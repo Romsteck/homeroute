@@ -1,0 +1,92 @@
+import axios from 'axios';
+
+const api = axios.create({
+  baseURL: '/api',
+  timeout: 30000
+});
+
+// DNS/DHCP
+export const getDnsConfig = () => api.get('/dns');
+export const getDhcpLeases = () => api.get('/dns/leases');
+
+// Network
+export const getInterfaces = () => api.get('/network/interfaces');
+export const getRoutes = () => api.get('/network/routes');
+export const getIpv6Routes = () => api.get('/network/routes6');
+
+// NAT/Firewall
+export const getNatRules = () => api.get('/nat/rules');
+export const getFilterRules = () => api.get('/nat/filter');
+export const getMasqueradeRules = () => api.get('/nat/masquerade');
+export const getPortForwards = () => api.get('/nat/forwards');
+
+// AdBlock
+export const getAdblockStats = () => api.get('/adblock/stats');
+export const getWhitelist = () => api.get('/adblock/whitelist');
+export const addToWhitelist = (domain) => api.post('/adblock/whitelist', { domain });
+export const removeFromWhitelist = (domain) => api.delete(`/adblock/whitelist/${domain}`);
+export const updateAdblockLists = () => api.post('/adblock/update');
+export const searchBlocked = (query) => api.get('/adblock/search', { params: { q: query } });
+
+// DDNS
+export const getDdnsStatus = () => api.get('/ddns/status');
+export const forceDdnsUpdate = () => api.post('/ddns/update');
+
+// Backup SMB
+export const getBackupConfig = () => api.get('/backup/config');
+export const saveBackupConfig = (sources) => api.post('/backup/config', { sources });
+export const runBackup = () => api.post('/backup/run', {}, { timeout: 3600000 });
+export const getBackupHistory = () => api.get('/backup/history');
+export const testBackupConnection = () => api.post('/backup/test');
+export const cancelBackup = () => api.post('/backup/cancel');
+export const getBackupStatus = () => api.get('/backup/status');
+
+// Reverse Proxy
+export const getReverseProxyConfig = () => api.get('/reverseproxy/config');
+export const getReverseProxyStatus = () => api.get('/reverseproxy/status');
+export const getReverseProxyHosts = () => api.get('/reverseproxy/hosts');
+export const addReverseProxyHost = (host) => api.post('/reverseproxy/hosts', host);
+export const updateReverseProxyHost = (id, updates) => api.put(`/reverseproxy/hosts/${id}`, updates);
+export const deleteReverseProxyHost = (id) => api.delete(`/reverseproxy/hosts/${id}`);
+export const toggleReverseProxyHost = (id, enabled) => api.post(`/reverseproxy/hosts/${id}/toggle`, { enabled });
+export const updateBaseDomain = (baseDomain) => api.put('/reverseproxy/config/domain', { baseDomain });
+export const renewCertificates = () => api.post('/reverseproxy/certificates/renew');
+export const reloadCaddy = () => api.post('/reverseproxy/reload');
+
+// Samba - Configuration
+export const getSambaConfig = () => api.get('/samba/config');
+export const updateSambaGlobalConfig = (config) => api.put('/samba/config', config);
+
+// Samba - Service Status
+export const getSambaStatus = () => api.get('/samba/status');
+export const restartSamba = () => api.post('/samba/restart');
+export const reloadSamba = () => api.post('/samba/reload');
+
+// Samba - Shares CRUD
+export const getSambaShares = () => api.get('/samba/shares');
+export const getSambaShare = (id) => api.get(`/samba/shares/${id}`);
+export const addSambaShare = (share) => api.post('/samba/shares', share);
+export const updateSambaShare = (id, updates) => api.put(`/samba/shares/${id}`, updates);
+export const deleteSambaShare = (id) => api.delete(`/samba/shares/${id}`);
+export const toggleSambaShare = (id, enabled) => api.post(`/samba/shares/${id}/toggle`, { enabled });
+
+// Samba - Apply Configuration
+export const applySambaConfig = () => api.post('/samba/apply');
+export const testSambaConfig = () => api.post('/samba/testparm');
+export const previewSambaConfig = () => api.get('/samba/preview');
+export const importSambaShares = () => api.post('/samba/import');
+
+// Samba - Monitoring
+export const getSambaSessions = () => api.get('/samba/sessions');
+export const getSambaOpenFiles = () => api.get('/samba/files');
+export const getSambaShareConnections = (shareName) => api.get(`/samba/connections/${shareName}`);
+
+// Samba - Users
+export const getSambaUsers = () => api.get('/samba/users');
+export const addSambaUser = (username, password) => api.post('/samba/users', { username, password });
+export const deleteSambaUser = (username) => api.delete(`/samba/users/${username}`);
+export const changeSambaUserPassword = (username, password) => api.put(`/samba/users/${username}/password`, { password });
+export const enableSambaUser = (username) => api.post(`/samba/users/${username}/enable`);
+export const disableSambaUser = (username) => api.post(`/samba/users/${username}/disable`);
+
+export default api;
