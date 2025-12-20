@@ -338,7 +338,7 @@ function ReverseProxy() {
             <span className="font-mono">{config?.baseDomain || '-'}</span>
           </div>
           <p className="text-xs text-gray-500 pt-2 border-t border-gray-700">
-            Les sous-domaines utilisent ce domaine de base. Les certificats SSL sont obtenus automatiquement via Let's Encrypt.
+            Les sous-domaines utilisent ce domaine de base. Les certificats SSL sont obtenus automatiquement via Let&apos;s Encrypt.
           </p>
         </div>
       </Card>
@@ -350,7 +350,7 @@ function ReverseProxy() {
             <Globe className="w-12 h-12 mx-auto mb-2 opacity-50" />
             <p>Aucun hôte configuré</p>
             {!config?.baseDomain && (
-              <p className="text-xs mt-2">Configurez d'abord un domaine de base</p>
+              <p className="text-xs mt-2">Configurez d&apos;abord un domaine de base</p>
             )}
           </div>
         ) : (
@@ -526,7 +526,7 @@ function ReverseProxy() {
               <div className="text-xs text-gray-500 bg-gray-900/50 rounded p-3">
                 <p className="flex items-center gap-1">
                   <Lock className="w-3 h-3" />
-                  Certificat SSL automatique via Let's Encrypt
+                  Certificat SSL automatique via Let&apos;s Encrypt
                 </p>
               </div>
             </div>
@@ -571,7 +571,7 @@ function ReverseProxy() {
               <div className="text-xs text-gray-500 bg-gray-900/50 rounded p-3">
                 <p className="flex items-center gap-1">
                   <Lock className="w-3 h-3" />
-                  Les certificats SSL sont obtenus automatiquement via Let's Encrypt pour chaque domaine.
+                  Les certificats SSL sont obtenus automatiquement via Let&apos;s Encrypt pour chaque domaine.
                 </p>
               </div>
             </div>
@@ -594,7 +594,7 @@ function ReverseProxy() {
           <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md border border-gray-700">
             <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
               <Pencil className="w-5 h-5 text-blue-400" />
-              Modifier l'hôte
+              Modifier l&apos;hôte
             </h2>
 
             <div className="space-y-4">

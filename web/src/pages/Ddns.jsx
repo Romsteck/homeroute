@@ -109,7 +109,7 @@ function Ddns() {
                 {status?.currentIpv6 ? (
                   <StatusBadge status="up">Connecté</StatusBadge>
                 ) : (
-                  <StatusBadge status="down">Pas d'IPv6</StatusBadge>
+                  <StatusBadge status="down">Pas d&apos;IPv6</StatusBadge>
                 )}
               </dd>
             </div>
