@@ -1,4 +1,5 @@
 import { Routes, Route } from 'react-router-dom';
+import { useMemo } from 'react';
 import Layout from './components/Layout';
 import Dashboard from './pages/Dashboard';
 import Dns from './pages/Dns';
@@ -11,6 +12,18 @@ import Samba from './pages/Samba';
 import Login from './pages/Login';
 
 function App() {
+  // Detect if we're on a protected subdomain (not proxy.*)
+  const isProtectedSubdomain = useMemo(() => {
+    const hostname = window.location.hostname;
+    // If not on proxy.* subdomain, we're on a protected subdomain
+    return !hostname.startsWith('proxy.') && hostname.includes('.');
+  }, []);
+
+  // On protected subdomains, always show login (Caddy handles auth check)
+  if (isProtectedSubdomain) {
+    return <Login />;
+  }
+
   return (
     <Routes>
       {/* Login page - standalone, no layout */}
