@@ -13,7 +13,10 @@ import {
   Server,
   Wifi,
   Pencil,
-  Shield
+  Shield,
+  Key,
+  AlertTriangle,
+  User
 } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
@@ -27,7 +30,12 @@ import {
   toggleReverseProxyHost,
   updateBaseDomain,
   renewCertificates,
-  reloadCaddy
+  reloadCaddy,
+  getAuthAccounts,
+  addAuthAccount,
+  updateAuthAccount,
+  deleteAuthAccount,
+  getCertificatesStatus
 } from '../api/client';
 
 function ReverseProxy() {
@@ -37,17 +45,30 @@ function ReverseProxy() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState(null);
 
+  // Tab state
+  const [activeTab, setActiveTab] = useState('hosts');
+
+  // Auth accounts state
+  const [authAccounts, setAuthAccounts] = useState([]);
+  const [certStatuses, setCertStatuses] = useState({});
+
   // Modal states
   const [showAddModal, setShowAddModal] = useState(false);
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
+  const [showDomainRequiredModal, setShowDomainRequiredModal] = useState(false);
+  const [showAddAccountModal, setShowAddAccountModal] = useState(false);
+  const [showEditAccountModal, setShowEditAccountModal] = useState(false);
   const [editingHost, setEditingHost] = useState(null);
+  const [editingAccount, setEditingAccount] = useState(null);
 
   // Form states
   const [hostType, setHostType] = useState('subdomain');
-  const [newHost, setNewHost] = useState({ subdomain: '', customDomain: '', targetHost: 'localhost', targetPort: '', localOnly: false });
-  const [editForm, setEditForm] = useState({ targetHost: '', targetPort: '', localOnly: false });
+  const [newHost, setNewHost] = useState({ subdomain: '', customDomain: '', targetHost: 'localhost', targetPort: '', localOnly: false, requireAuth: false });
+  const [editForm, setEditForm] = useState({ targetHost: '', targetPort: '', localOnly: false, requireAuth: false });
   const [configForm, setConfigForm] = useState({ baseDomain: '' });
+  const [newAccount, setNewAccount] = useState({ username: '', password: '' });
+  const [editAccountForm, setEditAccountForm] = useState({ username: '', password: '' });
 
   // Action states
   const [saving, setSaving] = useState(false);
@@ -60,21 +81,33 @@ function ReverseProxy() {
 
   async function fetchData() {
     try {
-      const [configRes, statusRes, hostsRes] = await Promise.all([
+      const [configRes, statusRes, hostsRes, accountsRes, certsRes] = await Promise.all([
         getReverseProxyConfig(),
         getReverseProxyStatus(),
-        getReverseProxyHosts()
+        getReverseProxyHosts(),
+        getAuthAccounts(),
+        getCertificatesStatus()
       ]);
 
       if (configRes.data.success) {
         setConfig(configRes.data.config);
         setConfigForm({ baseDomain: configRes.data.config.baseDomain || '' });
+        // Check if domain is configured
+        if (!configRes.data.config.baseDomain) {
+          setShowDomainRequiredModal(true);
+        }
       }
       if (statusRes.data.success) {
         setStatus(statusRes.data);
       }
       if (hostsRes.data.success) {
         setHosts(hostsRes.data.hosts || []);
+      }
+      if (accountsRes.data.success) {
+        setAuthAccounts(accountsRes.data.accounts || []);
+      }
+      if (certsRes.data.success) {
+        setCertStatuses(certsRes.data.certificates || {});
       }
     } catch (error) {
       console.error('Error:', error);
@@ -103,7 +136,8 @@ function ReverseProxy() {
       const payload = {
         targetHost: newHost.targetHost,
         targetPort: parseInt(newHost.targetPort),
-        localOnly: newHost.localOnly
+        localOnly: newHost.localOnly,
+        requireAuth: newHost.requireAuth
       };
       if (hostType === 'subdomain') {
         payload.subdomain = newHost.subdomain;
@@ -115,7 +149,7 @@ function ReverseProxy() {
       if (res.data.success) {
         setMessage({ type: 'success', text: 'Hôte ajouté' });
         setShowAddModal(false);
-        setNewHost({ subdomain: '', customDomain: '', targetHost: 'localhost', targetPort: '', localOnly: false });
+        setNewHost({ subdomain: '', customDomain: '', targetHost: 'localhost', targetPort: '', localOnly: false, requireAuth: false });
         fetchData();
       } else {
         setMessage({ type: 'error', text: res.data.error });
@@ -157,7 +191,7 @@ function ReverseProxy() {
 
   function openEditModal(host) {
     setEditingHost(host);
-    setEditForm({ targetHost: host.targetHost, targetPort: String(host.targetPort), localOnly: !!host.localOnly });
+    setEditForm({ targetHost: host.targetHost, targetPort: String(host.targetPort), localOnly: !!host.localOnly, requireAuth: !!host.requireAuth });
     setShowEditModal(true);
   }
 
@@ -171,7 +205,8 @@ function ReverseProxy() {
       const res = await updateReverseProxyHost(editingHost.id, {
         targetHost: editForm.targetHost,
         targetPort: parseInt(editForm.targetPort),
-        localOnly: editForm.localOnly
+        localOnly: editForm.localOnly,
+        requireAuth: editForm.requireAuth
       });
       if (res.data.success) {
         setMessage({ type: 'success', text: 'Hôte modifié' });
@@ -204,11 +239,85 @@ function ReverseProxy() {
 
       setMessage({ type: 'success', text: 'Configuration sauvegardée' });
       setShowConfigModal(false);
+      setShowDomainRequiredModal(false);
       fetchData();
     } catch (error) {
       setMessage({ type: 'error', text: 'Erreur de sauvegarde' });
     } finally {
       setSaving(false);
+    }
+  }
+
+  // ========== Auth Account Handlers ==========
+
+  async function handleAddAccount() {
+    if (!newAccount.username || !newAccount.password) {
+      setMessage({ type: 'error', text: 'Nom d\'utilisateur et mot de passe requis' });
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await addAuthAccount(newAccount.username, newAccount.password);
+      if (res.data.success) {
+        setMessage({ type: 'success', text: 'Compte créé' });
+        setShowAddAccountModal(false);
+        setNewAccount({ username: '', password: '' });
+        fetchData();
+      } else {
+        setMessage({ type: 'error', text: res.data.error });
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: error.response?.data?.error || 'Erreur' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function openEditAccountModal(account) {
+    setEditingAccount(account);
+    setEditAccountForm({ username: account.username, password: '' });
+    setShowEditAccountModal(true);
+  }
+
+  async function handleEditAccount() {
+    if (!editAccountForm.username) {
+      setMessage({ type: 'error', text: 'Nom d\'utilisateur requis' });
+      return;
+    }
+    setSaving(true);
+    try {
+      const updates = { username: editAccountForm.username };
+      if (editAccountForm.password) {
+        updates.password = editAccountForm.password;
+      }
+      const res = await updateAuthAccount(editingAccount.id, updates);
+      if (res.data.success) {
+        setMessage({ type: 'success', text: 'Compte modifié' });
+        setShowEditAccountModal(false);
+        setEditingAccount(null);
+        fetchData();
+      } else {
+        setMessage({ type: 'error', text: res.data.error });
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: error.response?.data?.error || 'Erreur' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDeleteAccount(accountId) {
+    if (!confirm('Supprimer ce compte ?')) return;
+    try {
+      const res = await deleteAuthAccount(accountId);
+      if (res.data.success) {
+        setMessage({ type: 'success', text: 'Compte supprimé' });
+        fetchData();
+      } else {
+        setMessage({ type: 'error', text: res.data.error });
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: 'Erreur' });
     }
   }
 
@@ -325,29 +434,65 @@ function ReverseProxy() {
         </Card>
       </div>
 
-      {/* Configuration Card */}
-      <Card
-        title="Configuration"
-        icon={Settings}
-        actions={
-          <Button onClick={() => setShowConfigModal(true)} variant="secondary" className="text-sm">
-            Modifier
-          </Button>
-        }
-      >
-        <div className="space-y-3 text-sm">
-          <div className="flex justify-between">
-            <span className="text-gray-400">Domaine de base</span>
-            <span className="font-mono">{config?.baseDomain || '-'}</span>
-          </div>
-          <p className="text-xs text-gray-500 pt-2 border-t border-gray-700">
-            Les sous-domaines utilisent ce domaine de base. Les certificats SSL sont obtenus automatiquement via Let&apos;s Encrypt.
-          </p>
-        </div>
-      </Card>
+      {/* Tabs */}
+      <div className="flex gap-1 border-b border-gray-700">
+        <button
+          onClick={() => setActiveTab('hosts')}
+          className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
+            activeTab === 'hosts'
+              ? 'border-blue-500 text-blue-400'
+              : 'border-transparent text-gray-400 hover:text-gray-300'
+          }`}
+        >
+          <Globe className="w-4 h-4" />
+          Hôtes
+        </button>
+        <button
+          onClick={() => setActiveTab('auth')}
+          className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
+            activeTab === 'auth'
+              ? 'border-blue-500 text-blue-400'
+              : 'border-transparent text-gray-400 hover:text-gray-300'
+          }`}
+        >
+          <Key className="w-4 h-4" />
+          Authentification
+          {authAccounts.length > 0 && (
+            <span className="bg-gray-700 text-gray-300 text-xs px-1.5 py-0.5 rounded">{authAccounts.length}</span>
+          )}
+        </button>
+      </div>
 
-      {/* Hosts Table */}
-      <Card title="Hôtes configurés" icon={Globe}>
+      {/* Hosts Tab */}
+      {activeTab === 'hosts' && (
+        <>
+          {/* Configuration Card */}
+          <Card
+            title="Configuration"
+            icon={Settings}
+            actions={
+              <Button onClick={() => setShowConfigModal(true)} variant="secondary" className="text-sm">
+                Modifier
+              </Button>
+            }
+          >
+            <div className="space-y-3 text-sm">
+              <div className="flex justify-between">
+                <span className="text-gray-400">Domaine de base</span>
+                <span className="font-mono">{config?.baseDomain || '-'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-400">Dashboard distant</span>
+                <span className="font-mono text-blue-400">proxy.{config?.baseDomain || 'domain.com'}</span>
+              </div>
+              <p className="text-xs text-gray-500 pt-2 border-t border-gray-700">
+                Les sous-domaines utilisent ce domaine de base. Les certificats SSL sont obtenus automatiquement via Let&apos;s Encrypt.
+              </p>
+            </div>
+          </Card>
+
+          {/* Hosts Table */}
+          <Card title="Hôtes configurés" icon={Globe}>
         {hosts.length === 0 ? (
           <div className="text-center py-8 text-gray-500">
             <Globe className="w-12 h-12 mx-auto mb-2 opacity-50" />
@@ -363,15 +508,18 @@ function ReverseProxy() {
                 <tr className="text-left text-gray-400 border-b border-gray-700">
                   <th className="pb-2">Domaine</th>
                   <th className="pb-2">Cible</th>
+                  <th className="pb-2">SSL</th>
                   <th className="pb-2">Status</th>
                   <th className="pb-2 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {hosts.map(host => (
+                {hosts.map(host => {
+                  const certStatus = certStatuses[host.id];
+                  return (
                   <tr key={host.id} className="border-b border-gray-700/50">
                     <td className="py-3">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <ExternalLink className="w-4 h-4 text-gray-500" />
                         <a
                           href={`https://${host.customDomain || `${host.subdomain}.${config?.baseDomain}`}`}
@@ -387,10 +535,35 @@ function ReverseProxy() {
                             Local
                           </span>
                         )}
+                        {host.requireAuth && (
+                          <span className="flex items-center gap-1 text-xs text-purple-400 bg-purple-900/30 px-2 py-0.5 rounded" title="Authentification requise">
+                            <Key className="w-3 h-3" />
+                            Auth
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td className="py-3 font-mono text-sm text-gray-300">
                       {host.targetHost}:{host.targetPort}
+                    </td>
+                    <td className="py-3">
+                      {certStatus ? (
+                        <span
+                          className={`flex items-center gap-1 text-xs px-2 py-0.5 rounded ${
+                            certStatus.valid
+                              ? certStatus.daysRemaining <= 14
+                                ? 'text-yellow-400 bg-yellow-900/30'
+                                : 'text-green-400 bg-green-900/30'
+                              : 'text-red-400 bg-red-900/30'
+                          }`}
+                          title={certStatus.valid ? `Expire dans ${certStatus.daysRemaining} jours` : certStatus.error || 'Invalide'}
+                        >
+                          <Lock className="w-3 h-3" />
+                          {certStatus.valid ? (certStatus.daysRemaining <= 14 ? `${certStatus.daysRemaining}j` : 'OK') : 'Erreur'}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-gray-500">-</span>
+                      )}
                     </td>
                     <td className="py-3">
                       <button
@@ -424,12 +597,84 @@ function ReverseProxy() {
                       </div>
                     </td>
                   </tr>
-                ))}
+                );})}
               </tbody>
             </table>
           </div>
         )}
-      </Card>
+          </Card>
+        </>
+      )}
+
+      {/* Auth Tab */}
+      {activeTab === 'auth' && (
+        <Card
+          title="Comptes d'authentification"
+          icon={Key}
+          actions={
+            <Button onClick={() => setShowAddAccountModal(true)}>
+              <Plus className="w-4 h-4" />
+              Ajouter
+            </Button>
+          }
+        >
+          {authAccounts.length === 0 ? (
+            <div className="text-center py-8 text-gray-500">
+              <Key className="w-12 h-12 mx-auto mb-2 opacity-50" />
+              <p>Aucun compte configuré</p>
+              <p className="text-xs mt-2">Créez un compte pour activer l&apos;authentification sur les hôtes</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-gray-400 border-b border-gray-700">
+                    <th className="pb-2">Utilisateur</th>
+                    <th className="pb-2">Créé le</th>
+                    <th className="pb-2 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {authAccounts.map(account => (
+                    <tr key={account.id} className="border-b border-gray-700/50">
+                      <td className="py-3">
+                        <div className="flex items-center gap-2">
+                          <User className="w-4 h-4 text-gray-500" />
+                          <span className="font-mono">{account.username}</span>
+                        </div>
+                      </td>
+                      <td className="py-3 text-gray-400">
+                        {new Date(account.createdAt).toLocaleDateString('fr-FR')}
+                      </td>
+                      <td className="py-3 text-right">
+                        <div className="flex justify-end gap-1">
+                          <button
+                            onClick={() => openEditAccountModal(account)}
+                            className="text-blue-400 hover:text-blue-300 p-1"
+                            title="Modifier"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => handleDeleteAccount(account.id)}
+                            className="text-red-400 hover:text-red-300 p-1"
+                            title="Supprimer"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p className="text-xs text-gray-500 mt-4 pt-4 border-t border-gray-700">
+            Ces comptes sont utilisés pour l&apos;authentification HTTP Basic sur les hôtes avec l&apos;option &quot;Authentification requise&quot; activée.
+          </p>
+        </Card>
+      )}
 
       {/* Add Host Modal */}
       {showAddModal && (
@@ -549,6 +794,31 @@ function ReverseProxy() {
                   <div className={`w-4 h-4 bg-white rounded-full mt-1 transition-transform ${newHost.localOnly ? 'translate-x-5' : 'translate-x-1'}`} />
                 </div>
               </div>
+
+              {/* Require Auth Toggle */}
+              <div
+                onClick={() => setNewHost({ ...newHost, requireAuth: !newHost.requireAuth })}
+                className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                  newHost.requireAuth
+                    ? 'bg-purple-900/30 border-purple-600 text-purple-400'
+                    : 'bg-gray-900/50 border-gray-700 text-gray-400 hover:border-gray-600'
+                }`}
+              >
+                <Key className={`w-5 h-5 ${newHost.requireAuth ? 'text-purple-400' : 'text-gray-500'}`} />
+                <div className="flex-1">
+                  <div className="font-medium text-sm">Authentification requise</div>
+                  <div className="text-xs opacity-75">Demande un login/mot de passe</div>
+                </div>
+                <div className={`w-10 h-6 rounded-full transition-colors ${newHost.requireAuth ? 'bg-purple-600' : 'bg-gray-600'}`}>
+                  <div className={`w-4 h-4 bg-white rounded-full mt-1 transition-transform ${newHost.requireAuth ? 'translate-x-5' : 'translate-x-1'}`} />
+                </div>
+              </div>
+              {newHost.requireAuth && authAccounts.length === 0 && (
+                <div className="flex items-center gap-2 text-xs text-yellow-400 bg-yellow-900/30 p-2 rounded">
+                  <AlertTriangle className="w-4 h-4" />
+                  Créez au moins un compte dans l&apos;onglet Authentification
+                </div>
+              )}
 
               {/* Certificate Info */}
               <div className="text-xs text-gray-500 bg-gray-900/50 rounded p-3">
@@ -692,6 +962,31 @@ function ReverseProxy() {
                   <div className={`w-4 h-4 bg-white rounded-full mt-1 transition-transform ${editForm.localOnly ? 'translate-x-5' : 'translate-x-1'}`} />
                 </div>
               </div>
+
+              {/* Require Auth Toggle */}
+              <div
+                onClick={() => setEditForm({ ...editForm, requireAuth: !editForm.requireAuth })}
+                className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                  editForm.requireAuth
+                    ? 'bg-purple-900/30 border-purple-600 text-purple-400'
+                    : 'bg-gray-900/50 border-gray-700 text-gray-400 hover:border-gray-600'
+                }`}
+              >
+                <Key className={`w-5 h-5 ${editForm.requireAuth ? 'text-purple-400' : 'text-gray-500'}`} />
+                <div className="flex-1">
+                  <div className="font-medium text-sm">Authentification requise</div>
+                  <div className="text-xs opacity-75">Demande un login/mot de passe</div>
+                </div>
+                <div className={`w-10 h-6 rounded-full transition-colors ${editForm.requireAuth ? 'bg-purple-600' : 'bg-gray-600'}`}>
+                  <div className={`w-4 h-4 bg-white rounded-full mt-1 transition-transform ${editForm.requireAuth ? 'translate-x-5' : 'translate-x-1'}`} />
+                </div>
+              </div>
+              {editForm.requireAuth && authAccounts.length === 0 && (
+                <div className="flex items-center gap-2 text-xs text-yellow-400 bg-yellow-900/30 p-2 rounded">
+                  <AlertTriangle className="w-4 h-4" />
+                  Créez au moins un compte dans l&apos;onglet Authentification
+                </div>
+              )}
             </div>
 
             <div className="flex justify-end gap-2 mt-6">
@@ -700,6 +995,150 @@ function ReverseProxy() {
               </Button>
               <Button onClick={handleEditHost} loading={saving}>
                 Sauvegarder
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Account Modal */}
+      {showAddAccountModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md border border-gray-700">
+            <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
+              <User className="w-5 h-5 text-purple-400" />
+              Nouveau compte
+            </h2>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-gray-400 mb-1">Nom d&apos;utilisateur</label>
+                <input
+                  type="text"
+                  placeholder="admin"
+                  value={newAccount.username}
+                  onChange={e => setNewAccount({ ...newAccount, username: e.target.value })}
+                  className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-1">Mot de passe</label>
+                <input
+                  type="password"
+                  placeholder="••••••••"
+                  value={newAccount.password}
+                  onChange={e => setNewAccount({ ...newAccount, password: e.target.value })}
+                  className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div className="text-xs text-gray-500 bg-gray-900/50 rounded p-3">
+                <p className="flex items-center gap-1">
+                  <Key className="w-3 h-3" />
+                  Ce compte sera utilisé pour l&apos;authentification HTTP Basic
+                </p>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 mt-6">
+              <Button variant="secondary" onClick={() => { setShowAddAccountModal(false); setNewAccount({ username: '', password: '' }); }}>
+                Annuler
+              </Button>
+              <Button onClick={handleAddAccount} loading={saving}>
+                Créer
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Account Modal */}
+      {showEditAccountModal && editingAccount && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md border border-gray-700">
+            <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
+              <Pencil className="w-5 h-5 text-blue-400" />
+              Modifier le compte
+            </h2>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-gray-400 mb-1">Nom d&apos;utilisateur</label>
+                <input
+                  type="text"
+                  placeholder="admin"
+                  value={editAccountForm.username}
+                  onChange={e => setEditAccountForm({ ...editAccountForm, username: e.target.value })}
+                  className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-1">Nouveau mot de passe (optionnel)</label>
+                <input
+                  type="password"
+                  placeholder="Laisser vide pour conserver l'actuel"
+                  value={editAccountForm.password}
+                  onChange={e => setEditAccountForm({ ...editAccountForm, password: e.target.value })}
+                  className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Laissez vide pour conserver le mot de passe actuel
+                </p>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 mt-6">
+              <Button variant="secondary" onClick={() => { setShowEditAccountModal(false); setEditingAccount(null); }}>
+                Annuler
+              </Button>
+              <Button onClick={handleEditAccount} loading={saving}>
+                Sauvegarder
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Domain Required Modal */}
+      {showDomainRequiredModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md border border-gray-700">
+            <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-yellow-400" />
+              Configuration requise
+            </h2>
+
+            <p className="text-gray-300 mb-4">
+              Veuillez configurer un domaine de base pour utiliser le reverse proxy.
+            </p>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-gray-400 mb-1">Domaine de base</label>
+                <input
+                  type="text"
+                  placeholder="example.com"
+                  value={configForm.baseDomain}
+                  onChange={e => setConfigForm({ ...configForm, baseDomain: e.target.value })}
+                  className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Les sous-domaines seront: app.{configForm.baseDomain || 'example.com'}
+                </p>
+              </div>
+
+              <div className="bg-blue-900/30 border border-blue-700 rounded p-3">
+                <p className="text-sm text-blue-300">
+                  Une route système <span className="font-mono">proxy.{configForm.baseDomain || 'votre-domaine.com'}</span> sera créée automatiquement pour accéder au dashboard à distance.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 mt-6">
+              <Button onClick={handleSaveConfig} loading={saving} disabled={!configForm.baseDomain}>
+                Configurer
               </Button>
             </div>
           </div>
