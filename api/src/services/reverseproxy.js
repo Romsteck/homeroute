@@ -602,10 +602,10 @@ function getSplashHtml(targetDomain) {
 function getAuthSplashHtml(targetDomain) {
   // Same visual as regular splash, but with very short cookie (10s for slow connections)
   const baseHtml = getSplashHtml(targetDomain);
-  // Replace the long cookie with a 10-second cookie
+  // Replace the long cookie with a 10-second cookie (using regex for flexible matching)
   return baseHtml.replace(
-    `document.cookie = "proxy_splash=1; path=/; max-age=3600; SameSite=Lax";`,
-    `document.cookie = "proxy_auth_splash=1; path=/; max-age=10; SameSite=Lax";`
+    /document\.cookie\s*=\s*"proxy_splash=1;[^"]*"/,
+    'document.cookie = "proxy_auth_splash=1; path=/; max-age=10; SameSite=Lax"'
   );
 }
 
@@ -646,9 +646,9 @@ function generateCaddyRoute(host, baseDomain) {
   const routes = [];
 
   if (host.requireAuth) {
-    // For auth routes: splash shown on every fresh visit (10s cookie for slow connections)
+    // For auth routes: splash shown on EVERY fresh page visit (10s cookie)
 
-    // Route 1: Authenticated (has session cookie) -> proxy ALL to target
+    // Route 1: Authenticated -> proxy to target (skip splash for all requests)
     routes.push({
       match: [{
         header: { Cookie: ['*dashboard.sid=*'] }
@@ -656,17 +656,12 @@ function generateCaddyRoute(host, baseDomain) {
       handle: [reverseProxyHandler]
     });
 
-    // Route 2: No splash cookie -> show splash (sets 10s cookie, then reloads)
-    routes.push({
-      match: [{ not: [{ header: { Cookie: ['*proxy_auth_splash=1*'] } }] }],
-      handle: [authSplashHandler]
-    });
-
-    // Route 3: Static assets & API -> proxy to dashboard without rewrite
+    // Route 2: API/assets/WebSocket requests -> proxy to dashboard without splash
+    // (These are not page navigations, shouldn't get splash)
     routes.push({
       match: [{
         path_regexp: {
-          pattern: '^/(assets/|api/|.*\\.(js|css|svg|png|jpg|jpeg|gif|ico|woff|woff2|ttf|eot|map)$)'
+          pattern: '^/(api/|socket\\.io/|assets/|.*\\.(js|css|svg|png|jpg|jpeg|gif|ico|woff|woff2|ttf|eot|map|json)$)'
         }
       }],
       handle: [{
@@ -675,18 +670,18 @@ function generateCaddyRoute(host, baseDomain) {
       }]
     });
 
-    // Route 4: Not authenticated -> rewrite to /login and proxy to dashboard
+    // Route 3: Page navigation without splash cookie -> show splash
     routes.push({
-      handle: [
-        {
-          handler: 'rewrite',
-          uri: '/login'
-        },
-        {
-          handler: 'reverse_proxy',
-          upstreams: [{ dial: `localhost:${DASHBOARD_PORT}` }]
-        }
-      ]
+      match: [{ not: [{ header: { Cookie: ['*proxy_auth_splash=1*'] } }] }],
+      handle: [authSplashHandler]
+    });
+
+    // Route 4: Splash seen but not authenticated -> proxy to dashboard (shows login)
+    routes.push({
+      handle: [{
+        handler: 'reverse_proxy',
+        upstreams: [{ dial: `localhost:${DASHBOARD_PORT}` }]
+      }]
     });
   } else {
     // For non-auth routes: splash shown once (using cookie)
