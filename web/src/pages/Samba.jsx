@@ -463,7 +463,7 @@ function Samba() {
       {pendingChanges && (
         <div className="p-4 rounded-lg bg-yellow-900/30 border border-yellow-700 text-yellow-400 flex items-center gap-2">
           <Settings className="w-5 h-5" />
-          <span>Des modifications sont en attente. Cliquez sur "Appliquer" pour les activer.</span>
+          <span>Des modifications sont en attente. Cliquez sur &quot;Appliquer&quot; pour les activer.</span>
         </div>
       )}
 
@@ -646,7 +646,7 @@ function Samba() {
               <div className="text-center py-8 text-gray-500">
                 <Users className="w-12 h-12 mx-auto mb-2 opacity-50" />
                 <p>Aucun utilisateur Samba</p>
-                <p className="text-xs mt-1">Les utilisateurs doivent d'abord exister dans le système (useradd)</p>
+                <p className="text-xs mt-1">Les utilisateurs doivent d&apos;abord exister dans le système (useradd)</p>
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -921,7 +921,7 @@ function Samba() {
           <div className="bg-gray-800 rounded-lg p-6 w-full max-w-lg border border-gray-700 max-h-[90vh] overflow-y-auto">
             <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
               <Pencil className="w-5 h-5 text-blue-400" />
-              Modifier "{editingShare.name}"
+              Modifier &quot;{editingShare.name}&quot;
             </h2>
 
             <div className="space-y-4">
@@ -1021,7 +1021,7 @@ function Samba() {
 
             <div className="space-y-4">
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Nom d'utilisateur</label>
+                <label className="block text-sm text-gray-400 mb-1">Nom d&apos;utilisateur</label>
                 <input
                   type="text"
                   placeholder="username"
@@ -1029,7 +1029,7 @@ function Samba() {
                   onChange={e => setNewUser({ ...newUser, username: e.target.value })}
                   className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm focus:outline-none focus:border-blue-500"
                 />
-                <p className="text-xs text-gray-500 mt-1">Doit exister en tant qu'utilisateur système</p>
+                <p className="text-xs text-gray-500 mt-1">Doit exister en tant qu&apos;utilisateur système</p>
               </div>
 
               <div>
