@@ -2,7 +2,8 @@ import axios from 'axios';
 
 const api = axios.create({
   baseURL: '/api',
-  timeout: 30000
+  timeout: 30000,
+  withCredentials: true  // Enable cookies for session-based auth
 });
 
 // DNS/DHCP
@@ -52,6 +53,20 @@ export const toggleReverseProxyHost = (id, enabled) => api.post(`/reverseproxy/h
 export const updateBaseDomain = (baseDomain) => api.put('/reverseproxy/config/domain', { baseDomain });
 export const renewCertificates = () => api.post('/reverseproxy/certificates/renew');
 export const reloadCaddy = () => api.post('/reverseproxy/reload');
+export const getSystemRouteStatus = () => api.get('/reverseproxy/system-route');
+export const getCertificatesStatus = () => api.get('/reverseproxy/certificates/status');
+
+// Reverse Proxy - Auth Accounts
+export const getAuthAccounts = () => api.get('/reverseproxy/auth/accounts');
+export const addAuthAccount = (username, password) => api.post('/reverseproxy/auth/accounts', { username, password });
+export const updateAuthAccount = (id, data) => api.put(`/reverseproxy/auth/accounts/${id}`, data);
+export const deleteAuthAccount = (id) => api.delete(`/reverseproxy/auth/accounts/${id}`);
+
+// Auth - Session (login page)
+export const login = (username, password) => api.post('/auth/login', { username, password });
+export const logout = () => api.post('/auth/logout');
+export const checkAuth = () => api.get('/auth/check');
+export const getMe = () => api.get('/auth/me');
 
 // Samba - Configuration
 export const getSambaConfig = () => api.get('/samba/config');

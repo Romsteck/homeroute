@@ -7,9 +7,15 @@ import {
   updateHost,
   deleteHost,
   toggleHost,
+  getAuthAccounts,
+  addAuthAccount,
+  updateAuthAccount,
+  deleteAuthAccount,
   getCaddyStatus,
   reloadCaddy,
-  renewCertificates
+  renewCertificates,
+  getSystemRouteStatus,
+  getCertificatesStatus
 } from '../services/reverseproxy.js';
 
 const router = Router();
@@ -42,14 +48,14 @@ router.get('/hosts', async (req, res) => {
 
 // POST /api/reverseproxy/hosts - Ajouter un hôte
 router.post('/hosts', async (req, res) => {
-  const { subdomain, customDomain, targetHost, targetPort } = req.body;
+  const { subdomain, customDomain, targetHost, targetPort, localOnly, requireAuth } = req.body;
   if (!targetHost || !targetPort) {
     return res.status(400).json({ success: false, error: 'Target host and port required' });
   }
   if (!subdomain && !customDomain) {
     return res.status(400).json({ success: false, error: 'Subdomain or custom domain required' });
   }
-  const result = await addHost({ subdomain, customDomain, targetHost, targetPort });
+  const result = await addHost({ subdomain, customDomain, targetHost, targetPort, localOnly, requireAuth });
   res.json(result);
 });
 
@@ -92,6 +98,50 @@ router.post('/reload', async (req, res) => {
 // POST /api/reverseproxy/certificates/renew - Renouveler les certificats
 router.post('/certificates/renew', async (req, res) => {
   const result = await renewCertificates();
+  res.json(result);
+});
+
+// GET /api/reverseproxy/certificates/status - Status des certificats
+router.get('/certificates/status', async (req, res) => {
+  const result = await getCertificatesStatus();
+  res.json(result);
+});
+
+// ========== Auth Accounts Endpoints ==========
+
+// GET /api/reverseproxy/auth/accounts - Liste des comptes
+router.get('/auth/accounts', async (req, res) => {
+  const result = await getAuthAccounts();
+  res.json(result);
+});
+
+// POST /api/reverseproxy/auth/accounts - Créer un compte
+router.post('/auth/accounts', async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ success: false, error: 'Username and password required' });
+  }
+  const result = await addAuthAccount(username, password);
+  res.json(result);
+});
+
+// PUT /api/reverseproxy/auth/accounts/:id - Modifier un compte
+router.put('/auth/accounts/:id', async (req, res) => {
+  const result = await updateAuthAccount(req.params.id, req.body);
+  res.json(result);
+});
+
+// DELETE /api/reverseproxy/auth/accounts/:id - Supprimer un compte
+router.delete('/auth/accounts/:id', async (req, res) => {
+  const result = await deleteAuthAccount(req.params.id);
+  res.json(result);
+});
+
+// ========== System Route Endpoints ==========
+
+// GET /api/reverseproxy/system-route - Status de la route système
+router.get('/system-route', async (req, res) => {
+  const result = await getSystemRouteStatus();
   res.json(result);
 });
 
