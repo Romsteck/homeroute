@@ -74,7 +74,16 @@
       "Bash(node --version:*)",
       "Bash(npm:*)",
       "Bash(openssl s_client:*)",
-      "Bash(dig:*)"
+      "Bash(dig:*)",
+      "Bash(sh)",
+      "Bash(tailscale up:*)",
+      "Bash(tailscale status:*)",
+      "Bash(tailscale ip:*)",
+      "Bash(tailscale dns:*)",
+      "Bash(systemctl list-dependencies:*)",
+      "Bash(who:*)",
+      "Bash(w:*)",
+      "Bash(rm:*)"
     ]
   }
 }
