@@ -9,6 +9,8 @@ import Ddns from './pages/Ddns';
 import Backup from './pages/Backup';
 import ReverseProxy from './pages/ReverseProxy';
 import Samba from './pages/Samba';
+import Updates from './pages/Updates';
+import Energy from './pages/Energy';
 import Login from './pages/Login';
 
 function App() {
@@ -41,6 +43,8 @@ function App() {
             <Route path="/backup" element={<Backup />} />
             <Route path="/reverseproxy" element={<ReverseProxy />} />
             <Route path="/samba" element={<Samba />} />
+            <Route path="/updates" element={<Updates />} />
+            <Route path="/energy" element={<Energy />} />
           </Routes>
         </Layout>
       } />

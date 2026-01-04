@@ -20,6 +20,8 @@ import backupRoutes from './routes/backup.js';
 import reverseproxyRoutes from './routes/reverseproxy.js';
 import sambaRoutes from './routes/samba.js';
 import authRoutes from './routes/auth.js';
+import updatesRoutes from './routes/updates.js';
+import energyRoutes from './routes/energy.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -82,6 +84,8 @@ async function startServer() {
   app.use('/api/backup', backupRoutes);
   app.use('/api/reverseproxy', reverseproxyRoutes);
   app.use('/api/samba', sambaRoutes);
+  app.use('/api/updates', updatesRoutes);
+  app.use('/api/energy', energyRoutes);
 
   // Health check
   app.get('/api/health', (req, res) => {

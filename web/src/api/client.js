@@ -109,4 +109,38 @@ export const changeSambaUserPassword = (username, password) => api.put(`/samba/u
 export const enableSambaUser = (username) => api.post(`/samba/users/${username}/enable`);
 export const disableSambaUser = (username) => api.post(`/samba/users/${username}/disable`);
 
+// System Updates
+export const getUpdatesStatus = () => api.get('/updates/status');
+export const getLastUpdatesCheck = () => api.get('/updates/last');
+export const checkForUpdates = () => api.post('/updates/check', {}, { timeout: 300000 });
+export const cancelUpdatesCheck = () => api.post('/updates/cancel');
+
+// System Updates - Upgrade actions
+export const getUpgradeStatus = () => api.get('/updates/upgrade/status');
+export const runAptUpgrade = () => api.post('/updates/upgrade/apt', {}, { timeout: 1800000 });
+export const runAptFullUpgrade = () => api.post('/updates/upgrade/apt-full', {}, { timeout: 1800000 });
+export const runSnapRefresh = () => api.post('/updates/upgrade/snap', {}, { timeout: 1800000 });
+export const cancelUpgrade = () => api.post('/updates/upgrade/cancel');
+
+// Energy - CPU Info
+export const getCpuInfo = () => api.get('/energy/cpu');
+export const getEnergyStatus = () => api.get('/energy/status');
+export const setEnergyGovernor = (governor) => api.post('/energy/governor', { governor });
+
+// Energy - Modes (unified: economy/auto/performance)
+export const getEnergyModes = () => api.get('/energy/modes');
+export const getCurrentEnergyMode = () => api.get('/energy/mode');
+export const setEnergyMode = (mode) => api.post(`/energy/mode/${mode}`);
+
+// Energy - Fans
+export const getFansStatus = () => api.get('/energy/fans');
+export const setFanSpeed = (id, pwm, mode) => api.post(`/energy/fans/${id}`, { pwm, mode });
+export const getFanProfiles = () => api.get('/energy/fans/profiles');
+export const saveFanProfile = (profile) => api.post('/energy/fans/profiles', profile);
+export const applyFanProfile = (name) => api.post(`/energy/fans/profiles/${name}/apply`);
+
+// Energy - Schedule
+export const getEnergySchedule = () => api.get('/energy/schedule');
+export const saveEnergySchedule = (config) => api.post('/energy/schedule', config);
+
 export default api;
