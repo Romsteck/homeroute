@@ -8,7 +8,9 @@ import {
   Settings,
   HardDrive,
   ArrowLeftRight,
-  FolderOpen
+  FolderOpen,
+  RefreshCw,
+  Zap
 } from 'lucide-react';
 
 const navItems = [
@@ -20,6 +22,8 @@ const navItems = [
   { to: '/backup', icon: HardDrive, label: 'Backup' },
   { to: '/reverseproxy', icon: ArrowLeftRight, label: 'Reverse Proxy' },
   { to: '/samba', icon: FolderOpen, label: 'Samba' },
+  { to: '/updates', icon: RefreshCw, label: 'Mises a jour' },
+  { to: '/energy', icon: Zap, label: 'Énergie' },
 ];
 
 function Sidebar() {
