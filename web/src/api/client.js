@@ -154,4 +154,25 @@ export const getBenchmarkStatus = () => api.get('/energy/benchmark');
 export const startBenchmark = (duration = 60) => api.post('/energy/benchmark/start', { duration });
 export const stopBenchmark = () => api.post('/energy/benchmark/stop');
 
+// Users - Authelia Status
+export const getAutheliaStatus = () => api.get('/users/authelia/status');
+export const getAutheliaInstallInstructions = () => api.get('/users/authelia/install');
+export const bootstrapAdmin = (password) => api.post('/users/authelia/bootstrap', { password });
+
+// Users - CRUD
+export const getUsers = () => api.get('/users');
+export const getUser = (username) => api.get(`/users/${username}`);
+export const createUser = (data) => api.post('/users', data);
+export const updateUser = (username, data) => api.put(`/users/${username}`, data);
+export const deleteUser = (username) => api.delete(`/users/${username}`);
+export const changeUserPassword = (username, password) => api.put(`/users/${username}/password`, { password });
+
+// Users - Groups
+export const getUserGroups = () => api.get('/users/groups');
+
+// Users - MFA
+export const getUserMfa = (username) => api.get(`/users/${username}/mfa`);
+export const resetUserTotp = (username) => api.delete(`/users/${username}/mfa/totp`);
+export const resetUserWebauthn = (username) => api.delete(`/users/${username}/mfa/webauthn`);
+
 export default api;

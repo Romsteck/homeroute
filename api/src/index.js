@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import session from 'express-session';
+import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -8,7 +8,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { connectDB } from './config/db.js';
 import { setIO } from './socket.js';
-import { getBaseDomain } from './services/reverseproxy.js';
+import { autheliaAuth } from './middleware/authelia.js';
 
 // Routes
 import dnsRoutes from './routes/dns.js';
@@ -22,6 +22,7 @@ import sambaRoutes from './routes/samba.js';
 import authRoutes from './routes/auth.js';
 import updatesRoutes from './routes/updates.js';
 import energyRoutes from './routes/energy.js';
+import usersRoutes from './routes/users.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -48,29 +49,16 @@ app.set('trust proxy', 1);
 // Middleware
 app.use(cors({
   origin: true,
-  credentials: true  // Permet les cookies cross-origin
+  credentials: true
 }));
 app.use(express.json());
+app.use(cookieParser());
 
-// Demarrage async pour attendre la config session
+// Middleware Auth - vérifie le cookie auth_session via auth-service
+app.use(autheliaAuth);
+
+// Demarrage async
 async function startServer() {
-  // Session middleware (SSO via cookie partage entre sous-domaines)
-  const baseDomain = await getBaseDomain();
-  app.use(session({
-    secret: process.env.SESSION_SECRET || 'server-dashboard-secret-key-change-in-production',
-    name: 'dashboard.sid',
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      domain: baseDomain ? `.${baseDomain}` : undefined,
-      secure: true,  // Toujours secure car derriere Caddy HTTPS
-      httpOnly: true,
-      maxAge: 24 * 60 * 60 * 1000, // 24h
-      sameSite: 'lax'
-    },
-    proxy: true  // Faire confiance au proxy (Caddy) pour X-Forwarded-Proto
-  }));
-
   // Connect to MongoDB
   connectDB();
 
@@ -86,6 +74,7 @@ async function startServer() {
   app.use('/api/samba', sambaRoutes);
   app.use('/api/updates', updatesRoutes);
   app.use('/api/energy', energyRoutes);
+  app.use('/api/users', usersRoutes);
 
   // Health check
   app.get('/api/health', (req, res) => {
