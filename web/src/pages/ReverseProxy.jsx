@@ -91,20 +91,34 @@ L'app est accessible à tous, mais peut détecter les utilisateurs connectés.
 
 ## Récupérer l'utilisateur connecté
 
-Si un utilisateur est connecté, le reverse proxy ajoute ces headers HTTP :
+Le cookie \`auth_session\` est automatiquement envoyé par le navigateur.
+Pour vérifier si l'utilisateur est connecté et obtenir ses infos, appelle l'API :
 
-- \`X-Auth-User\` : nom d'utilisateur (ex: \`john\`)
-- \`X-Auth-Email\` : email (ex: \`john@example.com\`)
-- \`X-Auth-Name\` : nom affiché (ex: \`John Doe\`)
-- \`X-Auth-Groups\` : groupes séparés par virgule (ex: \`users,admins\`)
+\`\`\`javascript
+// Côté serveur (Express.js)
+const authCookie = req.cookies.auth_session;
+if (authCookie) {
+  const res = await fetch('https://proxy.mynetwk.biz/api/authproxy/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cookie: authCookie })
+  });
+  const { valid, user } = await res.json();
+  if (valid) {
+    // user = { username, email, displayName, groups, isAdmin, isPowerUser }
+  }
+}
+\`\`\`
 
-Si l'utilisateur n'est pas connecté, ces headers sont absents.
+## API de vérification
 
-## Détecter si connecté
+- \`POST https://proxy.mynetwk.biz/api/authproxy/verify\`
+  - Body : \`{ "cookie": "valeur_auth_session" }\`
+  - Réponse : \`{ "valid": true, "user": { username, email, displayName, groups, isAdmin, isPowerUser } }\`
 
-Vérifie la présence du header \`X-Auth-User\` :
-- Présent → utilisateur connecté, lire les autres headers
-- Absent → utilisateur non connecté (visiteur anonyme)
+- \`POST https://proxy.mynetwk.biz/api/authproxy/check-group\`
+  - Body : \`{ "cookie": "valeur_auth_session", "groups": ["admins"] }\`
+  - Réponse : \`{ "valid": true, "hasAccess": true, "matchedGroups": ["admins"] }\`
 
 ## Groupes disponibles
 
@@ -112,28 +126,16 @@ Vérifie la présence du header \`X-Auth-User\` :
 - \`power_users\` : utilisateurs avancés
 - \`users\` : utilisateurs standards
 
-Pour afficher/cacher des fonctionnalités, vérifie si le groupe est dans \`X-Auth-Groups\`.
-
 ## Connexion
 
 Pour permettre à l'utilisateur de se connecter, redirige vers :
 \`https://auth.mynetwk.biz/login?rd=URL_RETOUR\`
 
-## API de vérification (optionnel)
-
-- \`POST https://proxy.mynetwk.biz/api/authproxy/verify\`
-  - Body : \`{ "cookie": "valeur_auth_session" }\`
-  - Réponse : \`{ "valid": true, "user": { username, email, displayName, groups } }\`
-
-- \`POST https://proxy.mynetwk.biz/api/authproxy/check-group\`
-  - Body : \`{ "cookie": "valeur_auth_session", "groups": ["admins"] }\`
-  - Réponse : \`{ "valid": true, "hasAccess": true, "matchedGroups": ["admins"] }\`
-
 ## Notes
 
 - L'app reste accessible même sans connexion
-- Les headers sont fiables car injectés par le proxy après vérification
-- Utilise les headers pour adapter l'UI (afficher bouton admin, etc.)`;
+- Le cookie \`auth_session\` est partagé sur le domaine \`*.mynetwk.biz\`
+- Appelle l'API de vérification côté serveur pour valider le cookie`;
 
   async function copyInstructions() {
     try {
@@ -821,9 +823,9 @@ Pour permettre à l'utilisateur de se connecter, redirige vers :
             <div className="bg-blue-900/20 border border-blue-800 rounded-lg p-4">
               <h4 className="text-sm font-medium text-blue-400 mb-2">Fonctionnement</h4>
               <ul className="text-xs text-gray-400 space-y-1 list-disc list-inside">
-                <li>Par défaut, toutes les apps reçoivent les headers <code className="text-blue-400">X-Auth-*</code> si l&apos;utilisateur est connecté</li>
-                <li>Si &quot;Authentification requise&quot; est activé, l&apos;accès est bloqué pour les non-connectés</li>
-                <li>Les apps peuvent lire les headers pour adapter leur UI selon l&apos;utilisateur</li>
+                <li>Le cookie <code className="text-blue-400">auth_session</code> est partagé sur <code className="text-blue-400">*.mynetwk.biz</code></li>
+                <li>Les apps appellent l&apos;API <code className="text-blue-400">/api/authproxy/verify</code> pour vérifier le cookie</li>
+                <li>L&apos;API retourne les infos utilisateur (username, email, groupes, isAdmin)</li>
               </ul>
             </div>
           </div>
