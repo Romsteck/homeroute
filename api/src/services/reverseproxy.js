@@ -452,31 +452,20 @@ export async function deleteAuthAccount(accountId) {
 
 function generateCaddyRoute(host, baseDomain) {
   const domain = host.customDomain || `${host.subdomain}.${baseDomain}`;
-  const authServiceUrl = process.env.AUTH_SERVICE_URL || 'http://localhost:9100';
 
-  // Build handlers array
-  const handlers = [];
+  // Note: Caddy standard n'a pas le module forward_auth
+  // L'authentification est gérée côté application via l'API /api/authproxy/verify
+  // Le cookie auth_session est automatiquement transmis par le navigateur
 
-  // Toujours ajouter forward_auth pour injecter les headers d'authentification
-  // - Par défaut : endpoint optionnel (ne bloque pas, retourne 200 même si non connecté)
-  // - Si requireAuth : endpoint bloquant (retourne 401 si non connecté)
-  const authEndpoint = host.requireAuth
-    ? '/api/authz/forward-auth'           // Bloque si non authentifié
-    : '/api/authz/forward-auth-optional'; // Ne bloque jamais, injecte headers si connecté
-
-  handlers.push({
-    handler: 'forward_auth',
-    uri: `${authServiceUrl}${authEndpoint}`,
-    copy_headers: ['Remote-User', 'Remote-Email', 'Remote-Name', 'Remote-Groups']
-  });
-
-  // Proxy to target
-  handlers.push({
+  // Proxy direct vers la cible
+  const reverseProxyHandler = {
     handler: 'reverse_proxy',
     upstreams: [{
       dial: `${host.targetHost}:${host.targetPort}`
     }]
-  });
+  };
+
+  const handlers = [reverseProxyHandler];
 
   const subrouteHandler = {
     handler: 'subroute',
