@@ -452,10 +452,7 @@ export async function deleteAuthAccount(accountId) {
 
 function generateCaddyRoute(host, baseDomain) {
   const domain = host.customDomain || `${host.subdomain}.${baseDomain}`;
-
-  // Note: Caddy standard n'a pas le module forward_auth
-  // L'authentification est gérée côté application via l'API /api/authproxy/verify
-  // Le cookie auth_session est automatiquement transmis par le navigateur
+  const authServiceUrl = process.env.AUTH_SERVICE_URL || 'http://localhost:9100';
 
   // Proxy direct vers la cible
   const reverseProxyHandler = {
@@ -465,6 +462,76 @@ function generateCaddyRoute(host, baseDomain) {
     }]
   };
 
+  // Si requireAuth est activé, on utilise intercept pour vérifier l'auth
+  // via une sous-requête à l'auth-service
+  if (host.requireAuth) {
+    // Route avec vérification d'auth via intercept
+    const authCheckRoute = {
+      '@id': host.id,
+      match: [{ host: [domain] }],
+      handle: [{
+        handler: 'subroute',
+        routes: [
+          {
+            // Faire une sous-requête à l'auth-service pour vérifier le cookie
+            handle: [{
+              handler: 'reverse_proxy',
+              upstreams: [{ dial: authServiceUrl.replace('http://', '') }],
+              rewrite: {
+                uri: '/api/authz/forward-auth'
+              },
+              handle_response: [
+                {
+                  // Si auth-service retourne 401, rediriger vers login
+                  match: { status_code: [401, 403] },
+                  routes: [{
+                    handle: [{
+                      handler: 'static_response',
+                      status_code: 302,
+                      headers: {
+                        'Location': [`https://auth.${baseDomain}/login?rd=https://${domain}{http.request.uri}`]
+                      }
+                    }]
+                  }]
+                },
+                {
+                  // Si auth OK (200), proxy vers l'app cible
+                  match: { status_code: [200] },
+                  routes: [{
+                    handle: [reverseProxyHandler]
+                  }]
+                }
+              ]
+            }]
+          }
+        ]
+      }],
+      terminal: true
+    };
+
+    // Ajouter restriction IP si localOnly
+    if (host.localOnly) {
+      authCheckRoute.handle = [{
+        handler: 'subroute',
+        routes: [
+          {
+            match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }],
+            handle: authCheckRoute.handle
+          },
+          {
+            handle: [{
+              handler: 'error',
+              status_code: 403
+            }]
+          }
+        ]
+      }];
+    }
+
+    return authCheckRoute;
+  }
+
+  // Sans requireAuth : proxy direct
   const handlers = [reverseProxyHandler];
 
   const subrouteHandler = {
