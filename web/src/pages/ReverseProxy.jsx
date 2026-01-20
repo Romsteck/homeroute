@@ -73,14 +73,20 @@ function ReverseProxy() {
   const authInstructions = `# Authentification
 
 Le cookie \`auth_session\` est partagé sur \`*.mynetwk.biz\`.
-Pour vérifier si un utilisateur est connecté, appelle l'API auth.
 
-## Endpoints disponibles
+## Connexion / Déconnexion
+
+Pour connecter un utilisateur, redirige vers :
+\`https://auth.mynetwk.biz/login?rd=URL_RETOUR\`
+
+Pour déconnecter un utilisateur, redirige vers :
+\`https://auth.mynetwk.biz/logout?rd=URL_RETOUR\`
+
+## Vérifier l'utilisateur connecté
 
 ### GET https://auth.mynetwk.biz/api/auth/me
-Récupérer les infos de l'utilisateur connecté.
 
-**Entrée :** Cookie \`auth_session\`
+**Entrée :** Cookie \`auth_session\` (envoyé automatiquement)
 
 **Sortie (connecté) :**
 - \`success\`: true
@@ -88,60 +94,25 @@ Récupérer les infos de l'utilisateur connecté.
 - \`user.displayname\`: nom affiché
 - \`user.email\`: email
 - \`user.groups\`: liste des groupes (ex: ["users", "admins"])
-- \`session.expires_at\`: expiration de la session
 
-**Sortie (non connecté) :** \`success\`: false, \`error\`: "Non authentifié"
+**Sortie (non connecté) :** \`success\`: false
 
 ---
 
 ### GET https://auth.mynetwk.biz/api/auth/check
-Vérification rapide d'authentification.
+
+Vérification rapide (sans les détails utilisateur).
 
 **Entrée :** Cookie \`auth_session\`
 
-**Sortie (connecté) :**
-- \`authenticated\`: true
-- \`user_id\`: identifiant utilisateur
-
+**Sortie (connecté) :** \`authenticated\`: true
 **Sortie (non connecté) :** \`authenticated\`: false
-
----
-
-### POST https://auth.mynetwk.biz/api/auth/login
-Connecter un utilisateur.
-
-**Entrée (body JSON) :**
-- \`username\`: nom d'utilisateur
-- \`password\`: mot de passe
-- \`remember_me\` (optionnel): true pour session de 30 jours
-
-**Sortie (succès) :**
-- \`success\`: true
-- \`user\`: infos utilisateur
-- \`expires_at\`: expiration
-
-**Sortie (échec) :** \`success\`: false, \`error\`: message d'erreur
-
----
-
-### POST https://auth.mynetwk.biz/api/auth/logout
-Déconnecter l'utilisateur.
-
-**Entrée :** Cookie \`auth_session\`
-
-**Sortie :** \`success\`: true
-
----
 
 ## Groupes disponibles
 
 - \`admins\` : administrateurs
 - \`power_users\` : utilisateurs avancés
 - \`users\` : utilisateurs standards
-
-## URL de connexion
-
-Rediriger vers : \`https://auth.mynetwk.biz/login?rd=URL_RETOUR\`
 
 ## Notes
 
