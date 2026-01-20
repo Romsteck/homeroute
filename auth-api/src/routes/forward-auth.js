@@ -73,6 +73,37 @@ router.get('/forward-auth', (req, res) => {
   });
 });
 
+// GET /api/authz/forward-auth-optional - Auth optionnelle (ne bloque jamais)
+// Retourne toujours 200, injecte les headers si authentifié
+router.get('/forward-auth-optional', (req, res) => {
+  const sessionId = req.cookies.auth_session;
+
+  // Pas de session - retourner 200 sans headers user
+  if (!sessionId) {
+    return res.status(200).json({ authenticated: false });
+  }
+
+  // Valider la session
+  const session = validateSession(sessionId);
+  if (!session) {
+    return res.status(200).json({ authenticated: false });
+  }
+
+  // Récupérer l'utilisateur
+  const user = getUser(session.userId);
+  if (!user || user.disabled) {
+    return res.status(200).json({ authenticated: false });
+  }
+
+  // Utilisateur authentifié - injecter les headers
+  res.set('Remote-User', user.username);
+  res.set('Remote-Email', user.email || '');
+  res.set('Remote-Name', user.displayname || user.username);
+  res.set('Remote-Groups', (user.groups || []).join(','));
+
+  res.status(200).json({ authenticated: true, user: user.username });
+});
+
 // GET /api/authz/verify - Simple session verification (for internal use)
 router.get('/verify', (req, res) => {
   const sessionId = req.cookies.auth_session;
