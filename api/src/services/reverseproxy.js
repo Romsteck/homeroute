@@ -251,7 +251,7 @@ export async function updateHost(hostId, updates) {
       return { success: false, error: 'Host not found' };
     }
 
-    const allowedUpdates = ['targetHost', 'targetPort', 'enabled', 'localOnly', 'requireAuth'];
+    const allowedUpdates = ['targetHost', 'targetPort', 'enabled', 'localOnly', 'requireAuth', 'authBackend'];
     for (const key of Object.keys(updates)) {
       if (allowedUpdates.includes(key)) {
         if (key === 'targetPort') {
@@ -260,6 +260,18 @@ export async function updateHost(hostId, updates) {
             return { success: false, error: 'Invalid port number' };
           }
           config.hosts[hostIndex][key] = port;
+        } else if (key === 'authBackend') {
+          // Validate authBackend value
+          const validBackends = ['none', 'legacy', 'authelia'];
+          if (!validBackends.includes(updates[key])) {
+            return { success: false, error: 'Invalid authBackend value' };
+          }
+          // PROTECTION: Ne pas permettre authelia sur code-server
+          if (updates[key] === 'authelia' && config.hosts[hostIndex].subdomain === 'code') {
+            console.warn('REFUSÉ: code-server ne peut pas utiliser Authelia');
+            return { success: false, error: 'code-server ne peut pas utiliser Authelia pour des raisons de sécurité' };
+          }
+          config.hosts[hostIndex][key] = updates[key];
         } else {
           config.hosts[hostIndex][key] = updates[key];
         }
@@ -438,181 +450,14 @@ export async function deleteAuthAccount(accountId) {
 
 // ========== Caddy Configuration Generation ==========
 
-// HTML splash page shown for 2 seconds before proxying
-function getSplashHtml(targetDomain) {
-  return `<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Connexion securisee...</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      min-height: 100vh;
-      background: #111827;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      color: white;
-    }
-    .container { text-align: center; }
-    .flow {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 16px;
-      margin-bottom: 32px;
-    }
-    .icon-box {
-      width: 64px;
-      height: 64px;
-      background: #1f2937;
-      border-radius: 12px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      border: 1px solid #374151;
-    }
-    .shield-box {
-      width: 80px;
-      height: 80px;
-      background: rgba(37, 99, 235, 0.2);
-      border: 2px solid #3b82f6;
-      border-radius: 12px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      position: relative;
-    }
-    .ping {
-      position: absolute;
-      top: -4px;
-      right: -4px;
-      width: 16px;
-      height: 16px;
-      background: #22c55e;
-      border-radius: 50%;
-      animation: ping 1s infinite;
-    }
-    @keyframes ping {
-      0% { transform: scale(1); opacity: 1; }
-      75%, 100% { transform: scale(1.5); opacity: 0; }
-    }
-    .arrows {
-      display: flex;
-      gap: 4px;
-    }
-    .arrow {
-      color: #3b82f6;
-      animation: pulse 1s infinite;
-    }
-    .arrow:nth-child(2) { animation-delay: 0.15s; }
-    .arrow:nth-child(3) { animation-delay: 0.3s; }
-    .arrows-green .arrow { color: #22c55e; }
-    .arrows-green .arrow:nth-child(1) { animation-delay: 0.45s; }
-    .arrows-green .arrow:nth-child(2) { animation-delay: 0.6s; }
-    .arrows-green .arrow:nth-child(3) { animation-delay: 0.75s; }
-    @keyframes pulse {
-      0%, 100% { opacity: 0.3; }
-      50% { opacity: 1; }
-    }
-    h1 { font-size: 1.5rem; margin-bottom: 8px; }
-    .subtitle { color: #9ca3af; margin-bottom: 24px; }
-    .progress-bar {
-      width: 256px;
-      height: 6px;
-      background: #1f2937;
-      border-radius: 9999px;
-      overflow: hidden;
-      margin: 0 auto;
-    }
-    .progress-fill {
-      height: 100%;
-      background: linear-gradient(to right, #3b82f6, #22c55e);
-      border-radius: 9999px;
-      animation: progress 2s ease-out forwards;
-    }
-    @keyframes progress {
-      0% { width: 0%; }
-      100% { width: 100%; }
-    }
-    .tech { margin-top: 32px; font-size: 12px; color: #4b5563; font-family: monospace; }
-    .domain { margin-top: 16px; font-size: 13px; color: #6b7280; }
-    svg { width: 32px; height: 32px; }
-    .shield svg { width: 40px; height: 40px; color: #60a5fa; }
-    .user svg { color: #6b7280; }
-    .server svg { color: #9ca3af; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="flow">
-      <div class="icon-box user">
-        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/>
-        </svg>
-      </div>
-      <div class="arrows">
-        <span class="arrow">&#x2192;</span>
-        <span class="arrow">&#x2192;</span>
-        <span class="arrow">&#x2192;</span>
-      </div>
-      <div class="shield-box">
-        <div class="ping"></div>
-        <div class="shield">
-          <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-          </svg>
-        </div>
-      </div>
-      <div class="arrows arrows-green">
-        <span class="arrow">&#x2192;</span>
-        <span class="arrow">&#x2192;</span>
-        <span class="arrow">&#x2192;</span>
-      </div>
-      <div class="icon-box server">
-        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <rect x="2" y="2" width="20" height="8" rx="2"/>
-          <rect x="2" y="14" width="20" height="8" rx="2"/>
-          <circle cx="6" cy="6" r="1" fill="currentColor"/>
-          <circle cx="6" cy="18" r="1" fill="currentColor"/>
-        </svg>
-      </div>
-    </div>
-    <h1>Reverse Proxy</h1>
-    <p class="subtitle">Connexion securisee en cours...</p>
-    <div class="progress-bar"><div class="progress-fill"></div></div>
-    <p class="tech">TLS 1.3 | HTTP/2 | Caddy Server</p>
-    <p class="domain">${targetDomain}</p>
-  </div>
-  <script>
-    document.cookie = "proxy_splash=1; path=/; max-age=3600; SameSite=Lax";
-    setTimeout(function() {
-      window.location.reload();
-    }, 2000);
-  </script>
-</body>
-</html>`;
-}
-
-// Splash HTML for auth routes - uses short-lived cookie (10 seconds, shows every fresh visit)
-function getAuthSplashHtml(targetDomain) {
-  // Same visual as regular splash, but with very short cookie (10s for slow connections)
-  const baseHtml = getSplashHtml(targetDomain);
-  // Replace the long cookie with a 10-second cookie (using regex for flexible matching)
-  return baseHtml.replace(
-    /document\.cookie\s*=\s*"proxy_splash=1;[^"]*"/,
-    'document.cookie = "proxy_auth_splash=1; path=/; max-age=10; SameSite=Lax"'
-  );
-}
-
 function generateCaddyRoute(host, baseDomain) {
-  const { DASHBOARD_PORT } = getEnv();
   const domain = host.customDomain || `${host.subdomain}.${baseDomain}`;
 
+  // Note: requireAuth n'est plus géré par Caddy (forward_auth non disponible)
+  // L'authentification est gérée côté API via le middleware qui vérifie
+  // le cookie auth_session auprès de auth-service
+
+  // Proxy direct vers la cible
   const reverseProxyHandler = {
     handler: 'reverse_proxy',
     upstreams: [{
@@ -620,64 +465,10 @@ function generateCaddyRoute(host, baseDomain) {
     }]
   };
 
-  // Splash screen handler for auth routes (short-lived cookie, shows every fresh visit)
-  const authSplashHandler = {
-    handler: 'static_response',
-    status_code: 200,
-    headers: {
-      'Content-Type': ['text/html; charset=utf-8'],
-      'Cache-Control': ['no-cache, no-store, must-revalidate']
-    },
-    body: getAuthSplashHtml(domain)
-  };
-
-  // Build subroute logic based on auth and splash requirements
   const routes = [];
-
-  if (host.requireAuth) {
-    // For auth routes: splash shown on EVERY fresh page visit (10s cookie)
-
-    // Route 1: Authenticated -> proxy to target (skip splash for all requests)
-    routes.push({
-      match: [{
-        header: { Cookie: ['*dashboard.sid=*'] }
-      }],
-      handle: [reverseProxyHandler]
-    });
-
-    // Route 2: API/assets/WebSocket requests -> proxy to dashboard without splash
-    // (These are not page navigations, shouldn't get splash)
-    routes.push({
-      match: [{
-        path_regexp: {
-          pattern: '^/(api/|socket\\.io/|assets/|.*\\.(js|css|svg|png|jpg|jpeg|gif|ico|woff|woff2|ttf|eot|map|json)$)'
-        }
-      }],
-      handle: [{
-        handler: 'reverse_proxy',
-        upstreams: [{ dial: `localhost:${DASHBOARD_PORT}` }]
-      }]
-    });
-
-    // Route 3: Page navigation without splash cookie -> show splash
-    routes.push({
-      match: [{ not: [{ header: { Cookie: ['*proxy_auth_splash=1*'] } }] }],
-      handle: [authSplashHandler]
-    });
-
-    // Route 4: Splash seen but not authenticated -> proxy to dashboard (shows login)
-    routes.push({
-      handle: [{
-        handler: 'reverse_proxy',
-        upstreams: [{ dial: `localhost:${DASHBOARD_PORT}` }]
-      }]
-    });
-  } else {
-    // For non-auth routes: no splash, just proxy directly
-    routes.push({
-      handle: [reverseProxyHandler]
-    });
-  }
+  routes.push({
+    handle: [reverseProxyHandler]
+  });
 
   const subrouteHandler = {
     handler: 'subroute',
@@ -718,10 +509,15 @@ function generateCaddyRoute(host, baseDomain) {
 
 function generateCaddyConfig(config) {
   const { DASHBOARD_PORT } = getEnv();
+  const authServiceUrl = process.env.AUTH_SERVICE_URL || 'http://localhost:9100';
+
+  // Filtrer les hosts activés
   const enabledHosts = config.hosts.filter(h => h.enabled);
+
   const routes = enabledHosts.map(h => generateCaddyRoute(h, config.baseDomain));
 
   // Add system route for dashboard (proxy.<baseDomain>)
+  // Note: L'authentification est gérée côté API via le middleware (cookie auth_session)
   if (config.baseDomain) {
     routes.unshift({
       '@id': 'system-dashboard',
@@ -729,6 +525,17 @@ function generateCaddyConfig(config) {
       handle: [{
         handler: 'reverse_proxy',
         upstreams: [{ dial: `localhost:${DASHBOARD_PORT}` }]
+      }],
+      terminal: true
+    });
+
+    // Add auth portal route (auth.<baseDomain>) - custom auth service (no auth required)
+    routes.unshift({
+      '@id': 'system-auth',
+      match: [{ host: [`auth.${config.baseDomain}`] }],
+      handle: [{
+        handler: 'reverse_proxy',
+        upstreams: [{ dial: authServiceUrl.replace('http://', '').replace('https://', '') }]
       }],
       terminal: true
     });

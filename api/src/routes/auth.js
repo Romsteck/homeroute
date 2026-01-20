@@ -1,73 +1,48 @@
 import { Router } from 'express';
-import bcrypt from 'bcrypt';
-import { loadConfig } from '../services/reverseproxy.js';
 
 const router = Router();
 
-// POST /api/auth/login - Connexion
-router.post('/login', async (req, res) => {
-  try {
-    const { username, password } = req.body;
-
-    if (!username || !password) {
-      return res.status(400).json({ success: false, error: 'Username and password required' });
-    }
-
-    const config = await loadConfig();
-    const account = config.authAccounts?.find(a => a.username === username.toLowerCase());
-
-    if (!account) {
-      return res.status(401).json({ success: false, error: 'Invalid credentials' });
-    }
-
-    const isValid = await bcrypt.compare(password, account.passwordHash);
-    if (!isValid) {
-      return res.status(401).json({ success: false, error: 'Invalid credentials' });
-    }
-
-    req.session.user = { id: account.id, username: account.username };
-
-    // Sauvegarder explicitement la session avant de repondre
-    req.session.save((err) => {
-      if (err) {
-        console.error('Session save error:', err);
-        return res.status(500).json({ success: false, error: 'Session error' });
-      }
-      res.json({ success: true, user: req.session.user });
-    });
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({ success: false, error: 'Server error' });
-  }
-});
-
-// POST /api/auth/logout - Deconnexion
-router.post('/logout', (req, res) => {
-  req.session.destroy((err) => {
-    if (err) {
-      return res.status(500).json({ success: false, error: 'Logout failed' });
-    }
-    res.clearCookie('dashboard.sid');
-    res.json({ success: true });
-  });
-});
-
-// GET /api/auth/check - Verification session (pour Caddy forward_auth)
-router.get('/check', (req, res) => {
-  if (req.session?.user) {
-    res.status(200).json({ authenticated: true, user: req.session.user });
-  } else {
-    res.status(401).json({ authenticated: false });
-  }
-});
-
-// GET /api/auth/me - Info utilisateur courant
+/**
+ * GET /api/auth/me - Info utilisateur courant via headers Authelia
+ *
+ * Retourne l'utilisateur authentifié via les headers transmis par Caddy forward_auth
+ * Headers lus: Remote-User, Remote-Groups, Remote-Email, Remote-Name
+ */
 router.get('/me', (req, res) => {
-  if (req.session?.user) {
-    res.json({ success: true, user: req.session.user });
+  if (req.autheliaUser) {
+    res.json({
+      success: true,
+      user: {
+        username: req.autheliaUser.username,
+        displayName: req.autheliaUser.displayName,
+        email: req.autheliaUser.email,
+        groups: req.autheliaUser.groups,
+        isAdmin: req.autheliaUser.isAdmin
+      },
+      authMethod: 'authelia'
+    });
   } else {
-    res.json({ success: false, user: null });
+    res.json({
+      success: false,
+      user: null,
+      authUrl: 'https://auth.mynetwk.biz'
+    });
   }
+});
+
+/**
+ * POST /api/auth/logout - Déconnexion via Authelia
+ *
+ * Retourne l'URL de logout Authelia pour que le frontend redirige l'utilisateur
+ */
+router.post('/logout', (req, res) => {
+  // Construire l'URL de redirection après logout
+  const redirectUrl = req.get('X-Original-URL') || 'https://proxy.mynetwk.biz';
+
+  res.json({
+    success: true,
+    logoutUrl: `https://auth.mynetwk.biz/logout?rd=${encodeURIComponent(redirectUrl)}`
+  });
 });
 
 export default router;

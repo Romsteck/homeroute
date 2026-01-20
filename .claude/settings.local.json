@@ -151,7 +151,13 @@
       "Bash(apt-cache show:*)",
       "Bash(sudo apt install:*)",
       "Bash(sudo ./dkms-install.sh:*)",
-      "Bash(sudo rmmod:*)"
+      "Bash(sudo rmmod:*)",
+      "Bash(wc:*)",
+      "Bash(sudo chmod:*)",
+      "Bash(docker pull:*)",
+      "Bash(docker kill:*)",
+      "Bash(docker start:*)",
+      "Read(//ssd_pool/**)"
     ]
   }
 }

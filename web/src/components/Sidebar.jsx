@@ -10,8 +10,12 @@ import {
   ArrowLeftRight,
   FolderOpen,
   RefreshCw,
-  Zap
+  Zap,
+  Users,
+  LogOut,
+  User
 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
@@ -21,12 +25,15 @@ const navItems = [
   { to: '/ddns', icon: Globe, label: 'Dynamic DNS' },
   { to: '/backup', icon: HardDrive, label: 'Backup' },
   { to: '/reverseproxy', icon: ArrowLeftRight, label: 'Reverse Proxy' },
+  { to: '/users', icon: Users, label: 'Utilisateurs' },
   { to: '/samba', icon: FolderOpen, label: 'Samba' },
   { to: '/updates', icon: RefreshCw, label: 'Mises a jour' },
   { to: '/energy', icon: Zap, label: 'Énergie' },
 ];
 
 function Sidebar() {
+  const { user, logout } = useAuth();
+
   return (
     <aside className="w-64 bg-gray-800 border-r border-gray-700 flex flex-col">
       <div className="p-4 border-b border-gray-700">
@@ -59,8 +66,30 @@ function Sidebar() {
         </ul>
       </nav>
 
-      <div className="p-4 border-t border-gray-700 text-xs text-gray-500">
-        mynetwk.biz
+      <div className="p-4 border-t border-gray-700">
+        {user && (
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 min-w-0">
+              <User className="w-4 h-4 text-gray-400 flex-shrink-0" />
+              <div className="min-w-0">
+                <p className="text-sm text-gray-300 truncate">
+                  {user.displayName || user.username}
+                </p>
+                {user.isAdmin && (
+                  <p className="text-xs text-blue-400">Admin</p>
+                )}
+              </div>
+            </div>
+            <button
+              onClick={logout}
+              className="p-2 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded transition-colors"
+              title="Deconnexion"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+        <p className="text-xs text-gray-500 mt-2">mynetwk.biz</p>
       </div>
     </aside>
   );
