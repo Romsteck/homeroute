@@ -18,6 +18,7 @@
 - Pas de wildcard certificate
 - Le domaine de base sert uniquement de raccourci pour les sous-domaines
 - Caddy API sur `localhost:2019`
+- **IMPORTANT**: Utiliser l'API du projet (`/api/caddy/*`) pour redémarrer Caddy afin de ne pas perdre la configuration
 
 ## Commandes utiles
 

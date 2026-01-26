@@ -851,13 +851,19 @@ function getAppDomain(app, endpointType, env, baseDomain, apiSlug = '') {
 }
 
 // Generate CSP header handler
-function getCspHeaderHandler(baseDomain) {
+// Returns null for domains that need permissive CSP (like code-server)
+function getCspHeaderHandler(baseDomain, domain = null) {
+  // Skip CSP for code-server domains (they manage their own security)
+  if (domain && domain.startsWith('code.')) {
+    return null;
+  }
+
   return {
     handler: 'headers',
     response: {
       set: {
         'Content-Security-Policy': [
-          `default-src 'self'; connect-src 'self' https://auth.${baseDomain}; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:`
+          `default-src 'self'; connect-src 'self' https://auth.${baseDomain}; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; worker-src 'self' blob:`
         ]
       }
     }
@@ -929,7 +935,7 @@ function generateAppRoutes(app, environments, baseDomain) {
 
 // Generate a single endpoint route
 function generateEndpointRoute(id, domain, endpoint, baseDomain, authServiceUrl, envId = null) {
-  const cspHandler = getCspHeaderHandler(baseDomain);
+  const cspHandler = getCspHeaderHandler(baseDomain, domain);
   const reverseProxyHandler = {
     handler: 'reverse_proxy',
     upstreams: [{
@@ -981,24 +987,23 @@ function generateEndpointRoute(id, domain, endpoint, baseDomain, authServiceUrl,
       }]
     });
 
+    const subrouteHandler = {
+      handler: 'subroute',
+      routes
+    };
     const authCheckRoute = {
       '@id': id,
       match: [{ host: [domain] }],
-      handle: [
-        cspHandler,
-        {
-          handler: 'subroute',
-          routes
-        }
-      ],
+      handle: cspHandler ? [cspHandler, subrouteHandler] : [subrouteHandler],
       terminal: true
     };
 
     if (endpoint.localOnly) {
+      const localHandlers = cspHandler ? [cspHandler, subrouteHandler] : [subrouteHandler];
       authCheckRoute.handle = [{
         handler: 'subroute',
         routes: [
-          { match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }], handle: [cspHandler, ...authCheckRoute.handle.slice(1)] },
+          { match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }], handle: localHandlers },
           { handle: [{ handler: 'error', status_code: 403 }] }
         ]
       }];
@@ -1009,13 +1014,14 @@ function generateEndpointRoute(id, domain, endpoint, baseDomain, authServiceUrl,
 
   // Without requireAuth: direct proxy
   if (endpoint.localOnly) {
+    const localHandlers = cspHandler ? [cspHandler, reverseProxyHandler] : [reverseProxyHandler];
     return {
       '@id': id,
       match: [{ host: [domain] }],
       handle: [{
         handler: 'subroute',
         routes: [
-          { match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }], handle: [cspHandler, reverseProxyHandler] },
+          { match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }], handle: localHandlers },
           { handle: [{ handler: 'error', status_code: 403 }] }
         ]
       }],
@@ -1026,7 +1032,7 @@ function generateEndpointRoute(id, domain, endpoint, baseDomain, authServiceUrl,
   return {
     '@id': id,
     match: [{ host: [domain] }],
-    handle: [cspHandler, reverseProxyHandler],
+    handle: cspHandler ? [cspHandler, reverseProxyHandler] : [reverseProxyHandler],
     terminal: true
   };
 }
@@ -1035,7 +1041,7 @@ function generateCaddyRoute(host, baseDomain) {
   const domain = host.customDomain || `${host.subdomain}.${baseDomain}`;
   const { DASHBOARD_PORT } = getEnv();
   const authServiceUrl = `http://localhost:${DASHBOARD_PORT}`;
-  const cspHandler = getCspHeaderHandler(baseDomain);
+  const cspHandler = getCspHeaderHandler(baseDomain, domain);
 
   // Proxy direct vers la cible
   const reverseProxyHandler = {
@@ -1099,27 +1105,26 @@ function generateCaddyRoute(host, baseDomain) {
     });
 
     // Route avec vérification d'auth via intercept
+    const subrouteHandler = {
+      handler: 'subroute',
+      routes
+    };
     const authCheckRoute = {
       '@id': host.id,
       match: [{ host: [domain] }],
-      handle: [
-        cspHandler,
-        {
-          handler: 'subroute',
-          routes
-        }
-      ],
+      handle: cspHandler ? [cspHandler, subrouteHandler] : [subrouteHandler],
       terminal: true
     };
 
     // Ajouter restriction IP si localOnly
     if (host.localOnly) {
+      const localHandlers = cspHandler ? [cspHandler, subrouteHandler] : [subrouteHandler];
       authCheckRoute.handle = [{
         handler: 'subroute',
         routes: [
           {
             match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }],
-            handle: [cspHandler, ...authCheckRoute.handle.slice(1)]
+            handle: localHandlers
           },
           {
             handle: [{
@@ -1136,6 +1141,7 @@ function generateCaddyRoute(host, baseDomain) {
 
   // Sans requireAuth : proxy direct
   if (host.localOnly) {
+    const localHandlers = cspHandler ? [cspHandler, reverseProxyHandler] : [reverseProxyHandler];
     return {
       '@id': host.id,
       match: [{ host: [domain] }],
@@ -1144,7 +1150,7 @@ function generateCaddyRoute(host, baseDomain) {
         routes: [
           {
             match: [{ remote_ip: { ranges: LOCAL_NETWORKS } }],
-            handle: [cspHandler, reverseProxyHandler]
+            handle: localHandlers
           },
           {
             handle: [{
@@ -1161,7 +1167,7 @@ function generateCaddyRoute(host, baseDomain) {
   return {
     '@id': host.id,
     match: [{ host: [domain] }],
-    handle: [cspHandler, reverseProxyHandler],
+    handle: cspHandler ? [cspHandler, reverseProxyHandler] : [reverseProxyHandler],
     terminal: true
   };
 }
