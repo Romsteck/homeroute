@@ -1,2 +1,12 @@
 node_modules
 .env
+
+# Data files (runtime)
+api/data/*.db
+api/data/*.db-shm
+api/data/*.db-wal
+api/data/*.log
+api/data/users.yml
+
+# Claude Code local settings
+.claude/settings.local.json
