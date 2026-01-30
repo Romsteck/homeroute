@@ -17,6 +17,7 @@ import { setIO } from './socket.js';
 import { authMiddleware } from './middleware/auth.js';
 import { startScheduler as startDdnsScheduler } from './services/cloudflare.js';
 import { initDatabase } from './services/authdb.js';
+import { reloadCaddy } from './services/reverseproxy.js';
 
 // Traffic Analytics
 import { initMongoDB } from './services/mongodb.js';
@@ -111,6 +112,14 @@ async function startServer() {
   httpServer.listen(PORT, () => {
     console.log(`API server running on http://localhost:${PORT}`);
   });
+
+  // Restaurer la configuration Caddy depuis le fichier sauvegardé
+  try {
+    await reloadCaddy();
+    console.log('✓ Caddy configuration restored');
+  } catch (error) {
+    console.error('⚠ Caddy configuration restore failed:', error.message);
+  }
 
   // Démarrer le scheduler DDNS Cloudflare
   startDdnsScheduler();

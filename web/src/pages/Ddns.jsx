@@ -1,14 +1,18 @@
 import { useState, useEffect } from 'react';
-import { Globe, RefreshCw, Clock, Wifi } from 'lucide-react';
+import { Globe, RefreshCw, Clock, Wifi, Pencil, Check, X } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
 import StatusBadge from '../components/StatusBadge';
-import { getDdnsStatus, forceDdnsUpdate } from '../api/client';
+import { getDdnsStatus, forceDdnsUpdate, updateDdnsToken } from '../api/client';
 
 function Ddns() {
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
+  const [editingToken, setEditingToken] = useState(false);
+  const [tokenValue, setTokenValue] = useState('');
+  const [savingToken, setSavingToken] = useState(false);
+  const [tokenError, setTokenError] = useState(null);
 
   useEffect(() => {
     fetchStatus();
@@ -38,6 +42,26 @@ function Ddns() {
       console.error('Error updating:', error);
     } finally {
       setUpdating(false);
+    }
+  }
+
+  async function handleSaveToken() {
+    if (!tokenValue.trim()) return;
+    setSavingToken(true);
+    setTokenError(null);
+    try {
+      const res = await updateDdnsToken(tokenValue.trim());
+      if (res.data.success) {
+        setEditingToken(false);
+        setTokenValue('');
+        await fetchStatus();
+      } else {
+        setTokenError(res.data.error || 'Erreur');
+      }
+    } catch (error) {
+      setTokenError(error.response?.data?.error || 'Erreur de connexion');
+    } finally {
+      setSavingToken(false);
     }
   }
 
@@ -81,9 +105,53 @@ function Ddns() {
         </Card>
 
         <Card title="API Token" icon={Globe}>
-          <div className="text-sm font-mono text-gray-500">
-            {status?.config?.apiToken || '-'}
-          </div>
+          {editingToken ? (
+            <div className="space-y-2">
+              <input
+                type="password"
+                value={tokenValue}
+                onChange={(e) => setTokenValue(e.target.value)}
+                placeholder="Nouveau token API"
+                className="w-full bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm font-mono text-white focus:outline-none focus:border-blue-500"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleSaveToken();
+                  if (e.key === 'Escape') { setEditingToken(false); setTokenValue(''); setTokenError(null); }
+                }}
+              />
+              {tokenError && <p className="text-xs text-red-400">{tokenError}</p>}
+              <div className="flex gap-2">
+                <button
+                  onClick={handleSaveToken}
+                  disabled={savingToken || !tokenValue.trim()}
+                  className="flex items-center gap-1 px-2 py-1 text-xs bg-green-600 hover:bg-green-700 disabled:opacity-50 rounded text-white"
+                >
+                  <Check className="w-3 h-3" />
+                  {savingToken ? '...' : 'Valider'}
+                </button>
+                <button
+                  onClick={() => { setEditingToken(false); setTokenValue(''); setTokenError(null); }}
+                  className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-600 hover:bg-gray-700 rounded text-white"
+                >
+                  <X className="w-3 h-3" />
+                  Annuler
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-mono text-gray-500">
+                {status?.config?.apiToken || '-'}
+              </div>
+              <button
+                onClick={() => setEditingToken(true)}
+                className="p-1 text-gray-500 hover:text-blue-400 transition-colors"
+                title="Modifier le token"
+              >
+                <Pencil className="w-4 h-4" />
+              </button>
+            </div>
+          )}
         </Card>
       </div>
 
