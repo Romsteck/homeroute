@@ -1,6 +1,6 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { appendFile, mkdir } from 'fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -173,6 +173,8 @@ export async function runUpdate() {
 
     // Vérifier si mise à jour nécessaire
     if (record && record.content === currentIp) {
+      lastUpdate = new Date().toISOString();
+      lastIp = currentIp;
       lastError = null;
       return { success: true, message: 'IP unchanged', ip: currentIp };
     }
@@ -247,6 +249,42 @@ export async function forceUpdate() {
     ...result,
     status: status.success ? status.status : null
   };
+}
+
+export async function updateToken(newToken) {
+  const envPath = path.resolve(__dirname, '../../../.env');
+
+  try {
+    // Lire le fichier .env actuel
+    let envContent = '';
+    try {
+      envContent = await readFile(envPath, 'utf-8');
+    } catch {
+      // Fichier inexistant, on le créera
+    }
+
+    // Remplacer ou ajouter CF_API_TOKEN
+    if (envContent.match(/^CF_API_TOKEN=.*/m)) {
+      envContent = envContent.replace(/^CF_API_TOKEN=.*/m, `CF_API_TOKEN=${newToken}`);
+    } else {
+      envContent = envContent.trimEnd() + `\nCF_API_TOKEN=${newToken}\n`;
+    }
+
+    await writeFile(envPath, envContent);
+
+    // Mettre à jour en mémoire
+    process.env.CF_API_TOKEN = newToken;
+
+    // Redémarrer le scheduler avec le nouveau token
+    stopScheduler();
+    startScheduler();
+
+    await log('Token API mis à jour via UI', 'INFO');
+    return { success: true };
+  } catch (error) {
+    await log(`Erreur mise à jour token: ${error.message}`, 'ERROR');
+    return { success: false, error: error.message };
+  }
 }
 
 export function startScheduler() {

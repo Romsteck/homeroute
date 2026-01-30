@@ -57,6 +57,7 @@ export const searchBlocked = (query) => api.get('/adblock/search', { params: { q
 // DDNS
 export const getDdnsStatus = () => api.get('/ddns/status');
 export const forceDdnsUpdate = () => api.post('/ddns/update');
+export const updateDdnsToken = (token) => api.put('/ddns/token', { token });
 
 // Reverse Proxy
 export const getReverseProxyConfig = () => api.get('/reverseproxy/config');
