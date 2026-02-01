@@ -20,21 +20,21 @@ import {
 } from '../services/sessions.js';
 
 const router = Router();
-const BASE_DOMAIN = process.env.BASE_DOMAIN || 'localhost';
 
 // Cookie options - detect context from request (HTTPS + real domain = production-like)
 const getCookieOptions = (req) => {
+  const baseDomain = process.env.BASE_DOMAIN || 'localhost';
   const host = req.get('host') || '';
   const proto = req.get('x-forwarded-proto') || req.protocol;
   const isSecure = proto === 'https';
-  const isRealDomain = BASE_DOMAIN !== 'localhost' && host.includes(BASE_DOMAIN);
+  const isRealDomain = baseDomain !== 'localhost' && host.includes(baseDomain);
 
   return {
     httpOnly: true,
     secure: isSecure,
     sameSite: 'lax',
     // Set domain only when accessing via the real domain
-    domain: isRealDomain ? `.${BASE_DOMAIN}` : undefined,
+    domain: isRealDomain ? `.${baseDomain}` : undefined,
     path: '/'
   };
 };
@@ -127,11 +127,11 @@ router.post('/logout', (req, res) => {
   res.clearCookie('auth_session', getCookieOptions(req));
 
   // Retourner aussi l'URL de logout pour redirection si necessaire
-  const redirectUrl = req.get('X-Original-URL') || `https://proxy.${BASE_DOMAIN}`;
+  const redirectUrl = req.get('X-Original-URL') || `https://proxy.${(process.env.BASE_DOMAIN || 'localhost')}`;
 
   res.json({
     success: true,
-    logoutUrl: `https://auth.${BASE_DOMAIN}/logout?rd=${encodeURIComponent(redirectUrl)}`
+    logoutUrl: `https://auth.${(process.env.BASE_DOMAIN || 'localhost')}/logout?rd=${encodeURIComponent(redirectUrl)}`
   });
 });
 
@@ -167,6 +167,18 @@ router.get('/check', (req, res) => {
 router.get('/me', (req, res) => {
   const sessionId = req.cookies.auth_session;
 
+  // Refresh the cookie with the correct domain on every successful auth check
+  // (fixes old cookies scoped to a single subdomain instead of .baseDomain)
+  if (sessionId) {
+    const session = validateSession(sessionId);
+    if (session) {
+      res.cookie('auth_session', sessionId, {
+        ...getCookieOptions(req),
+        maxAge: session.expiresAt - Date.now()
+      });
+    }
+  }
+
   // Essayer d'abord via le middleware authelia (headers proxy)
   if (req.autheliaUser) {
     return res.json({
@@ -187,7 +199,7 @@ router.get('/me', (req, res) => {
     return res.json({
       success: false,
       user: null,
-      authUrl: `https://auth.${BASE_DOMAIN}`
+      authUrl: `https://auth.${(process.env.BASE_DOMAIN || 'localhost')}`
     });
   }
 
@@ -199,7 +211,7 @@ router.get('/me', (req, res) => {
       success: false,
       user: null,
       error: 'Session expiree',
-      authUrl: `https://auth.${BASE_DOMAIN}`
+      authUrl: `https://auth.${(process.env.BASE_DOMAIN || 'localhost')}`
     });
   }
 
@@ -212,7 +224,7 @@ router.get('/me', (req, res) => {
       success: false,
       user: null,
       error: 'Utilisateur non trouve',
-      authUrl: `https://auth.${BASE_DOMAIN}`
+      authUrl: `https://auth.${(process.env.BASE_DOMAIN || 'localhost')}`
     });
   }
 

@@ -12,31 +12,19 @@ import {
   createUser as createUserBase,
   updateUser as updateUserBase,
   changePassword as changePasswordBase,
-  deleteUser as deleteUserBase,
-  getGroups as getGroupsBase
+  deleteUser as deleteUserBase
 } from './authUsers.js';
+import {
+  getGroups as getGroupsFromService,
+  isValidGroup,
+  migratePowerUsers
+} from './groups.js';
 
 const DATA_DIR = process.env.AUTH_DATA_DIR || path.join(process.cwd(), 'data');
-const BASE_DOMAIN = process.env.BASE_DOMAIN || 'localhost';
+const getBaseDomain = () => process.env.BASE_DOMAIN || 'localhost';
 
-// Groupes predefinis avec leurs descriptions
-const PREDEFINED_GROUPS = {
-  admins: {
-    name: 'admins',
-    displayName: 'Administrateurs',
-    description: 'Acces complet, gestion des utilisateurs et services'
-  },
-  power_users: {
-    name: 'power_users',
-    displayName: 'Power Users',
-    description: 'Acces etendu aux services'
-  },
-  users: {
-    name: 'users',
-    displayName: 'Utilisateurs',
-    description: 'Acces basique aux services'
-  }
-};
+// Migration au demarrage : remplacer power_users par users
+migratePowerUsers();
 
 // ========== Status Service Auth ==========
 
@@ -104,7 +92,7 @@ export async function createUser(username, password, displayname, email, groups 
   }
 
   // Valider les groupes
-  const validGroups = groups.filter(g => PREDEFINED_GROUPS[g]);
+  const validGroups = groups.filter(g => isValidGroup(g));
   if (validGroups.length === 0) {
     validGroups.push('users');
   }
@@ -115,7 +103,7 @@ export async function createUser(username, password, displayname, email, groups 
 export async function updateUser(username, updates) {
   // Valider les groupes si presents
   if (updates.groups) {
-    const validGroups = updates.groups.filter(g => PREDEFINED_GROUPS[g]);
+    const validGroups = updates.groups.filter(g => isValidGroup(g));
     if (validGroups.length > 0) {
       updates.groups = validGroups;
     } else {
@@ -151,27 +139,7 @@ export async function deleteUser(username) {
 
 export async function getGroups() {
   try {
-    const users = getUsersBase();
-
-    // Compter les membres de chaque groupe
-    const groupCounts = {};
-    for (const group of Object.keys(PREDEFINED_GROUPS)) {
-      groupCounts[group] = 0;
-    }
-
-    for (const user of users) {
-      for (const group of user.groups || []) {
-        if (groupCounts[group] !== undefined) {
-          groupCounts[group]++;
-        }
-      }
-    }
-
-    const groups = Object.values(PREDEFINED_GROUPS).map(group => ({
-      ...group,
-      memberCount: groupCounts[group.name] || 0
-    }));
-
+    const groups = getGroupsFromService();
     return { success: true, groups };
   } catch (error) {
     return { success: false, error: error.message };
@@ -196,7 +164,7 @@ export async function bootstrapAdmin(password) {
       'admin',
       password,
       'Administrateur',
-      `admin@${BASE_DOMAIN}`,
+      `admin@${getBaseDomain()}`,
       ['admins']
     );
   } catch (error) {

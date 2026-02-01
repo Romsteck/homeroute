@@ -25,6 +25,7 @@ import {
 import Card from '../components/Card';
 import Button from '../components/Button';
 import ApplicationCard from '../components/ApplicationCard';
+import GroupBadge from '../components/GroupBadge';
 import {
   getReverseProxyConfig,
   getReverseProxyStatus,
@@ -43,7 +44,8 @@ import {
   updateReverseProxyApplication,
   deleteReverseProxyApplication,
   toggleReverseProxyApplication,
-  getRustProxyStatus
+  getRustProxyStatus,
+  getUserGroups
 } from '../api/client';
 
 function ReverseProxy() {
@@ -52,6 +54,7 @@ function ReverseProxy() {
   const [hosts, setHosts] = useState([]);
   const [applications, setApplications] = useState([]);
   const [environments, setEnvironments] = useState([]);
+  const [userGroups, setUserGroups] = useState([]);
   const [rustProxy, setRustProxy] = useState(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState(null);
@@ -78,6 +81,7 @@ function ReverseProxy() {
   const [newApp, setNewApp] = useState({
     name: '',
     slug: '',
+    allowedGroups: [],
     endpoints: {
       prod: {
         enabled: true,
@@ -141,8 +145,8 @@ Verification rapide (sans les details utilisateur).
 ## Groupes disponibles
 
 - \`admins\` : administrateurs
-- \`power_users\` : utilisateurs avances
-- \`users\` : utilisateurs standards`;
+- \`users\` : utilisateurs standards
+- Groupes personnalises crees via la page Utilisateurs`;
 
   async function copyInstructions() {
     try {
@@ -160,14 +164,15 @@ Verification rapide (sans les details utilisateur).
 
   async function fetchData() {
     try {
-      const [configRes, statusRes, hostsRes, certsRes, envsRes, appsRes, rustRes] = await Promise.all([
+      const [configRes, statusRes, hostsRes, certsRes, envsRes, appsRes, rustRes, groupsRes] = await Promise.all([
         getReverseProxyConfig(),
         getReverseProxyStatus(),
         getReverseProxyHosts(),
         getCertificatesStatus(),
         getReverseProxyEnvironments(),
         getReverseProxyApplications(),
-        getRustProxyStatus().catch(() => ({ data: { success: false } }))
+        getRustProxyStatus().catch(() => ({ data: { success: false } })),
+        getUserGroups().catch(() => ({ data: { success: false } }))
       ]);
 
       if (configRes.data.success) {
@@ -185,6 +190,7 @@ Verification rapide (sans les details utilisateur).
       if (envsRes.data.success) setEnvironments(envsRes.data.environments || []);
       if (appsRes.data.success) setApplications(appsRes.data.applications || []);
       if (rustRes.data.success) setRustProxy(rustRes.data);
+      if (groupsRes.data?.success) setUserGroups(groupsRes.data.groups || []);
     } catch (error) {
       console.error('Error:', error);
       setMessage({ type: 'error', text: 'Erreur de chargement' });
@@ -356,6 +362,7 @@ Verification rapide (sans les details utilisateur).
       const payload = {
         name: newApp.name,
         slug: newApp.slug.toLowerCase(),
+        allowedGroups: newApp.allowedGroups || [],
         endpoints
       };
 
@@ -367,6 +374,7 @@ Verification rapide (sans les details utilisateur).
         setNewApp({
           name: '',
           slug: '',
+          allowedGroups: [],
           endpoints: {
             prod: {
               enabled: true,
@@ -446,6 +454,7 @@ Verification rapide (sans les details utilisateur).
     setEditAppForm({
       name: app.name,
       slug: app.slug,
+      allowedGroups: app.allowedGroups || [],
       endpoints: formEndpoints
     });
     setShowEditAppModal(true);
@@ -530,6 +539,7 @@ Verification rapide (sans les details utilisateur).
       const payload = {
         name: editAppForm.name,
         slug: editAppForm.slug,
+        allowedGroups: editAppForm.allowedGroups || [],
         endpoints
       };
 
@@ -745,6 +755,7 @@ Verification rapide (sans les details utilisateur).
                   onToggle={handleToggleApp}
                   onEdit={openEditAppModal}
                   onDelete={handleDeleteApp}
+                  userGroups={userGroups}
                 />
               ))}
             </div>
@@ -1190,6 +1201,42 @@ Verification rapide (sans les details utilisateur).
                 );
               })}
             </div>
+            {/* Allowed Groups */}
+            {userGroups.length > 0 && (
+              <div className="mt-4">
+                <label className="block text-sm text-gray-400 mb-2">Acces restreint par groupe</label>
+                <p className="text-xs text-gray-500 mb-2">
+                  {newApp.allowedGroups.length === 0
+                    ? 'Tous les utilisateurs authentifies ont acces'
+                    : `${newApp.allowedGroups.length} groupe(s) selectionne(s)`}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {userGroups.filter(g => g.id !== 'admins').map(group => {
+                    const selected = newApp.allowedGroups.includes(group.id);
+                    return (
+                      <button
+                        key={group.id}
+                        type="button"
+                        onClick={() => {
+                          const groups = selected
+                            ? newApp.allowedGroups.filter(id => id !== group.id)
+                            : [...newApp.allowedGroups, group.id];
+                          setNewApp({ ...newApp, allowedGroups: groups });
+                        }}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs border transition-all ${
+                          selected
+                            ? 'border-white/30 bg-white/10 text-white'
+                            : 'border-gray-700 bg-gray-800/50 text-gray-400 hover:border-gray-500'
+                        }`}
+                      >
+                        <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: group.color }} />
+                        {group.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             <div className="flex justify-end gap-2 mt-6">
               <Button variant="secondary" onClick={() => setShowAddAppModal(false)}>Annuler</Button>
               <Button onClick={handleAddApp} loading={saving}>Creer</Button>
@@ -1470,6 +1517,42 @@ Verification rapide (sans les details utilisateur).
                 );
               })}
             </div>
+            {/* Allowed Groups */}
+            {userGroups.length > 0 && (
+              <div className="mt-4">
+                <label className="block text-sm text-gray-400 mb-2">Acces restreint par groupe</label>
+                <p className="text-xs text-gray-500 mb-2">
+                  {(editAppForm.allowedGroups || []).length === 0
+                    ? 'Tous les utilisateurs authentifies ont acces'
+                    : `${editAppForm.allowedGroups.length} groupe(s) selectionne(s)`}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {userGroups.filter(g => g.id !== 'admins').map(group => {
+                    const selected = (editAppForm.allowedGroups || []).includes(group.id);
+                    return (
+                      <button
+                        key={group.id}
+                        type="button"
+                        onClick={() => {
+                          const groups = selected
+                            ? editAppForm.allowedGroups.filter(id => id !== group.id)
+                            : [...(editAppForm.allowedGroups || []), group.id];
+                          setEditAppForm({ ...editAppForm, allowedGroups: groups });
+                        }}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs border transition-all ${
+                          selected
+                            ? 'border-white/30 bg-white/10 text-white'
+                            : 'border-gray-700 bg-gray-800/50 text-gray-400 hover:border-gray-500'
+                        }`}
+                      >
+                        <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: group.color }} />
+                        {group.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             <div className="flex justify-end gap-2 mt-6">
               <Button variant="secondary" onClick={() => { setShowEditAppModal(false); setEditingApp(null); }}>Annuler</Button>
               <Button onClick={handleEditApp} loading={saving}>Sauvegarder</Button>

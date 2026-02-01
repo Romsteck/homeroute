@@ -1,13 +1,8 @@
 import { useState, useEffect } from 'react';
-import { X, Eye, EyeOff, Shield, User } from 'lucide-react';
+import { X, Eye, EyeOff, Shield, User, Users } from 'lucide-react';
 import Button from './Button';
 
-const GROUPS = [
-  { id: 'admins', label: 'Administrateurs', icon: Shield, description: 'Accès complet aux services' },
-  { id: 'users', label: 'Utilisateurs', icon: User, description: 'Accès basique' }
-];
-
-function UserModal({ isOpen, onClose, onSave, user = null, saving = false }) {
+function UserModal({ isOpen, onClose, onSave, user = null, saving = false, availableGroups = [] }) {
   const [form, setForm] = useState({
     username: '',
     password: '',
@@ -20,6 +15,14 @@ function UserModal({ isOpen, onClose, onSave, user = null, saving = false }) {
   const [errors, setErrors] = useState({});
 
   const isEditing = !!user;
+
+  // Build display list from availableGroups prop, fallback to defaults
+  const groupList = availableGroups.length > 0
+    ? availableGroups
+    : [
+        { id: 'admins', name: 'Administrateurs', description: 'Accès complet aux services', color: '#EF4444', builtIn: true },
+        { id: 'users', name: 'Utilisateurs', description: 'Accès basique', color: '#3B82F6', builtIn: true }
+      ];
 
   useEffect(() => {
     if (user) {
@@ -96,6 +99,12 @@ function UserModal({ isOpen, onClose, onSave, user = null, saving = false }) {
         : [...prev.groups, groupId];
       return { ...prev, groups };
     });
+  }
+
+  function getGroupIcon(group) {
+    if (group.id === 'admins') return Shield;
+    if (group.id === 'users') return User;
+    return Users;
   }
 
   if (!isOpen) return null;
@@ -217,9 +226,11 @@ function UserModal({ isOpen, onClose, onSave, user = null, saving = false }) {
               Groupes
             </label>
             <div className="space-y-2">
-              {GROUPS.map(group => {
-                const Icon = group.icon;
+              {groupList.map(group => {
+                const Icon = getGroupIcon(group);
                 const isSelected = form.groups.includes(group.id);
+                const groupColor = group.color || '#8B5CF6';
+
                 return (
                   <button
                     key={group.id}
@@ -227,17 +238,27 @@ function UserModal({ isOpen, onClose, onSave, user = null, saving = false }) {
                     onClick={() => toggleGroup(group.id)}
                     className={`w-full flex items-center gap-3 p-3 rounded-lg border transition-colors ${
                       isSelected
-                        ? 'bg-blue-500/20 border-blue-500/50 text-blue-400'
+                        ? 'border-opacity-50'
                         : 'bg-gray-700 border-gray-600 text-gray-300 hover:border-gray-500'
                     }`}
+                    style={isSelected ? {
+                      backgroundColor: `${groupColor}20`,
+                      borderColor: `${groupColor}80`,
+                      color: groupColor
+                    } : undefined}
                   >
                     <Icon className="w-5 h-5" />
                     <div className="text-left">
-                      <div className="font-medium">{group.label}</div>
-                      <div className="text-xs opacity-70">{group.description}</div>
+                      <div className="font-medium">{group.name}</div>
+                      {group.description && (
+                        <div className="text-xs opacity-70">{group.description}</div>
+                      )}
                     </div>
                     {isSelected && (
-                      <div className="ml-auto w-2 h-2 rounded-full bg-blue-400" />
+                      <div
+                        className="ml-auto w-2 h-2 rounded-full"
+                        style={{ backgroundColor: groupColor }}
+                      />
                     )}
                   </button>
                 );

@@ -8,7 +8,7 @@
 import { validateSession } from '../services/sessions.js';
 import { getUser } from '../services/authUsers.js';
 
-const BASE_DOMAIN = process.env.BASE_DOMAIN || 'localhost';
+const getBaseDomain = () => process.env.BASE_DOMAIN || 'localhost';
 
 /**
  * Middleware global qui verifie le cookie auth_session
@@ -29,7 +29,6 @@ export async function authMiddleware(req, res, next) {
             displayName: user.displayname || user.username,
             groups: user.groups || [],
             isAdmin: user.groups?.includes('admins') || false,
-            isPowerUser: user.groups?.includes('power_users') || false,
             hasGroup: (group) => user.groups?.includes(group) || false
           };
           // Compatibilite avec l'ancien nom
@@ -50,12 +49,12 @@ export async function authMiddleware(req, res, next) {
  */
 export function requireAuth(req, res, next) {
   if (!req.user) {
-    const originalUrl = req.get('X-Original-URL') || `https://proxy.${BASE_DOMAIN}${req.originalUrl}`;
+    const originalUrl = req.get('X-Original-URL') || `https://proxy.${getBaseDomain()}${req.originalUrl}`;
     return res.status(401).json({
       success: false,
       error: 'Authentication required',
-      authUrl: `https://auth.${BASE_DOMAIN}`,
-      redirect: `https://auth.${BASE_DOMAIN}/login?rd=${encodeURIComponent(originalUrl)}`
+      authUrl: `https://auth.${getBaseDomain()}`,
+      redirect: `https://auth.${getBaseDomain()}/login?rd=${encodeURIComponent(originalUrl)}`
     });
   }
   next();
@@ -71,7 +70,7 @@ export function requireGroup(...groups) {
       return res.status(401).json({
         success: false,
         error: 'Authentication required',
-        authUrl: `https://auth.${BASE_DOMAIN}`
+        authUrl: `https://auth.${getBaseDomain()}`
       });
     }
 
@@ -95,15 +94,9 @@ export function requireGroup(...groups) {
  */
 export const requireAdmin = requireGroup('admins');
 
-/**
- * Raccourci pour exiger admins ou power_users
- */
-export const requirePowerUser = requireGroup('admins', 'power_users');
-
 export default {
   authMiddleware,
   requireAuth,
   requireGroup,
-  requireAdmin,
-  requirePowerUser
+  requireAdmin
 };

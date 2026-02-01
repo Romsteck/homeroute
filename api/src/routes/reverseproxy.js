@@ -55,14 +55,14 @@ router.get('/hosts', async (req, res) => {
 
 // POST /api/reverseproxy/hosts - Ajouter un hôte
 router.post('/hosts', async (req, res) => {
-  const { subdomain, customDomain, targetHost, targetPort, localOnly, requireAuth } = req.body;
+  const { subdomain, customDomain, targetHost, targetPort, localOnly, requireAuth, allowedGroups } = req.body;
   if (!targetHost || !targetPort) {
     return res.status(400).json({ success: false, error: 'Target host and port required' });
   }
   if (!subdomain && !customDomain) {
     return res.status(400).json({ success: false, error: 'Subdomain or custom domain required' });
   }
-  const result = await addHost({ subdomain, customDomain, targetHost, targetPort, localOnly, requireAuth });
+  const result = await addHost({ subdomain, customDomain, targetHost, targetPort, localOnly, requireAuth, allowedGroups });
   res.json(result);
 });
 
@@ -159,14 +159,14 @@ router.get('/applications', async (req, res) => {
 
 // POST /api/reverseproxy/applications - Ajouter une application
 router.post('/applications', async (req, res) => {
-  const { name, slug, endpoints } = req.body;
+  const { name, slug, endpoints, allowedGroups } = req.body;
   if (!name || !slug) {
     return res.status(400).json({ success: false, error: 'Name and slug are required' });
   }
   if (!endpoints || typeof endpoints !== 'object' || Object.keys(endpoints).length === 0) {
     return res.status(400).json({ success: false, error: 'At least one environment endpoint is required' });
   }
-  const result = await addApplication({ name, slug, endpoints });
+  const result = await addApplication({ name, slug, endpoints, allowedGroups });
   res.json(result);
 });
 

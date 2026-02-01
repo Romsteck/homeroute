@@ -144,6 +144,9 @@ export const changeUserPassword = (username, password) => api.put(`/users/${user
 
 // Users - Groups
 export const getUserGroups = () => api.get('/users/groups');
+export const createUserGroup = (data) => api.post('/users/groups', data);
+export const updateUserGroup = (id, data) => api.put(`/users/groups/${id}`, data);
+export const deleteUserGroup = (id) => api.delete(`/users/groups/${id}`);
 
 // ========== Traffic Analytics ==========
 

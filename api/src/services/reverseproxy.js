@@ -249,6 +249,7 @@ export async function addHost(hostConfig) {
       targetPort: port,
       localOnly: !!hostConfig.localOnly,
       requireAuth: !!hostConfig.requireAuth,
+      allowedGroups: Array.isArray(hostConfig.allowedGroups) ? hostConfig.allowedGroups : [],
       enabled: true,
       createdAt: new Date().toISOString()
     };
@@ -272,7 +273,7 @@ export async function updateHost(hostId, updates) {
       return { success: false, error: 'Host not found' };
     }
 
-    const allowedUpdates = ['targetHost', 'targetPort', 'enabled', 'localOnly', 'requireAuth', 'authBackend'];
+    const allowedUpdates = ['targetHost', 'targetPort', 'enabled', 'localOnly', 'requireAuth', 'authBackend', 'allowedGroups'];
     for (const key of Object.keys(updates)) {
       if (allowedUpdates.includes(key)) {
         if (key === 'targetPort') {
@@ -539,6 +540,7 @@ export async function addApplication(appConfig) {
       name,
       slug: slug.toLowerCase(),
       endpoints: validEndpoints,
+      allowedGroups: Array.isArray(appConfig.allowedGroups) ? appConfig.allowedGroups : [],
       enabled: true,
       createdAt: new Date().toISOString()
     };
@@ -590,6 +592,11 @@ export async function updateApplication(appId, updates) {
     // Update enabled if provided
     if (typeof updates.enabled === 'boolean') {
       app.enabled = updates.enabled;
+    }
+
+    // Update allowedGroups if provided
+    if (Array.isArray(updates.allowedGroups)) {
+      app.allowedGroups = updates.allowedGroups;
     }
 
     // Update endpoints if provided
@@ -830,6 +837,7 @@ async function syncAllRoutes(config) {
         target_port: host.targetPort,
         local_only: !!host.localOnly,
         require_auth: !!host.requireAuth,
+        allowed_groups: host.allowedGroups || [],
         enabled: true
       });
     }
@@ -853,6 +861,7 @@ async function syncAllRoutes(config) {
           target_port: envEndpoints.frontend.targetPort,
           local_only: !!envEndpoints.frontend.localOnly,
           require_auth: !!envEndpoints.frontend.requireAuth,
+          allowed_groups: app.allowedGroups || [],
           enabled: true
         });
       }
@@ -867,6 +876,7 @@ async function syncAllRoutes(config) {
           target_port: api.targetPort,
           local_only: !!api.localOnly,
           require_auth: !!api.requireAuth,
+          allowed_groups: app.allowedGroups || [],
           enabled: true
         });
       }
