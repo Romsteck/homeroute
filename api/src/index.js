@@ -48,6 +48,7 @@ import serversRoutes from './routes/servers.js';
 import wolRoutes from './routes/wol.js';
 import caRoutes from './routes/ca.js';
 import rustProxyRoutes from './routes/rust-proxy.js';
+import dnsDhcpRoutes from './routes/dns-dhcp.js';
 
 const app = express();
 const httpServer = createServer(app);
@@ -106,6 +107,7 @@ async function startServer() {
   app.use('/api/wol', wolRoutes);
   app.use('/api/ca', caRoutes);
   app.use('/api/rust-proxy', rustProxyRoutes);
+  app.use('/api/dns-dhcp', dnsDhcpRoutes);
 
   // Health check
   app.get('/api/health', (req, res) => {

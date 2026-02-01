@@ -2,79 +2,55 @@ import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 
 function getConfigPath() {
-  return process.env.DNSMASQ_CONFIG || '/etc/dnsmasq.d/lan.conf';
+  return process.env.DNS_DHCP_CONFIG_PATH || '/var/lib/server-dashboard/dns-dhcp-config.json';
 }
 
 function getLeasesPath() {
-  return process.env.DNSMASQ_LEASES || '/var/lib/misc/dnsmasq.leases';
+  return process.env.DNSMASQ_LEASES || '/var/lib/server-dashboard/dhcp-leases';
 }
 
 export async function getDnsConfig() {
   try {
-    const content = await readFile(getConfigPath(), 'utf-8');
-    const config = parseConfig(content);
+    const configPath = getConfigPath();
+    if (!existsSync(configPath)) {
+      return { success: false, error: 'Config file not found' };
+    }
+
+    const content = await readFile(configPath, 'utf-8');
+    const json = JSON.parse(content);
+
+    // Translate JSON config to frontend-compatible format
+    const config = {
+      interface: json.dhcp?.interface || null,
+      dhcpRange: json.dhcp?.enabled
+        ? `${json.dhcp.range_start},${json.dhcp.range_end},${json.dhcp.netmask},${json.dhcp.default_lease_time_secs}`
+        : null,
+      dhcpOptions: [],
+      dnsServers: json.dns?.upstream_servers || [],
+      domain: json.dns?.local_domain || null,
+      cacheSize: json.dns?.cache_size || null,
+      ipv6: {
+        raEnabled: json.ipv6?.ra_enabled || false,
+        dhcpRange: json.ipv6?.enabled ? json.ipv6.ra_prefix : null,
+      },
+      wildcardAddress: json.dns?.wildcard_ipv4
+        ? { domain: json.dns.local_domain, ip: json.dns.wildcard_ipv4 }
+        : null,
+      comments: []
+    };
+
+    // Build dhcpOptions from config
+    if (json.dhcp?.gateway) {
+      config.dhcpOptions.push(`3,${json.dhcp.gateway}`);
+    }
+    if (json.dhcp?.dns_server) {
+      config.dhcpOptions.push(`6,${json.dhcp.dns_server}`);
+    }
+
     return { success: true, config, raw: content };
   } catch (error) {
     return { success: false, error: error.message };
   }
-}
-
-function parseConfig(content) {
-  const lines = content.split('\n');
-  const config = {
-    interface: null,
-    dhcpRange: null,
-    dhcpOptions: [],
-    dnsServers: [],
-    domain: null,
-    cacheSize: null,
-    ipv6: {},
-    wildcardAddress: null,
-    comments: []
-  };
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-
-    if (trimmed.startsWith('#') || trimmed === '') {
-      if (trimmed.startsWith('#') && !trimmed.startsWith('# ')) {
-        config.comments.push(trimmed);
-      }
-      continue;
-    }
-
-    if (trimmed.startsWith('interface=')) {
-      config.interface = trimmed.split('=')[1];
-    } else if (trimmed.startsWith('dhcp-range=')) {
-      const value = trimmed.split('=')[1];
-      if (value.includes(':')) {
-        config.ipv6.dhcpRange = value;
-      } else {
-        config.dhcpRange = value;
-      }
-    } else if (trimmed.startsWith('dhcp-option=')) {
-      const value = trimmed.split('=')[1];
-      if (value.startsWith('option6:')) {
-        config.ipv6.options = config.ipv6.options || [];
-        config.ipv6.options.push(value);
-      } else {
-        config.dhcpOptions.push(value);
-      }
-    } else if (trimmed.startsWith('server=')) {
-      config.dnsServers.push(trimmed.split('=')[1]);
-    } else if (trimmed.startsWith('domain=')) {
-      config.domain = trimmed.split('=')[1];
-    } else if (trimmed.startsWith('cache-size=')) {
-      config.cacheSize = parseInt(trimmed.split('=')[1]);
-    } else if (trimmed.startsWith('address=')) {
-      const parts = trimmed.split('=')[1].split('/');
-      config.wildcardAddress = { domain: parts[1], ip: parts[2] };
-    } else if (trimmed === 'enable-ra') {
-      config.ipv6.raEnabled = true;
-    }
-  }
-
-  return config;
 }
 
 export async function getDhcpLeases() {
