@@ -11,10 +11,12 @@ import {
   ChevronDown,
   ChevronUp,
   Layers,
-  Lock
+  Lock,
+  Users
 } from 'lucide-react';
+import GroupBadge from './GroupBadge';
 
-function ApplicationCard({ app, environments, baseDomain, certStatuses, onToggle, onEdit, onDelete }) {
+function ApplicationCard({ app, environments, baseDomain, certStatuses, onToggle, onEdit, onDelete, userGroups = [] }) {
   const [expanded, setExpanded] = useState(false);
 
   // Get active environments for this app (those that have endpoints configured)
@@ -82,6 +84,17 @@ function ApplicationCard({ app, environments, baseDomain, certStatuses, onToggle
               </span>
             ))}
           </div>
+          {app.allowedGroups && app.allowedGroups.length > 0 && (
+            <div className="flex items-center gap-1.5 mt-1.5">
+              <Users className="w-3 h-3 text-gray-500" />
+              {app.allowedGroups.map(gid => {
+                const group = userGroups.find(g => g.id === gid);
+                return group
+                  ? <GroupBadge key={gid} group={gid} color={group.color} label={group.name} />
+                  : <GroupBadge key={gid} group={gid} />;
+              })}
+            </div>
+          )}
           <div className="flex items-center gap-2 mt-1 text-sm text-gray-400">
             {firstEndpoint && (
               <>

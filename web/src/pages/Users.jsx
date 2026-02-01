@@ -21,6 +21,7 @@ import Card from '../components/Card';
 import Button from '../components/Button';
 import GroupBadge from '../components/GroupBadge';
 import UserModal from '../components/UserModal';
+import GroupModal from '../components/GroupModal';
 import {
   getAutheliaStatus,
   getAutheliaInstallInstructions,
@@ -30,7 +31,10 @@ import {
   updateUser,
   deleteUser,
   changeUserPassword,
-  getUserGroups
+  getUserGroups,
+  createUserGroup,
+  updateUserGroup,
+  deleteUserGroup
 } from '../api/client';
 
 function Users() {
@@ -46,7 +50,9 @@ function Users() {
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [showInstallModal, setShowInstallModal] = useState(false);
   const [showBootstrapModal, setShowBootstrapModal] = useState(false);
+  const [showGroupModal, setShowGroupModal] = useState(false);
   const [editingUser, setEditingUser] = useState(null);
+  const [editingGroup, setEditingGroup] = useState(null);
   const [selectedUser, setSelectedUser] = useState(null);
 
   // Form states
@@ -223,6 +229,66 @@ function Users() {
     }
   }
 
+  // ========== Group Handlers ==========
+
+  async function handleCreateGroup(data) {
+    try {
+      setSaving(true);
+      const res = await createUserGroup(data);
+      if (res.data.success) {
+        setMessage({ type: 'success', text: 'Groupe créé avec succès' });
+        setShowGroupModal(false);
+        fetchData();
+      } else {
+        setMessage({ type: 'error', text: res.data.error || 'Erreur lors de la création' });
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: error.response?.data?.error || 'Erreur lors de la création' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleUpdateGroup(data) {
+    if (!editingGroup) return;
+    try {
+      setSaving(true);
+      const res = await updateUserGroup(editingGroup.id, data);
+      if (res.data.success) {
+        setMessage({ type: 'success', text: 'Groupe modifié avec succès' });
+        setShowGroupModal(false);
+        setEditingGroup(null);
+        fetchData();
+      } else {
+        setMessage({ type: 'error', text: res.data.error || 'Erreur lors de la modification' });
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: error.response?.data?.error || 'Erreur lors de la modification' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDeleteGroup(groupId) {
+    if (!confirm(`Supprimer le groupe "${groupId}" ?`)) return;
+    try {
+      const res = await deleteUserGroup(groupId);
+      if (res.data.success) {
+        setMessage({ type: 'success', text: 'Groupe supprimé' });
+        fetchData();
+      } else {
+        setMessage({ type: 'error', text: res.data.error || 'Erreur lors de la suppression' });
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: error.response?.data?.error || 'Erreur lors de la suppression' });
+    }
+  }
+
+  // Helper to find group metadata by id
+  function getGroupMeta(groupId) {
+    return groups.find(g => g.id === groupId);
+  }
+
   // ========== Render Helpers ==========
 
   function renderStatusBadge() {
@@ -319,9 +385,18 @@ function Users() {
                 </td>
                 <td className="py-3">
                   <div className="flex flex-wrap gap-1">
-                    {(user.groups || []).map(group => (
-                      <GroupBadge key={group} group={group} size="xs" />
-                    ))}
+                    {(user.groups || []).map(groupId => {
+                      const meta = getGroupMeta(groupId);
+                      return (
+                        <GroupBadge
+                          key={groupId}
+                          group={groupId}
+                          color={meta?.color}
+                          label={meta?.name}
+                          size="xs"
+                        />
+                      );
+                    })}
                   </div>
                 </td>
                 <td className="py-3">
@@ -377,21 +452,63 @@ function Users() {
 
   function renderGroupsTab() {
     return (
-      <div className="grid gap-4 md:grid-cols-2">
-        {groups.map(group => (
-          <div
-            key={group.name}
-            className="bg-gray-700/50 rounded-lg p-4 border border-gray-600"
+      <div className="space-y-4">
+        <div className="flex justify-end">
+          <Button
+            variant="primary"
+            onClick={() => {
+              setEditingGroup(null);
+              setShowGroupModal(true);
+            }}
           >
-            <div className="flex items-center gap-2 mb-2">
-              <GroupBadge group={group.name} size="md" />
+            <Plus className="w-4 h-4" />
+            Nouveau groupe
+          </Button>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2">
+          {groups.map(group => (
+            <div
+              key={group.id}
+              className="bg-gray-700/50 rounded-lg p-4 border border-gray-600"
+            >
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <GroupBadge group={group.id} color={group.color} label={group.name} size="md" />
+                  {group.builtIn && (
+                    <span className="text-xs text-gray-500 bg-gray-600/50 px-2 py-0.5 rounded">
+                      Système
+                    </span>
+                  )}
+                </div>
+                {!group.builtIn && (
+                  <div className="flex gap-1">
+                    <button
+                      onClick={() => {
+                        setEditingGroup(group);
+                        setShowGroupModal(true);
+                      }}
+                      className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded"
+                      title="Modifier"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => handleDeleteGroup(group.id)}
+                      className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded"
+                      title="Supprimer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+              </div>
+              <p className="text-gray-400 text-sm mb-3">{group.description}</p>
+              <div className="text-sm text-gray-500">
+                {group.memberCount} membre{group.memberCount !== 1 ? 's' : ''}
+              </div>
             </div>
-            <p className="text-gray-400 text-sm mb-3">{group.description}</p>
-            <div className="text-sm text-gray-500">
-              {group.memberCount} membre(s)
-            </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
     );
   }
@@ -458,7 +575,7 @@ function Users() {
           title="Gestion des utilisateurs"
           icon={UsersIcon}
           actions={
-            isAuthAvailable && users.length > 0 && (
+            isAuthAvailable && users.length > 0 && activeTab === 'users' && (
               <Button
                 variant="primary"
                 onClick={() => {
@@ -504,6 +621,19 @@ function Users() {
         }}
         onSave={editingUser ? handleUpdateUser : handleCreateUser}
         user={editingUser}
+        saving={saving}
+        availableGroups={groups}
+      />
+
+      {/* Group Modal */}
+      <GroupModal
+        isOpen={showGroupModal}
+        onClose={() => {
+          setShowGroupModal(false);
+          setEditingGroup(null);
+        }}
+        onSave={editingGroup ? handleUpdateGroup : handleCreateGroup}
+        group={editingGroup}
         saving={saving}
       />
 

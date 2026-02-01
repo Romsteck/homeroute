@@ -10,25 +10,6 @@ import argon2 from 'argon2';
 const DATA_DIR = process.env.AUTH_DATA_DIR || path.join(process.cwd(), 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.yml');
 
-// Default groups configuration
-const DEFAULT_GROUPS = {
-  admins: {
-    displayName: 'Administrateurs',
-    description: 'Acces complet a tous les services',
-    policy: 'two_factor'
-  },
-  power_users: {
-    displayName: 'Power Users',
-    description: 'Acces etendu avec 2FA',
-    policy: 'two_factor'
-  },
-  users: {
-    displayName: 'Utilisateurs',
-    description: 'Acces basique avec 1FA',
-    policy: 'one_factor'
-  }
-};
-
 // Load users from YAML file
 function loadUsers() {
   try {
@@ -262,11 +243,6 @@ export function deleteUser(username) {
   return { success: true };
 }
 
-// Get all groups
-export function getGroups() {
-  return DEFAULT_GROUPS;
-}
-
 // Check if user has admin rights
 export function isAdmin(username) {
   const user = getUser(username);
@@ -278,8 +254,7 @@ export function getRequiredAuthLevel(username) {
   const user = getUser(username);
   if (!user) return null;
 
-  // Check groups in order of priority
-  if (user.groups.includes('admins') || user.groups.includes('power_users')) {
+  if (user.groups.includes('admins')) {
     return 'two_factor';
   }
   return 'one_factor';

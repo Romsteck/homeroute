@@ -11,6 +11,11 @@ import {
   bootstrapAdmin,
   getInstallationInstructions
 } from '../services/userManagement.js';
+import {
+  createGroup,
+  updateGroup,
+  deleteGroup
+} from '../services/groups.js';
 
 const router = Router();
 
@@ -46,6 +51,40 @@ router.post('/authelia/bootstrap', async (req, res) => {
 // GET /api/users/groups - Liste des groupes
 router.get('/groups', async (req, res) => {
   const result = await getGroups();
+  res.json(result);
+});
+
+// POST /api/users/groups - Créer un groupe personnalisé
+router.post('/groups', (req, res) => {
+  const { name, description, color } = req.body;
+  if (!name) {
+    return res.status(400).json({ success: false, error: 'Nom du groupe requis' });
+  }
+  const result = createGroup({ name, description, color });
+  if (!result.success) {
+    return res.status(400).json(result);
+  }
+  res.status(201).json(result);
+});
+
+// PUT /api/users/groups/:id - Modifier un groupe personnalisé
+router.put('/groups/:id', (req, res) => {
+  const { id } = req.params;
+  const { name, description, color } = req.body;
+  const result = updateGroup(id, { name, description, color });
+  if (!result.success) {
+    return res.status(400).json(result);
+  }
+  res.json(result);
+});
+
+// DELETE /api/users/groups/:id - Supprimer un groupe personnalisé
+router.delete('/groups/:id', (req, res) => {
+  const { id } = req.params;
+  const result = deleteGroup(id);
+  if (!result.success) {
+    return res.status(400).json(result);
+  }
   res.json(result);
 });
 

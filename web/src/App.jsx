@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useSearchParams } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import Layout from './components/Layout';
 import Dashboard from './pages/Dashboard';
@@ -42,6 +42,8 @@ function ProtectedRoute({ children }) {
 // Component to redirect authenticated users away from login
 function PublicRoute({ children }) {
   const { isAuthenticated, loading } = useAuth();
+  const [searchParams] = useSearchParams();
+  const redirectUrl = searchParams.get('rd');
 
   if (loading) {
     return (
@@ -55,6 +57,11 @@ function PublicRoute({ children }) {
   }
 
   if (isAuthenticated) {
+    // If rd parameter is present, redirect to the original URL (cross-domain)
+    if (redirectUrl) {
+      window.location.href = redirectUrl;
+      return null;
+    }
     return <Navigate to="/" replace />;
   }
 

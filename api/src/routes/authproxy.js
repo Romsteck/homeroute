@@ -32,8 +32,7 @@ function verifySessionLocal(sessionCookie) {
     email: user.email || '',
     displayName: user.displayname || user.username,
     groups: user.groups || [],
-    isAdmin: user.groups?.includes('admins') || false,
-    isPowerUser: user.groups?.includes('power_users') || false
+    isAdmin: user.groups?.includes('admins') || false
   };
 }
 
@@ -66,8 +65,7 @@ router.post('/verify', (req, res) => {
           email: user.email,
           displayName: user.displayName,
           groups: user.groups,
-          isAdmin: user.isAdmin,
-          isPowerUser: user.isPowerUser
+          isAdmin: user.isAdmin
         }
       });
     } else {
@@ -87,7 +85,7 @@ router.post('/verify', (req, res) => {
  *
  * Verifie si un utilisateur appartient a un ou plusieurs groupes
  *
- * Body: { cookie: "auth_session_value", groups: ["admins", "power_users"] }
+ * Body: { cookie: "auth_session_value", groups: ["admins", "media"] }
  * Response: { valid: true, hasAccess: true, matchedGroups: ["admins"] }
  */
 router.post('/check-group', (req, res) => {

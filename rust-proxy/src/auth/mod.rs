@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 pub async fn check_auth(
     auth_service_url: &str,
     headers: &HeaderMap,
+    host: &str,
+    uri: &str,
 ) -> Result<AuthResponse, AuthError> {
     let client = Client::new();
 
@@ -24,6 +26,9 @@ pub async fn check_auth(
     let response = client
         .get(&url)
         .header("Cookie", cookie_header)
+        .header("X-Forwarded-Host", host)
+        .header("X-Forwarded-Uri", uri)
+        .header("X-Forwarded-Proto", "https")
         .send()
         .await
         .map_err(|e| AuthError::RequestFailed(e.to_string()))?;
@@ -37,7 +42,13 @@ pub async fn check_auth(
             Ok(auth_data)
         }
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-            Err(AuthError::Unauthorized)
+            // Extract redirect URL from X-Auth-Redirect header
+            let redirect = response
+                .headers()
+                .get("x-auth-redirect")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            Err(AuthError::Unauthorized(redirect))
         }
         status => Err(AuthError::UnexpectedStatus(status.as_u16())),
     }
@@ -58,7 +69,7 @@ pub enum AuthError {
     ParseError(String),
 
     #[error("Unauthorized")]
-    Unauthorized,
+    Unauthorized(Option<String>),
 
     #[error("Unexpected status: {0}")]
     UnexpectedStatus(u16),
@@ -67,7 +78,7 @@ pub enum AuthError {
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let status = match self {
-            AuthError::Unauthorized => StatusCode::UNAUTHORIZED,
+            AuthError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
 

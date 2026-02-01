@@ -118,7 +118,7 @@ pub async fn proxy_handler(
         Err(e) => match e {
             ProxyError::DomainNotFound(_) => 404,
             ProxyError::Forbidden => 403,
-            ProxyError::AuthRequired => 401,
+            ProxyError::AuthRequired(_) => 302,
             ProxyError::UpstreamError(_) => 502,
             ProxyError::InvalidUri(_) => 400,
         },
@@ -168,19 +168,20 @@ async fn proxy_handler_inner(
     // Forward-auth for routes requiring authentication
     if route.require_auth {
         let auth_url = state.auth_service_url();
-        match auth::check_auth(&auth_url, req.headers()).await {
+        let req_uri = req.uri().path_and_query().map(|pq| pq.to_string()).unwrap_or_else(|| "/".to_string());
+        match auth::check_auth(&auth_url, req.headers(), &host, &req_uri).await {
             Ok(auth_resp) => {
                 if !auth_resp.success {
-                    return Err(ProxyError::AuthRequired);
+                    return Err(ProxyError::AuthRequired(None));
                 }
                 debug!("Auth OK for user: {:?}", auth_resp.user);
             }
-            Err(auth::AuthError::Unauthorized) => {
-                return Err(ProxyError::AuthRequired);
+            Err(auth::AuthError::Unauthorized(redirect)) => {
+                return Err(ProxyError::AuthRequired(redirect));
             }
             Err(e) => {
                 error!("Auth service error: {}", e);
-                return Err(ProxyError::AuthRequired);
+                return Err(ProxyError::AuthRequired(None));
             }
         }
     }
@@ -375,7 +376,7 @@ pub enum ProxyError {
     UpstreamError(String),
 
     #[error("Authentication required")]
-    AuthRequired,
+    AuthRequired(Option<String>),
 
     #[error("Forbidden")]
     Forbidden,
@@ -386,15 +387,25 @@ pub enum ProxyError {
 
 impl IntoResponse for ProxyError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
-            ProxyError::InvalidUri(msg) => (StatusCode::BAD_REQUEST, msg),
-            ProxyError::UpstreamError(msg) => (StatusCode::BAD_GATEWAY, msg),
-            ProxyError::AuthRequired => (StatusCode::UNAUTHORIZED, "Authentication required".to_string()),
-            ProxyError::Forbidden => (StatusCode::FORBIDDEN, "Forbidden".to_string()),
-            ProxyError::DomainNotFound(domain) => (StatusCode::NOT_FOUND, format!("Domain not configured: {}", domain)),
-        };
-
-        (status, message).into_response()
+        match self {
+            ProxyError::AuthRequired(Some(redirect_url)) => {
+                Response::builder()
+                    .status(StatusCode::FOUND)
+                    .header("Location", &redirect_url)
+                    .body(Body::empty())
+                    .unwrap()
+            }
+            other => {
+                let (status, message) = match other {
+                    ProxyError::InvalidUri(msg) => (StatusCode::BAD_REQUEST, msg),
+                    ProxyError::UpstreamError(msg) => (StatusCode::BAD_GATEWAY, msg),
+                    ProxyError::Forbidden => (StatusCode::FORBIDDEN, "Forbidden".to_string()),
+                    ProxyError::DomainNotFound(domain) => (StatusCode::NOT_FOUND, format!("Domain not configured: {}", domain)),
+                    _ => (StatusCode::UNAUTHORIZED, "Authentication required".to_string()),
+                };
+                (status, message).into_response()
+            }
+        }
     }
 }
 
@@ -619,9 +630,14 @@ mod tests {
         let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
-        let err = ProxyError::AuthRequired;
+        let err = ProxyError::AuthRequired(None);
         let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let err = ProxyError::AuthRequired(Some("https://auth.example.com/login".to_string()));
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        assert_eq!(resp.headers().get("location").unwrap(), "https://auth.example.com/login");
 
         let err = ProxyError::UpstreamError("timeout".to_string());
         let resp = err.into_response();
