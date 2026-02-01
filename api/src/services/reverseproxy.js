@@ -4,6 +4,7 @@ import path from 'path';
 import crypto from 'crypto';
 import http from 'http';
 import tls from 'tls';
+import { syncRustProxyRoutes } from '../routes/rust-proxy.js';
 
 // Environment configuration
 const getEnv = () => ({
@@ -318,8 +319,9 @@ export async function addHost(hostConfig) {
     config.hosts.push(newHost);
     await saveConfigFile(config);
 
-    // Apply to Caddy
+    // Apply to Caddy + Rust proxy
     await applyCaddyConfig();
+    await syncAllRustRoutes(config);
 
     return { success: true, host: newHost };
   } catch (error) {
@@ -336,7 +338,7 @@ export async function updateHost(hostId, updates) {
       return { success: false, error: 'Host not found' };
     }
 
-    const allowedUpdates = ['targetHost', 'targetPort', 'enabled', 'localOnly', 'requireAuth', 'authBackend'];
+    const allowedUpdates = ['targetHost', 'targetPort', 'enabled', 'localOnly', 'requireAuth', 'authBackend', 'backend'];
     for (const key of Object.keys(updates)) {
       if (allowedUpdates.includes(key)) {
         if (key === 'targetPort') {
@@ -357,6 +359,12 @@ export async function updateHost(hostId, updates) {
             return { success: false, error: 'code-server ne peut pas utiliser Authelia pour des raisons de sécurité' };
           }
           config.hosts[hostIndex][key] = updates[key];
+        } else if (key === 'backend') {
+          const validBackends = ['caddy', 'rust'];
+          if (!validBackends.includes(updates[key])) {
+            return { success: false, error: 'Invalid backend value (caddy or rust)' };
+          }
+          config.hosts[hostIndex][key] = updates[key];
         } else {
           config.hosts[hostIndex][key] = updates[key];
         }
@@ -365,6 +373,7 @@ export async function updateHost(hostId, updates) {
 
     await saveConfigFile(config);
     await applyCaddyConfig();
+    await syncAllRustRoutes(config);
 
     return { success: true, host: config.hosts[hostIndex] };
   } catch (error) {
@@ -384,6 +393,7 @@ export async function deleteHost(hostId) {
     const deletedHost = config.hosts.splice(hostIndex, 1)[0];
     await saveConfigFile(config);
     await applyCaddyConfig();
+    await syncAllRustRoutes(config);
 
     return { success: true, message: 'Host deleted', host: deletedHost };
   } catch (error) {
@@ -559,7 +569,8 @@ export async function addApplication(appConfig) {
           targetHost: api.targetHost || 'localhost',
           targetPort: parseInt(api.targetPort) || 3001,
           localOnly: !!api.localOnly,
-          requireAuth: !!api.requireAuth
+          requireAuth: !!api.requireAuth,
+          ...(api.backend === 'rust' ? { backend: 'rust' } : {})
         }));
       } else if (envEndpoints.api) {
         // Backward compatibility: convert single api to apis[]
@@ -588,7 +599,8 @@ export async function addApplication(appConfig) {
           targetHost: envEndpoints.frontend.targetHost,
           targetPort: frontendPort,
           localOnly: !!envEndpoints.frontend.localOnly,
-          requireAuth: !!envEndpoints.frontend.requireAuth
+          requireAuth: !!envEndpoints.frontend.requireAuth,
+          ...(envEndpoints.frontend.backend === 'rust' ? { backend: 'rust' } : {})
         },
         apis
       };
@@ -610,6 +622,7 @@ export async function addApplication(appConfig) {
     config.applications.push(newApp);
     await saveConfigFile(config);
     await applyCaddyConfig();
+    await syncAllRustRoutes(config);
 
     return { success: true, application: newApp };
   } catch (error) {
@@ -690,7 +703,8 @@ export async function updateApplication(appId, updates) {
                 targetHost: api.targetHost || 'localhost',
                 targetPort: parseInt(api.targetPort) || 3001,
                 localOnly: !!api.localOnly,
-                requireAuth: !!api.requireAuth
+                requireAuth: !!api.requireAuth,
+                ...(api.backend === 'rust' ? { backend: 'rust' } : {})
               }));
             } else {
               apis = [];
@@ -730,7 +744,8 @@ export async function updateApplication(appId, updates) {
               targetHost: envEndpoints.frontend.targetHost || 'localhost',
               targetPort: parseInt(envEndpoints.frontend.targetPort) || 3000,
               localOnly: !!envEndpoints.frontend.localOnly,
-              requireAuth: !!envEndpoints.frontend.requireAuth
+              requireAuth: !!envEndpoints.frontend.requireAuth,
+              ...(envEndpoints.frontend.backend === 'rust' ? { backend: 'rust' } : {})
             } : app.endpoints[envId]?.frontend || null,
             apis
           };
@@ -740,6 +755,7 @@ export async function updateApplication(appId, updates) {
 
     await saveConfigFile(config);
     await applyCaddyConfig();
+    await syncAllRustRoutes(config);
 
     return { success: true, application: app };
   } catch (error) {
@@ -759,6 +775,7 @@ export async function deleteApplication(appId) {
     const deletedApp = config.applications.splice(appIndex, 1)[0];
     await saveConfigFile(config);
     await applyCaddyConfig();
+    await syncAllRustRoutes(config);
 
     return { success: true, message: 'Application deleted', application: deletedApp };
   } catch (error) {
@@ -885,8 +902,8 @@ function generateAppRoutes(app, environments, baseDomain) {
     const env = environments.find(e => e.id === envId);
     if (!env || !envEndpoints) continue;
 
-    // Frontend route
-    if (envEndpoints.frontend) {
+    // Frontend route (skip backend='rust')
+    if (envEndpoints.frontend && envEndpoints.frontend.backend !== 'rust') {
       const frontendDomain = getAppDomain(app, 'frontend', env, baseDomain);
       routes.push(generateEndpointRoute(
         `${app.id}-frontend-${envId}`,
@@ -898,9 +915,10 @@ function generateAppRoutes(app, environments, baseDomain) {
       ));
     }
 
-    // API routes (multiple APIs supported via apis[])
+    // API routes (multiple APIs supported via apis[], skip backend='rust')
     const apis = envEndpoints.apis || [];
     for (const api of apis) {
+      if (api.backend === 'rust') continue;
       const apiSlug = api.slug || '';
       const apiDomain = getAppDomain(app, 'api', env, baseDomain, apiSlug);
       const routeId = apiSlug
@@ -1201,8 +1219,8 @@ function generateCaddyConfig(config) {
     routes.push(...appRoutes);
   }
 
-  // Generate routes for standalone hosts
-  const enabledHosts = config.hosts.filter(h => h.enabled);
+  // Generate routes for standalone hosts (skip backend='rust')
+  const enabledHosts = config.hosts.filter(h => h.enabled && h.backend !== 'rust');
   routes.push(...enabledHosts.map(h => generateCaddyRoute(h, config.baseDomain)));
 
   // Add system route for dashboard (proxy.<baseDomain>)
@@ -1407,6 +1425,78 @@ export async function getSystemRouteStatus() {
     return { success: false, error: error.message };
   }
 }
+
+// ========== Rust Proxy Sync ==========
+
+/**
+ * Collect all routes with backend='rust' from hosts and applications,
+ * and sync them to the rust-proxy config.
+ */
+async function syncAllRustRoutes(config) {
+  if (!config) config = await loadConfig();
+  const rustRoutes = [];
+
+  // Collect from standalone hosts
+  for (const host of config.hosts || []) {
+    if (host.backend === 'rust' && host.enabled) {
+      const domain = host.customDomain || `${host.subdomain}.${config.baseDomain}`;
+      rustRoutes.push({
+        id: host.id,
+        domain,
+        target_host: host.targetHost,
+        target_port: host.targetPort,
+        local_only: !!host.localOnly,
+        require_auth: !!host.requireAuth,
+        enabled: true
+      });
+    }
+  }
+
+  // Collect from applications
+  for (const app of config.applications || []) {
+    if (!app.enabled || !app.endpoints) continue;
+
+    for (const [envId, envEndpoints] of Object.entries(app.endpoints)) {
+      const env = (config.environments || []).find(e => e.id === envId);
+      if (!env || !envEndpoints) continue;
+
+      // Frontend
+      if (envEndpoints.frontend && envEndpoints.frontend.backend === 'rust') {
+        const domain = getAppDomain(app, 'frontend', env, config.baseDomain);
+        rustRoutes.push({
+          id: `${app.id}-frontend-${envId}`,
+          domain,
+          target_host: envEndpoints.frontend.targetHost,
+          target_port: envEndpoints.frontend.targetPort,
+          local_only: !!envEndpoints.frontend.localOnly,
+          require_auth: !!envEndpoints.frontend.requireAuth,
+          enabled: true
+        });
+      }
+
+      // APIs
+      for (const api of envEndpoints.apis || []) {
+        if (api.backend === 'rust') {
+          const apiDomain = getAppDomain(app, 'api', env, config.baseDomain, api.slug || '');
+          rustRoutes.push({
+            id: api.slug ? `${app.id}-api-${api.slug}-${envId}` : `${app.id}-api-${envId}`,
+            domain: apiDomain,
+            target_host: api.targetHost,
+            target_port: api.targetPort,
+            local_only: !!api.localOnly,
+            require_auth: !!api.requireAuth,
+            enabled: true
+          });
+        }
+      }
+    }
+  }
+
+  await syncRustProxyRoutes(rustRoutes);
+}
+
+// Export for use in routes
+export { syncAllRustRoutes };
 
 // ========== Certificate Status ==========
 

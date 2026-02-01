@@ -86,6 +86,10 @@ export const toggleReverseProxyApplication = (id, enabled) => api.post(`/reverse
 export const getCloudflareConfig = () => api.get('/reverseproxy/cloudflare');
 export const updateCloudflareConfig = (config) => api.put('/reverseproxy/cloudflare', config);
 
+// Rust Proxy
+export const getRustProxyStatus = () => api.get('/rust-proxy/status');
+export const reloadRustProxy = () => api.post('/rust-proxy/reload');
+
 // Auth - Session (login page)
 export const login = (username, password, remember_me = false) => api.post('/auth/login', { username, password, remember_me });
 export const logout = () => api.post('/auth/logout');

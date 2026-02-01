@@ -13,6 +13,7 @@ import Users from './pages/Users';
 import Traffic from './pages/Traffic';
 import Servers from './pages/Servers';
 import Wol from './pages/Wol';
+import CertificateAuthority from './pages/CertificateAuthority';
 import Login from './pages/Login';
 import Profile from './pages/Profile';
 
@@ -94,6 +95,7 @@ function AppRoutes() {
               <Route path="/traffic" element={<Traffic />} />
               <Route path="/servers" element={<Servers />} />
               <Route path="/wol" element={<Wol />} />
+              <Route path="/ca" element={<CertificateAuthority />} />
             </Routes>
           </Layout>
         </ProtectedRoute>

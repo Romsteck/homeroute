@@ -45,7 +45,9 @@ import {
   deleteReverseProxyApplication,
   toggleReverseProxyApplication,
   getCloudflareConfig,
-  updateCloudflareConfig
+  updateCloudflareConfig,
+  getRustProxyStatus,
+  reloadRustProxy
 } from '../api/client';
 
 function ReverseProxy() {
@@ -55,6 +57,7 @@ function ReverseProxy() {
   const [applications, setApplications] = useState([]);
   const [environments, setEnvironments] = useState([]);
   const [cloudflare, setCloudflare] = useState(null);
+  const [rustProxy, setRustProxy] = useState(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState(null);
 
@@ -162,14 +165,15 @@ Verification rapide (sans les details utilisateur).
 
   async function fetchData() {
     try {
-      const [configRes, statusRes, hostsRes, certsRes, envsRes, appsRes, cfRes] = await Promise.all([
+      const [configRes, statusRes, hostsRes, certsRes, envsRes, appsRes, cfRes, rustRes] = await Promise.all([
         getReverseProxyConfig(),
         getReverseProxyStatus(),
         getReverseProxyHosts(),
         getCertificatesStatus(),
         getReverseProxyEnvironments(),
         getReverseProxyApplications(),
-        getCloudflareConfig()
+        getCloudflareConfig(),
+        getRustProxyStatus().catch(() => ({ data: { success: false } }))
       ]);
 
       if (configRes.data.success) {
@@ -187,6 +191,7 @@ Verification rapide (sans les details utilisateur).
       if (envsRes.data.success) setEnvironments(envsRes.data.environments || []);
       if (appsRes.data.success) setApplications(appsRes.data.applications || []);
       if (cfRes.data.success) setCloudflare(cfRes.data.cloudflare);
+      if (rustRes.data.success) setRustProxy(rustRes.data);
     } catch (error) {
       console.error('Error:', error);
       setMessage({ type: 'error', text: 'Erreur de chargement' });
@@ -264,7 +269,7 @@ Verification rapide (sans les details utilisateur).
 
   function openEditModal(host) {
     setEditingHost(host);
-    setEditForm({ targetHost: host.targetHost, targetPort: String(host.targetPort), localOnly: !!host.localOnly, requireAuth: !!host.requireAuth });
+    setEditForm({ targetHost: host.targetHost, targetPort: String(host.targetPort), localOnly: !!host.localOnly, requireAuth: !!host.requireAuth, backend: host.backend || 'caddy' });
     setShowEditModal(true);
   }
 
@@ -279,7 +284,8 @@ Verification rapide (sans les details utilisateur).
         targetHost: editForm.targetHost,
         targetPort: parseInt(editForm.targetPort),
         localOnly: editForm.localOnly,
-        requireAuth: editForm.requireAuth
+        requireAuth: editForm.requireAuth,
+        backend: editForm.backend
       });
       if (res.data.success) {
         setMessage({ type: 'success', text: 'Hote modifie' });
@@ -343,13 +349,15 @@ Verification rapide (sans les details utilisateur).
               targetHost: envData.frontend.targetHost,
               targetPort: parseInt(envData.frontend.targetPort),
               localOnly: envData.frontend.localOnly || false,
-              requireAuth: envData.frontend.requireAuth || false
+              requireAuth: envData.frontend.requireAuth || false,
+              ...(envData.frontend.backend === 'rust' ? { backend: 'rust' } : {})
             },
             api: envData.hasApi && envData.api?.targetPort ? {
               targetHost: envData.api.targetHost,
               targetPort: parseInt(envData.api.targetPort),
               localOnly: envData.api.localOnly || false,
-              requireAuth: envData.api.requireAuth || false
+              requireAuth: envData.api.requireAuth || false,
+              ...(envData.api.backend === 'rust' ? { backend: 'rust' } : {})
             } : null
           };
         }
@@ -512,7 +520,8 @@ Verification rapide (sans les details utilisateur).
               targetHost: api.targetHost || 'localhost',
               targetPort: parseInt(api.targetPort),
               localOnly: api.localOnly || false,
-              requireAuth: api.requireAuth || false
+              requireAuth: api.requireAuth || false,
+              ...(api.backend === 'rust' ? { backend: 'rust' } : {})
             }));
 
           endpoints[envId] = {
@@ -520,7 +529,8 @@ Verification rapide (sans les details utilisateur).
               targetHost: envData.frontend.targetHost,
               targetPort: parseInt(envData.frontend.targetPort),
               localOnly: envData.frontend.localOnly || false,
-              requireAuth: envData.frontend.requireAuth || false
+              requireAuth: envData.frontend.requireAuth || false,
+              ...(envData.frontend.backend === 'rust' ? { backend: 'rust' } : {})
             },
             apis: validApis
           };
@@ -680,7 +690,7 @@ Verification rapide (sans les details utilisateur).
       )}
 
       {/* Status Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         <Card title="Caddy" icon={Server}>
           <div className="flex items-center gap-2">
             <div className={`w-3 h-3 rounded-full ${caddyRunning ? 'bg-green-400' : 'bg-red-400'}`} />
@@ -688,6 +698,18 @@ Verification rapide (sans les details utilisateur).
               {caddyRunning ? 'En ligne' : 'Hors ligne'}
             </span>
           </div>
+        </Card>
+
+        <Card title="Rust Proxy" icon={Server}>
+          <div className="flex items-center gap-2">
+            <div className={`w-3 h-3 rounded-full ${rustProxy?.running ? 'bg-orange-400' : 'bg-gray-500'}`} />
+            <span className={rustProxy?.running ? 'text-orange-400' : 'text-gray-500'}>
+              {rustProxy?.running ? `Port ${rustProxy.httpsPort}` : 'Hors ligne'}
+            </span>
+          </div>
+          {rustProxy?.running && rustProxy.activeRoutes > 0 && (
+            <p className="text-xs text-gray-500 mt-1">{rustProxy.activeRoutes} route{rustProxy.activeRoutes > 1 ? 's' : ''}</p>
+          )}
         </Card>
 
         <Card title="Domaine" icon={Globe}>
@@ -816,6 +838,13 @@ Verification rapide (sans les details utilisateur).
                                     Auth
                                   </span>
                                 )}
+                                <span className={`text-xs px-2 py-0.5 rounded font-medium ${
+                                  host.backend === 'rust'
+                                    ? 'text-orange-400 bg-orange-900/30'
+                                    : 'text-blue-400 bg-blue-900/30'
+                                }`}>
+                                  {host.backend === 'rust' ? 'Rust' : 'Caddy'}
+                                </span>
                               </div>
                             </td>
                             <td className="py-3 font-mono text-sm text-gray-300">
@@ -1177,6 +1206,16 @@ Verification rapide (sans les details utilisateur).
                               />
                               <Shield className="w-3 h-3 text-yellow-400" /> Local
                             </label>
+                            <button
+                              onClick={() => updateEnv(data => ({ ...data, frontend: { ...data.frontend, backend: data.frontend.backend === 'rust' ? undefined : 'rust' } }))}
+                              className={`text-xs px-1.5 py-0.5 rounded font-medium transition-colors ${
+                                envData.frontend.backend === 'rust'
+                                  ? 'text-orange-400 bg-orange-900/30'
+                                  : 'text-gray-500 bg-gray-700/30 hover:text-gray-300'
+                              }`}
+                            >
+                              {envData.frontend.backend === 'rust' ? 'Rust' : 'Caddy'}
+                            </button>
                           </div>
                         </div>
 
@@ -1238,6 +1277,16 @@ Verification rapide (sans les details utilisateur).
                                   />
                                   <Shield className="w-3 h-3 text-yellow-400" /> Local
                                 </label>
+                                <button
+                                  onClick={() => updateEnv(data => ({ ...data, api: { ...data.api, backend: data.api.backend === 'rust' ? undefined : 'rust' } }))}
+                                  className={`text-xs px-1.5 py-0.5 rounded font-medium transition-colors ${
+                                    envData.api.backend === 'rust'
+                                      ? 'text-orange-400 bg-orange-900/30'
+                                      : 'text-gray-500 bg-gray-700/30 hover:text-gray-300'
+                                  }`}
+                                >
+                                  {envData.api.backend === 'rust' ? 'Rust' : 'Caddy'}
+                                </button>
                               </div>
                             </>
                           )}
@@ -1285,6 +1334,36 @@ Verification rapide (sans les details utilisateur).
                 <Key className="w-5 h-5" />
                 <div className="flex-1"><div className="text-sm">Authentification requise</div></div>
                 <div className={`w-10 h-6 rounded-full ${editForm.requireAuth ? 'bg-purple-600' : 'bg-gray-600'}`}><div className={`w-4 h-4 bg-white rounded-full mt-1 ${editForm.requireAuth ? 'translate-x-5' : 'translate-x-1'}`} /></div>
+              </div>
+
+              {/* Backend selector */}
+              <div>
+                <label className="block text-sm text-gray-400 mb-1">Backend proxy</label>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setEditForm({ ...editForm, backend: 'caddy' })}
+                    className={`flex-1 py-2 rounded text-sm font-medium transition-colors ${
+                      editForm.backend !== 'rust'
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                    }`}
+                  >
+                    Caddy
+                  </button>
+                  <button
+                    onClick={() => setEditForm({ ...editForm, backend: 'rust' })}
+                    className={`flex-1 py-2 rounded text-sm font-medium transition-colors ${
+                      editForm.backend === 'rust'
+                        ? 'bg-orange-600 text-white'
+                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                    }`}
+                  >
+                    Rust
+                  </button>
+                </div>
+                {editForm.backend === 'rust' && (
+                  <p className="text-xs text-orange-400 mt-1">Certificat CA locale (port {rustProxy?.httpsPort || 444})</p>
+                )}
               </div>
             </div>
             <div className="flex justify-end gap-2 mt-6">
@@ -1455,6 +1534,17 @@ Verification rapide (sans les details utilisateur).
                                 />
                                 <Shield className="w-3 h-3 text-yellow-400" />
                               </label>
+                              <button
+                                onClick={() => updateEditEnv(data => ({ ...data, frontend: { ...data.frontend, backend: data.frontend.backend === 'rust' ? undefined : 'rust' } }))}
+                                className={`text-xs px-1.5 py-0.5 rounded font-medium transition-colors ${
+                                  envData.frontend.backend === 'rust'
+                                    ? 'text-orange-400 bg-orange-900/30'
+                                    : 'text-gray-500 bg-gray-700/30 hover:text-gray-300'
+                                }`}
+                                title={envData.frontend.backend === 'rust' ? 'Backend: Rust (port 444)' : 'Backend: Caddy (port 443)'}
+                              >
+                                {envData.frontend.backend === 'rust' ? 'Rust' : 'Caddy'}
+                              </button>
                             </div>
                           </div>
 
@@ -1508,6 +1598,17 @@ Verification rapide (sans les details utilisateur).
                                   />
                                   <Shield className="w-3 h-3 text-yellow-400" />
                                 </label>
+                                <button
+                                  onClick={() => updateApi(apiIndex, { backend: api.backend === 'rust' ? undefined : 'rust' })}
+                                  className={`text-xs px-1.5 py-0.5 rounded font-medium transition-colors ${
+                                    api.backend === 'rust'
+                                      ? 'text-orange-400 bg-orange-900/30'
+                                      : 'text-gray-500 bg-gray-700/30 hover:text-gray-300'
+                                  }`}
+                                  title={api.backend === 'rust' ? 'Backend: Rust (port 444)' : 'Backend: Caddy (port 443)'}
+                                >
+                                  {api.backend === 'rust' ? 'Rust' : 'Caddy'}
+                                </button>
                               </div>
                             </div>
                           ))}
