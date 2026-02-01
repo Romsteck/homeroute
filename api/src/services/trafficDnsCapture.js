@@ -5,7 +5,7 @@ import { getCollection, COLLECTIONS } from './mongodb.js';
 import { getDhcpLeases } from './dnsmasq.js';
 import { trafficEvents } from './traffic.js';
 
-const DNS_LOG_PATH = process.env.DNS_LOG_PATH || '/var/log/dnsmasq.log';
+const DNS_LOG_PATH = process.env.DNS_LOG_PATH || '/var/log/rust-dns-dhcp/queries.log';
 const POLL_INTERVAL_MS = 2000; // Check for new lines every 2 seconds
 const BATCH_SIZE = parseInt(process.env.TRAFFIC_BATCH_SIZE || '100');
 const BATCH_INTERVAL_MS = parseInt(process.env.TRAFFIC_BATCH_INTERVAL_MS || '5000');
@@ -166,19 +166,35 @@ async function readNewLines(start, end) {
  */
 async function processLogLine(line) {
   try {
-    // Parse dnsmasq log format: "Jan 25 16:44:47 dnsmasq[17278]: query[A] example.com from 10.0.0.50"
-    const queryMatch = line.match(/query\[(\w+)\]\s+([\w\.\-]+)\s+from\s+([\w\.:]+)/);
+    // Parse JSON log format from rust-dns-dhcp:
+    // {"ts":"2026-02-01T10:30:00Z","type":"A","domain":"example.com","from":"10.0.0.50","blocked":false,"cached":false,"ms":12}
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      // Fallback: try legacy dnsmasq format
+      const queryMatch = line.match(/query\[(\w+)\]\s+([\w\.\-]+)\s+from\s+([\w\.:]+)/);
+      if (!queryMatch) return;
+      const [, queryType, domain, sourceIp] = queryMatch;
+      const timestampMatch = line.match(/^(\w+\s+\d+\s+\d+:\d+:\d+)/);
+      entry = {
+        ts: timestampMatch ? parseTimestamp(timestampMatch[1]).toISOString() : new Date().toISOString(),
+        type: queryType,
+        domain,
+        from: sourceIp,
+        blocked: false,
+        cached: false
+      };
+    }
 
-    if (!queryMatch) return; // Skip non-query lines
-
-    const [, queryType, domain, sourceIp] = queryMatch;
+    const domain = entry.domain;
+    const sourceIp = entry.from;
+    const queryType = entry.type;
 
     // Skip reverse DNS queries
     if (domain.includes('.in-addr.arpa') || domain.includes('.ip6.arpa')) return;
 
-    // Extract timestamp
-    const timestampMatch = line.match(/^(\w+\s+\d+\s+\d+:\d+:\d+)/);
-    const timestamp = timestampMatch ? parseTimestamp(timestampMatch[1]) : new Date();
+    const timestamp = new Date(entry.ts);
 
     // Enrich with metadata
     const enrichedEvent = await enrichDnsEvent({
