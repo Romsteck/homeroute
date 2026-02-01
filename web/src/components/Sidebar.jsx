@@ -14,7 +14,8 @@ import {
   LogOut,
   User,
   Power,
-  HardDrive
+  HardDrive,
+  KeyRound
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -25,6 +26,7 @@ const navItems = [
   { to: '/adblock', icon: Shield, label: 'AdBlock' },
   { to: '/ddns', icon: Globe, label: 'Dynamic DNS' },
   { to: '/reverseproxy', icon: ArrowLeftRight, label: 'Reverse Proxy' },
+  { to: '/ca', icon: KeyRound, label: 'Certificats (CA)' },
   { to: '/users', icon: Users, label: 'Utilisateurs' },
   { to: '/updates', icon: RefreshCw, label: 'Mises a jour' },
   { to: '/energy', icon: Zap, label: 'Énergie' },

@@ -46,6 +46,8 @@ import authproxyRoutes from './routes/authproxy.js';
 import trafficRoutes from './routes/traffic.js';
 import serversRoutes from './routes/servers.js';
 import wolRoutes from './routes/wol.js';
+import caRoutes from './routes/ca.js';
+import rustProxyRoutes from './routes/rust-proxy.js';
 
 const app = express();
 const httpServer = createServer(app);
@@ -102,6 +104,8 @@ async function startServer() {
   app.use('/api/traffic', trafficRoutes);
   app.use('/api/servers', serversRoutes);
   app.use('/api/wol', wolRoutes);
+  app.use('/api/ca', caRoutes);
+  app.use('/api/rust-proxy', rustProxyRoutes);
 
   // Health check
   app.get('/api/health', (req, res) => {

@@ -8,5 +8,8 @@ api/data/*.db-wal
 api/data/*.log
 api/data/users.yml
 
+# Rust build artifacts
+**/target/
+
 # Claude Code local settings
 .claude/settings.local.json
