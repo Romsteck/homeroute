@@ -199,11 +199,69 @@ async fn main() -> anyhow::Result<()> {
 
     let tls_manager = TlsManager::new(proxy_config.ca_storage_path.clone());
 
-    // Load TLS certificates for each active route
-    for route in proxy_config.active_routes() {
-        if let Some(ref cert_id) = route.cert_id {
-            if let Err(e) = tls_manager.load_certificate(&route.domain, cert_id) {
-                error!("Failed to load TLS cert for {}: {}", route.domain, e);
+    // Build domain-to-cert_id lookup from CA index
+    let ca_certs = ca.list_certificates().unwrap_or_default();
+    let mut domain_cert_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for cert_info in &ca_certs {
+        if !cert_info.is_expired() {
+            for domain in &cert_info.domains {
+                // Keep the most recently issued cert for each domain
+                domain_cert_map
+                    .entry(domain.clone())
+                    .or_insert_with(|| cert_info.id.clone());
+            }
+        }
+    }
+
+    // Collect all domains that need TLS certificates
+    let mut tls_domains: Vec<String> = proxy_config
+        .active_routes()
+        .iter()
+        .map(|r| r.domain.clone())
+        .collect();
+
+    // Add built-in management domains
+    let base_domain = &proxy_config.base_domain;
+    tls_domains.push(format!("proxy.{}", base_domain));
+    tls_domains.push(format!("auth.{}", base_domain));
+
+    // Load TLS certificates for each domain, issuing new ones if needed
+    for domain in &tls_domains {
+        let cert_id = if let Some(id) = domain_cert_map.get(domain) {
+            id.clone()
+        } else {
+            // Auto-issue a certificate for this domain
+            match ca.issue_certificate(vec![domain.clone()]).await {
+                Ok(cert_info) => {
+                    info!("Auto-issued TLS certificate for: {}", domain);
+                    cert_info.id
+                }
+                Err(e) => {
+                    error!("Failed to auto-issue TLS cert for {}: {}", domain, e);
+                    continue;
+                }
+            }
+        };
+
+        if let Err(e) = tls_manager.load_certificate(domain, &cert_id) {
+            error!("Failed to load TLS cert for {}: {}", domain, e);
+        }
+    }
+
+    // Load TLS certificates for management domains (proxy.*, auth.*)
+    {
+        let ca_certs = ca.list_certificates().unwrap_or_default();
+        for mgmt_sub in &["proxy", "auth"] {
+            let mgmt_domain = format!("{}.{}", mgmt_sub, proxy_config.base_domain);
+            if let Some(cert) = ca_certs
+                .iter()
+                .rev()
+                .find(|c| c.domains.iter().any(|d| d == &mgmt_domain) && !c.is_expired())
+            {
+                if let Err(e) = tls_manager.load_certificate(&mgmt_domain, &cert.id) {
+                    error!("Failed to load TLS cert for {}: {}", mgmt_domain, e);
+                }
             }
         }
     }
@@ -211,7 +269,7 @@ async fn main() -> anyhow::Result<()> {
     let tls_config = tls_manager.build_server_config()?;
 
     let proxy_state = Arc::new(
-        ProxyState::new(proxy_config.clone())
+        ProxyState::new(proxy_config.clone(), env.api_port)
             .with_auth(auth.clone())
             .with_events(events.http_traffic.clone()),
     );
@@ -474,6 +532,7 @@ async fn main() -> anyhow::Result<()> {
         auth: auth.clone(),
         ca: ca.clone(),
         proxy: proxy_state.clone(),
+        tls_manager: tls_manager.clone(),
         dns: dns_state.clone(),
         dhcp: dhcp_state.clone(),
         adblock: adblock.clone(),

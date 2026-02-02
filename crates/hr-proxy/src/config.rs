@@ -48,6 +48,9 @@ fn default_local_networks() -> Vec<String> {
         "10.0.0.0/8".to_string(),
         "172.16.0.0/12".to_string(),
         "127.0.0.0/8".to_string(),
+        "fd00::/8".to_string(),
+        "fe80::/10".to_string(),
+        "::1/128".to_string(),
     ]
 }
 

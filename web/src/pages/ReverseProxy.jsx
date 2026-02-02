@@ -21,6 +21,7 @@ import {
   ChevronDown,
   ChevronUp,
   Layers,
+  X,
 } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
@@ -37,6 +38,7 @@ import {
   deleteReverseProxyHost,
   toggleReverseProxyHost,
   updateBaseDomain,
+  updateLocalNetworks,
   renewCertificates,
   reloadProxy,
   getCertificatesStatus,
@@ -96,6 +98,9 @@ function ReverseProxy() {
   const [editForm, setEditForm] = useState({ targetHost: '', targetPort: '', localOnly: false, requireAuth: false });
   const [editAppForm, setEditAppForm] = useState(null);
   const [configForm, setConfigForm] = useState({ baseDomain: '' });
+  const [localNetworks, setLocalNetworks] = useState([]);
+  const [newCidr, setNewCidr] = useState('');
+  const [savingNetworks, setSavingNetworks] = useState(false);
 
   // Action states
   const [saving, setSaving] = useState(false);
@@ -180,6 +185,7 @@ Verification rapide (sans les details utilisateur).
       if (configRes.data.success) {
         setConfig(configRes.data.config);
         setConfigForm({ baseDomain: configRes.data.config.baseDomain || '' });
+        setLocalNetworks(configRes.data.config.localNetworks || []);
         if (!configRes.data.config.baseDomain) {
           setShowDomainRequiredModal(true);
         }
@@ -585,6 +591,24 @@ Verification rapide (sans les details utilisateur).
     }
   }
 
+  async function handleSaveNetworks() {
+    setSavingNetworks(true);
+    setMessage(null);
+    try {
+      const res = await updateLocalNetworks(localNetworks);
+      if (res.data.success) {
+        setMessage({ type: 'success', text: 'Reseaux locaux sauvegardes' });
+        fetchData();
+      } else {
+        setMessage({ type: 'error', text: res.data.error });
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: 'Erreur de sauvegarde' });
+    } finally {
+      setSavingNetworks(false);
+    }
+  }
+
   async function handleRenewCerts() {
     setRenewing(true);
     setMessage(null);
@@ -888,6 +912,7 @@ Verification rapide (sans les details utilisateur).
       )}
 
       {activeTab === 'config' && (
+        <div className="space-y-px">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-px">
           {/* Domain Config */}
           <Card title="Domaine de base" icon={Globe}>
@@ -943,6 +968,64 @@ Verification rapide (sans les details utilisateur).
                   </div>
                 </div>
               ))}
+            </div>
+          </Card>
+        </div>
+
+          {/* Local Networks */}
+          <Card title="Reseaux locaux" icon={Shield}>
+            <div className="space-y-4">
+              <p className="text-xs text-gray-500">
+                Reseaux consideres comme locaux pour l'option "Reseau local uniquement" (notation CIDR).
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {localNetworks.map((cidr, i) => (
+                  <div key={i} className="flex items-center gap-1 bg-gray-900 border border-gray-700 px-2 py-1 text-sm font-mono">
+                    <span>{cidr}</span>
+                    <button
+                      onClick={() => setLocalNetworks(localNetworks.filter((_, j) => j !== i))}
+                      className="text-gray-500 hover:text-red-400 ml-1"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newCidr}
+                  onChange={e => setNewCidr(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && newCidr.trim()) {
+                      setLocalNetworks([...localNetworks, newCidr.trim()]);
+                      setNewCidr('');
+                    }
+                  }}
+                  className="flex-1 px-3 py-2 bg-gray-900 border border-gray-600 text-sm font-mono"
+                  placeholder="192.168.0.0/16"
+                />
+                <Button
+                  onClick={() => {
+                    if (newCidr.trim()) {
+                      setLocalNetworks([...localNetworks, newCidr.trim()]);
+                      setNewCidr('');
+                    }
+                  }}
+                  disabled={!newCidr.trim()}
+                >
+                  <Plus className="w-4 h-4" />
+                </Button>
+              </div>
+              <div className="flex justify-end">
+                <Button
+                  onClick={handleSaveNetworks}
+                  loading={savingNetworks}
+                  disabled={JSON.stringify(localNetworks) === JSON.stringify(config?.localNetworks || [])}
+                >
+                  Sauver
+                </Button>
+              </div>
             </div>
           </Card>
         </div>

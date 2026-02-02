@@ -38,10 +38,12 @@ pub struct ProxyState {
     pub auth: Option<Arc<AuthService>>,
     /// Event sender for HTTP traffic analytics
     pub events: Option<broadcast::Sender<HttpTrafficEvent>>,
+    /// Management API port for proxy.{base_domain} and auth.{base_domain}
+    pub management_port: u16,
 }
 
 impl ProxyState {
-    pub fn new(config: ProxyConfig) -> Self {
+    pub fn new(config: ProxyConfig, management_port: u16) -> Self {
         let client = Client::builder(TokioExecutor::new()).build_http();
 
         let access_logger = OptionalAccessLogger::new(config.access_log_path.clone());
@@ -61,6 +63,7 @@ impl ProxyState {
             access_logger,
             auth: None,
             events: None,
+            management_port,
         }
     }
 
@@ -91,8 +94,9 @@ impl ProxyState {
 
     /// Check if an IP address is in a local network
     pub fn is_local_ip(&self, ip: &IpAddr) -> bool {
+        let canonical = ip.to_canonical();
         let snapshot = self.snapshot.read().unwrap();
-        snapshot.local_networks.iter().any(|net| net.contains(ip))
+        snapshot.local_networks.iter().any(|net| net.contains(&canonical))
     }
 
     /// Find the route matching a given Host header
@@ -214,10 +218,30 @@ async fn proxy_handler_inner(
         req.uri().path()
     );
 
-    // Find matching route
-    let route = state
-        .find_route(&host)
-        .ok_or(ProxyError::DomainNotFound(host.clone()))?;
+    // Built-in routes for management domains (proxy.* and auth.*)
+    let base_domain = state.base_domain();
+    let domain_only = host.split(':').next().unwrap_or(&host);
+    let is_management = domain_only == format!("proxy.{}", base_domain)
+        || domain_only == format!("auth.{}", base_domain);
+
+    let route = if is_management {
+        RouteConfig {
+            id: "__management__".to_string(),
+            domain: domain_only.to_string(),
+            backend: "rust".to_string(),
+            target_host: "localhost".to_string(),
+            target_port: state.management_port,
+            local_only: false,
+            require_auth: false,
+            enabled: true,
+            cert_id: None,
+        }
+    } else {
+        // Find matching route
+        state
+            .find_route(&host)
+            .ok_or(ProxyError::DomainNotFound(host.clone()))?
+    };
 
     // IP filtering for localOnly routes
     if route.local_only && !state.is_local_ip(&client_ip) {
@@ -563,7 +587,7 @@ mod tests {
 
     #[test]
     fn test_find_route_by_domain() {
-        let state = ProxyState::new(test_config());
+        let state = ProxyState::new(test_config(), 4000);
         let route = state.find_route("app.example.com");
         assert!(route.is_some());
         assert_eq!(route.unwrap().target_port, 3000);
@@ -571,7 +595,7 @@ mod tests {
 
     #[test]
     fn test_find_route_strips_port() {
-        let state = ProxyState::new(test_config());
+        let state = ProxyState::new(test_config(), 4000);
         let route = state.find_route("app.example.com:444");
         assert!(route.is_some());
         assert_eq!(route.unwrap().domain, "app.example.com");
@@ -579,26 +603,26 @@ mod tests {
 
     #[test]
     fn test_find_route_unknown_domain() {
-        let state = ProxyState::new(test_config());
+        let state = ProxyState::new(test_config(), 4000);
         assert!(state.find_route("unknown.example.com").is_none());
     }
 
     #[test]
     fn test_find_route_disabled() {
-        let state = ProxyState::new(test_config());
+        let state = ProxyState::new(test_config(), 4000);
         assert!(state.find_route("disabled.example.com").is_none());
     }
 
     #[test]
     fn test_is_local_ip_loopback() {
-        let state = ProxyState::new(test_config());
+        let state = ProxyState::new(test_config(), 4000);
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
         assert!(state.is_local_ip(&ip));
     }
 
     #[test]
     fn test_is_local_ip_private() {
-        let state = ProxyState::new(test_config());
+        let state = ProxyState::new(test_config(), 4000);
         assert!(state.is_local_ip(&"192.168.1.100".parse().unwrap()));
         assert!(state.is_local_ip(&"10.0.0.5".parse().unwrap()));
         assert!(state.is_local_ip(&"172.16.5.10".parse().unwrap()));
@@ -606,7 +630,7 @@ mod tests {
 
     #[test]
     fn test_is_not_local_ip_public() {
-        let state = ProxyState::new(test_config());
+        let state = ProxyState::new(test_config(), 4000);
         assert!(!state.is_local_ip(&"8.8.8.8".parse().unwrap()));
         assert!(!state.is_local_ip(&"172.32.0.1".parse().unwrap()));
     }
@@ -669,7 +693,7 @@ mod tests {
     #[test]
     fn test_reload_config() {
         let mut config = test_config();
-        let state = ProxyState::new(config.clone());
+        let state = ProxyState::new(config.clone(), 4000);
         assert!(state.find_route("app.example.com").is_some());
         assert!(state.find_route("new.example.com").is_none());
 

@@ -8,7 +8,7 @@ use hr_common::service_registry::SharedServiceRegistry;
 use hr_dns::SharedDnsState;
 use hr_dhcp::SharedDhcpState;
 use hr_firewall::FirewallEngine;
-use hr_proxy::ProxyState;
+use hr_proxy::{ProxyState, TlsManager};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -19,6 +19,7 @@ pub struct ApiState {
     pub auth: Arc<AuthService>,
     pub ca: Arc<CertificateAuthority>,
     pub proxy: Arc<ProxyState>,
+    pub tls_manager: Arc<TlsManager>,
     pub dns: SharedDnsState,
     pub dhcp: SharedDhcpState,
     pub adblock: Arc<RwLock<AdblockEngine>>,
