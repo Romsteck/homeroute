@@ -369,7 +369,7 @@ const CertificateAuthority = () => {
                 Aucun certificat émis pour le moment
               </div>
             ) : (
-              <div className="space-y-3">
+              <div className="space-y-px">
                 {certificates.map((cert) => {
                   const daysUntilExpiry = getDaysUntilExpiry(cert.expires_at);
                   const needsRenewal = daysUntilExpiry < 30;

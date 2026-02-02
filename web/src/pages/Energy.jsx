@@ -289,7 +289,7 @@ function Energy() {
       <PageHeader title="Énergie" icon={Zap} />
 
       <Section title="CPU / Mode">
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-px">
         {/* CPU Info Card */}
         <Card title={`Infos CPU (${cpuModel})`} icon={Cpu}>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -418,7 +418,7 @@ function Energy() {
       </Section>
 
       <Section title="Programmation / Auto-select" contrast>
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-px">
         {/* Programmation Card */}
         <Card title="Programmation" icon={Clock}>
           <div className="space-y-6">

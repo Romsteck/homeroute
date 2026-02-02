@@ -139,30 +139,35 @@ function Network() {
         </Button>
       </PageHeader>
 
-      {/* Tabs */}
-      <div className="flex border-b border-gray-700">
-        {tabs.map(tab => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
-              activeTab === tab.id
-                ? 'border-blue-400 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-300'
-            }`}
-          >
-            <tab.icon className="w-4 h-4" />
-            {tab.label}
-          </button>
-        ))}
-      </div>
+      {/* Vertical Tabs Layout */}
+      <div className="flex flex-1">
+        {/* Tab Sidebar */}
+        <div className="w-56 border-r border-gray-700 bg-gray-800/50 flex-shrink-0">
+          {tabs.map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`w-full flex items-center gap-2 px-4 py-2.5 text-sm text-left transition-colors ${
+                activeTab === tab.id
+                  ? 'bg-gray-900 text-blue-400 border-l-2 border-blue-400'
+                  : 'text-gray-400 hover:bg-gray-800 hover:text-gray-300 border-l-2 border-transparent'
+              }`}
+            >
+              <tab.icon className="w-4 h-4" />
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Tab Content */}
+        <div className="flex-1 overflow-auto">
 
       {/* Tab: Interfaces */}
       {activeTab === 'interfaces' && (
         <div>
           {/* Physical Interfaces */}
           <Card title="Interfaces Physiques" icon={NetworkIcon}>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-px">
               {physicalIfaces.map(iface => (
                 <div key={iface.name} className="bg-gray-900 p-4">
                   <div className="flex items-center justify-between mb-3">
@@ -201,7 +206,7 @@ function Network() {
           {/* VPN Interfaces */}
           {vpnIfaces.length > 0 && (
             <Card title="Interfaces VPN" icon={Shield}>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-px">
                 {vpnIfaces.map(iface => (
                   <div key={iface.name} className="bg-gray-900 p-4">
                     <div className="flex items-center justify-between mb-3">
@@ -332,7 +337,7 @@ function Network() {
         <div>
           {/* Chain Stats Overview */}
           {chainStats && (
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-px">
               {mainChains.map(chainName => {
                 const chain = filterRules[chainName];
                 const stats = chainStats.chains?.[chainName];
@@ -484,7 +489,7 @@ function Network() {
       {activeTab === 'nat' && (
         <div>
           {/* Port Forwards */}
-          <Card title="Port Forwards (DNAT)" icon={ArrowRight}>
+          <Card title="Port Forwards (DNAT)" icon={ArrowRight} >
             {forwards.length > 0 ? (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
@@ -548,6 +553,9 @@ function Network() {
           </Card>
         </div>
       )}
+
+        </div>{/* end tab content */}
+      </div>{/* end flex layout */}
     </div>
   );
 }

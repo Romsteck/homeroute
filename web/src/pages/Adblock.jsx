@@ -108,7 +108,7 @@ function Adblock() {
       </PageHeader>
 
       <Section title="Vue d'ensemble">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-px">
           <Card title="Domaines Bloqués" icon={Shield}>
             <div className="text-4xl font-bold text-green-400">
               {stats?.domainCount?.toLocaleString() || 0}
@@ -135,7 +135,7 @@ function Adblock() {
       </Section>
 
       <Section title="Sources / Whitelist" contrast>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-px">
           <Card title="Sources de blocage" icon={ExternalLink}>
             <div className="space-y-3">
               {stats?.sources?.map((source, i) => (

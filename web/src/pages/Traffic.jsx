@@ -107,7 +107,7 @@ export default function Traffic() {
         <>
           {/* Overview Cards */}
           <Section title="Vue d'ensemble">
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-px">
             <Card title="Requêtes" icon={Activity}>
               <div className="text-3xl font-bold text-gray-100">
                 {overview?.totalRequests?.toLocaleString() || '0'}
@@ -157,7 +157,7 @@ export default function Traffic() {
 
           {/* Top Devices & Endpoints */}
           <Section title="Top Périphériques / Endpoints">
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-px">
             <Card title="Top Périphériques">
               {topDevices.length > 0 ? (
                 <TopDevicesChart data={topDevices} />
@@ -193,7 +193,7 @@ export default function Traffic() {
           </Section>
 
           <Section title="DNS Analytics">
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-px">
             <Card title="Top Domaines LAN/WAN">
               {topDomains.length > 0 ? (
                 <div className="space-y-2">

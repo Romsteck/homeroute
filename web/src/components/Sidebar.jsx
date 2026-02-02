@@ -6,20 +6,34 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
-const navItems = [
-  { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
-  { to: '/dns', icon: Server, label: 'DNS / DHCP' },
-  { to: '/network', icon: Network, label: 'Réseau / Firewall' },
-  { to: '/adblock', icon: Shield, label: 'AdBlock' },
-  { to: '/ddns', icon: Globe, label: 'Dynamic DNS' },
-  { to: '/reverseproxy', icon: ArrowLeftRight, label: 'Reverse Proxy' },
-  { to: '/ca', icon: KeyRound, label: 'Certificats (CA)' },
-  { to: '/users', icon: Users, label: 'Utilisateurs' },
-  { to: '/updates', icon: RefreshCw, label: 'Mises a jour' },
-  { to: '/energy', icon: Zap, label: 'Énergie' },
-  { to: '/traffic', icon: BarChart3, label: 'Trafic' },
-  { to: '/servers', icon: HardDrive, label: 'Serveurs' },
-  { to: '/wol', icon: Power, label: 'Wake-on-LAN' },
+const navGroups = [
+  {
+    items: [
+      { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
+    ],
+  },
+  {
+    label: 'Réseau',
+    items: [
+      { to: '/dns', icon: Server, label: 'DNS / DHCP' },
+      { to: '/network', icon: Network, label: 'Réseau / Firewall' },
+      { to: '/adblock', icon: Shield, label: 'AdBlock' },
+      { to: '/ddns', icon: Globe, label: 'Dynamic DNS' },
+      { to: '/reverseproxy', icon: ArrowLeftRight, label: 'Reverse Proxy' },
+      { to: '/ca', icon: KeyRound, label: 'Certificats (CA)' },
+    ],
+  },
+  {
+    label: 'Système',
+    items: [
+      { to: '/servers', icon: HardDrive, label: 'Serveurs' },
+      { to: '/wol', icon: Power, label: 'Wake-on-LAN' },
+      { to: '/traffic', icon: BarChart3, label: 'Trafic' },
+      { to: '/users', icon: Users, label: 'Utilisateurs' },
+      { to: '/updates', icon: RefreshCw, label: 'Mises à jour' },
+      { to: '/energy', icon: Zap, label: 'Énergie' },
+    ],
+  },
 ];
 
 function Sidebar() {
@@ -35,26 +49,35 @@ function Sidebar() {
         <p className="text-xs text-gray-400 mt-1">cloudmaster</p>
       </div>
 
-      <nav className="flex-1 py-2">
-        <ul className="space-y-0.5">
-          {navItems.map(({ to, icon: Icon, label }) => (
-            <li key={to}>
-              <NavLink
-                to={to}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-4 py-2 transition-colors text-sm ${
-                    isActive
-                      ? 'border-l-3 border-blue-400 bg-gray-700/50 text-white'
-                      : 'border-l-3 border-transparent text-gray-300 hover:bg-gray-700/30'
-                  }`
-                }
-              >
-                <Icon className="w-5 h-5" />
-                {label}
-              </NavLink>
-            </li>
-          ))}
-        </ul>
+      <nav className="flex-1 py-2 overflow-y-auto">
+        {navGroups.map((group, gi) => (
+          <div key={gi}>
+            {group.label && (
+              <div className="px-4 pt-4 pb-1 text-xs text-gray-500 uppercase tracking-wider">
+                {group.label}
+              </div>
+            )}
+            <ul className="space-y-0.5">
+              {group.items.map(({ to, icon: Icon, label }) => (
+                <li key={to}>
+                  <NavLink
+                    to={to}
+                    className={({ isActive }) =>
+                      `flex items-center gap-3 px-4 py-2 transition-colors text-sm ${
+                        isActive
+                          ? 'border-l-3 border-blue-400 bg-gray-700/50 text-white'
+                          : 'border-l-3 border-transparent text-gray-300 hover:bg-gray-700/30'
+                      }`
+                    }
+                  >
+                    <Icon className="w-5 h-5" />
+                    {label}
+                  </NavLink>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
       </nav>
 
       <div className="p-4 border-t border-gray-700">

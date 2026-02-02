@@ -6,7 +6,7 @@ function Section({ title, children, contrast = false, className = '' }) {
           <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">{title}</h2>
         </div>
       )}
-      <div className="px-6 py-4">
+      <div className="px-6 py-3">
         {children}
       </div>
     </div>

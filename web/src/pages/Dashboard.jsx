@@ -65,7 +65,7 @@ function Dashboard() {
       <PageHeader title="Dashboard" icon={LayoutDashboard} />
 
       <Section title="Vue d'ensemble">
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-px">
             {/* Interfaces Card */}
             <Card
               title="Interfaces Réseau"
