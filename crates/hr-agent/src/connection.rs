@@ -1,0 +1,129 @@
+//! WebSocket client connecting to HomeRoute registry.
+
+use anyhow::Result;
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
+use tracing::{error, info, warn};
+
+use hr_registry::protocol::{AgentMessage, RegistryMessage};
+
+use crate::config::AgentConfig;
+
+/// Connect to HomeRoute, authenticate, and return channels for bidirectional communication.
+/// Returns (config_rx, shutdown_rx) — config_rx receives RegistryMessages, shutdown_rx signals shutdown.
+pub async fn run_connection(
+    config: &AgentConfig,
+    registry_tx: mpsc::Sender<RegistryMessage>,
+) -> Result<()> {
+    let url = config.ws_url();
+    info!(url, "Connecting to HomeRoute registry");
+
+    let (ws_stream, _response) = tokio_tungstenite::connect_async(&url)
+        .await
+        .map_err(|e| anyhow::anyhow!("WebSocket connect failed: {e}"))?;
+
+    let (mut ws_sink, mut ws_stream) = ws_stream.split();
+
+    // Send Auth message
+    let auth_msg = AgentMessage::Auth {
+        token: config.token.clone(),
+        service_name: config.service_name.clone(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    let auth_json = serde_json::to_string(&auth_msg)?;
+    ws_sink.send(Message::Text(auth_json.into())).await?;
+
+    info!("Auth message sent, waiting for response");
+
+    // Wait for AuthResult
+    let first_msg = ws_stream
+        .next()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Connection closed before auth response"))??;
+
+    let auth_result: RegistryMessage = match first_msg {
+        Message::Text(text) => serde_json::from_str(&text)?,
+        other => anyhow::bail!("Unexpected message type during auth: {other:?}"),
+    };
+
+    match auth_result {
+        RegistryMessage::AuthResult { success: true, .. } => {
+            info!("Authentication successful");
+        }
+        RegistryMessage::AuthResult { success: false, error, .. } => {
+            anyhow::bail!("Authentication failed: {}", error.unwrap_or_default());
+        }
+        _ => anyhow::bail!("Unexpected message during auth handshake"),
+    }
+
+    // Start heartbeat task
+    let (heartbeat_tx, mut heartbeat_rx) = mpsc::channel::<()>(1);
+    let start_time = std::time::Instant::now();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            if heartbeat_tx.send(()).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Main message loop
+    loop {
+        tokio::select! {
+            // Incoming messages from registry
+            ws_msg = ws_stream.next() => {
+                match ws_msg {
+                    Some(Ok(Message::Text(text))) => {
+                        match serde_json::from_str::<RegistryMessage>(&text) {
+                            Ok(msg) => {
+                                let is_shutdown = matches!(&msg, RegistryMessage::Shutdown);
+                                if registry_tx.send(msg).await.is_err() {
+                                    error!("Registry message channel closed");
+                                    break;
+                                }
+                                if is_shutdown {
+                                    info!("Shutdown requested by registry");
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Invalid message from registry: {e}");
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        info!("WebSocket connection closed");
+                        break;
+                    }
+                    Some(Ok(Message::Ping(data))) => {
+                        let _ = ws_sink.send(Message::Pong(data)).await;
+                    }
+                    Some(Err(e)) => {
+                        error!("WebSocket error: {e}");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Heartbeat timer
+            Some(()) = heartbeat_rx.recv() => {
+                let uptime = start_time.elapsed().as_secs();
+                let hb = AgentMessage::Heartbeat {
+                    uptime_secs: uptime,
+                    connections_active: 0,
+                };
+                let json = serde_json::to_string(&hb)?;
+                if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                    error!("Failed to send heartbeat");
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}

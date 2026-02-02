@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, State},
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use serde::Deserialize;
@@ -19,20 +19,6 @@ pub fn router() -> Router<ApiState> {
         .route("/reload", post(reload_proxy))
         .route("/certificates/status", get(certificates_status))
         .route("/certificates/renew", post(renew_certificates))
-        .route("/environments", get(list_environments).post(add_environment))
-        .route(
-            "/environments/{id}",
-            put(update_environment).delete(delete_environment),
-        )
-        .route(
-            "/applications",
-            get(list_applications).post(add_application),
-        )
-        .route(
-            "/applications/{id}",
-            put(update_application).delete(delete_application),
-        )
-        .route("/applications/{id}/toggle", post(toggle_application))
         .route("/config/networks", put(update_local_networks))
 }
 
@@ -73,22 +59,8 @@ async fn sync_and_reload(state: &ApiState) -> Result<(), String> {
         .cloned()
         .unwrap_or_default();
 
-    let applications = rp_config
-        .get("applications")
-        .and_then(|a| a.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let environments = rp_config
-        .get("environments")
-        .and_then(|e| e.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    // Build proxy routes
+    // Build proxy routes from standalone hosts
     let mut routes = Vec::new();
-
-    // Add host-based routes
     for host in &hosts {
         if host.get("enabled").and_then(|e| e.as_bool()) != Some(true) {
             continue;
@@ -117,66 +89,6 @@ async fn sync_and_reload(state: &ApiState) -> Result<(), String> {
             "require_auth": host.get("requireAuth").unwrap_or(&json!(false)),
             "enabled": true
         }));
-    }
-
-    // Add application-based routes
-    for app in &applications {
-        if app.get("enabled").and_then(|e| e.as_bool()) != Some(true) {
-            continue;
-        }
-        let slug = app.get("slug").and_then(|s| s.as_str()).unwrap_or("");
-        let endpoints = app.get("endpoints").and_then(|e| e.as_object());
-
-        if let Some(endpoints) = endpoints {
-            for (env_id, env_endpoints) in endpoints {
-                let prefix = environments
-                    .iter()
-                    .find(|e| e.get("id").and_then(|i| i.as_str()) == Some(env_id))
-                    .and_then(|e| e.get("prefix").and_then(|p| p.as_str()))
-                    .unwrap_or(env_id);
-
-                // Frontend endpoint
-                if let Some(fe) = env_endpoints.get("frontend") {
-                    let domain = if prefix.is_empty() {
-                        format!("{}.{}", slug, base_domain)
-                    } else {
-                        format!("{}.{}.{}", slug, prefix, base_domain)
-                    };
-                    routes.push(json!({
-                        "id": format!("{}-{}-fe", app.get("id").and_then(|i| i.as_str()).unwrap_or(""), env_id),
-                        "domain": domain,
-                        "backend": "rust",
-                        "target_host": fe.get("targetHost").unwrap_or(&json!("localhost")),
-                        "target_port": fe.get("targetPort").unwrap_or(&json!(80)),
-                        "local_only": fe.get("localOnly").unwrap_or(&json!(false)),
-                        "require_auth": fe.get("requireAuth").unwrap_or(&json!(false)),
-                        "enabled": true
-                    }));
-                }
-
-                // API endpoints
-                if let Some(apis) = env_endpoints.get("apis").and_then(|a| a.as_array()) {
-                    for api in apis {
-                        let api_slug = api.get("slug").and_then(|s| s.as_str()).unwrap_or("api");
-                        let domain = if prefix.is_empty() {
-                            format!("{}-{}.{}", slug, api_slug, base_domain)
-                        } else {
-                            format!("{}-{}.{}.{}", slug, api_slug, prefix, base_domain)
-                        };
-                        routes.push(json!({
-                            "id": format!("{}-{}-{}", app.get("id").and_then(|i| i.as_str()).unwrap_or(""), env_id, api_slug),
-                            "domain": domain,
-                            "backend": "rust",
-                            "target_host": api.get("targetHost").unwrap_or(&json!("localhost")),
-                            "target_port": api.get("targetPort").unwrap_or(&json!(80)),
-                            "local_only": api.get("localOnly").unwrap_or(&json!(false)),
-                            "require_auth": api.get("requireAuth").unwrap_or(&json!(false)),
-                            "enabled": true
-                        }));
-                    }
-                }
-            }
-        }
     }
 
     // Resolve cert_id for each route: find existing cert or issue a new one
@@ -537,205 +449,3 @@ async fn renew_certificates(State(state): State<ApiState>) -> Json<Value> {
     }))
 }
 
-async fn list_environments(State(state): State<ApiState>) -> Json<Value> {
-    match load_rp_config(&state).await {
-        Ok(config) => {
-            let envs = config.get("environments").cloned().unwrap_or(json!([]));
-            Json(json!({"success": true, "environments": envs}))
-        }
-        Err(e) => Json(json!({"success": false, "error": e})),
-    }
-}
-
-async fn add_environment(State(state): State<ApiState>, Json(body): Json<Value>) -> Json<Value> {
-    let mut config = match load_rp_config(&state).await {
-        Ok(c) => c,
-        Err(e) => return Json(json!({"success": false, "error": e})),
-    };
-
-    let id = uuid::Uuid::new_v4().to_string();
-    let mut env = body;
-    env["id"] = json!(id);
-
-    let envs = config.get_mut("environments").and_then(|e| e.as_array_mut());
-    match envs {
-        Some(arr) => arr.push(env.clone()),
-        None => config["environments"] = json!([env]),
-    }
-
-    if let Err(e) = save_rp_config(&state, &config).await {
-        return Json(json!({"success": false, "error": e}));
-    }
-
-    Json(json!({"success": true, "environment": env}))
-}
-
-async fn update_environment(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-    Json(updates): Json<Value>,
-) -> Json<Value> {
-    let mut config = match load_rp_config(&state).await {
-        Ok(c) => c,
-        Err(e) => return Json(json!({"success": false, "error": e})),
-    };
-
-    if let Some(envs) = config.get_mut("environments").and_then(|e| e.as_array_mut()) {
-        if let Some(env) = envs.iter_mut().find(|e| e.get("id").and_then(|i| i.as_str()) == Some(&id)) {
-            if let Some(obj) = updates.as_object() {
-                for (k, v) in obj {
-                    env[k] = v.clone();
-                }
-            }
-        }
-    }
-
-    if let Err(e) = save_rp_config(&state, &config).await {
-        return Json(json!({"success": false, "error": e}));
-    }
-    if let Err(e) = sync_and_reload(&state).await {
-        return Json(json!({"success": false, "error": format!("Sync failed: {}", e)}));
-    }
-
-    Json(json!({"success": true}))
-}
-
-async fn delete_environment(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-) -> Json<Value> {
-    let mut config = match load_rp_config(&state).await {
-        Ok(c) => c,
-        Err(e) => return Json(json!({"success": false, "error": e})),
-    };
-
-    if let Some(envs) = config.get_mut("environments").and_then(|e| e.as_array_mut()) {
-        envs.retain(|e| e.get("id").and_then(|i| i.as_str()) != Some(&id));
-    }
-
-    if let Err(e) = save_rp_config(&state, &config).await {
-        return Json(json!({"success": false, "error": e}));
-    }
-
-    Json(json!({"success": true}))
-}
-
-async fn list_applications(State(state): State<ApiState>) -> Json<Value> {
-    match load_rp_config(&state).await {
-        Ok(config) => {
-            let apps = config.get("applications").cloned().unwrap_or(json!([]));
-            Json(json!({"success": true, "applications": apps}))
-        }
-        Err(e) => Json(json!({"success": false, "error": e})),
-    }
-}
-
-async fn add_application(State(state): State<ApiState>, Json(body): Json<Value>) -> Json<Value> {
-    let mut config = match load_rp_config(&state).await {
-        Ok(c) => c,
-        Err(e) => return Json(json!({"success": false, "error": e})),
-    };
-
-    let id = uuid::Uuid::new_v4().to_string();
-    let mut app = body;
-    app["id"] = json!(id);
-    app["createdAt"] = json!(chrono::Utc::now().to_rfc3339());
-    if app.get("enabled").is_none() {
-        app["enabled"] = json!(true);
-    }
-
-    let apps = config.get_mut("applications").and_then(|a| a.as_array_mut());
-    match apps {
-        Some(arr) => arr.push(app.clone()),
-        None => config["applications"] = json!([app]),
-    }
-
-    if let Err(e) = save_rp_config(&state, &config).await {
-        return Json(json!({"success": false, "error": e}));
-    }
-    if let Err(e) = sync_and_reload(&state).await {
-        return Json(json!({"success": false, "error": format!("Sync failed: {}", e)}));
-    }
-
-    Json(json!({"success": true, "application": app}))
-}
-
-async fn update_application(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-    Json(updates): Json<Value>,
-) -> Json<Value> {
-    let mut config = match load_rp_config(&state).await {
-        Ok(c) => c,
-        Err(e) => return Json(json!({"success": false, "error": e})),
-    };
-
-    if let Some(apps) = config.get_mut("applications").and_then(|a| a.as_array_mut()) {
-        if let Some(app) = apps.iter_mut().find(|a| a.get("id").and_then(|i| i.as_str()) == Some(&id)) {
-            if let Some(obj) = updates.as_object() {
-                for (k, v) in obj {
-                    app[k] = v.clone();
-                }
-            }
-            app["updatedAt"] = json!(chrono::Utc::now().to_rfc3339());
-        }
-    }
-
-    if let Err(e) = save_rp_config(&state, &config).await {
-        return Json(json!({"success": false, "error": e}));
-    }
-    if let Err(e) = sync_and_reload(&state).await {
-        return Json(json!({"success": false, "error": format!("Sync failed: {}", e)}));
-    }
-
-    Json(json!({"success": true}))
-}
-
-async fn delete_application(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-) -> Json<Value> {
-    let mut config = match load_rp_config(&state).await {
-        Ok(c) => c,
-        Err(e) => return Json(json!({"success": false, "error": e})),
-    };
-
-    if let Some(apps) = config.get_mut("applications").and_then(|a| a.as_array_mut()) {
-        apps.retain(|a| a.get("id").and_then(|i| i.as_str()) != Some(&id));
-    }
-
-    if let Err(e) = save_rp_config(&state, &config).await {
-        return Json(json!({"success": false, "error": e}));
-    }
-    if let Err(e) = sync_and_reload(&state).await {
-        return Json(json!({"success": false, "error": format!("Sync failed: {}", e)}));
-    }
-
-    Json(json!({"success": true}))
-}
-
-async fn toggle_application(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-) -> Json<Value> {
-    let mut config = match load_rp_config(&state).await {
-        Ok(c) => c,
-        Err(e) => return Json(json!({"success": false, "error": e})),
-    };
-
-    if let Some(apps) = config.get_mut("applications").and_then(|a| a.as_array_mut()) {
-        if let Some(app) = apps.iter_mut().find(|a| a.get("id").and_then(|i| i.as_str()) == Some(&id)) {
-            let current = app.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true);
-            app["enabled"] = json!(!current);
-        }
-    }
-
-    if let Err(e) = save_rp_config(&state, &config).await {
-        return Json(json!({"success": false, "error": e}));
-    }
-    if let Err(e) = sync_and_reload(&state).await {
-        return Json(json!({"success": false, "error": format!("Sync failed: {}", e)}));
-    }
-
-    Json(json!({"success": true}))
-}

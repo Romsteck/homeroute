@@ -1,0 +1,22 @@
+[package]
+name = "hr-registry"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hr-common = { path = "../hr-common" }
+hr-ca = { path = "../hr-ca" }
+hr-firewall = { path = "../hr-firewall" }
+hr-lxd = { path = "../hr-lxd" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true }
+rand = { workspace = true }
+argon2 = { workspace = true }
+hex = { workspace = true }
+rand_core = { version = "0.6", features = ["getrandom"] }

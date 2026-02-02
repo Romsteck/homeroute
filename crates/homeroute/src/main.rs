@@ -10,6 +10,7 @@ use hr_common::service_registry::{
 };
 use hr_dns::DnsState;
 use hr_proxy::{ProxyConfig, ProxyState, TlsManager};
+use hr_registry::AgentRegistry;
 use signal_hook::consts::SIGHUP;
 use signal_hook_tokio::Signals;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -526,6 +527,69 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // ── Agent Registry ──────────────────────────────────────────────
+
+    let registry_state_path =
+        PathBuf::from("/var/lib/server-dashboard/agent-registry.json");
+    let registry = Arc::new(AgentRegistry::new(
+        registry_state_path,
+        ca.clone(),
+        firewall_engine.clone(),
+        Arc::new(env.clone()),
+        events.clone(),
+    ));
+
+    // Ensure LXD profile exists
+    {
+        let lan_bridge = dns_dhcp_config
+            .ipv6
+            .interface
+            .clone();
+        let lan_bridge = if lan_bridge.is_empty() { "br-lan".to_string() } else { lan_bridge };
+        tokio::spawn(async move {
+            if let Err(e) = hr_lxd::profile::ensure_profile(&lan_bridge, "default").await {
+                warn!("Failed to ensure LXD profile: {e}");
+            }
+        });
+    }
+
+    // Heartbeat monitor
+    {
+        let reg = registry.clone();
+        tokio::spawn(async move {
+            reg.run_heartbeat_monitor().await;
+        });
+    }
+
+    // Certificate renewal background task
+    {
+        let reg = registry.clone();
+        tokio::spawn(async move {
+            reg.run_cert_renewal().await;
+        });
+    }
+
+    // Prefix change watcher for agent registry
+    {
+        let reg = registry.clone();
+        let mut prefix_rx_registry = prefix_rx.clone();
+        tokio::spawn(async move {
+            loop {
+                if prefix_rx_registry.changed().await.is_err() {
+                    break;
+                }
+                let prefix_info = prefix_rx_registry.borrow().clone();
+                let prefix_str = prefix_info.map(|p| p.prefix.to_string());
+                reg.on_prefix_changed(prefix_str).await;
+            }
+        });
+    }
+
+    info!(
+        "Agent registry initialized ({} applications)",
+        registry.list_applications().await.len()
+    );
+
     // ── Management API (Important) ────────────────────────────────────
 
     let api_state = hr_api::state::ApiState {
@@ -544,6 +608,7 @@ async fn main() -> anyhow::Result<()> {
         reverseproxy_config_path: env.reverseproxy_config_path.clone(),
         service_registry: service_registry.clone(),
         firewall: firewall_engine,
+        registry: Some(registry.clone()),
     };
 
     let api_router = hr_api::build_router(api_state);
@@ -554,7 +619,7 @@ async fn main() -> anyhow::Result<()> {
         let router = api_router.clone();
         let port = api_port;
         async move {
-            let addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
+            let addr: SocketAddr = format!("[::]:{}", port).parse()?;
             let listener = tokio::net::TcpListener::bind(addr).await?;
             info!("Management API listening on {}", addr);
             axum::serve(listener, router).await?;
