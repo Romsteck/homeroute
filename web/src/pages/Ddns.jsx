@@ -125,7 +125,7 @@ function Ddns() {
       </PageHeader>
 
       <Section title="Configuration">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-px">
           <Card title="Enregistrement" icon={Globe}>
             <div className="text-lg font-mono text-blue-400 break-all">
               {status?.config?.recordName || '-'}
@@ -259,7 +259,7 @@ function Ddns() {
       </Section>
 
       <Section title="État / Automatisation" contrast>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-px">
           <Card title="État" icon={Clock}>
             <dl className="space-y-4">
               <div className="flex justify-between items-center">

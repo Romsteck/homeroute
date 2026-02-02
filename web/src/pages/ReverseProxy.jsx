@@ -673,7 +673,7 @@ Verification rapide (sans les details utilisateur).
       )}
 
       {/* Status Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-px">
         <Card title="Proxy" icon={Server}>
           <div className="flex items-center gap-2">
             <div className={`w-3 h-3  ${rustProxy?.running ? 'bg-green-400' : 'bg-red-400'}`} />
@@ -707,32 +707,34 @@ Verification rapide (sans les details utilisateur).
         </Card>
       </div>
 
-      {/* Tabs */}
-      <div className="border-b border-gray-700">
-        <div className="flex gap-1">
+      {/* Vertical Tabs Layout */}
+      <div className="flex flex-1">
+        {/* Tab Sidebar */}
+        <div className="w-56 border-r border-gray-700 bg-gray-800/50 flex-shrink-0">
           {tabs.map(tab => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+              className={`w-full flex items-center gap-2 px-4 py-2.5 text-sm text-left transition-colors ${
                 activeTab === tab.id
-                  ? 'border-blue-500 text-blue-400'
-                  : 'border-transparent text-gray-400 hover:text-gray-300'
+                  ? 'bg-gray-900 text-blue-400 border-l-2 border-blue-400'
+                  : 'text-gray-400 hover:bg-gray-800 hover:text-gray-300 border-l-2 border-transparent'
               }`}
             >
               <tab.icon className="w-4 h-4" />
               {tab.label}
               {tab.count !== undefined && (
-                <span className="text-xs bg-gray-700 px-2 py-0.5 ">{tab.count}</span>
+                <span className="text-xs bg-gray-700 px-2 py-0.5">{tab.count}</span>
               )}
             </button>
           ))}
         </div>
-      </div>
 
-      {/* Tab Content */}
+        {/* Tab Content */}
+        <div className="flex-1 overflow-auto">
+
       {activeTab === 'applications' && (
-        <div className="space-y-4">
+        <div className="space-y-px">
           {applications.length === 0 ? (
             <Card>
               <div className="text-center py-8 text-gray-500">
@@ -742,7 +744,7 @@ Verification rapide (sans les details utilisateur).
               </div>
             </Card>
           ) : (
-            <div className="space-y-3">
+            <div className="space-y-px">
               {applications.map(app => (
                 <ApplicationCard
                   key={app.id}
@@ -762,7 +764,7 @@ Verification rapide (sans les details utilisateur).
       )}
 
       {activeTab === 'standalone' && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-px">
           <div className="lg:col-span-2">
             <Card title="Hotes standalone" icon={Globe}>
               {hosts.length === 0 ? (
@@ -886,7 +888,7 @@ Verification rapide (sans les details utilisateur).
       )}
 
       {activeTab === 'config' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-px">
           {/* Domain Config */}
           <Card title="Domaine de base" icon={Globe}>
             <div className="space-y-4">
@@ -945,6 +947,9 @@ Verification rapide (sans les details utilisateur).
           </Card>
         </div>
       )}
+
+        </div>{/* end tab content */}
+      </div>{/* end flex layout */}
 
       {/* Add Host Modal */}
       {showAddModal && (

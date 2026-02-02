@@ -466,7 +466,7 @@ function Users() {
             Nouveau groupe
           </Button>
         </div>
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid gap-px md:grid-cols-2">
           {groups.map(group => (
             <div
               key={group.id}
@@ -560,45 +560,58 @@ function Users() {
           {renderStopped()}
         </Card>
       ) : (
-        <Card
-          title="Gestion des utilisateurs"
-          icon={UsersIcon}
-          actions={
-            isAuthAvailable && users.length > 0 && activeTab === 'users' && (
-              <Button
-                variant="primary"
-                onClick={() => {
-                  setEditingUser(null);
-                  setShowUserModal(true);
-                }}
-              >
-                <Plus className="w-4 h-4" />
-                Ajouter
-              </Button>
-            )
-          }
-        >
-          {/* Tabs */}
-          <div className="flex gap-1 mb-4 border-b border-gray-700">
-            {['users', 'groups'].map(tab => (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
-                  activeTab === tab
-                    ? 'border-blue-400 text-blue-400'
-                    : 'border-transparent text-gray-400 hover:text-white'
-                }`}
-              >
-                {tab === 'users' ? 'Utilisateurs' : 'Groupes'}
-              </button>
-            ))}
+        <div className="flex flex-1">
+          {/* Vertical Tab Sidebar */}
+          <div className="w-56 border-r border-gray-700 bg-gray-800/50 flex-shrink-0">
+            <button
+              onClick={() => setActiveTab('users')}
+              className={`w-full flex items-center gap-2 px-4 py-2.5 text-sm text-left transition-colors ${
+                activeTab === 'users'
+                  ? 'bg-gray-900 text-blue-400 border-l-2 border-blue-400'
+                  : 'text-gray-400 hover:bg-gray-800 hover:text-gray-300 border-l-2 border-transparent'
+              }`}
+            >
+              <UsersIcon className="w-4 h-4" />
+              Utilisateurs
+            </button>
+            <button
+              onClick={() => setActiveTab('groups')}
+              className={`w-full flex items-center gap-2 px-4 py-2.5 text-sm text-left transition-colors ${
+                activeTab === 'groups'
+                  ? 'bg-gray-900 text-blue-400 border-l-2 border-blue-400'
+                  : 'text-gray-400 hover:bg-gray-800 hover:text-gray-300 border-l-2 border-transparent'
+              }`}
+            >
+              <Shield className="w-4 h-4" />
+              Groupes
+            </button>
           </div>
 
           {/* Tab Content */}
-          {activeTab === 'users' && renderUsersTab()}
-          {activeTab === 'groups' && renderGroupsTab()}
-        </Card>
+          <div className="flex-1 overflow-auto">
+            <Card
+              title={activeTab === 'users' ? 'Utilisateurs' : 'Groupes'}
+              icon={activeTab === 'users' ? UsersIcon : Shield}
+              actions={
+                isAuthAvailable && users.length > 0 && activeTab === 'users' && (
+                  <Button
+                    variant="primary"
+                    onClick={() => {
+                      setEditingUser(null);
+                      setShowUserModal(true);
+                    }}
+                  >
+                    <Plus className="w-4 h-4" />
+                    Ajouter
+                  </Button>
+                )
+              }
+            >
+              {activeTab === 'users' && renderUsersTab()}
+              {activeTab === 'groups' && renderGroupsTab()}
+            </Card>
+          </div>
+        </div>
       )}
 
       {/* User Modal */}
