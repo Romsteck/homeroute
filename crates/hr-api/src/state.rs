@@ -7,6 +7,7 @@ use hr_common::events::EventBus;
 use hr_common::service_registry::SharedServiceRegistry;
 use hr_dns::SharedDnsState;
 use hr_dhcp::SharedDhcpState;
+use hr_firewall::FirewallEngine;
 use hr_proxy::ProxyState;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,6 +26,7 @@ pub struct ApiState {
     pub env: Arc<EnvConfig>,
     pub analytics: Arc<AnalyticsStore>,
     pub service_registry: SharedServiceRegistry,
+    pub firewall: Option<Arc<FirewallEngine>>,
 
     /// Path to dns-dhcp-config.json
     pub dns_dhcp_config_path: PathBuf,

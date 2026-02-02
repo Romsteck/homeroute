@@ -305,13 +305,73 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // IPv6 RA sender (Important)
+    // ── IPv6 Prefix Delegation + RA + Firewall ────────────────────────
+
+    // Watch channel: PD client → RA sender + Firewall
+    let (prefix_tx, prefix_rx) =
+        tokio::sync::watch::channel::<Option<hr_ipv6::PrefixInfo>>(None);
+
+    // Load firewall config
+    let firewall_config = hr_firewall::FirewallConfig::load();
+
+    // 1) IPv6 Firewall (must be ready BEFORE prefix is announced)
+    let firewall_engine = if firewall_config.enabled {
+        let engine = Arc::new(hr_firewall::FirewallEngine::new(firewall_config));
+        let engine_c = engine.clone();
+        let rx = prefix_rx.clone();
+        let reg = service_registry.clone();
+        spawn_supervised("ipv6-firewall", ServicePriority::Important, reg, move || {
+            let engine = engine_c.clone();
+            let rx = rx.clone();
+            async move { hr_firewall::engine::run_firewall(engine, rx).await }
+        });
+        Some(engine)
+    } else {
+        let mut reg = service_registry.write().await;
+        reg.insert("ipv6-firewall".into(), ServiceStatus {
+            name: "ipv6-firewall".into(),
+            state: ServiceState::Disabled,
+            priority: ServicePriorityLevel::Important,
+            restart_count: 0,
+            last_state_change: now_millis(),
+            error: None,
+        });
+        drop(reg);
+        None
+    };
+
+    // 2) DHCPv6-PD client (obtains /56 from upstream, publishes /64 on channel)
+    if dns_dhcp_config.ipv6.enabled && dns_dhcp_config.ipv6.pd_enabled {
+        let ipv6_config = dns_dhcp_config.ipv6.clone();
+        let tx = prefix_tx.clone();
+        let reg = service_registry.clone();
+        spawn_supervised("ipv6-pd", ServicePriority::Important, reg, move || {
+            let config = ipv6_config.clone();
+            let tx = tx.clone();
+            async move { hr_ipv6::pd_client::run_pd_client(config, tx).await }
+        });
+    } else {
+        let mut reg = service_registry.write().await;
+        reg.insert("ipv6-pd".into(), ServiceStatus {
+            name: "ipv6-pd".into(),
+            state: ServiceState::Disabled,
+            priority: ServicePriorityLevel::Important,
+            restart_count: 0,
+            last_state_change: now_millis(),
+            error: None,
+        });
+        drop(reg);
+    }
+
+    // 3) IPv6 RA sender (announces ULA + GUA prefixes)
     if dns_dhcp_config.ipv6.enabled && dns_dhcp_config.ipv6.ra_enabled {
         let ipv6_config = dns_dhcp_config.ipv6.clone();
+        let rx = prefix_rx.clone();
         let reg = service_registry.clone();
         spawn_supervised("ipv6-ra", ServicePriority::Important, reg, move || {
             let config = ipv6_config.clone();
-            async move { hr_ipv6::ra::run_ra_sender(config).await }
+            let rx = rx.clone();
+            async move { hr_ipv6::ra::run_ra_sender(config, rx).await }
         });
     } else {
         let mut reg = service_registry.write().await;
@@ -326,7 +386,7 @@ async fn main() -> anyhow::Result<()> {
         drop(reg);
     }
 
-    // DHCPv6 (Important)
+    // 4) DHCPv6 stateless server (provides DNS info to LAN clients)
     if dns_dhcp_config.ipv6.enabled && dns_dhcp_config.ipv6.dhcpv6_enabled {
         let ipv6_config = dns_dhcp_config.ipv6.clone();
         let reg = service_registry.clone();
@@ -424,6 +484,7 @@ async fn main() -> anyhow::Result<()> {
         proxy_config_path: env.proxy_config_path.clone(),
         reverseproxy_config_path: env.reverseproxy_config_path.clone(),
         service_registry: service_registry.clone(),
+        firewall: firewall_engine,
     };
 
     let api_router = hr_api::build_router(api_state);

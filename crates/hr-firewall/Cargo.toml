@@ -1,5 +1,5 @@
 [package]
-name = "hr-ipv6"
+name = "hr-firewall"
 version.workspace = true
 edition.workspace = true
 
@@ -9,5 +9,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
-socket2 = { workspace = true }
-rand = { workspace = true }
+hr-ipv6 = { path = "../hr-ipv6" }

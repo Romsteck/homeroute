@@ -14,6 +14,7 @@ members = [
     "hr-servers",
     "hr-system",
     "hr-api",
+    "hr-firewall",
 ]
 
 [workspace.package]

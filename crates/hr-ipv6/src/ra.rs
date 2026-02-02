@@ -1,14 +1,77 @@
 //! Router Advertisement sender via raw ICMPv6 socket.
+//!
+//! Supports both a static ULA prefix from config and a dynamic GUA prefix
+//! received via a `watch` channel from the DHCPv6-PD client.
 
 use std::net::{Ipv6Addr, SocketAddrV6};
+use std::time::Duration;
+
 use anyhow::Result;
 use socket2::{Domain, Protocol, Socket, Type};
-use tracing::{info, warn};
+use tokio::sync::watch;
+use tracing::{info, warn, error};
 
 use crate::config::Ipv6Config;
+use crate::pd_client::PrefixInfo;
 
-/// Build an ICMPv6 Router Advertisement packet.
-fn build_ra_packet(config: &Ipv6Config) -> Vec<u8> {
+/// Assign a GUA address (<prefix>::1) to the LAN interface.
+async fn assign_lan_gua(interface: &str, prefix: &PrefixInfo) {
+    let mut octets = prefix.prefix.octets();
+    octets[15] = 1;
+    let addr = Ipv6Addr::from(octets);
+    let cidr = format!("{}/{}", addr, prefix.prefix_len);
+
+    let output = tokio::process::Command::new("ip")
+        .args(["-6", "addr", "add", &cidr, "dev", interface])
+        .output()
+        .await;
+
+    match output {
+        Ok(o) if o.status.success() => info!("Assigned GUA {} to {}", cidr, interface),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if !stderr.contains("File exists") {
+                error!("Failed to assign GUA {} to {}: {}", cidr, interface, stderr);
+            }
+        }
+        Err(e) => error!("Failed to run ip command: {}", e),
+    }
+}
+
+/// Remove a GUA address from the LAN interface.
+async fn remove_lan_gua(interface: &str, prefix: &PrefixInfo) {
+    let mut octets = prefix.prefix.octets();
+    octets[15] = 1;
+    let addr = Ipv6Addr::from(octets);
+    let cidr = format!("{}/{}", addr, prefix.prefix_len);
+
+    let output = tokio::process::Command::new("ip")
+        .args(["-6", "addr", "del", &cidr, "dev", interface])
+        .output()
+        .await;
+
+    match output {
+        Ok(o) if o.status.success() => info!("Removed GUA {} from {}", cidr, interface),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if !stderr.contains("Cannot assign") {
+                warn!("Failed to remove GUA from {}: {}", interface, stderr);
+            }
+        }
+        Err(e) => warn!("Failed to run ip command: {}", e),
+    }
+}
+
+/// A prefix to include in the Router Advertisement.
+struct PrefixOption {
+    addr: Ipv6Addr,
+    len: u8,
+    valid_lifetime: u32,
+    preferred_lifetime: u32,
+}
+
+/// Build an ICMPv6 Router Advertisement packet with multiple prefixes.
+fn build_ra_packet(config: &Ipv6Config, prefixes: &[PrefixOption]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(128);
 
     // ICMPv6 header
@@ -18,7 +81,6 @@ fn build_ra_packet(config: &Ipv6Config) -> Vec<u8> {
 
     // RA fields
     buf.push(64);  // Cur Hop Limit
-    // Flags: M=managed, O=other
     let flags = if config.ra_managed_flag { 0x80 } else { 0 }
         | if config.ra_other_flag { 0x40 } else { 0 };
     buf.push(flags);
@@ -26,18 +88,16 @@ fn build_ra_packet(config: &Ipv6Config) -> Vec<u8> {
     buf.extend_from_slice(&0u32.to_be_bytes()); // Reachable Time
     buf.extend_from_slice(&0u32.to_be_bytes()); // Retrans Timer
 
-    // Prefix Information Option (type=3, length=4 = 32 bytes)
-    if !config.ra_prefix.is_empty() {
-        if let Some((prefix, prefix_len)) = parse_prefix(&config.ra_prefix) {
-            buf.push(3);   // Type: Prefix Information
-            buf.push(4);   // Length: 4 (in units of 8 bytes = 32 bytes)
-            buf.push(prefix_len);
-            buf.push(0xC0); // Flags: L=1 (on-link), A=1 (autonomous)
-            buf.extend_from_slice(&86400u32.to_be_bytes()); // Valid Lifetime
-            buf.extend_from_slice(&14400u32.to_be_bytes()); // Preferred Lifetime
-            buf.extend_from_slice(&0u32.to_be_bytes()); // Reserved
-            buf.extend_from_slice(&prefix.octets()); // Prefix (16 bytes)
-        }
+    // Prefix Information Options
+    for pfx in prefixes {
+        buf.push(3);   // Type: Prefix Information
+        buf.push(4);   // Length: 4 (in units of 8 bytes = 32 bytes)
+        buf.push(pfx.len);
+        buf.push(0xC0); // Flags: L=1 (on-link), A=1 (autonomous)
+        buf.extend_from_slice(&pfx.valid_lifetime.to_be_bytes());
+        buf.extend_from_slice(&pfx.preferred_lifetime.to_be_bytes());
+        buf.extend_from_slice(&0u32.to_be_bytes()); // Reserved
+        buf.extend_from_slice(&pfx.addr.octets());
     }
 
     // RDNSS Option (type=25) — Recursive DNS Server
@@ -64,21 +124,78 @@ fn parse_prefix(prefix_str: &str) -> Option<(Ipv6Addr, u8)> {
     Some((addr, len))
 }
 
-/// Send periodic Router Advertisements.
-pub async fn run_ra_sender(config: Ipv6Config) -> Result<()> {
+/// Collect the list of prefixes to advertise.
+fn collect_prefixes(config: &Ipv6Config, gua: &Option<PrefixInfo>) -> Vec<PrefixOption> {
+    let mut prefixes = Vec::with_capacity(2);
+
+    // Static ULA prefix from config (always advertised if set)
+    if !config.ra_prefix.is_empty() {
+        if let Some((addr, len)) = parse_prefix(&config.ra_prefix) {
+            prefixes.push(PrefixOption {
+                addr,
+                len,
+                valid_lifetime: 86400,
+                preferred_lifetime: 14400,
+            });
+        }
+    }
+
+    // Dynamic GUA prefix from PD
+    if let Some(pd) = gua {
+        prefixes.push(PrefixOption {
+            addr: pd.prefix,
+            len: pd.prefix_len,
+            valid_lifetime: pd.valid_lifetime,
+            preferred_lifetime: pd.preferred_lifetime,
+        });
+    }
+
+    prefixes
+}
+
+/// Build a deprecation packet: announces the old GUA prefix with lifetime=0.
+fn build_deprecation_packet(config: &Ipv6Config, old_prefix: &PrefixInfo) -> Vec<u8> {
+    let mut prefixes = Vec::with_capacity(2);
+
+    // Keep ULA prefix active
+    if !config.ra_prefix.is_empty() {
+        if let Some((addr, len)) = parse_prefix(&config.ra_prefix) {
+            prefixes.push(PrefixOption {
+                addr,
+                len,
+                valid_lifetime: 86400,
+                preferred_lifetime: 14400,
+            });
+        }
+    }
+
+    // Deprecate old GUA
+    prefixes.push(PrefixOption {
+        addr: old_prefix.prefix,
+        len: old_prefix.prefix_len,
+        valid_lifetime: 0,
+        preferred_lifetime: 0,
+    });
+
+    build_ra_packet(config, &prefixes)
+}
+
+/// Send periodic Router Advertisements with dynamic prefix support.
+pub async fn run_ra_sender(
+    config: Ipv6Config,
+    mut prefix_rx: watch::Receiver<Option<PrefixInfo>>,
+) -> Result<()> {
     if !config.ra_enabled {
         info!("Router Advertisements disabled");
+        std::future::pending::<()>().await;
         return Ok(());
     }
 
-    info!("Starting Router Advertisement sender for prefix {}", config.ra_prefix);
+    info!("Starting Router Advertisement sender (ULA: {})", config.ra_prefix);
 
     let socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))?;
-
-    // Set hop limit to 255 (required for RA)
     socket.set_multicast_hops_v6(255)?;
 
-    // Bind to interface
     if !config.interface.is_empty() {
         #[cfg(target_os = "linux")]
         socket.bind_device(Some(config.interface.as_bytes()))?;
@@ -87,31 +204,88 @@ pub async fn run_ra_sender(config: Ipv6Config) -> Result<()> {
     socket.set_nonblocking(true)?;
     let socket = tokio::net::UdpSocket::from_std(socket.into())?;
 
-    let ra_packet = build_ra_packet(&config);
-
-    // Destination: ff02::1 (all-nodes multicast)
-    let dest = SocketAddrV6::new(
-        "ff02::1".parse().unwrap(),
-        0,
-        0,
-        0,
-    );
-
-    // Send interval: ra_lifetime / 3 (per RFC recommendation), min 200s
+    let dest = SocketAddrV6::new("ff02::1".parse().unwrap(), 0, 0, 0);
     let interval_secs = (config.ra_lifetime_secs / 3).max(200);
 
     info!("RA sender: sending every {}s to ff02::1", interval_secs);
 
+    let mut last_gua: Option<PrefixInfo> = None;
+    let lan_iface = config.interface.clone();
+
+    // Assign GUA to LAN if prefix already available at startup
+    {
+        let initial = prefix_rx.borrow().clone();
+        if let Some(ref info) = initial {
+            assign_lan_gua(&lan_iface, info).await;
+        }
+    }
+
     loop {
+        // Build and send RA with current prefixes
+        let current_gua = prefix_rx.borrow().clone();
+        let prefixes = collect_prefixes(&config, &current_gua);
+        let ra_packet = build_ra_packet(&config, &prefixes);
+
         match socket.send_to(&ra_packet, std::net::SocketAddr::V6(dest)).await {
             Ok(_) => {
-                info!("Sent Router Advertisement ({} bytes)", ra_packet.len());
+                let prefix_names: Vec<String> = prefixes.iter()
+                    .map(|p| format!("{}/{}", p.addr, p.len))
+                    .collect();
+                info!("Sent RA ({} bytes, prefixes: {:?})", ra_packet.len(), prefix_names);
             }
             Err(e) => {
                 warn!("Failed to send RA: {}", e);
             }
         }
 
-        tokio::time::sleep(std::time::Duration::from_secs(interval_secs as u64)).await;
+        last_gua = current_gua;
+
+        // Wait for either: periodic timer or prefix change
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(interval_secs as u64)) => {}
+            _ = prefix_rx.changed() => {
+                let new_gua = prefix_rx.borrow().clone();
+
+                // Manage GUA address on LAN interface
+                match (&new_gua, &last_gua) {
+                    (Some(new), None) => {
+                        // New prefix: assign address
+                        assign_lan_gua(&lan_iface, new).await;
+                    }
+                    (Some(new), Some(old)) if new.prefix != old.prefix => {
+                        // Prefix changed: remove old, assign new
+                        remove_lan_gua(&lan_iface, old).await;
+                        assign_lan_gua(&lan_iface, new).await;
+                    }
+                    (None, Some(old)) => {
+                        // Prefix withdrawn: remove address
+                        remove_lan_gua(&lan_iface, old).await;
+                    }
+                    _ => {}
+                }
+
+                // If prefix was withdrawn, send deprecation for old prefix
+                if new_gua.is_none() {
+                    if let Some(ref old) = last_gua {
+                        info!("GUA prefix withdrawn, sending deprecation RA");
+                        let deprecation = build_deprecation_packet(&config, old);
+                        let _ = socket.send_to(&deprecation, std::net::SocketAddr::V6(dest)).await;
+                    }
+                } else {
+                    info!("GUA prefix changed, sending rapid RAs");
+                }
+
+                // RFC 4861 §6.2.4: send 3 rapid RAs on prefix change
+                for i in 0..3 {
+                    let gua = prefix_rx.borrow().clone();
+                    let pfx = collect_prefixes(&config, &gua);
+                    let pkt = build_ra_packet(&config, &pfx);
+                    let _ = socket.send_to(&pkt, std::net::SocketAddr::V6(dest)).await;
+                    if i < 2 {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        }
     }
 }

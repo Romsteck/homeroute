@@ -17,3 +17,4 @@ pub mod servers;
 pub mod services;
 pub mod wol;
 pub mod ws;
+pub mod firewall;
