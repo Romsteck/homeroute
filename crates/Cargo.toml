@@ -15,6 +15,9 @@ members = [
     "hr-system",
     "hr-api",
     "hr-firewall",
+    "hr-lxd",
+    "hr-registry",
+    "hr-agent",
 ]
 
 [workspace.package]
@@ -89,3 +92,16 @@ rcgen = "0.13"
 
 # Cron scheduling
 tokio-cron-scheduler = "0.13"
+
+# WebSocket client (for hr-agent)
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+
+# TOML config
+toml = "0.8"
+
+# Crypto (already in tree via rustls)
+ring = "0.17"
+
+# Random (for OsRng)
+rand_core = { version = "0.6", features = ["getrandom"] }

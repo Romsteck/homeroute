@@ -20,6 +20,8 @@ hr-analytics = { path = "../hr-analytics" }
 hr-servers = { path = "../hr-servers" }
 hr-api = { path = "../hr-api" }
 hr-firewall = { path = "../hr-firewall" }
+hr-registry = { path = "../hr-registry" }
+hr-lxd = { path = "../hr-lxd" }
 
 axum = { workspace = true }
 tokio = { workspace = true }

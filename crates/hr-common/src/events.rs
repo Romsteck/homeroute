@@ -15,6 +15,8 @@ pub struct EventBus {
     pub config_changed: broadcast::Sender<ConfigChangeEvent>,
     /// System update events (updates → websocket)
     pub updates: broadcast::Sender<UpdateEvent>,
+    /// Agent status change events (registry → websocket)
+    pub agent_status: broadcast::Sender<AgentStatusEvent>,
 }
 
 impl EventBus {
@@ -26,6 +28,7 @@ impl EventBus {
             server_status: broadcast::channel(64).0,
             config_changed: broadcast::channel(16).0,
             updates: broadcast::channel(256).0,
+            agent_status: broadcast::channel(64).0,
         }
     }
 }
@@ -83,6 +86,13 @@ pub enum ConfigChangeEvent {
     DnsDhcp,
     Adblock,
     Users,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentStatusEvent {
+    pub app_id: String,
+    pub slug: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

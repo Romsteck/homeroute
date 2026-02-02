@@ -59,6 +59,7 @@ fn api_routes() -> Router<ApiState> {
         .nest("/wol", routes::wol::router())
         .nest("/services", routes::services::router())
         .nest("/firewall", routes::firewall::router())
+        .nest("/applications", routes::applications::router())
         .merge(routes::ws::router())
         .merge(routes::health::router())
 }

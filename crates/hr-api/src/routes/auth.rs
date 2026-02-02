@@ -16,6 +16,7 @@ pub fn router() -> Router<ApiState> {
         .route("/login", post(login))
         .route("/logout", post(logout))
         .route("/check", get(check))
+        .route("/forward-check", get(forward_check))
         .route("/me", get(me))
         .route("/sessions", get(list_sessions))
         .route("/sessions/{id}", delete(revoke_session))
@@ -347,4 +348,49 @@ async fn revoke_session(
     let _ = state.auth.sessions.delete(&target_id);
 
     (axum::http::StatusCode::OK, Json(json!({"success": true})))
+}
+
+/// Forward-auth endpoint for agent reverse proxies.
+/// Called by hr-agent with X-Forwarded-Host, X-Forwarded-Uri, X-Forwarded-Proto, Cookie headers.
+/// Returns 200 + X-Auth-User on success, 401 + login_url on unauthenticated, 403 on forbidden.
+async fn forward_check(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> (axum::http::StatusCode, Json<Value>) {
+    use hr_auth::forward_auth::{check_forward_auth, ForwardAuthResult};
+
+    let forwarded_host = headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let forwarded_uri = headers
+        .get("x-forwarded-uri")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("/");
+    let forwarded_proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("https");
+
+    let cookie_value = headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|c| {
+                let c = c.trim();
+                c.strip_prefix("auth_session=")
+            })
+        });
+
+    match check_forward_auth(&state.auth, cookie_value, forwarded_host, forwarded_uri, forwarded_proto, &[]) {
+        ForwardAuthResult::Success { user } => {
+            (axum::http::StatusCode::OK, Json(json!({"authenticated": true, "user": user.username})))
+        }
+        ForwardAuthResult::Unauthorized { login_url } => {
+            (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"authenticated": false, "login_url": login_url})))
+        }
+        ForwardAuthResult::Forbidden { message } => {
+            (axum::http::StatusCode::FORBIDDEN, Json(json!({"authenticated": false, "error": message})))
+        }
+    }
 }

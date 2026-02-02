@@ -89,12 +89,19 @@ export const getCertificatesStatus = () => api.get('/reverseproxy/certificates/s
 // Reverse Proxy - Environments
 export const getReverseProxyEnvironments = () => api.get('/reverseproxy/environments');
 
-// Reverse Proxy - Applications
+// Reverse Proxy - Applications (legacy)
 export const getReverseProxyApplications = () => api.get('/reverseproxy/applications');
 export const addReverseProxyApplication = (app) => api.post('/reverseproxy/applications', app);
 export const updateReverseProxyApplication = (id, updates) => api.put(`/reverseproxy/applications/${id}`, updates);
 export const deleteReverseProxyApplication = (id) => api.delete(`/reverseproxy/applications/${id}`);
 export const toggleReverseProxyApplication = (id, enabled) => api.post(`/reverseproxy/applications/${id}/toggle`, { enabled });
+
+// Applications (Agent-based LXC)
+export const getApplications = () => api.get('/applications');
+export const createApplication = (app) => api.post('/applications', app);
+export const updateApplication = (id, updates) => api.put(`/applications/${id}`, updates);
+export const deleteApplication = (id) => api.delete(`/applications/${id}`);
+export const toggleApplication = (id, enabled) => api.post(`/applications/${id}/toggle`, { enabled });
 
 // Rust Proxy
 export const getRustProxyStatus = () => api.get('/rust-proxy/status');

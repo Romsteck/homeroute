@@ -6,6 +6,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use hr_registry::cloudflare;
+
 use crate::state::ApiState;
 
 pub fn router() -> Router<ApiState> {
@@ -24,11 +26,13 @@ async fn status(State(state): State<ApiState>) -> Json<Value> {
     let ipv6 = get_ipv6_address(interface).await;
 
     // Get Cloudflare record if configured
-    let cf_ip = if env.cf_api_token.is_some() && env.cf_zone_id.is_some() && env.cf_record_name.is_some()
-    {
-        get_cloudflare_ip(env).await.ok()
-    } else {
-        None
+    let cf_ip = match (&env.cf_api_token, &env.cf_zone_id, &env.cf_record_name) {
+        (Some(token), Some(zone_id), Some(record_name)) => {
+            cloudflare::get_aaaa_record_content(token, zone_id, record_name)
+                .await
+                .ok()
+        }
+        _ => None,
     };
 
     let configured = env.cf_api_token.is_some()
@@ -52,7 +56,6 @@ async fn status(State(state): State<ApiState>) -> Json<Value> {
 
     // Parse last update info from logs
     let last_update = log.lines().rev().find(|l| l.contains("Updated ")).map(|l| {
-        // Extract timestamp from "[2024-01-01T00:00:00Z] Updated ..."
         l.trim_start_matches('[').split(']').next().unwrap_or("").to_string()
     });
 
@@ -98,8 +101,8 @@ async fn force_update(State(state): State<ApiState>) -> Json<Value> {
         None => return Json(json!({"success": false, "error": "Impossible de determiner l'adresse IPv6"})),
     };
 
-    match update_cloudflare_record(token, zone_id, record_name, &ipv6, env.cf_proxied).await {
-        Ok(()) => {
+    match cloudflare::upsert_aaaa_record(token, zone_id, record_name, &ipv6, env.cf_proxied).await {
+        Ok(_record_id) => {
             log_ddns(&format!("Updated {} to {}", record_name, ipv6)).await;
             Json(json!({"success": true, "ipv6": ipv6}))
         }
@@ -116,8 +119,6 @@ struct UpdateTokenRequest {
 }
 
 async fn update_token(Json(body): Json<UpdateTokenRequest>) -> Json<Value> {
-    // We can't update the env config at runtime in the same way Node.js does.
-    // Instead, we write to the .env file for next restart.
     let env_path = "/opt/homeroute/.env";
     let content = tokio::fs::read_to_string(env_path)
         .await
@@ -209,148 +210,6 @@ async fn get_ipv6_address(interface: &str) -> Option<String> {
         }
     }
     None
-}
-
-async fn get_cloudflare_ip(
-    env: &hr_common::config::EnvConfig,
-) -> Result<String, String> {
-    let token = env.cf_api_token.as_ref().ok_or("No token")?;
-    let zone_id = env.cf_zone_id.as_ref().ok_or("No zone ID")?;
-    let record_name = env.cf_record_name.as_ref().ok_or("No record name")?;
-
-    let client = reqwest::Client::new();
-    let url = format!(
-        "https://api.cloudflare.com/client/v4/zones/{}/dns_records?type=AAAA&name={}",
-        zone_id, record_name
-    );
-
-    let resp = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
-
-    // Check for Cloudflare API errors
-    if let Some(false) = body.get("success").and_then(|s| s.as_bool()) {
-        let errors = body.get("errors").and_then(|e| e.as_array())
-            .map(|arr| arr.iter()
-                .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
-                .collect::<Vec<_>>()
-                .join(", "))
-            .unwrap_or_else(|| "Unknown error".to_string());
-        return Err(format!("Cloudflare API: {}", errors));
-    }
-
-    body.get("result")
-        .and_then(|r| r.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|r| r.get("content"))
-        .and_then(|c| c.as_str())
-        .map(String::from)
-        .ok_or_else(|| "Record not found".to_string())
-}
-
-async fn update_cloudflare_record(
-    token: &str,
-    zone_id: &str,
-    record_name: &str,
-    ipv6: &str,
-    proxied: bool,
-) -> Result<(), String> {
-    let client = reqwest::Client::new();
-
-    // First get the record ID
-    let list_url = format!(
-        "https://api.cloudflare.com/client/v4/zones/{}/dns_records?type=AAAA&name={}",
-        zone_id, record_name
-    );
-
-    let resp = client
-        .get(&list_url)
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
-
-    // Check for Cloudflare API errors
-    if let Some(false) = body.get("success").and_then(|s| s.as_bool()) {
-        let errors = body.get("errors").and_then(|e| e.as_array())
-            .map(|arr| arr.iter()
-                .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
-                .collect::<Vec<_>>()
-                .join(", "))
-            .unwrap_or_else(|| "Unknown error".to_string());
-        return Err(format!("Cloudflare API: {}", errors));
-    }
-
-    let records = body
-        .get("result")
-        .and_then(|r| r.as_array())
-        .ok_or("Invalid response from Cloudflare")?;
-
-    if let Some(record) = records.first() {
-        // Update existing record
-        let record_id = record
-            .get("id")
-            .and_then(|i| i.as_str())
-            .ok_or("No record ID")?;
-
-        let update_url = format!(
-            "https://api.cloudflare.com/client/v4/zones/{}/dns_records/{}",
-            zone_id, record_id
-        );
-
-        let resp = client
-            .put(&update_url)
-            .header("Authorization", format!("Bearer {}", token))
-            .json(&json!({
-                "type": "AAAA",
-                "name": record_name,
-                "content": ipv6,
-                "ttl": 120,
-                "proxied": proxied
-            }))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Cloudflare API error: {}", body));
-        }
-    } else {
-        // Create new record
-        let create_url = format!(
-            "https://api.cloudflare.com/client/v4/zones/{}/dns_records",
-            zone_id
-        );
-
-        let resp = client
-            .post(&create_url)
-            .header("Authorization", format!("Bearer {}", token))
-            .json(&json!({
-                "type": "AAAA",
-                "name": record_name,
-                "content": ipv6,
-                "ttl": 120,
-                "proxied": proxied
-            }))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Cloudflare API error: {}", body));
-        }
-    }
-
-    Ok(())
 }
 
 async fn log_ddns(message: &str) {

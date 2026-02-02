@@ -16,6 +16,7 @@ hr-analytics = { path = "../hr-analytics" }
 hr-servers = { path = "../hr-servers" }
 hr-system = { path = "../hr-system" }
 hr-firewall = { path = "../hr-firewall" }
+hr-registry = { path = "../hr-registry" }
 tokio = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }
@@ -31,3 +32,4 @@ uuid = { workspace = true }
 reqwest = { workspace = true }
 tokio-stream = { workspace = true }
 ipnet = { workspace = true }
+ring = { workspace = true }

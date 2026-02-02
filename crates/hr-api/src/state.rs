@@ -9,6 +9,7 @@ use hr_dns::SharedDnsState;
 use hr_dhcp::SharedDhcpState;
 use hr_firewall::FirewallEngine;
 use hr_proxy::{ProxyState, TlsManager};
+use hr_registry::AgentRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -28,6 +29,7 @@ pub struct ApiState {
     pub analytics: Arc<AnalyticsStore>,
     pub service_registry: SharedServiceRegistry,
     pub firewall: Option<Arc<FirewallEngine>>,
+    pub registry: Option<Arc<AgentRegistry>>,
 
     /// Path to dns-dhcp-config.json
     pub dns_dhcp_config_path: PathBuf,

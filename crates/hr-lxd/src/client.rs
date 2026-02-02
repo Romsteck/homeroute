@@ -1,0 +1,183 @@
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use std::path::Path;
+use tokio::process::Command;
+use tracing::{info, warn};
+
+const PROFILE_NAME: &str = "homeroute-agent";
+const IMAGE: &str = "ubuntu:24.04";
+
+/// Information about an LXD container.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContainerInfo {
+    pub name: String,
+    pub status: ContainerState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub enum ContainerState {
+    Running,
+    Stopped,
+    Unknown,
+}
+
+/// Client for managing LXD containers via the `lxc` CLI.
+pub struct LxdClient;
+
+impl LxdClient {
+    /// Create and start a container with the `homeroute-agent` profile.
+    pub async fn create_container(name: &str) -> Result<()> {
+        info!(container = name, "Creating LXC container");
+
+        let output = Command::new("lxc")
+            .args(["launch", IMAGE, name, "--profile", PROFILE_NAME])
+            .output()
+            .await
+            .context("failed to run lxc launch")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("lxc launch failed: {stderr}");
+        }
+
+        // Wait for the container to get network connectivity
+        Self::wait_ready(name).await?;
+
+        info!(container = name, "Container created and running");
+        Ok(())
+    }
+
+    /// Wait for a container to be running and have a network interface up.
+    async fn wait_ready(name: &str) -> Result<()> {
+        for i in 0..30 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+            let output = Command::new("lxc")
+                .args(["exec", name, "--", "ip", "link", "show", "eth0"])
+                .output()
+                .await?;
+
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if stdout.contains("state UP") || stdout.contains("UP") {
+                    return Ok(());
+                }
+            }
+
+            if i == 29 {
+                warn!(container = name, "Container network not ready after 30s, proceeding anyway");
+            }
+        }
+        Ok(())
+    }
+
+    /// Push a local file into a container.
+    pub async fn push_file(container: &str, src: &Path, dest: &str) -> Result<()> {
+        let target = format!("{container}/{dest}");
+        let output = Command::new("lxc")
+            .args(["file", "push", src.to_str().unwrap_or(""), &target])
+            .output()
+            .await
+            .context("failed to run lxc file push")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("lxc file push to {target} failed: {stderr}");
+        }
+        Ok(())
+    }
+
+    /// Execute a command inside a container and return stdout.
+    pub async fn exec(container: &str, cmd: &[&str]) -> Result<String> {
+        let mut args = vec!["exec", container, "--"];
+        args.extend_from_slice(cmd);
+
+        let output = Command::new("lxc")
+            .args(&args)
+            .output()
+            .await
+            .context("failed to run lxc exec")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("lxc exec {cmd:?} failed: {stderr}");
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// Stop and delete a container.
+    pub async fn delete_container(name: &str) -> Result<()> {
+        info!(container = name, "Deleting LXC container");
+
+        // Force stop (ignore error if already stopped)
+        let _ = Command::new("lxc")
+            .args(["stop", name, "--force"])
+            .output()
+            .await;
+
+        let output = Command::new("lxc")
+            .args(["delete", name])
+            .output()
+            .await
+            .context("failed to run lxc delete")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("lxc delete {name} failed: {stderr}");
+        }
+
+        info!(container = name, "Container deleted");
+        Ok(())
+    }
+
+    /// List containers that use the `homeroute-agent` profile.
+    pub async fn list_containers() -> Result<Vec<ContainerInfo>> {
+        let output = Command::new("lxc")
+            .args(["list", "--format", "json"])
+            .output()
+            .await
+            .context("failed to run lxc list")?;
+
+        if !output.status.success() {
+            anyhow::bail!("lxc list failed");
+        }
+
+        let all: Vec<serde_json::Value> =
+            serde_json::from_slice(&output.stdout).context("failed to parse lxc list JSON")?;
+
+        let mut containers = Vec::new();
+        for entry in all {
+            // Check if this container uses the homeroute-agent profile
+            let profiles = entry
+                .get("profiles")
+                .and_then(|p| p.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            if !profiles.contains(&PROFILE_NAME) {
+                continue;
+            }
+
+            let name = entry
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let status = match entry.get("status").and_then(|s| s.as_str()) {
+                Some("Running") => ContainerState::Running,
+                Some("Stopped") => ContainerState::Stopped,
+                _ => ContainerState::Unknown,
+            };
+
+            containers.push(ContainerInfo { name, status });
+        }
+
+        Ok(containers)
+    }
+}
