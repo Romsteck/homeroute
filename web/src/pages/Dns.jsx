@@ -54,7 +54,8 @@ function Dns() {
   const filteredLeases = leases.filter(lease =>
     lease.hostname?.toLowerCase().includes(search.toLowerCase()) ||
     lease.ip.includes(search) ||
-    lease.mac.toLowerCase().includes(search.toLowerCase())
+    lease.mac.toLowerCase().includes(search.toLowerCase()) ||
+    lease.ipv6_addresses?.some(addr => addr.includes(search))
   );
 
   if (loading) {
@@ -162,7 +163,8 @@ function Dns() {
             <thead>
               <tr className="text-left text-gray-400 border-b border-gray-700">
                 <th className="pb-2">Hostname</th>
-                <th className="pb-2">Adresse IP</th>
+                <th className="pb-2">Adresse IPv4</th>
+                <th className="pb-2">Adresses IPv6</th>
                 <th className="pb-2">Adresse MAC</th>
                 <th className="pb-2">Expiration</th>
               </tr>
@@ -174,6 +176,17 @@ function Dns() {
                     {lease.hostname || <span className="text-gray-500">-</span>}
                   </td>
                   <td className="py-2 font-mono text-blue-400">{lease.ip}</td>
+                  <td className="py-2 font-mono text-xs">
+                    {lease.ipv6_addresses?.length > 0 ? (
+                      <div className="space-y-0.5">
+                        {lease.ipv6_addresses.map(addr => (
+                          <div key={addr} className="text-purple-400">{addr}</div>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-gray-500">-</span>
+                    )}
+                  </td>
                   <td className="py-2 font-mono text-gray-400 text-xs">{lease.mac}</td>
                   <td className="py-2 text-gray-400 text-xs">
                     {new Date(lease.expiry * 1000).toLocaleString('fr-FR')}

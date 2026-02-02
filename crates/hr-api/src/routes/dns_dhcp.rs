@@ -108,20 +108,61 @@ async fn update_config(
 }
 
 async fn get_leases(State(state): State<ApiState>) -> Json<Value> {
-    let dhcp = state.dhcp.read().await;
-    let leases: Vec<Value> = dhcp
-        .lease_store
-        .all_leases()
+    // Collect lease data while holding the lock
+    let lease_data: Vec<(u64, String, String, Option<String>, Option<String>)> = {
+        let dhcp = state.dhcp.read().await;
+        dhcp.lease_store
+            .all_leases()
+            .iter()
+            .map(|l| {
+                (
+                    l.expiry,
+                    l.mac.clone(),
+                    l.ip.to_string(),
+                    l.hostname.clone(),
+                    l.client_id.clone(),
+                )
+            })
+            .collect()
+    };
+
+    // Build MAC -> Vec<ipv6> from neighbor table
+    let mut ipv6_by_mac: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    if let Ok(output) = tokio::process::Command::new("ip")
+        .args(["-6", "neigh", "show", "dev", "br-lan"])
+        .output()
+        .await
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 4 && parts[1] == "lladdr" {
+                    let ipv6 = parts[0];
+                    let mac = parts[2].to_lowercase();
+                    if ipv6.starts_with("fe80:") || ipv6.starts_with("fd") {
+                        continue;
+                    }
+                    ipv6_by_mac.entry(mac).or_default().push(ipv6.to_string());
+                }
+            }
+        }
+    }
+
+    let result: Vec<Value> = lease_data
         .iter()
-        .map(|l| {
+        .map(|(expiry, mac, ip, hostname, client_id)| {
+            let ipv6 = ipv6_by_mac.get(&mac.to_lowercase()).cloned().unwrap_or_default();
             json!({
-                "expiry": l.expiry,
-                "mac": l.mac,
-                "ip": l.ip.to_string(),
-                "hostname": l.hostname,
-                "client_id": l.client_id
+                "expiry": expiry,
+                "mac": mac,
+                "ip": ip,
+                "hostname": hostname,
+                "client_id": client_id,
+                "ipv6_addresses": ipv6
             })
         })
         .collect();
-    Json(json!({"success": true, "leases": leases}))
+    Json(json!({"success": true, "leases": result}))
 }

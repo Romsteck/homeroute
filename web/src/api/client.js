@@ -39,8 +39,9 @@ export const getDhcpLeases = () => api.get('/dns-dhcp/leases');
 export const getInterfaces = () => api.get('/network/interfaces');
 export const getRoutes = () => api.get('/network/routes');
 export const getIpv6Routes = () => api.get('/network/routes6');
+export const getLanClients = () => api.get('/network/clients');
 
-// NAT/Firewall
+// NAT/Firewall (legacy)
 export const getNatRules = () => api.get('/nat/rules');
 export const getFilterRules = () => api.get('/nat/filter');
 export const getMasqueradeRules = () => api.get('/nat/masquerade');
@@ -48,6 +49,14 @@ export const getPortForwards = () => api.get('/nat/forwards');
 export const getFirewallStatus = () => api.get('/nat/status');
 export const getRoutingRules = () => api.get('/nat/routing-rules');
 export const getChainStats = () => api.get('/nat/stats');
+
+// IPv6 Firewall
+export const getIpv6FirewallStatus = () => api.get('/firewall/status');
+export const getIpv6FirewallRules = () => api.get('/firewall/rules');
+export const addIpv6FirewallRule = (rule) => api.post('/firewall/rules', rule);
+export const deleteIpv6FirewallRule = (id) => api.delete(`/firewall/rules/${id}`);
+export const toggleIpv6FirewallRule = (id) => api.patch(`/firewall/rules/${id}`);
+export const getIpv6FirewallRuleset = () => api.get('/firewall/current-ruleset');
 
 // AdBlock
 export const getAdblockStats = () => api.get('/adblock/stats');
@@ -72,6 +81,7 @@ export const updateReverseProxyHost = (id, updates) => api.put(`/reverseproxy/ho
 export const deleteReverseProxyHost = (id) => api.delete(`/reverseproxy/hosts/${id}`);
 export const toggleReverseProxyHost = (id, enabled) => api.post(`/reverseproxy/hosts/${id}/toggle`, { enabled });
 export const updateBaseDomain = (baseDomain) => api.put('/reverseproxy/config/domain', { baseDomain });
+export const updateLocalNetworks = (networks) => api.put('/reverseproxy/config/networks', { networks });
 export const renewCertificates = () => api.post('/reverseproxy/certificates/renew');
 export const reloadProxy = () => api.post('/reverseproxy/reload');
 export const getCertificatesStatus = () => api.get('/reverseproxy/certificates/status');

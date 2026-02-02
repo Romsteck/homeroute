@@ -33,6 +33,7 @@ pub fn router() -> Router<ApiState> {
             put(update_application).delete(delete_application),
         )
         .route("/applications/{id}/toggle", post(toggle_application))
+        .route("/config/networks", put(update_local_networks))
 }
 
 /// Load the reverseproxy-config.json
@@ -178,6 +179,46 @@ async fn sync_and_reload(state: &ApiState) -> Result<(), String> {
         }
     }
 
+    // Resolve cert_id for each route: find existing cert or issue a new one
+    let ca_certs = state.ca.list_certificates().unwrap_or_default();
+    for route in &mut routes {
+        let domain = route.get("domain").and_then(|d| d.as_str()).unwrap_or("");
+        if domain.is_empty() {
+            continue;
+        }
+        // Find existing cert for this domain (most recent first)
+        let existing = ca_certs
+            .iter()
+            .rev()
+            .find(|c| c.domains.iter().any(|d| d == domain) && !c.is_expired());
+        if let Some(cert) = existing {
+            route["cert_id"] = json!(cert.id);
+        } else {
+            // Issue a new certificate
+            match state.ca.issue_certificate(vec![domain.to_string()]).await {
+                Ok(cert) => {
+                    route["cert_id"] = json!(cert.id);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to issue cert for {}: {}", domain, e);
+                }
+            }
+        }
+    }
+
+    // Also ensure management domains have certificates
+    for mgmt_sub in &["proxy", "auth"] {
+        let mgmt_domain = format!("{}.{}", mgmt_sub, base_domain);
+        let has_cert = ca_certs
+            .iter()
+            .any(|c| c.domains.iter().any(|d| d == &mgmt_domain) && !c.is_expired());
+        if !has_cert {
+            if let Err(e) = state.ca.issue_certificate(vec![mgmt_domain.clone()]).await {
+                tracing::error!("Failed to issue cert for {}: {}", mgmt_domain, e);
+            }
+        }
+    }
+
     // Load current proxy config, update routes, save
     let proxy_config_path = &state.proxy_config_path;
     let proxy_content = tokio::fs::read_to_string(proxy_config_path)
@@ -189,6 +230,11 @@ async fn sync_and_reload(state: &ApiState) -> Result<(), String> {
     proxy_config["routes"] = json!(routes);
     proxy_config["base_domain"] = json!(base_domain);
 
+    // Sync local networks from reverseproxy config
+    if let Some(networks) = rp_config.get("localNetworks").and_then(|n| n.as_array()) {
+        proxy_config["local_networks"] = json!(networks);
+    }
+
     let content =
         serde_json::to_string_pretty(&proxy_config).map_err(|e| format!("Serialize: {}", e))?;
     let tmp = proxy_config_path.with_extension("json.tmp");
@@ -199,10 +245,25 @@ async fn sync_and_reload(state: &ApiState) -> Result<(), String> {
         .await
         .map_err(|e| format!("Rename: {}", e))?;
 
-    // Reload proxy config in memory
+    // Reload proxy config and TLS certificates in memory
     if let Ok(new_proxy_config) =
         hr_proxy::ProxyConfig::load_from_file(proxy_config_path)
     {
+        if let Err(e) = state.tls_manager.reload_certificates(&new_proxy_config.routes) {
+            tracing::error!("Failed to reload TLS certs: {}", e);
+        }
+        // Also load management domain certs
+        let refreshed_certs = state.ca.list_certificates().unwrap_or_default();
+        for mgmt_sub in &["proxy", "auth"] {
+            let mgmt_domain = format!("{}.{}", mgmt_sub, base_domain);
+            if let Some(cert) = refreshed_certs
+                .iter()
+                .rev()
+                .find(|c| c.domains.iter().any(|d| d == &mgmt_domain) && !c.is_expired())
+            {
+                let _ = state.tls_manager.load_certificate(&mgmt_domain, &cert.id);
+            }
+        }
         state.proxy.reload_config(new_proxy_config);
     }
 
@@ -211,7 +272,21 @@ async fn sync_and_reload(state: &ApiState) -> Result<(), String> {
 
 async fn get_config(State(state): State<ApiState>) -> Json<Value> {
     match load_rp_config(&state).await {
-        Ok(config) => Json(json!({"success": true, "config": config})),
+        Ok(mut config) => {
+            // Include default local networks if not configured
+            if config.get("localNetworks").is_none() {
+                config["localNetworks"] = json!([
+                    "192.168.0.0/16",
+                    "10.0.0.0/8",
+                    "172.16.0.0/12",
+                    "127.0.0.0/8",
+                    "fd00::/8",
+                    "fe80::/10",
+                    "::1/128"
+                ]);
+            }
+            Json(json!({"success": true, "config": config}))
+        }
         Err(e) => Json(json!({"success": false, "error": e})),
     }
 }
@@ -231,6 +306,40 @@ async fn update_domain(
     };
 
     config["baseDomain"] = json!(body.domain);
+
+    if let Err(e) = save_rp_config(&state, &config).await {
+        return Json(json!({"success": false, "error": e}));
+    }
+
+    if let Err(e) = sync_and_reload(&state).await {
+        return Json(json!({"success": false, "error": format!("Sync failed: {}", e)}));
+    }
+
+    Json(json!({"success": true}))
+}
+
+#[derive(Deserialize)]
+struct UpdateLocalNetworksRequest {
+    networks: Vec<String>,
+}
+
+async fn update_local_networks(
+    State(state): State<ApiState>,
+    Json(body): Json<UpdateLocalNetworksRequest>,
+) -> Json<Value> {
+    // Validate each entry is a valid CIDR
+    for cidr in &body.networks {
+        if cidr.parse::<ipnet::IpNet>().is_err() {
+            return Json(json!({"success": false, "error": format!("Invalid CIDR: {}", cidr)}));
+        }
+    }
+
+    let mut config = match load_rp_config(&state).await {
+        Ok(c) => c,
+        Err(e) => return Json(json!({"success": false, "error": e})),
+    };
+
+    config["localNetworks"] = json!(body.networks);
 
     if let Err(e) = save_rp_config(&state, &config).await {
         return Json(json!({"success": false, "error": e}));
