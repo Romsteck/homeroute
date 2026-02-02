@@ -15,6 +15,7 @@ hr-adblock = { path = "../hr-adblock" }
 hr-analytics = { path = "../hr-analytics" }
 hr-servers = { path = "../hr-servers" }
 hr-system = { path = "../hr-system" }
+hr-firewall = { path = "../hr-firewall" }
 tokio = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }
