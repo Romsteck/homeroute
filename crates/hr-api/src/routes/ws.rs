@@ -90,13 +90,17 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
             result = agent_rx.recv() => {
                 match result {
                     Ok(event) => {
+                        let mut data = json!({
+                            "appId": event.app_id,
+                            "slug": event.slug,
+                            "status": event.status
+                        });
+                        if let Some(message) = &event.message {
+                            data["message"] = json!(message);
+                        }
                         let msg = json!({
                             "type": "agent:status",
-                            "data": {
-                                "appId": event.app_id,
-                                "slug": event.slug,
-                                "status": event.status
-                            }
+                            "data": data
                         });
                         if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
                             break;

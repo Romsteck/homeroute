@@ -93,6 +93,9 @@ pub struct AgentStatusEvent {
     pub app_id: String,
     pub slug: String,
     pub status: String,
+    /// Optional step description for deployment progress.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

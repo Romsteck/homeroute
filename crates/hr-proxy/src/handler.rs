@@ -40,6 +40,9 @@ pub struct ProxyState {
     pub events: Option<broadcast::Sender<HttpTrafficEvent>>,
     /// Management API port for proxy.{base_domain} and auth.{base_domain}
     pub management_port: u16,
+    /// Agent TLS passthrough: domain → IPv6 socket address string (e.g. "[2a0d::6]:443")
+    /// When SNI matches, raw TCP is forwarded to the agent instead of TLS termination.
+    agent_passthrough: RwLock<std::collections::HashMap<String, String>>,
 }
 
 impl ProxyState {
@@ -64,6 +67,7 @@ impl ProxyState {
             auth: None,
             events: None,
             management_port,
+            agent_passthrough: RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -121,6 +125,27 @@ impl ProxyState {
     pub fn config(&self) -> ProxyConfig {
         let snapshot = self.snapshot.read().unwrap();
         snapshot.config.clone()
+    }
+
+    /// Add a TLS passthrough entry: domain → agent socket address (e.g. "[2a0d::6]:443")
+    pub fn set_passthrough(&self, domain: String, addr: String) {
+        let mut map = self.agent_passthrough.write().unwrap();
+        info!(domain = domain, addr = addr, "Added TLS passthrough");
+        map.insert(domain, addr);
+    }
+
+    /// Remove a TLS passthrough entry by domain.
+    pub fn remove_passthrough(&self, domain: &str) {
+        let mut map = self.agent_passthrough.write().unwrap();
+        if map.remove(domain).is_some() {
+            info!(domain = domain, "Removed TLS passthrough");
+        }
+    }
+
+    /// Look up a passthrough target for a given SNI domain.
+    pub fn get_passthrough(&self, domain: &str) -> Option<String> {
+        let map = self.agent_passthrough.read().unwrap();
+        map.get(domain).cloned()
     }
 }
 

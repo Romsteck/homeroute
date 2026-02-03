@@ -9,6 +9,27 @@ use serde_json::{json, Value};
 
 use crate::state::ApiState;
 
+/// Convert a MAC address to EUI-64 identifier (lower 64 bits of IPv6 address)
+fn mac_to_eui64(mac: &str) -> Option<u128> {
+    let parts: Vec<u8> = mac
+        .split(':')
+        .filter_map(|s| u8::from_str_radix(s, 16).ok())
+        .collect();
+    if parts.len() != 6 {
+        return None;
+    }
+    // EUI-64: insert FF:FE in the middle and flip the U/L bit (bit 1 of first byte)
+    let eui64: u64 = ((parts[0] ^ 0x02) as u64) << 56
+        | (parts[1] as u64) << 48
+        | (parts[2] as u64) << 40
+        | 0xFF << 32
+        | 0xFE << 24
+        | (parts[3] as u64) << 16
+        | (parts[4] as u64) << 8
+        | (parts[5] as u64);
+    Some(eui64 as u128)
+}
+
 pub fn router() -> Router<ApiState> {
     Router::new()
         .route("/interfaces", get(interfaces))
@@ -135,7 +156,59 @@ async fn lan_clients(State(state): State<ApiState>) -> Json<Value> {
     }
     drop(dhcp);
 
-    // 2. Get IPv6 neighbor table on br-lan
+    // 2. Get IPv6 prefixes and ping EUI-64 derived addresses to refresh neighbor table
+    let mut prefixes: Vec<(u128, u8)> = Vec::new();
+    if let Ok(output) = tokio::process::Command::new("ip")
+        .args(["-6", "addr", "show", "dev", "br-lan", "scope", "global"])
+        .output()
+        .await
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let line = line.trim();
+                if line.starts_with("inet6 ") {
+                    if let Some(addr_part) = line.strip_prefix("inet6 ") {
+                        if let Some((addr_str, rest)) = addr_part.split_once('/') {
+                            if let Ok(addr) = addr_str.parse::<std::net::Ipv6Addr>() {
+                                let prefix_len: u8 = rest
+                                    .split_whitespace()
+                                    .next()
+                                    .and_then(|s| s.parse().ok())
+                                    .unwrap_or(64);
+                                let prefix_mask = !0u128 << (128 - prefix_len);
+                                let prefix = u128::from(addr) & prefix_mask;
+                                prefixes.push((prefix, prefix_len));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Spawn background task to ping EUI-64 addresses (fire-and-forget)
+    // Refreshes neighbor table for subsequent requests without blocking this one
+    let macs: Vec<String> = clients.keys().cloned().collect();
+    let prefixes_clone = prefixes.clone();
+    tokio::spawn(async move {
+        for mac in macs {
+            if let Some(eui64) = mac_to_eui64(&mac) {
+                for (prefix, _) in &prefixes_clone {
+                    let addr = prefix | eui64;
+                    let ipv6 = std::net::Ipv6Addr::from(addr);
+                    tokio::spawn(async move {
+                        let _ = tokio::process::Command::new("ping")
+                            .args(["-6", "-c", "1", "-W", "1", &ipv6.to_string()])
+                            .output()
+                            .await;
+                    });
+                }
+            }
+        }
+    });
+
+    // 3. Read neighbor table
     if let Ok(output) = tokio::process::Command::new("ip")
         .args(["-6", "neigh", "show", "dev", "br-lan"])
         .output()
@@ -150,8 +223,8 @@ async fn lan_clients(State(state): State<ApiState>) -> Json<Value> {
                     let ipv6 = parts[0];
                     let mac = parts[2].to_lowercase();
 
-                    // Skip link-local (fe80::) and ULA (fd00::)
-                    if ipv6.starts_with("fe80:") || ipv6.starts_with("fd") {
+                    // Skip link-local addresses only (fe80::)
+                    if ipv6.starts_with("fe80:") {
                         continue;
                     }
 

@@ -5,3 +5,4 @@ pub mod pd_client;
 
 pub use config::Ipv6Config;
 pub use pd_client::{PrefixInfo, PrefixSender, PrefixWatch};
+pub use dhcpv6::{Dhcpv6Lease, Dhcpv6LeaseStore};

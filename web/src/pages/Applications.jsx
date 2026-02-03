@@ -20,6 +20,8 @@ import {
   AlertTriangle,
   X,
   Terminal,
+  Code2,
+  Loader2,
 } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
@@ -36,18 +38,19 @@ import {
 
 const STATUS_BADGES = {
   connected: { color: 'text-green-400 bg-green-900/30', icon: Wifi, label: 'Connecte' },
+  deploying: { color: 'text-blue-400 bg-blue-900/30', icon: Loader2, label: 'Deploiement', spin: true },
   pending: { color: 'text-yellow-400 bg-yellow-900/30', icon: Clock, label: 'En attente' },
   disconnected: { color: 'text-red-400 bg-red-900/30', icon: WifiOff, label: 'Deconnecte' },
   error: { color: 'text-red-400 bg-red-900/30', icon: AlertTriangle, label: 'Erreur' },
 };
 
-function StatusBadge({ status }) {
+function StatusBadge({ status, message }) {
   const badge = STATUS_BADGES[status] || STATUS_BADGES.disconnected;
   const Icon = badge.icon;
   return (
     <span className={`flex items-center gap-1 text-xs px-2 py-0.5 ${badge.color}`}>
-      <Icon className="w-3 h-3" />
-      {badge.label}
+      <Icon className={`w-3 h-3 ${badge.spin ? 'animate-spin' : ''}`} />
+      {message || badge.label}
     </span>
   );
 }
@@ -73,6 +76,7 @@ function Applications() {
     slug: '',
     frontend: { target_port: '', auth_required: false, allowed_groups: [], local_only: false },
     apis: [],
+    code_server_enabled: true,
   });
 
   // Edit form
@@ -104,6 +108,9 @@ function Applications() {
   }, [fetchData]);
 
   // WebSocket connection for agent status updates
+  const fetchDataRef = useRef(fetchData);
+  fetchDataRef.current = fetchData;
+
   useEffect(() => {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${proto}//${window.location.host}/api/ws`);
@@ -113,11 +120,21 @@ function Applications() {
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === 'agent:status') {
-          setApplications(prev => prev.map(app =>
-            app.id === msg.data.appId
-              ? { ...app, status: msg.data.status }
-              : app
-          ));
+          const { appId, status, message: stepMsg } = msg.data;
+          setApplications(prev => {
+            const old = prev.find(a => a.id === appId);
+            const wasDeploying = old && (old.status === 'deploying' || old._deployMessage);
+            const nowReady = status === 'connected' || (status === 'pending' && wasDeploying);
+            // If transitioning out of deploying, refresh full data to get IP, version, etc.
+            if (wasDeploying && nowReady) {
+              setTimeout(() => fetchDataRef.current(), 500);
+            }
+            return prev.map(app =>
+              app.id === appId
+                ? { ...app, status, _deployMessage: status === 'deploying' ? (stepMsg || null) : null }
+                : app
+            );
+          });
         }
       } catch {}
     };
@@ -179,6 +196,7 @@ function Applications() {
           allowed_groups: a.allowed_groups || [],
           local_only: a.local_only || false,
         })),
+        code_server_enabled: createForm.code_server_enabled,
       };
 
       const res = await createApplication(payload);
@@ -188,6 +206,7 @@ function Applications() {
           name: '', slug: '',
           frontend: { target_port: '', auth_required: false, allowed_groups: [], local_only: false },
           apis: [],
+          code_server_enabled: true,
         });
         if (res.data.token) {
           setTokenModal({ name: createForm.name, token: res.data.token });
@@ -223,6 +242,7 @@ function Applications() {
           allowed_groups: a.allowed_groups || [],
           local_only: a.local_only || false,
         })),
+        code_server_enabled: editForm.code_server_enabled,
       };
 
       const res = await updateApplication(editingApp.id, payload);
@@ -273,6 +293,7 @@ function Applications() {
       name: app.name,
       frontend: { ...app.frontend, target_port: String(app.frontend.target_port) },
       apis: (app.apis || []).map(a => ({ ...a, target_port: String(a.target_port) })),
+      code_server_enabled: app.code_server_enabled !== false,
     });
     setShowEditModal(true);
   }
@@ -345,114 +366,183 @@ function Applications() {
             </div>
           </Card>
         ) : (
-          applications.map(app => (
+          applications.map(app => {
+            const isDeploying = app.status === 'deploying';
+            return (
             <Card key={app.id}>
-              <div className="flex items-start justify-between gap-4">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-3 mb-2">
-                    <h3 className="text-lg font-semibold truncate">{app.name}</h3>
-                    <StatusBadge status={app.status} />
-                    {!app.enabled && (
-                      <span className="text-xs text-gray-500 bg-gray-800 px-2 py-0.5">Desactive</span>
-                    )}
+              {isDeploying ? (
+                /* ── Deploying state: animated provisioning card ── */
+                <div className="relative overflow-hidden">
+                  {/* Animated gradient bar */}
+                  <div className="absolute inset-x-0 top-0 h-0.5">
+                    <div className="h-full w-full bg-gradient-to-r from-transparent via-blue-500 to-transparent animate-shimmer" style={{ backgroundSize: '200% 100%' }} />
                   </div>
-
-                  {/* Domains */}
-                  <div className="space-y-1 mb-3">
-                    <div className="flex items-center gap-2 text-sm">
-                      <Globe className="w-3.5 h-3.5 text-blue-400" />
-                      <a
-                        href={`https://${app.slug}.${baseDomain}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="font-mono text-blue-400 hover:underline"
-                      >
-                        {app.slug}.{baseDomain}
-                      </a>
-                      <span className="text-gray-600">:{app.frontend.target_port}</span>
-                      {app.frontend.auth_required && (
-                        <span className="flex items-center gap-1 text-xs text-purple-400 bg-purple-900/30 px-1.5 py-0.5">
-                          <Key className="w-3 h-3" /> Auth
+                  <div className="flex items-center gap-4">
+                    {/* Animated icon */}
+                    <div className="relative flex-shrink-0">
+                      <div className="w-12 h-12 rounded-lg bg-blue-900/30 border border-blue-800/50 flex items-center justify-center">
+                        <Loader2 className="w-6 h-6 text-blue-400 animate-spin" />
+                      </div>
+                      <div className="absolute -inset-1 rounded-lg bg-blue-500/10 animate-pulse" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-3 mb-1">
+                        <h3 className="text-lg font-semibold truncate">{app.name}</h3>
+                        <span className="text-xs px-2 py-0.5 text-blue-400 bg-blue-900/30 font-medium">
+                          Provisionnement
                         </span>
-                      )}
-                      {app.frontend.local_only && (
-                        <span className="flex items-center gap-1 text-xs text-yellow-400 bg-yellow-900/30 px-1.5 py-0.5">
-                          <Shield className="w-3 h-3" /> Local
+                      </div>
+                      <p className="text-sm text-blue-300/80 font-mono truncate">
+                        {app._deployMessage || 'Demarrage...'}
+                      </p>
+                      <div className="flex items-center gap-3 mt-2 text-xs text-gray-500">
+                        <span className="flex items-center gap-1">
+                          <Container className="w-3 h-3" />
+                          {app.container_name}
                         </span>
+                        <span className="font-mono">{app.slug}.{baseDomain}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                /* ── Normal state: full app card ── */
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-3 mb-2">
+                      <h3 className="text-lg font-semibold truncate">{app.name}</h3>
+                      <StatusBadge status={app.status} />
+                      {!app.enabled && (
+                        <span className="text-xs text-gray-500 bg-gray-800 px-2 py-0.5">Desactive</span>
                       )}
                     </div>
-                    {(app.apis || []).map((api, i) => (
-                      <div key={i} className="flex items-center gap-2 text-sm">
-                        <Server className="w-3.5 h-3.5 text-green-400" />
+
+                    {/* Domains */}
+                    <div className="space-y-1 mb-3">
+                      <div className="flex items-center gap-2 text-sm">
+                        <Globe className="w-3.5 h-3.5 text-blue-400" />
                         <a
-                          href={`https://${app.slug}-${api.slug}.${baseDomain}`}
+                          href={`https://${app.slug}.${baseDomain}`}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="font-mono text-green-400 hover:underline"
+                          className="font-mono text-blue-400 hover:underline"
                         >
-                          {app.slug}-{api.slug}.{baseDomain}
+                          {app.slug}.{baseDomain}
                         </a>
-                        <span className="text-gray-600">:{api.target_port}</span>
-                        {api.auth_required && (
+                        <span className="text-gray-600">:{app.frontend.target_port}</span>
+                        {app.frontend.auth_required && (
                           <span className="flex items-center gap-1 text-xs text-purple-400 bg-purple-900/30 px-1.5 py-0.5">
                             <Key className="w-3 h-3" /> Auth
                           </span>
                         )}
+                        {app.frontend.local_only && (
+                          <span className="flex items-center gap-1 text-xs text-yellow-400 bg-yellow-900/30 px-1.5 py-0.5">
+                            <Shield className="w-3 h-3" /> Local
+                          </span>
+                        )}
                       </div>
-                    ))}
+                      {(app.apis || []).map((api, i) => (
+                        <div key={i} className="flex items-center gap-2 text-sm">
+                          <Server className="w-3.5 h-3.5 text-green-400" />
+                          <a
+                            href={`https://${app.slug}-${api.slug}.${baseDomain}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="font-mono text-green-400 hover:underline"
+                          >
+                            {app.slug}-{api.slug}.{baseDomain}
+                          </a>
+                          <span className="text-gray-600">:{api.target_port}</span>
+                          {api.auth_required && (
+                            <span className="flex items-center gap-1 text-xs text-purple-400 bg-purple-900/30 px-1.5 py-0.5">
+                              <Key className="w-3 h-3" /> Auth
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                      {app.code_server_enabled !== false && baseDomain && (
+                        <div className="flex items-center gap-2 text-sm">
+                          <Code2 className="w-3.5 h-3.5 text-cyan-400" />
+                          <a
+                            href={`https://${app.slug}.code.${baseDomain}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="font-mono text-cyan-400 hover:underline"
+                          >
+                            {app.slug}.code.{baseDomain}
+                          </a>
+                          <span className="text-gray-600">:13337</span>
+                          <span className="flex items-center gap-1 text-xs text-purple-400 bg-purple-900/30 px-1.5 py-0.5">
+                            <Key className="w-3 h-3" /> Auth
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Info row */}
+                    <div className="flex items-center gap-4 text-xs text-gray-500">
+                      <span className="flex items-center gap-1">
+                        <Container className="w-3 h-3" />
+                        {app.container_name}
+                      </span>
+                      {app.ipv6_address && (
+                        <span className="font-mono">{app.ipv6_address}</span>
+                      )}
+                      {app.agent_version && (
+                        <span>v{app.agent_version}</span>
+                      )}
+                    </div>
                   </div>
 
-                  {/* Info row */}
-                  <div className="flex items-center gap-4 text-xs text-gray-500">
-                    <span className="flex items-center gap-1">
-                      <Container className="w-3 h-3" />
-                      {app.container_name}
-                    </span>
-                    {app.ipv6_address && (
-                      <span className="font-mono">{app.ipv6_address}</span>
+                  {/* Actions */}
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    {app.code_server_enabled !== false && baseDomain && (
+                      <a
+                        href={`https://${app.slug}.code.${baseDomain}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="p-1.5 text-cyan-400 hover:text-cyan-300 hover:bg-cyan-900/30 transition-colors"
+                        title="Ouvrir IDE (code-server)"
+                      >
+                        <Code2 className="w-4 h-4" />
+                      </a>
                     )}
-                    {app.agent_version && (
-                      <span>v{app.agent_version}</span>
-                    )}
+                    <button
+                      onClick={() => setTerminalApp(app)}
+                      className="p-1.5 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/30 transition-colors"
+                      title="Terminal"
+                    >
+                      <Terminal className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => handleToggle(app.id, !app.enabled)}
+                      className={`p-1.5 transition-colors ${
+                        app.enabled ? 'text-green-400 bg-green-900/30 hover:bg-green-900/50' : 'text-gray-500 bg-gray-700/30 hover:bg-gray-700/50'
+                      }`}
+                      title={app.enabled ? 'Desactiver' : 'Activer'}
+                    >
+                      <Power className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => openEditModal(app)}
+                      className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 transition-colors"
+                      title="Modifier"
+                    >
+                      <Pencil className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => handleDelete(app.id, app.name)}
+                      className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/30 transition-colors"
+                      title="Supprimer"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
                   </div>
                 </div>
-
-                {/* Actions */}
-                <div className="flex items-center gap-1 flex-shrink-0">
-                  <button
-                    onClick={() => setTerminalApp(app)}
-                    className="p-1.5 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/30 transition-colors"
-                    title="Terminal"
-                  >
-                    <Terminal className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={() => handleToggle(app.id, !app.enabled)}
-                    className={`p-1.5 transition-colors ${
-                      app.enabled ? 'text-green-400 bg-green-900/30 hover:bg-green-900/50' : 'text-gray-500 bg-gray-700/30 hover:bg-gray-700/50'
-                    }`}
-                    title={app.enabled ? 'Desactiver' : 'Activer'}
-                  >
-                    <Power className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={() => openEditModal(app)}
-                    className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 transition-colors"
-                    title="Modifier"
-                  >
-                    <Pencil className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={() => handleDelete(app.id, app.name)}
-                    className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/30 transition-colors"
-                    title="Supprimer"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
+              )}
             </Card>
-          ))
+            );
+          })
         )}
       </div>
 
@@ -532,6 +622,21 @@ function Applications() {
                   </div>
                 </div>
               </div>
+
+              {/* code-server */}
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={createForm.code_server_enabled}
+                  onChange={e => setCreateForm({ ...createForm, code_server_enabled: e.target.checked })}
+                  className="rounded"
+                />
+                <Code2 className="w-4 h-4 text-cyan-400" />
+                code-server IDE
+                {createForm.slug && baseDomain && createForm.code_server_enabled && (
+                  <span className="text-xs text-gray-500 font-mono ml-2">{createForm.slug}.code.{baseDomain}</span>
+                )}
+              </label>
 
               {/* APIs */}
               <div className="border border-gray-700 p-4">
@@ -726,6 +831,21 @@ function Applications() {
                   </div>
                 </div>
               </div>
+
+              {/* code-server */}
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={editForm.code_server_enabled}
+                  onChange={e => setEditForm({ ...editForm, code_server_enabled: e.target.checked })}
+                  className="rounded"
+                />
+                <Code2 className="w-4 h-4 text-cyan-400" />
+                code-server IDE
+                {baseDomain && editForm.code_server_enabled && (
+                  <span className="text-xs text-gray-500 font-mono ml-2">{editingApp.slug}.code.{baseDomain}</span>
+                )}
+              </label>
 
               {/* APIs */}
               <div className="border border-gray-700 p-4">
