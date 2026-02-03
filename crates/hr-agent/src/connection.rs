@@ -9,6 +9,7 @@ use tracing::{error, info, warn};
 use hr_registry::protocol::{AgentMessage, RegistryMessage};
 
 use crate::config::AgentConfig;
+use crate::ipv6;
 
 /// Connect to HomeRoute, authenticate, and return channels for bidirectional communication.
 /// Returns (config_rx, shutdown_rx) — config_rx receives RegistryMessages, shutdown_rx signals shutdown.
@@ -25,11 +26,20 @@ pub async fn run_connection(
 
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
-    // Send Auth message
+    // Detect our GUA IPv6 address
+    let ipv6_address = ipv6::get_gua_address("eth0", None).await;
+    if let Some(ref addr) = ipv6_address {
+        info!(addr, "Detected GUA IPv6 address");
+    } else {
+        warn!("No GUA IPv6 address detected on eth0");
+    }
+
+    // Send Auth message with our actual IPv6
     let auth_msg = AgentMessage::Auth {
         token: config.token.clone(),
         service_name: config.service_name.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        ipv6_address,
     };
     let auth_json = serde_json::to_string(&auth_msg)?;
     ws_sink.send(Message::Text(auth_json.into())).await?;

@@ -300,7 +300,13 @@ async fn main() -> anyhow::Result<()> {
 
     // DNS UDP server (Critical)
     for addr_str in &dns_dhcp_config.dns.listen_addresses {
-        let addr: SocketAddr = format!("{}:{}", addr_str, dns_dhcp_config.dns.port).parse()?;
+        // IPv6 addresses need brackets: [addr]:port
+        let addr_formatted = if addr_str.contains(':') {
+            format!("[{}]:{}", addr_str, dns_dhcp_config.dns.port)
+        } else {
+            format!("{}:{}", addr_str, dns_dhcp_config.dns.port)
+        };
+        let addr: SocketAddr = addr_formatted.parse()?;
 
         let dns_state_c = dns_state.clone();
         let reg = service_registry.clone();
@@ -445,13 +451,15 @@ async fn main() -> anyhow::Result<()> {
         drop(reg);
     }
 
-    // 4) DHCPv6 stateless server (provides DNS info to LAN clients)
+    // 4) DHCPv6 stateful server (assigns addresses from GUA prefix)
     if dns_dhcp_config.ipv6.enabled && dns_dhcp_config.ipv6.dhcpv6_enabled {
         let ipv6_config = dns_dhcp_config.ipv6.clone();
+        let rx = prefix_rx.clone();
         let reg = service_registry.clone();
         spawn_supervised("dhcpv6", ServicePriority::Important, reg, move || {
             let config = ipv6_config.clone();
-            async move { hr_ipv6::dhcpv6::run_dhcpv6_server(config).await }
+            let prefix_rx = rx.clone();
+            async move { hr_ipv6::dhcpv6::run_dhcpv6_server(config, prefix_rx).await }
         });
     } else {
         let mut reg = service_registry.write().await;
@@ -572,6 +580,8 @@ async fn main() -> anyhow::Result<()> {
     // Prefix change watcher for agent registry
     {
         let reg = registry.clone();
+        let proxy_for_prefix = proxy_state.clone();
+        let base_domain_prefix = env.base_domain.clone();
         let mut prefix_rx_registry = prefix_rx.clone();
         tokio::spawn(async move {
             loop {
@@ -581,8 +591,37 @@ async fn main() -> anyhow::Result<()> {
                 let prefix_info = prefix_rx_registry.borrow().clone();
                 let prefix_str = prefix_info.map(|p| p.prefix.to_string());
                 reg.on_prefix_changed(prefix_str).await;
+
+                // Update passthrough map with new IPv6 addresses
+                let apps = reg.list_applications().await;
+                for app in &apps {
+                    if let Some(ipv6) = app.ipv6_address {
+                        let target = format!("[{}]:443", ipv6);
+                        for domain in app.domains(&base_domain_prefix) {
+                            proxy_for_prefix.set_passthrough(domain, target.clone());
+                        }
+                    } else {
+                        // Remove passthrough if no IPv6
+                        for domain in app.domains(&base_domain_prefix) {
+                            proxy_for_prefix.remove_passthrough(&domain);
+                        }
+                    }
+                }
             }
         });
+    }
+
+    // Populate TLS passthrough map for any applications that have IPv6 addresses
+    {
+        let apps = registry.list_applications().await;
+        for app in &apps {
+            if let Some(ipv6) = app.ipv6_address {
+                let target = format!("[{}]:443", ipv6);
+                for domain in app.domains(&env.base_domain) {
+                    proxy_state.set_passthrough(domain, target.clone());
+                }
+            }
+        }
     }
 
     info!(
@@ -807,6 +846,89 @@ async fn main() -> anyhow::Result<()> {
 
 // ── HTTPS server ───────────────────────────────────────────────────────
 
+/// Extract the SNI server name from a TLS ClientHello message (peeked bytes).
+/// Returns None if parsing fails or no SNI extension is present.
+fn extract_sni(buf: &[u8]) -> Option<String> {
+    // TLS record: type(1) version(2) length(2) then handshake
+    if buf.len() < 5 || buf[0] != 0x16 {
+        return None; // Not a TLS handshake record
+    }
+    let record_len = ((buf[3] as usize) << 8) | buf[4] as usize;
+    let handshake = &buf[5..buf.len().min(5 + record_len)];
+
+    // Handshake: type(1) length(3) ...
+    if handshake.is_empty() || handshake[0] != 0x01 {
+        return None; // Not ClientHello
+    }
+    if handshake.len() < 4 {
+        return None;
+    }
+    let hello_len =
+        ((handshake[1] as usize) << 16) | ((handshake[2] as usize) << 8) | handshake[3] as usize;
+    let hello = &handshake[4..handshake.len().min(4 + hello_len)];
+
+    // ClientHello: version(2) random(32) session_id_len(1) session_id(var) ...
+    if hello.len() < 34 {
+        return None;
+    }
+    let mut pos = 34; // skip version + random
+    if pos >= hello.len() {
+        return None;
+    }
+    let session_id_len = hello[pos] as usize;
+    pos += 1 + session_id_len;
+
+    // cipher_suites: length(2) then data
+    if pos + 2 > hello.len() {
+        return None;
+    }
+    let cs_len = ((hello[pos] as usize) << 8) | hello[pos + 1] as usize;
+    pos += 2 + cs_len;
+
+    // compression_methods: length(1) then data
+    if pos >= hello.len() {
+        return None;
+    }
+    let cm_len = hello[pos] as usize;
+    pos += 1 + cm_len;
+
+    // extensions: total_length(2) then extensions
+    if pos + 2 > hello.len() {
+        return None;
+    }
+    let ext_total = ((hello[pos] as usize) << 8) | hello[pos + 1] as usize;
+    pos += 2;
+    let ext_end = pos + ext_total;
+
+    while pos + 4 <= hello.len().min(ext_end) {
+        let ext_type = ((hello[pos] as u16) << 8) | hello[pos + 1] as u16;
+        let ext_len = ((hello[pos + 2] as usize) << 8) | hello[pos + 3] as usize;
+        pos += 4;
+        if ext_type == 0x0000 {
+            // SNI extension
+            // server_name_list: length(2) then entries
+            if pos + 2 > hello.len() {
+                return None;
+            }
+            let _list_len = ((hello[pos] as usize) << 8) | hello[pos + 1] as usize;
+            let mut p = pos + 2;
+            // entry: type(1) length(2) name(var)
+            if p + 3 > hello.len() {
+                return None;
+            }
+            let name_type = hello[p];
+            let name_len = ((hello[p + 1] as usize) << 8) | hello[p + 2] as usize;
+            p += 3;
+            if name_type == 0x00 && p + name_len <= hello.len() {
+                return String::from_utf8(hello[p..p + name_len].to_vec()).ok();
+            }
+            return None;
+        }
+        pos += ext_len;
+    }
+    None
+}
+
 async fn run_https_server(
     proxy_state: Arc<ProxyState>,
     tls_config: Arc<rustls::ServerConfig>,
@@ -837,6 +959,50 @@ async fn run_https_server(
         let client_ip = remote_addr.ip();
 
         tokio::spawn(async move {
+            // Peek at the first bytes to extract SNI for passthrough check
+            let mut peek_buf = [0u8; 1024];
+            let n = match tcp_stream.peek(&mut peek_buf).await {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::debug!("TCP peek failed from {}: {}", remote_addr, e);
+                    return;
+                }
+            };
+
+            // Check if this SNI matches an agent passthrough domain
+            if let Some(sni) = extract_sni(&peek_buf[..n]) {
+                if let Some(target_addr) = proxy_state.get_passthrough(&sni) {
+                    tracing::debug!("TLS passthrough {} → {}", sni, target_addr);
+                    // Raw TCP passthrough to agent
+                    match tokio::net::TcpStream::connect(&target_addr).await {
+                        Ok(mut upstream) => {
+                            let mut client = tcp_stream;
+                            match tokio::io::copy_bidirectional(&mut client, &mut upstream).await {
+                                Ok((c2s, s2c)) => {
+                                    tracing::debug!(
+                                        "Passthrough {} closed: {}↑ {}↓",
+                                        sni, c2s, s2c
+                                    );
+                                }
+                                Err(e) => {
+                                    let msg = e.to_string();
+                                    if !msg.contains("connection reset")
+                                        && !msg.contains("broken pipe")
+                                    {
+                                        tracing::debug!("Passthrough {} IO error: {}", sni, e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Passthrough connect to {} failed: {}", target_addr, e);
+                        }
+                    }
+                    return;
+                }
+            }
+
+            // Normal TLS termination path
             let tls_stream = match acceptor.accept(tcp_stream).await {
                 Ok(s) => s,
                 Err(e) => {

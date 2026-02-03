@@ -85,6 +85,17 @@ async fn delete_application(
         return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"success": false, "error": "Registry not available"}))).into_response();
     };
 
+    // Remove passthrough entries before deleting
+    {
+        let apps = registry.list_applications().await;
+        if let Some(app) = apps.iter().find(|a| a.id == id) {
+            let base_domain = &state.env.base_domain;
+            for domain in app.domains(base_domain) {
+                state.proxy.remove_passthrough(&domain);
+            }
+        }
+    }
+
     match registry.remove_application(&id).await {
         Ok(true) => Json(serde_json::json!({"success": true})).into_response(),
         Ok(false) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": "Not found"}))).into_response(),
@@ -227,11 +238,11 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
     // Wait for Auth message with a timeout
     let auth_msg = tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await;
 
-    let (token, service_name, version) = match auth_msg {
+    let (token, service_name, version, reported_ipv6) = match auth_msg {
         Ok(Some(Ok(Message::Text(text)))) => {
             match serde_json::from_str::<AgentMessage>(&text) {
-                Ok(AgentMessage::Auth { token, service_name, version }) => {
-                    (token, service_name, version)
+                Ok(AgentMessage::Auth { token, service_name, version, ipv6_address }) => {
+                    (token, service_name, version, ipv6_address)
                 }
                 _ => {
                     warn!("Agent WS: expected Auth message, got something else");
@@ -258,16 +269,30 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
         return;
     };
 
-    info!(app_id = app_id, service = service_name, "Agent authenticated");
+    info!(app_id = app_id, service = service_name, ipv6 = ?reported_ipv6, "Agent authenticated");
 
     // Create mpsc channel for registry → agent messages
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
 
     // Notify registry of connection (provisions certs, DNS, firewall, pushes config)
-    if let Err(e) = registry.on_agent_connected(&app_id, tx, version).await {
+    if let Err(e) = registry.on_agent_connected(&app_id, tx, version, reported_ipv6).await {
         error!(app_id, "Agent provisioning failed: {e}");
         let _ = socket.send(Message::Close(None)).await;
         return;
+    }
+
+    // Update TLS passthrough map so the host proxy forwards agent domains
+    {
+        let apps = registry.list_applications().await;
+        if let Some(app) = apps.iter().find(|a| a.id == app_id) {
+            if let Some(ipv6) = app.ipv6_address {
+                let base_domain = &state.env.base_domain;
+                let target = format!("[{}]:443", ipv6);
+                for domain in app.domains(base_domain) {
+                    state.proxy.set_passthrough(domain, target.clone());
+                }
+            }
+        }
     }
 
     // Send auth success
@@ -318,6 +343,17 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
                     Some(Ok(Message::Close(_))) | None => break,
                     _ => {}
                 }
+            }
+        }
+    }
+
+    // Remove TLS passthrough entries for this agent's domains
+    {
+        let apps = registry.list_applications().await;
+        if let Some(app) = apps.iter().find(|a| a.id == app_id) {
+            let base_domain = &state.env.base_domain;
+            for domain in app.domains(base_domain) {
+                state.proxy.remove_passthrough(&domain);
             }
         }
     }

@@ -106,7 +106,52 @@ impl LxdClient {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    /// Stop and delete a container.
+    /// Create a storage volume and attach it to a container at the given path.
+    pub async fn attach_storage_volume(
+        container: &str,
+        volume_name: &str,
+        mount_path: &str,
+    ) -> Result<()> {
+        // Create the storage volume (on the default pool)
+        let output = Command::new("lxc")
+            .args(["storage", "volume", "create", "default", volume_name])
+            .output()
+            .await
+            .context("failed to create storage volume")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Ignore "already exists" errors
+            if !stderr.contains("already exists") {
+                anyhow::bail!("lxc storage volume create failed: {stderr}");
+            }
+        }
+
+        // Attach the volume as a disk device
+        let device_name = format!("{volume_name}-disk");
+        let output = Command::new("lxc")
+            .args([
+                "config", "device", "add", container, &device_name, "disk",
+                &format!("pool=default"),
+                &format!("source={volume_name}"),
+                &format!("path={mount_path}"),
+            ])
+            .output()
+            .await
+            .context("failed to attach storage volume")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.contains("already exists") {
+                anyhow::bail!("lxc config device add failed: {stderr}");
+            }
+        }
+
+        info!(container, volume = volume_name, path = mount_path, "Storage volume attached");
+        Ok(())
+    }
+
+    /// Stop and delete a container (and its workspace volume).
     pub async fn delete_container(name: &str) -> Result<()> {
         info!(container = name, "Deleting LXC container");
 
@@ -126,6 +171,13 @@ impl LxdClient {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("lxc delete {name} failed: {stderr}");
         }
+
+        // Delete the workspace storage volume (ignore errors if it doesn't exist)
+        let vol_name = format!("{name}-workspace");
+        let _ = Command::new("lxc")
+            .args(["storage", "volume", "delete", "default", &vol_name])
+            .output()
+            .await;
 
         info!(container = name, "Container deleted");
         Ok(())

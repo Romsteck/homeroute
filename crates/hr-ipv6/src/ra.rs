@@ -1,7 +1,7 @@
 //! Router Advertisement sender via raw ICMPv6 socket.
 //!
-//! Supports both a static ULA prefix from config and a dynamic GUA prefix
-//! received via a `watch` channel from the DHCPv6-PD client.
+//! Sends the GUA prefix from DHCPv6-PD with SLAAC enabled (A=1, M=1).
+//! Android uses SLAAC; Windows/Linux can use DHCPv6 stateful.
 
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::time::Duration;
@@ -71,6 +71,7 @@ struct PrefixOption {
 }
 
 /// Build an ICMPv6 Router Advertisement packet with multiple prefixes.
+/// SLAAC is disabled (A=0), clients must use DHCPv6 stateful (M=1).
 fn build_ra_packet(config: &Ipv6Config, prefixes: &[PrefixOption]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(128);
 
@@ -81,8 +82,8 @@ fn build_ra_packet(config: &Ipv6Config, prefixes: &[PrefixOption]) -> Vec<u8> {
 
     // RA fields
     buf.push(64);  // Cur Hop Limit
-    let flags = if config.ra_managed_flag { 0x80 } else { 0 }
-        | if config.ra_other_flag { 0x40 } else { 0 };
+    // M=1 (Managed - use DHCPv6 for addresses), O=1 (Other - use DHCPv6 for DNS)
+    let flags: u8 = 0x80 | 0x40; // M=1, O=1
     buf.push(flags);
     buf.extend_from_slice(&config.ra_lifetime_secs.to_be_bytes()[2..4]); // Router Lifetime (16-bit)
     buf.extend_from_slice(&0u32.to_be_bytes()); // Reachable Time
@@ -93,7 +94,7 @@ fn build_ra_packet(config: &Ipv6Config, prefixes: &[PrefixOption]) -> Vec<u8> {
         buf.push(3);   // Type: Prefix Information
         buf.push(4);   // Length: 4 (in units of 8 bytes = 32 bytes)
         buf.push(pfx.len);
-        buf.push(0xC0); // Flags: L=1 (on-link), A=1 (autonomous)
+        buf.push(0xC0); // Flags: L=1 (on-link), A=1 (autonomous/SLAAC enabled for Android)
         buf.extend_from_slice(&pfx.valid_lifetime.to_be_bytes());
         buf.extend_from_slice(&pfx.preferred_lifetime.to_be_bytes());
         buf.extend_from_slice(&0u32.to_be_bytes()); // Reserved
@@ -114,33 +115,13 @@ fn build_ra_packet(config: &Ipv6Config, prefixes: &[PrefixOption]) -> Vec<u8> {
     buf
 }
 
-fn parse_prefix(prefix_str: &str) -> Option<(Ipv6Addr, u8)> {
-    let parts: Vec<&str> = prefix_str.split('/').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let addr: Ipv6Addr = parts[0].parse().ok()?;
-    let len: u8 = parts[1].parse().ok()?;
-    Some((addr, len))
-}
 
 /// Collect the list of prefixes to advertise.
-fn collect_prefixes(config: &Ipv6Config, gua: &Option<PrefixInfo>) -> Vec<PrefixOption> {
-    let mut prefixes = Vec::with_capacity(2);
+/// Only the GUA prefix from Starlink PD is advertised (no ULA).
+fn collect_prefixes(_config: &Ipv6Config, gua: &Option<PrefixInfo>) -> Vec<PrefixOption> {
+    let mut prefixes = Vec::with_capacity(1);
 
-    // Static ULA prefix from config (always advertised if set)
-    if !config.ra_prefix.is_empty() {
-        if let Some((addr, len)) = parse_prefix(&config.ra_prefix) {
-            prefixes.push(PrefixOption {
-                addr,
-                len,
-                valid_lifetime: 86400,
-                preferred_lifetime: 14400,
-            });
-        }
-    }
-
-    // Dynamic GUA prefix from PD
+    // Only GUA prefix from PD - no ULA, DHCPv6 stateful handles addressing
     if let Some(pd) = gua {
         prefixes.push(PrefixOption {
             addr: pd.prefix,
@@ -155,27 +136,13 @@ fn collect_prefixes(config: &Ipv6Config, gua: &Option<PrefixInfo>) -> Vec<Prefix
 
 /// Build a deprecation packet: announces the old GUA prefix with lifetime=0.
 fn build_deprecation_packet(config: &Ipv6Config, old_prefix: &PrefixInfo) -> Vec<u8> {
-    let mut prefixes = Vec::with_capacity(2);
-
-    // Keep ULA prefix active
-    if !config.ra_prefix.is_empty() {
-        if let Some((addr, len)) = parse_prefix(&config.ra_prefix) {
-            prefixes.push(PrefixOption {
-                addr,
-                len,
-                valid_lifetime: 86400,
-                preferred_lifetime: 14400,
-            });
-        }
-    }
-
-    // Deprecate old GUA
-    prefixes.push(PrefixOption {
+    // Deprecate old GUA prefix
+    let prefixes = vec![PrefixOption {
         addr: old_prefix.prefix,
         len: old_prefix.prefix_len,
         valid_lifetime: 0,
         preferred_lifetime: 0,
-    });
+    }];
 
     build_ra_packet(config, &prefixes)
 }
@@ -191,7 +158,7 @@ pub async fn run_ra_sender(
         return Ok(());
     }
 
-    info!("Starting Router Advertisement sender (ULA: {})", config.ra_prefix);
+    info!("Starting Router Advertisement sender (SLAAC+DHCPv6 mode, M=1, A=1)");
 
     let socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))?;
     socket.set_multicast_hops_v6(255)?;

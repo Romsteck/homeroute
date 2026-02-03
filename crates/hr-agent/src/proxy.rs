@@ -157,11 +157,29 @@ impl AgentProxy {
         self.shutdown_tx = Some(shutdown_tx);
 
         let handle = tokio::spawn(async move {
-            let listener = match TcpListener::bind(addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    error!(addr = %addr, "Failed to bind proxy: {e}");
-                    return;
+            // Retry bind up to 5 times (address may not be ready yet after ip addr add)
+            let listener = {
+                let mut last_err = None;
+                let mut bound = None;
+                for attempt in 0..5 {
+                    match TcpListener::bind(addr).await {
+                        Ok(l) => {
+                            bound = Some(l);
+                            break;
+                        }
+                        Err(e) => {
+                            warn!(addr = %addr, attempt, "Bind failed, retrying: {e}");
+                            last_err = Some(e);
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+                    }
+                }
+                match bound {
+                    Some(l) => l,
+                    None => {
+                        error!(addr = %addr, "Failed to bind proxy after retries: {}", last_err.unwrap());
+                        return;
+                    }
                 }
             };
 

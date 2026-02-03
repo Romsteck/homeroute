@@ -11,3 +11,4 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 socket2 = { workspace = true }
 rand = { workspace = true }
+hex = "0.4"

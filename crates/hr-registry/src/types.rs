@@ -2,6 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::net::Ipv6Addr;
 
+/// Port that code-server listens on inside each container.
+pub const CODE_SERVER_PORT: u16 = 13337;
+
 /// A registered application with its LXC container and agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Application {
@@ -27,6 +30,10 @@ pub struct Application {
     #[serde(default)]
     pub apis: Vec<ApiEndpoint>,
 
+    /// Whether code-server IDE is enabled for this application.
+    #[serde(default = "default_true")]
+    pub code_server_enabled: bool,
+
     /// Certificate IDs (one per domain: frontend + each API).
     #[serde(default)]
     pub cert_ids: Vec<String>,
@@ -41,6 +48,9 @@ impl Application {
         let mut domains = vec![format!("{}.{}", self.slug, base_domain)];
         for api in &self.apis {
             domains.push(format!("{}-{}.{}", self.slug, api.slug, base_domain));
+        }
+        if self.code_server_enabled {
+            domains.push(format!("{}.code.{}", self.slug, base_domain));
         }
         domains
     }
@@ -59,6 +69,14 @@ impl Application {
                 target_port: api.target_port,
                 auth_required: api.auth_required,
                 allowed_groups: api.allowed_groups.clone(),
+            });
+        }
+        if self.code_server_enabled {
+            routes.push(RouteInfo {
+                domain: format!("{}.code.{}", self.slug, base_domain),
+                target_port: CODE_SERVER_PORT,
+                auth_required: true,
+                allowed_groups: vec![],
             });
         }
         routes
@@ -101,6 +119,7 @@ pub struct ApiEndpoint {
 #[serde(rename_all = "lowercase")]
 pub enum AgentStatus {
     Pending,
+    Deploying,
     Connected,
     Disconnected,
     Error,
@@ -113,6 +132,10 @@ pub struct RegistryState {
     pub applications: Vec<Application>,
     #[serde(default = "default_next_suffix")]
     pub next_suffix: u16,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_next_suffix() -> u16 {
@@ -136,6 +159,8 @@ pub struct CreateApplicationRequest {
     pub frontend: FrontendEndpoint,
     #[serde(default)]
     pub apis: Vec<ApiEndpoint>,
+    #[serde(default = "default_true")]
+    pub code_server_enabled: bool,
 }
 
 /// Request body for updating an application.
@@ -144,15 +169,15 @@ pub struct UpdateApplicationRequest {
     pub name: Option<String>,
     pub frontend: Option<FrontendEndpoint>,
     pub apis: Option<Vec<ApiEndpoint>>,
+    pub code_server_enabled: Option<bool>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_domains() {
-        let app = Application {
+    fn make_test_app(code_server_enabled: bool) -> Application {
+        Application {
             id: "test".into(),
             name: "Test".into(),
             slug: "myapp".into(),
@@ -178,12 +203,42 @@ mod tests {
                 allowed_groups: vec!["admin".into()],
                 local_only: false,
             }],
+            code_server_enabled,
             cert_ids: vec![],
             cloudflare_record_ids: vec![],
-        };
+        }
+    }
 
+    #[test]
+    fn test_domains() {
+        let app = make_test_app(true);
+        let domains = app.domains("example.com");
+        assert_eq!(
+            domains,
+            vec![
+                "myapp.example.com",
+                "myapp-api.example.com",
+                "myapp.code.example.com",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_domains_no_code_server() {
+        let app = make_test_app(false);
         let domains = app.domains("example.com");
         assert_eq!(domains, vec!["myapp.example.com", "myapp-api.example.com"]);
+    }
+
+    #[test]
+    fn test_routes_code_server() {
+        let app = make_test_app(true);
+        let routes = app.routes("example.com");
+        assert_eq!(routes.len(), 3);
+        let cs_route = &routes[2];
+        assert_eq!(cs_route.domain, "myapp.code.example.com");
+        assert_eq!(cs_route.target_port, CODE_SERVER_PORT);
+        assert!(cs_route.auth_required);
     }
 
     #[test]

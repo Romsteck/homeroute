@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 
 use hr_ca::CertificateAuthority;
 use hr_common::config::EnvConfig;
-use hr_common::events::EventBus;
+use hr_common::events::{AgentStatusEvent, EventBus};
 use hr_firewall::config::FirewallRule;
 use hr_firewall::FirewallEngine;
 use hr_lxd::LxdClient;
@@ -76,10 +76,11 @@ impl AgentRegistry {
 
     // ── Application CRUD ────────────────────────────────────────
 
-    /// Create a new application: generates token, creates LXC, deploys agent.
-    /// Returns the application and the cleartext token (shown once to the user).
+    /// Create a new application: generates token, saves record immediately,
+    /// then deploys LXC container + agent in a background task.
+    /// Returns the application (status=deploying) and the cleartext token.
     pub async fn create_application(
-        &self,
+        self: &Arc<Self>,
         req: CreateApplicationRequest,
     ) -> Result<(Application, String)> {
         // Generate token
@@ -105,38 +106,117 @@ impl AgentRegistry {
             token_hash,
             ipv6_suffix: suffix,
             ipv6_address: None,
-            status: AgentStatus::Pending,
+            status: AgentStatus::Deploying,
             last_heartbeat: None,
             agent_version: None,
             created_at: Utc::now(),
             frontend: req.frontend,
             apis: req.apis,
+            code_server_enabled: req.code_server_enabled,
             cert_ids: vec![],
             cloudflare_record_ids: vec![],
         };
 
-        // Create the LXC container
-        LxdClient::create_container(&container_name)
-            .await
-            .with_context(|| format!("Failed to create LXC container {container_name}"))?;
-
-        // Deploy hr-agent into the container
-        if let Err(e) = self.deploy_agent(&container_name, &app.slug, &token_clear).await {
-            // Cleanup on failure
-            warn!("Agent deploy failed, deleting container: {e}");
-            let _ = LxdClient::delete_container(&container_name).await;
-            return Err(e);
-        }
-
-        // Store in state
+        // Store in state immediately so the UI can see the app
         {
             let mut state = self.state.write().await;
             state.applications.push(app.clone());
         }
         self.persist().await?;
 
-        info!(app = app.slug, container = container_name, "Application created");
+        info!(app = app.slug, container = container_name, "Application created, starting background deploy");
+
+        // Spawn background deploy task
+        let registry = Arc::clone(self);
+        let token_for_deploy = token_clear.clone();
+        let slug = app.slug.clone();
+        let app_id = id.clone();
+        tokio::spawn(async move {
+            registry.run_deploy_background(&app_id, &slug, &container_name, &token_for_deploy).await;
+        });
+
         Ok((app, token_clear))
+    }
+
+    /// Background deployment: creates LXC container, deploys agent, emits progress events.
+    async fn run_deploy_background(
+        &self,
+        app_id: &str,
+        slug: &str,
+        container_name: &str,
+        token: &str,
+    ) {
+        let emit = |message: &str| {
+            let _ = self.events.agent_status.send(AgentStatusEvent {
+                app_id: app_id.to_string(),
+                slug: slug.to_string(),
+                status: "deploying".to_string(),
+                message: Some(message.to_string()),
+            });
+        };
+
+        emit("Creation du conteneur LXC...");
+
+        // Create the LXC container
+        if let Err(e) = LxdClient::create_container(container_name).await {
+            error!(container = container_name, "LXC creation failed: {e}");
+            emit(&format!("Erreur: {e}"));
+            self.set_app_status(app_id, AgentStatus::Error).await;
+            // Remove the app from state on failure
+            self.remove_failed_app(app_id).await;
+            return;
+        }
+
+        // Deploy hr-agent into the container
+        if let Err(e) = self.deploy_agent(container_name, slug, token, &emit).await {
+            error!(container = container_name, "Agent deploy failed: {e}");
+            emit(&format!("Erreur: {e}"));
+            self.set_app_status(app_id, AgentStatus::Error).await;
+            // Cleanup container on failure
+            let _ = LxdClient::delete_container(container_name).await;
+            self.remove_failed_app(app_id).await;
+            return;
+        }
+
+        // Update status to pending only if agent hasn't already connected
+        {
+            let mut state = self.state.write().await;
+            if let Some(app) = state.applications.iter_mut().find(|a| a.id == app_id) {
+                if app.status == AgentStatus::Deploying {
+                    app.status = AgentStatus::Pending;
+                }
+            }
+        }
+        let _ = self.persist().await;
+
+        let _ = self.events.agent_status.send(AgentStatusEvent {
+            app_id: app_id.to_string(),
+            slug: slug.to_string(),
+            status: "pending".to_string(),
+            message: Some("Deploiement termine".to_string()),
+        });
+
+        info!(app = slug, container = container_name, "Background deploy complete");
+    }
+
+    /// Set an application's status and persist.
+    async fn set_app_status(&self, app_id: &str, status: AgentStatus) {
+        {
+            let mut state = self.state.write().await;
+            if let Some(app) = state.applications.iter_mut().find(|a| a.id == app_id) {
+                app.status = status;
+            }
+        }
+        let _ = self.persist().await;
+    }
+
+    /// Remove a failed application from state (cleanup after deploy failure).
+    async fn remove_failed_app(&self, app_id: &str) {
+        {
+            let mut state = self.state.write().await;
+            state.applications.retain(|a| a.id != app_id);
+        }
+        let _ = self.persist().await;
     }
 
     /// Update application endpoints/auth. Pushes new config to connected agent.
@@ -154,6 +234,9 @@ impl AgentRegistry {
         }
         if let Some(apis) = req.apis {
             app.apis = apis;
+        }
+        if let Some(code_server_enabled) = req.code_server_enabled {
+            app.code_server_enabled = code_server_enabled;
         }
 
         let app = app.clone();
@@ -259,11 +342,13 @@ impl AgentRegistry {
 
     /// Called when an agent successfully connects and authenticates.
     /// Issues certs, creates DNS records, adds firewall rule, pushes config.
+    /// If the agent reports its actual IPv6 address, we use that instead of computing from suffix.
     pub async fn on_agent_connected(
         &self,
         app_id: &str,
         tx: mpsc::Sender<RegistryMessage>,
         agent_version: String,
+        reported_ipv6: Option<String>,
     ) -> Result<()> {
         let now = Utc::now();
 
@@ -280,13 +365,24 @@ impl AgentRegistry {
             );
         }
 
-        // Update status
+        // Update status and IPv6 address if reported by agent
         {
             let mut state = self.state.write().await;
             if let Some(app) = state.applications.iter_mut().find(|a| a.id == app_id) {
                 app.status = AgentStatus::Connected;
                 app.agent_version = Some(agent_version);
                 app.last_heartbeat = Some(now);
+
+                // Use agent's reported IPv6 if available (more accurate than computed)
+                if let Some(ref ipv6_str) = reported_ipv6 {
+                    if let Ok(addr) = ipv6_str.parse() {
+                        let old_addr = app.ipv6_address;
+                        app.ipv6_address = Some(addr);
+                        if old_addr != Some(addr) {
+                            info!(app_id, ipv6 = ipv6_str, "Updated app IPv6 from agent report");
+                        }
+                    }
+                }
             }
         }
 
@@ -455,7 +551,7 @@ impl AgentRegistry {
 
                     let mut new_record_ids = Vec::new();
                     for domain in &domains {
-                        match cloudflare::upsert_aaaa_record(token, zone_id, domain, &ipv6_str, false).await {
+                        match cloudflare::upsert_aaaa_record(token, zone_id, domain, &ipv6_str, true).await {
                             Ok(rid) => new_record_ids.push(rid),
                             Err(e) => warn!(domain, "CF upsert failed: {e}"),
                         }
@@ -500,11 +596,13 @@ impl AgentRegistry {
     // ── Internal helpers ────────────────────────────────────────
 
     /// Deploy the hr-agent binary and config into an LXC container.
+    /// `emit` is called with progress messages for real-time UI updates.
     async fn deploy_agent(
         &self,
         container: &str,
         service_name: &str,
         token: &str,
+        emit: impl Fn(&str),
     ) -> Result<()> {
         let agent_binary = PathBuf::from("/opt/homeroute/data/agent-binaries/hr-agent");
         if !agent_binary.exists() {
@@ -515,10 +613,12 @@ impl AgentRegistry {
         }
 
         // Push binary
+        emit("Deploiement du binaire agent...");
         LxdClient::push_file(container, &agent_binary, "usr/local/bin/hr-agent").await?;
         LxdClient::exec(container, &["chmod", "+x", "/usr/local/bin/hr-agent"]).await?;
 
         // Generate config TOML
+        emit("Configuration de l'agent...");
         let api_port = self.env.api_port;
         let config_content = format!(
             r#"homeroute_address = "fd00:cafe::1"
@@ -553,9 +653,101 @@ WantedBy=multi-user.target
         LxdClient::push_file(container, &tmp_unit, "etc/systemd/system/hr-agent.service").await?;
         let _ = tokio::fs::remove_file(&tmp_unit).await;
 
-        // Enable and start
+        // Enable and start agent
+        emit("Demarrage de l'agent...");
         LxdClient::exec(container, &["systemctl", "daemon-reload"]).await?;
         LxdClient::exec(container, &["systemctl", "enable", "--now", "hr-agent"]).await?;
+
+        // Install code-server
+        emit("Installation des dependances...");
+        LxdClient::exec(
+            container,
+            &["bash", "-c", "apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1"],
+        )
+        .await?;
+        emit("Installation de code-server...");
+        LxdClient::exec(
+            container,
+            &["bash", "-c", "curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/usr/local > /dev/null 2>&1"],
+        )
+        .await
+        .with_context(|| format!("Failed to install code-server in {container}"))?;
+
+        // Attach a separate storage volume for the workspace (independent of boot disk)
+        emit("Creation du volume workspace...");
+        let vol_name = format!("{container}-workspace");
+        LxdClient::attach_storage_volume(container, &vol_name, "/root/workspace")
+            .await
+            .with_context(|| format!("Failed to attach workspace volume for {container}"))?;
+
+        // Configure code-server: no auth (forward-auth handles it), bind localhost
+        emit("Configuration de code-server...");
+        LxdClient::exec(container, &["mkdir", "-p", "/root/.config/code-server"]).await?;
+        let cs_config = "bind-addr: 127.0.0.1:13337\nauth: none\ncert: false\n";
+        let tmp_cs_config = PathBuf::from(format!("/tmp/cs-config-{service_name}.yaml"));
+        tokio::fs::write(&tmp_cs_config, cs_config).await?;
+        LxdClient::push_file(container, &tmp_cs_config, "root/.config/code-server/config.yaml").await?;
+        let _ = tokio::fs::remove_file(&tmp_cs_config).await;
+
+        // VS Code settings: dark theme, disable built-in AI features
+        LxdClient::exec(container, &["mkdir", "-p", "/root/.local/share/code-server/User"]).await?;
+        let cs_settings = r#"{
+  "workbench.colorTheme": "Default Dark Modern",
+  "chat.disableAIFeatures": true,
+  "workbench.startupEditor": "none",
+  "telemetry.telemetryLevel": "off"
+}
+"#;
+        let tmp_cs_settings = PathBuf::from(format!("/tmp/cs-settings-{service_name}.json"));
+        tokio::fs::write(&tmp_cs_settings, cs_settings).await?;
+        LxdClient::push_file(container, &tmp_cs_settings, "root/.local/share/code-server/User/settings.json").await?;
+        let _ = tokio::fs::remove_file(&tmp_cs_settings).await;
+
+        // Create systemd service for code-server (opens /root/workspace by default)
+        // Extension install runs as a one-shot service in the background to avoid blocking deploy
+        let cs_unit = r#"[Unit]
+Description=code-server IDE
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/code-server --bind-addr 127.0.0.1:13337 /root/workspace
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+"#;
+        let tmp_cs_unit = PathBuf::from(format!("/tmp/cs-unit-{service_name}.service"));
+        tokio::fs::write(&tmp_cs_unit, cs_unit).await?;
+        LxdClient::push_file(container, &tmp_cs_unit, "etc/systemd/system/code-server.service").await?;
+        let _ = tokio::fs::remove_file(&tmp_cs_unit).await;
+
+        // One-shot service to install Claude Code extension in the background
+        // (avoids blocking deploy on slow network downloads)
+        let cs_setup_unit = r#"[Unit]
+Description=code-server extension setup (one-shot)
+After=network-online.target code-server.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/code-server --install-extension Anthropic.claude-code
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target
+"#;
+        let tmp_cs_setup = PathBuf::from(format!("/tmp/cs-setup-{service_name}.service"));
+        tokio::fs::write(&tmp_cs_setup, cs_setup_unit).await?;
+        LxdClient::push_file(container, &tmp_cs_setup, "etc/systemd/system/code-server-setup.service").await?;
+        let _ = tokio::fs::remove_file(&tmp_cs_setup).await;
+
+        emit("Demarrage de code-server...");
+        LxdClient::exec(container, &["systemctl", "daemon-reload"]).await?;
+        LxdClient::exec(container, &["systemctl", "enable", "--now", "code-server"]).await?;
+        LxdClient::exec(container, &["systemctl", "enable", "--now", "code-server-setup"]).await?;
+        info!(container, "code-server installed and started");
 
         info!(container, "Agent deployed");
         Ok(())
@@ -622,7 +814,7 @@ WantedBy=multi-user.target
             if let (Some(token), Some(zone_id)) = (&self.env.cf_api_token, &self.env.cf_zone_id) {
                 let mut record_ids = Vec::new();
                 for domain in &domains {
-                    match cloudflare::upsert_aaaa_record(token, zone_id, domain, &ipv6_str, false)
+                    match cloudflare::upsert_aaaa_record(token, zone_id, domain, &ipv6_str, true)
                         .await
                     {
                         Ok(rid) => record_ids.push(rid),

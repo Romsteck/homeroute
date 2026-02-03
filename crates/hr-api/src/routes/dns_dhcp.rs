@@ -108,52 +108,61 @@ async fn update_config(
 }
 
 async fn get_leases(State(state): State<ApiState>) -> Json<Value> {
-    // Collect lease data while holding the lock
-    let lease_data: Vec<(u64, String, String, Option<String>, Option<String>)> = {
-        let dhcp = state.dhcp.read().await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Get DHCPv4 leases
+    let dhcpv4_leases: Vec<(u64, String, String, Option<String>, Option<String>)> = {
+        let mut dhcp = state.dhcp.write().await;
+        let purged = dhcp.lease_store.purge_expired();
+        if purged > 0 {
+            tracing::info!("Purged {} expired DHCPv4 leases", purged);
+            let _ = dhcp.lease_store.save_to_file();
+        }
         dhcp.lease_store
             .all_leases()
             .iter()
-            .map(|l| {
-                (
-                    l.expiry,
-                    l.mac.clone(),
-                    l.ip.to_string(),
-                    l.hostname.clone(),
-                    l.client_id.clone(),
-                )
-            })
+            .filter(|l| l.expiry > now)
+            .map(|l| (l.expiry, l.mac.clone(), l.ip.to_string(), l.hostname.clone(), l.client_id.clone()))
             .collect()
     };
 
-    // Build MAC -> Vec<ipv6> from neighbor table
-    let mut ipv6_by_mac: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
-    if let Ok(output) = tokio::process::Command::new("ip")
-        .args(["-6", "neigh", "show", "dev", "br-lan"])
-        .output()
-        .await
-    {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 4 && parts[1] == "lladdr" {
-                    let ipv6 = parts[0];
-                    let mac = parts[2].to_lowercase();
-                    if ipv6.starts_with("fe80:") || ipv6.starts_with("fd") {
-                        continue;
-                    }
-                    ipv6_by_mac.entry(mac).or_default().push(ipv6.to_string());
+    // Load DHCPv6 leases from file
+    let dhcpv6_leases: std::collections::HashMap<String, (String, u64)> = {
+        let path = "/var/lib/server-dashboard/dhcpv6-leases.json";
+        match tokio::fs::read_to_string(path).await {
+            Ok(data) => {
+                if let Ok(store) = serde_json::from_str::<serde_json::Value>(&data) {
+                    store.get("leases")
+                        .and_then(|l| l.as_object())
+                        .map(|leases| {
+                            leases.iter().filter_map(|(_, lease)| {
+                                let addr = lease.get("address")?.as_str()?;
+                                let valid = lease.get("valid_until")?.as_u64()?;
+                                // Use MAC directly from lease (extracted from link-local)
+                                let mac = lease.get("mac")?.as_str()?;
+                                Some((mac.to_lowercase(), (addr.to_string(), valid)))
+                            }).collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    std::collections::HashMap::new()
                 }
             }
+            Err(_) => std::collections::HashMap::new(),
         }
-    }
+    };
 
-    let result: Vec<Value> = lease_data
+    // Build result: DHCPv4 leases enriched with DHCPv6 addresses
+    let result: Vec<serde_json::Value> = dhcpv4_leases
         .iter()
         .map(|(expiry, mac, ip, hostname, client_id)| {
-            let ipv6 = ipv6_by_mac.get(&mac.to_lowercase()).cloned().unwrap_or_default();
+            let ipv6 = dhcpv6_leases.get(&mac.to_lowercase())
+                .filter(|(_, valid)| *valid > now)
+                .map(|(addr, _)| vec![addr.clone()])
+                .unwrap_or_default();
             json!({
                 "expiry": expiry,
                 "mac": mac,
@@ -164,5 +173,6 @@ async fn get_leases(State(state): State<ApiState>) -> Json<Value> {
             })
         })
         .collect();
+
     Json(json!({"success": true, "leases": result}))
 }
