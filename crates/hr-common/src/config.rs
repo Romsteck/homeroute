@@ -21,8 +21,12 @@ pub struct EnvConfig {
     pub proxy_config_path: PathBuf,
     pub dns_dhcp_config_path: PathBuf,
     pub reverseproxy_config_path: PathBuf,
-    /// Répertoire CA
-    pub ca_storage_path: PathBuf,
+    /// Répertoire ACME (Let's Encrypt)
+    pub acme_storage_path: PathBuf,
+    /// Email pour le compte ACME
+    pub acme_email: Option<String>,
+    /// Utiliser l'environnement de staging Let's Encrypt
+    pub acme_staging: bool,
     /// Répertoire des données applicatives
     pub data_dir: PathBuf,
     /// Répertoire des logs
@@ -52,7 +56,9 @@ impl Default for EnvConfig {
             reverseproxy_config_path: PathBuf::from(
                 "/var/lib/server-dashboard/reverseproxy-config.json",
             ),
-            ca_storage_path: PathBuf::from("/var/lib/server-dashboard/ca"),
+            acme_storage_path: PathBuf::from("/var/lib/server-dashboard/acme"),
+            acme_email: None,
+            acme_staging: false,
             data_dir: PathBuf::from("/opt/homeroute/data"),
             log_dir: PathBuf::from("/var/log/homeroute"),
             web_dist_path: PathBuf::from("/opt/homeroute/web/dist"),
@@ -102,6 +108,15 @@ impl EnvConfig {
         }
         if let Ok(v) = std::env::var("WEB_DIST_PATH") {
             config.web_dist_path = PathBuf::from(v);
+        }
+        if let Ok(v) = std::env::var("ACME_STORAGE_PATH") {
+            config.acme_storage_path = PathBuf::from(v);
+        }
+        if let Ok(v) = std::env::var("ACME_EMAIL") {
+            config.acme_email = Some(v);
+        }
+        if let Ok(v) = std::env::var("ACME_STAGING") {
+            config.acme_staging = v == "1" || v.to_lowercase() == "true";
         }
 
         config
