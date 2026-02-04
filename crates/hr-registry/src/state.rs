@@ -270,23 +270,68 @@ impl AgentRegistry {
 
         self.persist().await?;
 
-        // Sync local DNS if domains changed
+        // Sync DNS if domains changed
         if old_domains != new_domains {
-            // Remove old domains that are no longer present
+            // Identify added and removed domains
             let removed: Vec<_> = old_domains
                 .iter()
                 .filter(|d| !new_domains.contains(d))
                 .cloned()
                 .collect();
+            let added: Vec<_> = new_domains
+                .iter()
+                .filter(|d| !old_domains.contains(d))
+                .cloned()
+                .collect();
+
+            // Remove old local DNS records
             if !removed.is_empty() {
                 if let Err(e) = self.remove_local_dns_records(&removed) {
                     warn!("Failed to remove old DNS records: {e}");
                 }
             }
-            // Add/update new domains with IPv6 and IPv4
+            // Add/update new local DNS records
             if let Some(ipv6) = app.ipv6_address {
                 if let Err(e) = self.sync_local_dns_records(&new_domains, ipv6, app.ipv4_address) {
                     warn!("Failed to sync new DNS records: {e}");
+                }
+            }
+
+            // Sync Cloudflare DNS records
+            if let (Some(token), Some(zone_id)) = (&self.env.cf_api_token, &self.env.cf_zone_id) {
+                if let Some(ipv6) = app.ipv6_address {
+                    let ipv6_str = ipv6.to_string();
+
+                    // Create CF records for added domains
+                    for domain in &added {
+                        match cloudflare::upsert_aaaa_record(token, zone_id, domain, &ipv6_str, true).await {
+                            Ok(rid) => {
+                                let mut state = self.state.write().await;
+                                if let Some(app) = state.applications.iter_mut().find(|a| a.id == id) {
+                                    app.cloudflare_record_ids.push(rid);
+                                }
+                                drop(state);
+                                let _ = self.persist().await;
+                            }
+                            Err(e) => warn!(domain, "CF upsert failed: {e}"),
+                        }
+                    }
+
+                    // Delete CF records for removed domains
+                    for domain in &removed {
+                        match cloudflare::delete_record_by_name(token, zone_id, domain).await {
+                            Ok(Some(rid)) => {
+                                let mut state = self.state.write().await;
+                                if let Some(app) = state.applications.iter_mut().find(|a| a.id == id) {
+                                    app.cloudflare_record_ids.retain(|r| r != &rid);
+                                }
+                                drop(state);
+                                let _ = self.persist().await;
+                            }
+                            Ok(None) => {} // Record didn't exist
+                            Err(e) => warn!(domain, "CF delete failed: {e}"),
+                        }
+                    }
                 }
             }
         }
