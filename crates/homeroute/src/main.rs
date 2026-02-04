@@ -2,7 +2,7 @@ mod supervisor;
 
 use hr_adblock::AdblockEngine;
 use hr_auth::AuthService;
-use hr_ca::{CaConfig, CertificateAuthority};
+use hr_acme::{AcmeConfig, AcmeManager, WildcardType};
 use hr_common::config::EnvConfig;
 use hr_common::events::EventBus;
 use hr_common::service_registry::{
@@ -78,21 +78,42 @@ async fn main() -> anyhow::Result<()> {
     auth.start_cleanup_task();
     info!("Auth service initialized");
 
-    // Initialize CA
-    let ca_config = CaConfig {
-        storage_path: env.ca_storage_path.to_string_lossy().to_string(),
-        ..CaConfig::default()
-    };
-    let ca = Arc::new(CertificateAuthority::new(ca_config));
-    ca.init().await?;
-    info!(
-        "Certificate Authority initialized ({})",
-        if ca.is_initialized() {
-            "loaded existing"
+    // Initialize ACME (Let's Encrypt)
+    let acme_config = AcmeConfig {
+        storage_path: env.acme_storage_path.to_string_lossy().to_string(),
+        cf_api_token: env.cf_api_token.clone().unwrap_or_default(),
+        cf_zone_id: env.cf_zone_id.clone().unwrap_or_default(),
+        base_domain: env.base_domain.clone(),
+        directory_url: if env.acme_staging {
+            "https://acme-staging-v02.api.letsencrypt.org/directory".to_string()
         } else {
-            "generated new"
+            "https://acme-v02.api.letsencrypt.org/directory".to_string()
+        },
+        account_email: env.acme_email.clone()
+            .unwrap_or_else(|| format!("admin@{}", env.base_domain)),
+        renewal_threshold_days: 30,
+    };
+    let acme = Arc::new(AcmeManager::new(acme_config));
+    acme.init().await?;
+    info!(
+        "ACME manager initialized ({})",
+        if acme.is_initialized() {
+            "account loaded"
+        } else {
+            "new account created"
         }
     );
+
+    // Request wildcard certificates if not present
+    for wt in [WildcardType::Main, WildcardType::Code] {
+        if acme.get_certificate(wt).is_err() {
+            info!("Requesting wildcard certificate for {:?}...", wt);
+            match acme.request_wildcard(wt).await {
+                Ok(cert) => info!("Wildcard certificate issued: {} (expires {})", cert.id, cert.expires_at),
+                Err(e) => warn!("Failed to request wildcard {:?}: {}", wt, e),
+            }
+        }
+    }
 
     // ── Load DNS/DHCP/IPv6/Adblock config ──────────────────────────────
 
@@ -197,77 +218,42 @@ async fn main() -> anyhow::Result<()> {
     } else {
         ProxyConfig {
             base_domain: env.base_domain.clone(),
-            ca_storage_path: env.ca_storage_path.clone(),
+            ca_storage_path: env.acme_storage_path.clone(),
             ..serde_json::from_str("{}")?
         }
     };
 
-    let tls_manager = TlsManager::new(proxy_config.ca_storage_path.clone());
+    let tls_manager = TlsManager::new(env.acme_storage_path.clone());
 
-    // Build domain-to-cert_id lookup from CA index
-    let ca_certs = ca.list_certificates().unwrap_or_default();
-    let mut domain_cert_map: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    for cert_info in &ca_certs {
-        if !cert_info.is_expired() {
-            for domain in &cert_info.domains {
-                // Keep the most recently issued cert for each domain
-                domain_cert_map
-                    .entry(domain.clone())
-                    .or_insert_with(|| cert_info.id.clone());
+    // Load ACME wildcard certificates for proxy
+    // All *.mynetwk.biz domains use the main wildcard
+    // All *.code.mynetwk.biz domains use the code wildcard
+    for wt in [WildcardType::Main, WildcardType::Code] {
+        match acme.get_certificate(wt) {
+            Ok(cert_info) => {
+                // Load the wildcard cert into TLS manager with a representative domain
+                let domain = wt.domain_pattern(&env.base_domain);
+                if let Err(e) = tls_manager.load_certificate_from_pem(
+                    &domain,
+                    &cert_info.cert_path,
+                    &cert_info.key_path,
+                ) {
+                    error!("Failed to load wildcard cert for {}: {}", domain, e);
+                }
+            }
+            Err(e) => {
+                warn!("Wildcard cert {:?} not available: {}", wt, e);
             }
         }
     }
 
-    // Collect all domains that need TLS certificates
-    let mut tls_domains: Vec<String> = proxy_config
-        .active_routes()
-        .iter()
-        .map(|r| r.domain.clone())
-        .collect();
-
-    // Add built-in management domains
-    let base_domain = &proxy_config.base_domain;
-    tls_domains.push(format!("proxy.{}", base_domain));
-    tls_domains.push(format!("auth.{}", base_domain));
-
-    // Load TLS certificates for each domain, issuing new ones if needed
-    for domain in &tls_domains {
-        let cert_id = if let Some(id) = domain_cert_map.get(domain) {
-            id.clone()
-        } else {
-            // Auto-issue a certificate for this domain
-            match ca.issue_certificate(vec![domain.clone()]).await {
-                Ok(cert_info) => {
-                    info!("Auto-issued TLS certificate for: {}", domain);
-                    cert_info.id
-                }
-                Err(e) => {
-                    error!("Failed to auto-issue TLS cert for {}: {}", domain, e);
-                    continue;
-                }
-            }
-        };
-
-        if let Err(e) = tls_manager.load_certificate(domain, &cert_id) {
-            error!("Failed to load TLS cert for {}: {}", domain, e);
-        }
-    }
-
-    // Load TLS certificates for management domains (proxy.*, auth.*)
-    {
-        let ca_certs = ca.list_certificates().unwrap_or_default();
-        for mgmt_sub in &["proxy", "auth"] {
-            let mgmt_domain = format!("{}.{}", mgmt_sub, proxy_config.base_domain);
-            if let Some(cert) = ca_certs
-                .iter()
-                .rev()
-                .find(|c| c.domains.iter().any(|d| d == &mgmt_domain) && !c.is_expired())
-            {
-                if let Err(e) = tls_manager.load_certificate(&mgmt_domain, &cert.id) {
-                    error!("Failed to load TLS cert for {}: {}", mgmt_domain, e);
-                }
-            }
+    // Set main wildcard as fallback for unknown SNI domains
+    if let Ok(cert_info) = acme.get_certificate(WildcardType::Main) {
+        if let Err(e) = tls_manager.set_fallback_certificate_from_pem(
+            &cert_info.cert_path,
+            &cert_info.key_path,
+        ) {
+            warn!("Failed to set fallback certificate: {}", e);
         }
     }
 
@@ -545,12 +531,17 @@ async fn main() -> anyhow::Result<()> {
         PathBuf::from("/var/lib/server-dashboard/agent-registry.json");
     let registry = Arc::new(AgentRegistry::new(
         registry_state_path,
-        ca.clone(),
+        acme.clone(),
         firewall_engine.clone(),
         Arc::new(env.clone()),
         events.clone(),
         app_dns_store.clone(),
     ));
+
+    // Migrate existing apps' DNS records to static_records
+    if let Err(e) = registry.migrate_dns_records().await {
+        warn!("Failed to migrate DNS records: {e}");
+    }
 
     // Ensure LXD profile exists
     {
@@ -638,7 +629,7 @@ async fn main() -> anyhow::Result<()> {
 
     let api_state = hr_api::state::ApiState {
         auth: auth.clone(),
-        ca: ca.clone(),
+        acme: acme.clone(),
         proxy: proxy_state.clone(),
         tls_manager: tls_manager.clone(),
         dns: dns_state.clone(),
@@ -800,8 +791,8 @@ async fn main() -> anyhow::Result<()> {
     info!("HomeRoute started successfully");
     info!("  Auth: OK");
     info!(
-        "  CA: OK ({} certificates)",
-        ca.list_certificates().unwrap_or_default().len()
+        "  ACME: OK ({} wildcard certificates)",
+        acme.list_certificates().unwrap_or_default().len()
     );
     info!("  Events: OK (broadcast bus)");
     info!(

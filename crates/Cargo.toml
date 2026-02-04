@@ -4,7 +4,7 @@ members = [
     "homeroute",
     "hr-common",
     "hr-auth",
-    "hr-ca",
+    "hr-acme",
     "hr-proxy",
     "hr-dns",
     "hr-dhcp",
@@ -105,3 +105,7 @@ ring = "0.17"
 
 # Random (for OsRng)
 rand_core = { version = "0.6", features = ["getrandom"] }
+
+# ACME (Let's Encrypt)
+instant-acme = "0.7"
+base64 = "0.22"
