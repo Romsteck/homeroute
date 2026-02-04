@@ -51,7 +51,7 @@ fn api_routes() -> Router<ApiState> {
         .nest("/ddns", routes::ddns::router())
         .nest("/reverseproxy", routes::reverseproxy::router())
         .nest("/rust-proxy", routes::rust_proxy::router())
-        .nest("/ca", routes::ca::router())
+        .nest("/acme", routes::acme::router())
         .nest("/energy", routes::energy::router())
         .nest("/updates", routes::updates::router())
         .nest("/traffic", routes::traffic::router())

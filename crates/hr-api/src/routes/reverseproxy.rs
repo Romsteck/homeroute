@@ -46,6 +46,8 @@ async fn save_rp_config(state: &ApiState, config: &Value) -> Result<(), String> 
 
 /// Sync all routes to rust-proxy-config.json and reload proxy
 async fn sync_and_reload(state: &ApiState) -> Result<(), String> {
+    use hr_acme::WildcardType;
+
     let rp_config = load_rp_config(state).await?;
     let base_domain = rp_config
         .get("baseDomain")
@@ -60,6 +62,7 @@ async fn sync_and_reload(state: &ApiState) -> Result<(), String> {
         .unwrap_or_default();
 
     // Build proxy routes from standalone hosts
+    // With ACME wildcards, we don't need per-domain cert_ids
     let mut routes = Vec::new();
     for host in &hosts {
         if host.get("enabled").and_then(|e| e.as_bool()) != Some(true) {
@@ -91,46 +94,6 @@ async fn sync_and_reload(state: &ApiState) -> Result<(), String> {
         }));
     }
 
-    // Resolve cert_id for each route: find existing cert or issue a new one
-    let ca_certs = state.ca.list_certificates().unwrap_or_default();
-    for route in &mut routes {
-        let domain = route.get("domain").and_then(|d| d.as_str()).unwrap_or("");
-        if domain.is_empty() {
-            continue;
-        }
-        // Find existing cert for this domain (most recent first)
-        let existing = ca_certs
-            .iter()
-            .rev()
-            .find(|c| c.domains.iter().any(|d| d == domain) && !c.is_expired());
-        if let Some(cert) = existing {
-            route["cert_id"] = json!(cert.id);
-        } else {
-            // Issue a new certificate
-            match state.ca.issue_certificate(vec![domain.to_string()]).await {
-                Ok(cert) => {
-                    route["cert_id"] = json!(cert.id);
-                }
-                Err(e) => {
-                    tracing::error!("Failed to issue cert for {}: {}", domain, e);
-                }
-            }
-        }
-    }
-
-    // Also ensure management domains have certificates
-    for mgmt_sub in &["proxy", "auth"] {
-        let mgmt_domain = format!("{}.{}", mgmt_sub, base_domain);
-        let has_cert = ca_certs
-            .iter()
-            .any(|c| c.domains.iter().any(|d| d == &mgmt_domain) && !c.is_expired());
-        if !has_cert {
-            if let Err(e) = state.ca.issue_certificate(vec![mgmt_domain.clone()]).await {
-                tracing::error!("Failed to issue cert for {}: {}", mgmt_domain, e);
-            }
-        }
-    }
-
     // Load current proxy config, update routes, save
     let proxy_config_path = &state.proxy_config_path;
     let proxy_content = tokio::fs::read_to_string(proxy_config_path)
@@ -157,23 +120,21 @@ async fn sync_and_reload(state: &ApiState) -> Result<(), String> {
         .await
         .map_err(|e| format!("Rename: {}", e))?;
 
-    // Reload proxy config and TLS certificates in memory
+    // Reload proxy config and ACME wildcard certificates
     if let Ok(new_proxy_config) =
         hr_proxy::ProxyConfig::load_from_file(proxy_config_path)
     {
-        if let Err(e) = state.tls_manager.reload_certificates(&new_proxy_config.routes) {
-            tracing::error!("Failed to reload TLS certs: {}", e);
-        }
-        // Also load management domain certs
-        let refreshed_certs = state.ca.list_certificates().unwrap_or_default();
-        for mgmt_sub in &["proxy", "auth"] {
-            let mgmt_domain = format!("{}.{}", mgmt_sub, base_domain);
-            if let Some(cert) = refreshed_certs
-                .iter()
-                .rev()
-                .find(|c| c.domains.iter().any(|d| d == &mgmt_domain) && !c.is_expired())
-            {
-                let _ = state.tls_manager.load_certificate(&mgmt_domain, &cert.id);
+        // Load ACME wildcard certificates into TLS manager
+        for wt in [WildcardType::Main, WildcardType::Code] {
+            if let Ok(cert_info) = state.acme.get_certificate(wt) {
+                let wildcard_domain = wt.domain_pattern(&base_domain);
+                if let Err(e) = state.tls_manager.load_certificate_from_pem(
+                    &wildcard_domain,
+                    &cert_info.cert_path,
+                    &cert_info.key_path,
+                ) {
+                    tracing::error!("Failed to load wildcard cert for {}: {}", wildcard_domain, e);
+                }
             }
         }
         state.proxy.reload_config(new_proxy_config);
@@ -405,7 +366,7 @@ async fn reload_proxy(State(state): State<ApiState>) -> Json<Value> {
 }
 
 async fn certificates_status(State(state): State<ApiState>) -> Json<Value> {
-    match state.ca.list_certificates() {
+    match state.acme.list_certificates() {
         Ok(certs) => {
             let statuses: Vec<Value> = certs
                 .iter()
@@ -413,6 +374,7 @@ async fn certificates_status(State(state): State<ApiState>) -> Json<Value> {
                     json!({
                         "id": c.id,
                         "domains": c.domains,
+                        "wildcard_type": format!("{:?}", c.wildcard_type),
                         "issued_at": c.issued_at.to_rfc3339(),
                         "expires_at": c.expires_at.to_rfc3339(),
                         "expired": c.is_expired(),
@@ -422,23 +384,25 @@ async fn certificates_status(State(state): State<ApiState>) -> Json<Value> {
                 .collect();
             Json(json!({"success": true, "certificates": statuses}))
         }
-        Err(e) => Json(json!({"success": false, "error": e.to_string()})),
+        Err(e) => Json(json!({"success": false, "error": format!("{e}")})),
     }
 }
 
 async fn renew_certificates(State(state): State<ApiState>) -> Json<Value> {
-    let candidates = match state.ca.certificates_needing_renewal() {
+    use hr_acme::WildcardType;
+
+    let candidates = match state.acme.certificates_needing_renewal() {
         Ok(c) => c,
-        Err(e) => return Json(json!({"success": false, "error": e.to_string()})),
+        Err(e) => return Json(json!({"success": false, "error": format!("{e}")})),
     };
 
     let mut renewed = Vec::new();
-    let mut errors = Vec::new();
+    let mut errors: Vec<Value> = Vec::new();
 
     for cert in candidates {
-        match state.ca.renew_certificate(&cert.id).await {
+        match state.acme.request_wildcard(cert.wildcard_type).await {
             Ok(new_cert) => renewed.push(json!({"id": new_cert.id, "domains": new_cert.domains})),
-            Err(e) => errors.push(json!({"id": cert.id, "error": e.to_string()})),
+            Err(e) => errors.push(json!({"id": cert.id, "error": format!("{e}")})),
         }
     }
 
