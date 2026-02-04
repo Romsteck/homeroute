@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 hr-common = { path = "../hr-common" }
-hr-ca = { path = "../hr-ca" }
+hr-acme = { path = "../hr-acme" }
 hr-dns = { path = "../hr-dns" }
 hr-firewall = { path = "../hr-firewall" }
 hr-lxd = { path = "../hr-lxd" }
