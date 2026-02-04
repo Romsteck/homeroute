@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 
-use hr_ca::CertificateAuthority;
+use hr_acme::{AcmeManager, WildcardType};
 use hr_common::config::EnvConfig;
 use hr_common::events::{AgentMetricsEvent, AgentStatusEvent, AgentUpdateEvent, AgentUpdateStatus, EventBus};
 use hr_dns::AppDnsStore;
@@ -38,7 +38,7 @@ pub struct AgentRegistry {
     state: Arc<RwLock<RegistryState>>,
     state_path: PathBuf,
     connections: Arc<RwLock<HashMap<String, AgentConnection>>>,
-    ca: Arc<CertificateAuthority>,
+    acme: Arc<AcmeManager>,
     firewall: Option<Arc<FirewallEngine>>,
     env: Arc<EnvConfig>,
     events: Arc<EventBus>,
@@ -50,7 +50,7 @@ impl AgentRegistry {
     /// Load or create the registry state from disk.
     pub fn new(
         state_path: PathBuf,
-        ca: Arc<CertificateAuthority>,
+        acme: Arc<AcmeManager>,
         firewall: Option<Arc<FirewallEngine>>,
         env: Arc<EnvConfig>,
         events: Arc<EventBus>,
@@ -75,7 +75,7 @@ impl AgentRegistry {
             state: Arc::new(RwLock::new(state)),
             state_path,
             connections: Arc::new(RwLock::new(HashMap::new())),
-            ca,
+            acme,
             firewall,
             env,
             events,
@@ -115,6 +115,7 @@ impl AgentRegistry {
             token_hash,
             ipv6_suffix: suffix,
             ipv6_address: None,
+            ipv4_address: None,
             status: AgentStatus::Deploying,
             last_heartbeat: None,
             agent_version: None,
@@ -233,10 +234,14 @@ impl AgentRegistry {
 
     /// Update application endpoints/auth. Pushes new config to connected agent.
     pub async fn update_application(&self, id: &str, req: UpdateApplicationRequest) -> Result<Option<Application>> {
+        let base_domain = self.env.base_domain.clone();
         let mut state = self.state.write().await;
         let Some(app) = state.applications.iter_mut().find(|a| a.id == id) else {
             return Ok(None);
         };
+
+        // Capture old domains before modification
+        let old_domains = app.domains(&base_domain);
 
         if let Some(name) = req.name {
             app.name = name;
@@ -257,10 +262,34 @@ impl AgentRegistry {
             app.power_policy = power_policy;
         }
 
+        // Get new domains after modification
+        let new_domains = app.domains(&base_domain);
+
         let app = app.clone();
         drop(state);
 
         self.persist().await?;
+
+        // Sync local DNS if domains changed
+        if old_domains != new_domains {
+            // Remove old domains that are no longer present
+            let removed: Vec<_> = old_domains
+                .iter()
+                .filter(|d| !new_domains.contains(d))
+                .cloned()
+                .collect();
+            if !removed.is_empty() {
+                if let Err(e) = self.remove_local_dns_records(&removed) {
+                    warn!("Failed to remove old DNS records: {e}");
+                }
+            }
+            // Add/update new domains with IPv6 and IPv4
+            if let Some(ipv6) = app.ipv6_address {
+                if let Err(e) = self.sync_local_dns_records(&new_domains, ipv6, app.ipv4_address) {
+                    warn!("Failed to sync new DNS records: {e}");
+                }
+            }
+        }
 
         // Push new config to connected agent if any
         self.push_config_to_agent(&app).await;
@@ -297,6 +326,12 @@ impl AgentRegistry {
                     warn!(record_id, "Failed to delete CF record: {e}");
                 }
             }
+        }
+
+        // Remove local DNS records
+        let domains = app.domains(&self.env.base_domain);
+        if let Err(e) = self.remove_local_dns_records(&domains) {
+            warn!("Failed to remove local DNS records: {e}");
         }
 
         // Remove firewall rule
@@ -363,13 +398,14 @@ impl AgentRegistry {
 
     /// Called when an agent successfully connects and authenticates.
     /// Issues certs, creates DNS records, adds firewall rule, pushes config.
-    /// If the agent reports its actual IPv6 address, we use that instead of computing from suffix.
+    /// If the agent reports its actual IPv6/IPv4 addresses, we use those.
     pub async fn on_agent_connected(
         &self,
         app_id: &str,
         tx: mpsc::Sender<RegistryMessage>,
         agent_version: String,
         reported_ipv6: Option<String>,
+        reported_ipv4: Option<String>,
     ) -> Result<()> {
         let now = Utc::now();
 
@@ -386,7 +422,7 @@ impl AgentRegistry {
             );
         }
 
-        // Update status and IPv6 address if reported by agent
+        // Update status and IP addresses if reported by agent
         {
             let mut state = self.state.write().await;
             if let Some(app) = state.applications.iter_mut().find(|a| a.id == app_id) {
@@ -401,6 +437,17 @@ impl AgentRegistry {
                         app.ipv6_address = Some(addr);
                         if old_addr != Some(addr) {
                             info!(app_id, ipv6 = ipv6_str, "Updated app IPv6 from agent report");
+                        }
+                    }
+                }
+
+                // Use agent's reported IPv4 if available
+                if let Some(ref ipv4_str) = reported_ipv4 {
+                    if let Ok(addr) = ipv4_str.parse() {
+                        let old_addr = app.ipv4_address;
+                        app.ipv4_address = Some(addr);
+                        if old_addr != Some(addr) {
+                            info!(app_id, ipv4 = ipv4_str, "Updated app IPv4 from agent report");
                         }
                     }
                 }
@@ -501,16 +548,16 @@ impl AgentRegistry {
 
     // ── Certificate renewal ───────────────────────────────────────
 
-    /// Background task: check for certificates needing renewal and push updates.
+    /// Background task: check for ACME wildcard certificates needing renewal and push updates.
     pub async fn run_cert_renewal(self: &Arc<Self>) {
         // Check every 6 hours
         let interval = std::time::Duration::from_secs(6 * 3600);
         loop {
             tokio::time::sleep(interval).await;
 
-            info!("Checking agent certificates for renewal...");
+            info!("Checking ACME wildcard certificates for renewal...");
 
-            let certs = match self.ca.certificates_needing_renewal() {
+            let certs = match self.acme.certificates_needing_renewal() {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("Failed to check cert renewal: {e}");
@@ -519,41 +566,39 @@ impl AgentRegistry {
             };
 
             if certs.is_empty() {
+                info!("No certificates need renewal");
                 continue;
             }
 
-            // Find which apps have certs that need renewal
-            let state = self.state.read().await;
-            let mut apps_to_update = Vec::new();
-
+            // Renew certificates that need it
+            let mut renewed = 0;
             for cert in &certs {
-                for app in &state.applications {
-                    if app.cert_ids.contains(&cert.id) && !apps_to_update.contains(&app.id) {
-                        apps_to_update.push(app.id.clone());
-                    }
-                }
-                // Renew the cert
-                if let Err(e) = self.ca.renew_certificate(&cert.id).await {
-                    warn!(cert_id = cert.id, "Failed to renew cert: {e}");
+                info!(wildcard = cert.id, expires = %cert.expires_at, "Renewing certificate...");
+                if let Err(e) = self.acme.request_wildcard(cert.wildcard_type).await {
+                    warn!(wildcard = cert.id, "Failed to renew wildcard cert: {e}");
+                } else {
+                    renewed += 1;
+                    info!(wildcard = cert.id, "Certificate renewed successfully");
                 }
             }
-            drop(state);
 
-            info!(
-                renewed = certs.len(),
-                apps = apps_to_update.len(),
-                "Certificates renewed"
-            );
-
-            // Push updated config to affected agents
-            for app_id in apps_to_update {
-                let state = self.state.read().await;
-                if let Some(app) = state.applications.iter().find(|a| a.id == app_id) {
-                    let app = app.clone();
-                    drop(state);
-                    self.push_config_to_agent(&app).await;
-                }
+            if renewed > 0 {
+                info!(renewed, "Certificates renewed, pushing updates to all agents");
+                // Push updated certs to all connected agents
+                self.push_cert_updates().await;
             }
+        }
+    }
+
+    /// Push certificate updates to all connected agents.
+    /// Called after wildcard certificate renewal.
+    pub async fn push_cert_updates(&self) {
+        let state = self.state.read().await;
+        let apps: Vec<_> = state.applications.clone();
+        drop(state);
+
+        for app in apps {
+            self.push_config_to_agent(&app).await;
         }
     }
 
@@ -672,6 +717,135 @@ impl AgentRegistry {
             store.remove(&domain.to_lowercase());
         }
         info!(app = app.slug, "Removed app domains from DNS store");
+    }
+
+    // ── Local DNS static records (synced with Cloudflare) ────────
+
+    /// Add/update static DNS records (A and AAAA) for an application's domains.
+    /// These are stored in dns-dhcp-config.json and visible in the DNS page.
+    /// - AAAA records: IPv6 addresses (same as Cloudflare) for IPv6 clients
+    /// - A records: IPv4 addresses for IPv4-only clients (local DNS only)
+    fn sync_local_dns_records(
+        &self,
+        domains: &[String],
+        ipv6: std::net::Ipv6Addr,
+        ipv4: Option<std::net::Ipv4Addr>,
+    ) -> Result<()> {
+        let config_path = &self.env.dns_dhcp_config_path;
+        let content = std::fs::read_to_string(config_path)
+            .with_context(|| format!("Failed to read DNS config: {:?}", config_path))?;
+        let mut config: serde_json::Value = serde_json::from_str(&content)?;
+
+        let static_records = config["dns"]["static_records"]
+            .as_array_mut()
+            .ok_or_else(|| anyhow::anyhow!("Invalid DNS config: missing static_records"))?;
+
+        for domain in domains {
+            // Remove existing records with same name (both A and AAAA)
+            static_records.retain(|r| r["name"].as_str() != Some(domain.as_str()));
+
+            // Add AAAA record pointing to agent IPv6 (same as Cloudflare)
+            static_records.push(serde_json::json!({
+                "name": domain,
+                "type": "AAAA",
+                "value": ipv6.to_string(),
+                "ttl": 60
+            }));
+
+            // Add A record pointing to agent IPv4 (local DNS only, for v4 clients)
+            if let Some(v4) = ipv4 {
+                static_records.push(serde_json::json!({
+                    "name": domain,
+                    "type": "A",
+                    "value": v4.to_string(),
+                    "ttl": 60
+                }));
+            }
+        }
+
+        std::fs::write(config_path, serde_json::to_string_pretty(&config)?)?;
+        info!(domains = ?domains, ipv6 = %ipv6, ipv4 = ?ipv4, "Synced local DNS records (A + AAAA)");
+        Ok(())
+    }
+
+    /// Remove DNS records for specified domains.
+    fn remove_local_dns_records(&self, domains: &[String]) -> Result<()> {
+        let config_path = &self.env.dns_dhcp_config_path;
+        let content = std::fs::read_to_string(config_path)
+            .with_context(|| format!("Failed to read DNS config: {:?}", config_path))?;
+        let mut config: serde_json::Value = serde_json::from_str(&content)?;
+
+        let static_records = config["dns"]["static_records"]
+            .as_array_mut()
+            .ok_or_else(|| anyhow::anyhow!("Invalid DNS config: missing static_records"))?;
+
+        for domain in domains {
+            static_records.retain(|r| r["name"].as_str() != Some(domain.as_str()));
+        }
+
+        std::fs::write(config_path, serde_json::to_string_pretty(&config)?)?;
+        info!(domains = ?domains, "Removed local DNS records");
+        Ok(())
+    }
+
+    /// Migrate existing applications' DNS records to static_records.
+    /// Called once at startup to populate DNS records for apps that existed before this feature.
+    pub async fn migrate_dns_records(&self) -> Result<()> {
+        let config_path = &self.env.dns_dhcp_config_path;
+        let content = std::fs::read_to_string(config_path)
+            .with_context(|| format!("Failed to read DNS config: {:?}", config_path))?;
+        let mut config: serde_json::Value = serde_json::from_str(&content)?;
+
+        let static_records = config["dns"]["static_records"]
+            .as_array_mut()
+            .ok_or_else(|| anyhow::anyhow!("Invalid DNS config: missing static_records"))?;
+
+        let state = self.state.read().await;
+        let base_domain = &self.env.base_domain;
+        let mut added = 0;
+
+        for app in &state.applications {
+            if !app.enabled {
+                continue;
+            }
+            // Skip apps without IPv6 address
+            let Some(ipv6) = app.ipv6_address else {
+                continue;
+            };
+
+            let domains = app.domains(base_domain);
+            for domain in domains {
+                // Remove existing records (handles migration from old A-only to A+AAAA)
+                static_records.retain(|r| r["name"].as_str() != Some(&domain));
+
+                // Add AAAA record pointing to agent IPv6 (same as Cloudflare)
+                static_records.push(serde_json::json!({
+                    "name": domain,
+                    "type": "AAAA",
+                    "value": ipv6.to_string(),
+                    "ttl": 60
+                }));
+
+                // Add A record pointing to agent IPv4 (local DNS only)
+                if let Some(ipv4) = app.ipv4_address {
+                    static_records.push(serde_json::json!({
+                        "name": domain,
+                        "type": "A",
+                        "value": ipv4.to_string(),
+                        "ttl": 60
+                    }));
+                }
+
+                added += 1;
+            }
+        }
+
+        if added > 0 {
+            std::fs::write(config_path, serde_json::to_string_pretty(&config)?)?;
+            info!(added, "Migrated DNS records for existing applications");
+        }
+
+        Ok(())
     }
 
     // ── Internal helpers ────────────────────────────────────────
@@ -843,7 +1017,7 @@ WantedBy=multi-user.target
         Ok(())
     }
 
-    /// Issue certs, create DNS records, add firewall rule, push full config.
+    /// Create DNS records, add firewall rule, push full config with wildcard certs.
     async fn provision_and_push(
         &self,
         app_id: &str,
@@ -857,31 +1031,20 @@ WantedBy=multi-user.target
             .find(|a| a.id == app_id)
             .ok_or_else(|| anyhow::anyhow!("App not found: {app_id}"))?;
 
-        // Compute IPv6 if we don't have one yet
-        // For now we'll skip if no prefix is available — the agent will get Ipv6Update later
-        // In a real deployment, we'd read from the prefix watch channel
-
-        // Issue TLS certificates (one per domain)
+        // Get wildcard certificates for this app's domains
         let domains = app.domains(&base_domain);
         let routes = app.routes(&base_domain);
         let mut agent_routes = Vec::new();
-        let mut cert_ids = Vec::new();
 
         for route_info in &routes {
-            let cert_info = self
-                .ca
-                .issue_certificate(vec![route_info.domain.clone()])
-                .await
-                .map_err(|e| anyhow::anyhow!("CA cert issue failed: {e}"))?;
+            // Determine which wildcard to use based on domain
+            let wildcard_type = WildcardType::from_domain(&route_info.domain);
 
-            let cert_pem = tokio::fs::read_to_string(&cert_info.cert_path)
+            let (cert_pem, key_pem) = self
+                .acme
+                .get_cert_pem(wildcard_type)
                 .await
-                .context("read cert PEM")?;
-            let key_pem = tokio::fs::read_to_string(&cert_info.key_path)
-                .await
-                .context("read key PEM")?;
-
-            cert_ids.push(cert_info.id.clone());
+                .map_err(|e| anyhow::anyhow!("Failed to get wildcard cert for {}: {e}", route_info.domain))?;
 
             agent_routes.push(AgentRoute {
                 domain: route_info.domain.clone(),
@@ -892,7 +1055,8 @@ WantedBy=multi-user.target
                 allowed_groups: route_info.allowed_groups.clone(),
             });
         }
-        app.cert_ids = cert_ids;
+        // No longer tracking per-domain cert_ids (using wildcards)
+        app.cert_ids = vec![];
 
         // Create Cloudflare AAAA records
         let ipv6_str = app
@@ -933,11 +1097,15 @@ WantedBy=multi-user.target
             }
         }
 
-        // Read CA root cert for the agent
-        let ca_pem_path = format!("{}/root-ca.crt", self.env.ca_storage_path.display());
-        let ca_pem = tokio::fs::read_to_string(&ca_pem_path)
-            .await
-            .unwrap_or_default();
+        // Sync local DNS records (A + AAAA with agent IPv4 and IPv6)
+        if let Some(ipv6) = app.ipv6_address {
+            if let Err(e) = self.sync_local_dns_records(&domains, ipv6, app.ipv4_address) {
+                warn!("Failed to sync local DNS records: {e}");
+            }
+        }
+
+        // Let's Encrypt certs are trusted by default - no CA PEM needed
+        let ca_pem = String::new();
 
         let auth_url = format!("http://10.0.0.254:{}/api/auth/forward-check", self.env.api_port);
         let dashboard_url = format!("https://hr.{}", self.env.base_domain);
@@ -971,25 +1139,16 @@ WantedBy=multi-user.target
         let mut agent_routes = Vec::new();
 
         for route_info in &routes {
-            // Re-read cert PEM for this domain
-            let cert_info = match self
-                .ca
-                .issue_certificate(vec![route_info.domain.clone()])
-                .await
-            {
-                Ok(ci) => ci,
+            // Get wildcard cert for this domain
+            let wildcard_type = WildcardType::from_domain(&route_info.domain);
+
+            let (cert_pem, key_pem) = match self.acme.get_cert_pem(wildcard_type).await {
+                Ok(pems) => pems,
                 Err(e) => {
-                    warn!(domain = route_info.domain, "Failed to issue cert: {e}");
+                    warn!(domain = route_info.domain, "Failed to get wildcard cert: {e}");
                     continue;
                 }
             };
-
-            let cert_pem = tokio::fs::read_to_string(&cert_info.cert_path)
-                .await
-                .unwrap_or_default();
-            let key_pem = tokio::fs::read_to_string(&cert_info.key_path)
-                .await
-                .unwrap_or_default();
 
             agent_routes.push(AgentRoute {
                 domain: route_info.domain.clone(),
@@ -1001,10 +1160,8 @@ WantedBy=multi-user.target
             });
         }
 
-        let ca_pem_path = format!("{}/root-ca.crt", self.env.ca_storage_path.display());
-        let ca_pem = tokio::fs::read_to_string(&ca_pem_path)
-            .await
-            .unwrap_or_default();
+        // Let's Encrypt certs are trusted by default - no CA PEM needed
+        let ca_pem = String::new();
 
         let auth_url = format!(
             "http://10.0.0.254:{}/api/auth/forward-check",

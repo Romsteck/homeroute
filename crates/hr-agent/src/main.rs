@@ -386,6 +386,8 @@ async fn start_proxy(
     proxy_handle: &mut Option<tokio::task::JoinHandle<()>>,
     addr_str: &str,
 ) {
+    use std::net::Ipv4Addr;
+
     // Stop existing proxy
     proxy.shutdown();
     if let Some(handle) = proxy_handle.take() {
@@ -394,7 +396,7 @@ async fn start_proxy(
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
-    let bind_addr: Ipv6Addr = match addr_str.parse() {
+    let bind_addr_v6: Ipv6Addr = match addr_str.parse() {
         Ok(a) => a,
         Err(e) => {
             error!("Invalid IPv6 address {addr_str}: {e}");
@@ -402,10 +404,19 @@ async fn start_proxy(
         }
     };
 
-    info!(addr = addr_str, "Starting HTTPS proxy on [{}]:443", addr_str);
+    // Detect IPv4 address for dual-stack listening
+    let bind_addr_v4: Option<Ipv4Addr> = ipv6::get_ipv4_address("eth0")
+        .await
+        .and_then(|s| s.parse().ok());
+
+    if let Some(ref v4) = bind_addr_v4 {
+        info!(ipv6 = addr_str, ipv4 = %v4, "Starting HTTPS proxy on dual-stack (v6 + v4)");
+    } else {
+        info!(ipv6 = addr_str, "Starting HTTPS proxy on IPv6 only");
+    }
 
     // Get the shared components needed for the spawned task
-    let listener_handle = proxy.spawn_listener(bind_addr);
+    let listener_handle = proxy.spawn_listener(bind_addr_v6, bind_addr_v4);
     match listener_handle {
         Ok(handle) => {
             *proxy_handle = Some(handle);
