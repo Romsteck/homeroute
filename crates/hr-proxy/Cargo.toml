@@ -6,7 +6,6 @@ edition.workspace = true
 [dependencies]
 hr-common = { path = "../hr-common" }
 hr-auth = { path = "../hr-auth" }
-hr-ca = { path = "../hr-ca" }
 tokio = { workspace = true }
 axum = { workspace = true }
 hyper = { workspace = true }
