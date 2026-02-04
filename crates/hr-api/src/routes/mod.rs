@@ -9,7 +9,7 @@ pub mod nat;
 pub mod ddns;
 pub mod reverseproxy;
 pub mod rust_proxy;
-pub mod ca;
+pub mod acme;
 pub mod energy;
 pub mod updates;
 pub mod traffic;

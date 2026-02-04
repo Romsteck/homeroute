@@ -1,7 +1,7 @@
 use hr_adblock::AdblockEngine;
 use hr_analytics::store::AnalyticsStore;
 use hr_auth::AuthService;
-use hr_ca::CertificateAuthority;
+use hr_acme::AcmeManager;
 use hr_common::config::EnvConfig;
 use hr_common::events::EventBus;
 use hr_common::service_registry::SharedServiceRegistry;
@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 #[derive(Clone)]
 pub struct ApiState {
     pub auth: Arc<AuthService>,
-    pub ca: Arc<CertificateAuthority>,
+    pub acme: Arc<AcmeManager>,
     pub proxy: Arc<ProxyState>,
     pub tls_manager: Arc<TlsManager>,
     pub dns: SharedDnsState,
