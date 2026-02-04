@@ -129,6 +129,53 @@ pub async fn delete_record(token: &str, zone_id: &str, record_id: &str) -> Resul
     Ok(())
 }
 
+/// Delete a Cloudflare AAAA record by domain name.
+/// Returns Ok(Some(record_id)) if deleted, Ok(None) if not found.
+pub async fn delete_record_by_name(
+    token: &str,
+    zone_id: &str,
+    record_name: &str,
+) -> Result<Option<String>, String> {
+    let client = reqwest::Client::new();
+
+    // List existing AAAA records for this name
+    let list_url = format!(
+        "{}/zones/{}/dns_records?type=AAAA&name={}",
+        CF_API_BASE, zone_id, record_name
+    );
+
+    let resp = client
+        .get(&list_url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    check_cf_errors(&body)?;
+
+    let records = body
+        .get("result")
+        .and_then(|r| r.as_array())
+        .ok_or("Invalid response from Cloudflare")?;
+
+    let Some(record) = records.first() else {
+        return Ok(None);
+    };
+
+    let record_id = record
+        .get("id")
+        .and_then(|i| i.as_str())
+        .ok_or("No record ID")?
+        .to_string();
+
+    // Delete the record
+    delete_record(token, zone_id, &record_id).await?;
+
+    info!(record = record_name, "Deleted Cloudflare AAAA record by name");
+    Ok(Some(record_id))
+}
+
 /// Get the content (IPv6 address) of an existing AAAA record.
 pub async fn get_aaaa_record_content(
     token: &str,
