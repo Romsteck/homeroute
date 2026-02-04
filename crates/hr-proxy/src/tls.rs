@@ -15,49 +15,100 @@ use tracing::{info, warn, error};
 pub struct SniResolver {
     /// Certified keys indexed by domain name
     certs: RwLock<HashMap<String, Arc<CertifiedKey>>>,
+    /// Default/fallback certificate for unknown domains
+    default_cert: RwLock<Option<Arc<CertifiedKey>>>,
 }
 
 impl SniResolver {
     pub fn new() -> Self {
         Self {
             certs: RwLock::new(HashMap::new()),
+            default_cert: RwLock::new(None),
         }
     }
 
     /// Insert a certified key for a domain
     pub fn insert(&self, domain: String, key: Arc<CertifiedKey>) {
-        let mut certs = self.certs.write().unwrap();
-        certs.insert(domain, key);
+        if let Ok(mut certs) = self.certs.write() {
+            certs.insert(domain, key);
+        } else {
+            error!("Failed to acquire write lock for certificate insertion");
+        }
     }
 
     /// Remove a domain's certificate
     pub fn remove(&self, domain: &str) {
-        let mut certs = self.certs.write().unwrap();
-        certs.remove(domain);
+        if let Ok(mut certs) = self.certs.write() {
+            certs.remove(domain);
+        } else {
+            error!("Failed to acquire write lock for certificate removal");
+        }
     }
 
     /// List loaded domains
     pub fn loaded_domains(&self) -> Vec<String> {
-        let certs = self.certs.read().unwrap();
-        certs.keys().cloned().collect()
+        self.certs.read()
+            .map(|certs| certs.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Clear all certificates
     pub fn clear(&self) {
-        let mut certs = self.certs.write().unwrap();
-        certs.clear();
+        if let Ok(mut certs) = self.certs.write() {
+            certs.clear();
+        } else {
+            error!("Failed to acquire write lock for certificate clear");
+        }
+    }
+
+    /// Replace all certificates atomically (for SIGHUP reload)
+    pub fn replace_all(&self, new_certs: HashMap<String, Arc<CertifiedKey>>) -> Result<()> {
+        let mut certs = self.certs.write()
+            .map_err(|_| anyhow::anyhow!("Lock poisoned during certificate replacement"))?;
+        *certs = new_certs;
+        Ok(())
+    }
+
+    /// Set the default/fallback certificate
+    pub fn set_default_cert(&self, key: Arc<CertifiedKey>) {
+        if let Ok(mut default) = self.default_cert.write() {
+            *default = Some(key);
+            info!("Fallback certificate configured");
+        } else {
+            error!("Failed to acquire write lock for default certificate");
+        }
     }
 }
 
 impl ResolvesServerCert for SniResolver {
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         let server_name = client_hello.server_name()?;
-        let certs = self.certs.read().unwrap();
-        let key = certs.get(server_name).cloned();
-        if key.is_none() {
-            warn!("No certificate found for SNI: {}", server_name);
+        let certs = self.certs.read().ok()?;
+
+        // Try exact match first
+        if let Some(key) = certs.get(server_name).cloned() {
+            return Some(key);
         }
-        key
+
+        // Try wildcard match (e.g., *.example.com for sub.example.com)
+        if let Some(dot_pos) = server_name.find('.') {
+            let wildcard = format!("*.{}", &server_name[dot_pos + 1..]);
+            if let Some(key) = certs.get(&wildcard).cloned() {
+                return Some(key);
+            }
+        }
+
+        // Use fallback certificate if available
+        drop(certs); // Release read lock before acquiring another
+        if let Ok(default) = self.default_cert.read() {
+            if let Some(key) = default.clone() {
+                warn!("No certificate found for SNI: {}, using fallback", server_name);
+                return Some(key);
+            }
+        }
+
+        warn!("No certificate found for SNI: {} and no fallback available", server_name);
+        None
     }
 }
 
@@ -80,6 +131,14 @@ impl TlsManager {
 
     /// Load a certificate for a specific domain
     pub fn load_certificate(&self, domain: &str, cert_id: &str) -> Result<()> {
+        let certified_key = self.load_certified_key(cert_id)?;
+        self.resolver.insert(domain.to_string(), Arc::new(certified_key));
+        info!("Loaded TLS certificate for domain: {}", domain);
+        Ok(())
+    }
+
+    /// Load a CertifiedKey from cert_id without inserting it
+    fn load_certified_key(&self, cert_id: &str) -> Result<CertifiedKey> {
         let cert_path = self.ca_storage_path.join("certs").join(format!("{}.crt", cert_id));
         let key_path = self.ca_storage_path.join("keys").join(format!("{}.key", cert_id));
 
@@ -89,10 +148,30 @@ impl TlsManager {
         let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
             .map_err(|e| anyhow::anyhow!("Failed to parse signing key: {}", e))?;
 
-        let certified_key = CertifiedKey::new(certs, signing_key);
+        Ok(CertifiedKey::new(certs, signing_key))
+    }
 
+    /// Set the fallback certificate for unknown SNI domains
+    pub fn set_fallback_certificate(&self, cert_id: &str) -> Result<()> {
+        let certified_key = self.load_certified_key(cert_id)?;
+        self.resolver.set_default_cert(Arc::new(certified_key));
+        info!("Fallback TLS certificate configured with cert_id: {}", cert_id);
+        Ok(())
+    }
+
+    /// Load a certificate from PEM file paths (for ACME/Let's Encrypt certs)
+    pub fn load_certificate_from_pem(&self, domain: &str, cert_path: &str, key_path: &str) -> Result<()> {
+        let certified_key = load_certified_key_from_paths(cert_path, key_path)?;
         self.resolver.insert(domain.to_string(), Arc::new(certified_key));
-        info!("Loaded TLS certificate for domain: {}", domain);
+        info!("Loaded TLS certificate for domain: {} (from {})", domain, cert_path);
+        Ok(())
+    }
+
+    /// Set the fallback certificate from PEM file paths (for ACME/Let's Encrypt certs)
+    pub fn set_fallback_certificate_from_pem(&self, cert_path: &str, key_path: &str) -> Result<()> {
+        let certified_key = load_certified_key_from_paths(cert_path, key_path)?;
+        self.resolver.set_default_cert(Arc::new(certified_key));
+        info!("Fallback TLS certificate configured from: {}", cert_path);
         Ok(())
     }
 
@@ -116,21 +195,50 @@ impl TlsManager {
         self.resolver.loaded_domains()
     }
 
-    /// Reload all certificates from config
+    /// Reload all certificates from config (atomic swap - no interruption during reload)
     pub fn reload_certificates(&self, routes: &[crate::config::RouteConfig]) -> Result<()> {
-        self.resolver.clear();
+        // Phase 1: Build new certificate map WITHOUT touching the old one
+        let mut new_certs: HashMap<String, Arc<CertifiedKey>> = HashMap::new();
+        let mut load_errors = Vec::new();
+
         for route in routes {
             if route.enabled {
                 if let Some(cert_id) = &route.cert_id {
-                    match self.load_certificate(&route.domain, cert_id) {
-                        Ok(_) => info!("Reloaded certificate for: {}", route.domain),
-                        Err(e) => error!("Failed to reload certificate for {}: {}", route.domain, e),
+                    match self.load_certified_key(cert_id) {
+                        Ok(certified_key) => {
+                            new_certs.insert(route.domain.clone(), Arc::new(certified_key));
+                            info!("Prepared certificate for reload: {}", route.domain);
+                        }
+                        Err(e) => {
+                            load_errors.push(format!("{}: {}", route.domain, e));
+                            error!("Failed to load certificate for {}: {}", route.domain, e);
+                        }
                     }
                 }
             }
         }
+
+        // Phase 2: Atomic swap - replace all certs at once
+        self.resolver.replace_all(new_certs)?;
+        info!("Certificate reload completed atomically");
+
+        if !load_errors.is_empty() {
+            warn!("Some certificates failed to load during reload: {:?}", load_errors);
+        }
+
         Ok(())
     }
+}
+
+/// Load a CertifiedKey from explicit file paths
+fn load_certified_key_from_paths(cert_path: &str, key_path: &str) -> Result<CertifiedKey> {
+    let certs = load_certs(&PathBuf::from(cert_path))?;
+    let key = load_private_key(&PathBuf::from(key_path))?;
+
+    let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
+        .map_err(|e| anyhow::anyhow!("Failed to parse signing key: {}", e))?;
+
+    Ok(CertifiedKey::new(certs, signing_key))
 }
 
 /// Load certificates from a PEM file
@@ -180,6 +288,14 @@ mod tests {
     fn test_sni_resolver_clear() {
         let resolver = SniResolver::new();
         resolver.clear();
+        assert!(resolver.loaded_domains().is_empty());
+    }
+
+    #[test]
+    fn test_sni_resolver_replace_all() {
+        let resolver = SniResolver::new();
+        let new_certs = HashMap::new();
+        assert!(resolver.replace_all(new_certs).is_ok());
         assert!(resolver.loaded_domains().is_empty());
     }
 
