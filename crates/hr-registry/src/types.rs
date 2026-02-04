@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::net::Ipv6Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::protocol::{AgentMetrics, PowerPolicy, ServiceConfig};
 
@@ -21,6 +21,9 @@ pub struct Application {
     pub ipv6_suffix: u16,
     /// Currently assigned GUA (None if no prefix available).
     pub ipv6_address: Option<Ipv6Addr>,
+    /// IPv4 address reported by agent (for local DNS A records).
+    #[serde(default)]
+    pub ipv4_address: Option<Ipv4Addr>,
     pub status: AgentStatus,
     pub last_heartbeat: Option<DateTime<Utc>>,
     pub agent_version: Option<String>,
@@ -259,6 +262,7 @@ mod tests {
             token_hash: String::new(),
             ipv6_suffix: 2,
             ipv6_address: None,
+            ipv4_address: None,
             status: AgentStatus::Pending,
             last_heartbeat: None,
             agent_version: None,

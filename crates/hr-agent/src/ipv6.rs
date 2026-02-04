@@ -49,6 +49,33 @@ pub async fn get_gua_address(interface: &str, _prefix_hint: Option<&str>) -> Opt
     dhcpv6_addr.or(fallback_addr)
 }
 
+/// Get the IPv4 address from an interface (for local DNS A records).
+pub async fn get_ipv4_address(interface: &str) -> Option<String> {
+    let output = tokio::process::Command::new("ip")
+        .args(["-4", "-o", "addr", "show", "dev", interface, "scope", "global"])
+        .output()
+        .await
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    for line in stdout.lines() {
+        // Format: "2: eth0 inet 10.0.0.100/24 brd 10.0.0.255 scope global dynamic eth0"
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if let Some(addr_idx) = parts.iter().position(|&p| p == "inet") {
+            if let Some(addr_cidr) = parts.get(addr_idx + 1) {
+                let addr = addr_cidr.split('/').next().unwrap_or(addr_cidr);
+                // Skip loopback and link-local
+                if addr.starts_with("127.") || addr.starts_with("169.254.") {
+                    continue;
+                }
+                return Some(addr.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Add an IPv6 address to an interface.
 pub async fn add_address(interface: &str, addr: &str) -> Result<()> {
     // Check if already assigned

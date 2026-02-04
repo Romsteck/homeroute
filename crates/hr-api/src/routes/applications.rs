@@ -430,11 +430,11 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
     // Wait for Auth message with a timeout
     let auth_msg = tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await;
 
-    let (token, service_name, version, reported_ipv6) = match auth_msg {
+    let (token, service_name, version, reported_ipv6, reported_ipv4) = match auth_msg {
         Ok(Some(Ok(Message::Text(text)))) => {
             match serde_json::from_str::<AgentMessage>(&text) {
-                Ok(AgentMessage::Auth { token, service_name, version, ipv6_address }) => {
-                    (token, service_name, version, ipv6_address)
+                Ok(AgentMessage::Auth { token, service_name, version, ipv6_address, ipv4_address }) => {
+                    (token, service_name, version, ipv6_address, ipv4_address)
                 }
                 _ => {
                     warn!("Agent WS: expected Auth message, got something else");
@@ -461,13 +461,13 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
         return;
     };
 
-    info!(app_id = app_id, service = service_name, ipv6 = ?reported_ipv6, "Agent authenticated");
+    info!(app_id = app_id, service = service_name, ipv6 = ?reported_ipv6, ipv4 = ?reported_ipv4, "Agent authenticated");
 
     // Create mpsc channel for registry → agent messages
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
 
     // Notify registry of connection (provisions certs, DNS, firewall, pushes config)
-    if let Err(e) = registry.on_agent_connected(&app_id, tx, version, reported_ipv6).await {
+    if let Err(e) = registry.on_agent_connected(&app_id, tx, version, reported_ipv6, reported_ipv4).await {
         error!(app_id, "Agent provisioning failed: {e}");
         let _ = socket.send(Message::Close(None)).await;
         return;

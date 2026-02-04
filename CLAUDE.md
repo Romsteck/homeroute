@@ -20,7 +20,7 @@ crates/
 ├── hr-dhcp/         # Serveur DHCP (DHCPv4, leases, DORA)
 ├── hr-ipv6/         # IPv6 RA + DHCPv6 stateless
 ├── hr-adblock/      # Moteur adblock (FxHashSet, sources, whitelist)
-├── hr-ca/           # Autorité de certification locale
+├── hr-acme/         # Let's Encrypt ACME (wildcards DNS-01 via Cloudflare)
 ├── hr-analytics/    # Capture trafic + agrégation (SQLite)
 ├── hr-servers/      # Gestion serveurs (monitoring, WoL, scheduler)
 ├── hr-system/       # Système (énergie, updates, réseau, DDNS Cloudflare)
@@ -46,7 +46,7 @@ crates/
 | Config proxy | JSON | `/var/lib/server-dashboard/rust-proxy-config.json` |
 | Config DNS/DHCP | JSON | `/var/lib/server-dashboard/dns-dhcp-config.json` |
 | Config reverseproxy | JSON | `/var/lib/server-dashboard/reverseproxy-config.json` |
-| Certificats CA | PEM | `/var/lib/server-dashboard/ca/` |
+| Certificats ACME | PEM | `/var/lib/server-dashboard/acme/` |
 | DHCP leases | JSON | `/var/lib/server-dashboard/dhcp-leases` |
 | Env config | dotenv | `/opt/homeroute/.env` |
 
@@ -58,7 +58,15 @@ crates/
 | 80 | HTTP→HTTPS redirect |
 | 53 | DNS (hr-dns, UDP+TCP) |
 | 67 | DHCP (hr-dhcp) |
-| 3017 | API management (hr-api, interne) |
+| 4000 | API management (hr-api, interne) |
+
+## Cloudflare
+
+⚠️ **JAMAIS désactiver le mode proxied Cloudflare** - il convertit IPv6 → IPv4 pour les clients externes.
+
+Les enregistrements DNS sont synchronisés automatiquement:
+- **Cloudflare**: AAAA → IPv6 agent (proxied)
+- **DNS local**: A → IPv4 agent + AAAA → IPv6 agent (direct aux containers LXC)
 
 ## Commandes utiles
 
@@ -101,13 +109,13 @@ cp target/release/hr-agent /opt/homeroute/data/agent-binaries/hr-agent
 ### 3. Déclenchement de la mise à jour
 
 ```bash
-curl -X POST http://localhost:3017/api/applications/agents/update
+curl -X POST http://localhost:4000/api/applications/agents/update
 ```
 
 ### 4. Vérification de l'état
 
 ```bash
-curl http://localhost:3017/api/applications/agents/update/status | jq
+curl http://localhost:4000/api/applications/agents/update/status | jq
 ```
 
 Vérifier que tous les agents ont:
@@ -121,10 +129,10 @@ Si un agent ne se reconnecte pas après la mise à jour:
 
 ```bash
 # Via API (recommandé):
-curl -X POST http://localhost:3017/api/applications/{id}/update/fix
+curl -X POST http://localhost:4000/api/applications/{id}/update/fix
 
 # Ou manuellement via LXC:
-lxc exec hr-{slug} -- bash -c "curl -fsSL http://10.0.0.254:3017/api/applications/agents/binary -o /usr/local/bin/hr-agent && chmod +x /usr/local/bin/hr-agent && systemctl restart hr-agent"
+lxc exec hr-{slug} -- bash -c "curl -fsSL http://10.0.0.254:4000/api/applications/agents/binary -o /usr/local/bin/hr-agent && chmod +x /usr/local/bin/hr-agent && systemctl restart hr-agent"
 ```
 
 ### Checklist de vérification

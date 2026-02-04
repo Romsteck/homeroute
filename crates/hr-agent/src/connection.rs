@@ -36,12 +36,21 @@ pub async fn run_connection(
         warn!("No GUA IPv6 address detected on eth0");
     }
 
-    // Send Auth message with our actual IPv6
+    // Detect our IPv4 address
+    let ipv4_address = ipv6::get_ipv4_address("eth0").await;
+    if let Some(ref addr) = ipv4_address {
+        info!(addr, "Detected IPv4 address");
+    } else {
+        warn!("No IPv4 address detected on eth0");
+    }
+
+    // Send Auth message with our actual IPv6 and IPv4
     let auth_msg = AgentMessage::Auth {
         token: config.token.clone(),
         service_name: config.service_name.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         ipv6_address,
+        ipv4_address,
     };
     let auth_json = serde_json::to_string(&auth_msg)?;
     ws_sink.send(Message::Text(auth_json.into())).await?;

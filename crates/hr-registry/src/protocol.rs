@@ -96,6 +96,9 @@ pub enum AgentMessage {
         /// Agent's actual GUA IPv6 address (obtained via DHCPv6/SLAAC).
         #[serde(default)]
         ipv6_address: Option<String>,
+        /// Agent's IPv4 address (for local DNS A records).
+        #[serde(default)]
+        ipv4_address: Option<String>,
     },
     /// Periodic health report.
     #[serde(rename = "heartbeat")]
@@ -200,6 +203,7 @@ mod tests {
             service_name: "test".into(),
             version: "0.1.0".into(),
             ipv6_address: Some("2a0d:3341:b5b1:7500::18".into()),
+            ipv4_address: Some("10.0.0.100".into()),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""type":"auth"#));

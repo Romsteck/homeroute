@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::io::BufReader;
-use std::net::{Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
@@ -209,8 +209,14 @@ impl AgentProxy {
     }
 
     /// Spawn the proxy listener in a background task. Returns the JoinHandle.
-    pub fn spawn_listener(&mut self, bind_addr: Ipv6Addr) -> Result<tokio::task::JoinHandle<()>> {
-        let addr = SocketAddr::from((bind_addr, 443));
+    /// Listens on both IPv6 and optionally IPv4 addresses.
+    pub fn spawn_listener(
+        &mut self,
+        bind_addr_v6: Ipv6Addr,
+        bind_addr_v4: Option<Ipv4Addr>,
+    ) -> Result<tokio::task::JoinHandle<()>> {
+        let addr_v6 = SocketAddr::from((bind_addr_v6, 443));
+        let addr_v4 = bind_addr_v4.map(|ip| SocketAddr::from((ip, 443)));
         let tls_config = self.tls_config.clone();
         let state = self.state.clone();
 
@@ -219,15 +225,11 @@ impl AgentProxy {
 
         let handle = tokio::spawn(async move {
             // Retry bind up to 5 times (address may not be ready yet after ip addr add)
-            let listener = {
+            let bind_with_retry = |addr: SocketAddr| async move {
                 let mut last_err = None;
-                let mut bound = None;
                 for attempt in 0..5 {
                     match TcpListener::bind(addr).await {
-                        Ok(l) => {
-                            bound = Some(l);
-                            break;
-                        }
+                        Ok(l) => return Some(l),
                         Err(e) => {
                             warn!(addr = %addr, attempt, "Bind failed, retrying: {e}");
                             last_err = Some(e);
@@ -235,69 +237,110 @@ impl AgentProxy {
                         }
                     }
                 }
-                match bound {
-                    Some(l) => l,
+                error!(addr = %addr, "Failed to bind proxy after retries: {}", last_err.unwrap());
+                None
+            };
+
+            // Bind IPv6 listener (required)
+            let listener_v6 = match bind_with_retry(addr_v6).await {
+                Some(l) => l,
+                None => return,
+            };
+            info!(addr = %addr_v6, "Agent HTTPS proxy listening (IPv6)");
+
+            // Bind IPv4 listener (optional)
+            let listener_v4 = if let Some(addr) = addr_v4 {
+                match bind_with_retry(addr).await {
+                    Some(l) => {
+                        info!(addr = %addr, "Agent HTTPS proxy listening (IPv4)");
+                        Some(l)
+                    }
                     None => {
-                        error!(addr = %addr, "Failed to bind proxy after retries: {}", last_err.unwrap());
-                        return;
+                        warn!(addr = %addr, "IPv4 listener failed, continuing with IPv6 only");
+                        None
                     }
                 }
+            } else {
+                None
             };
 
             let acceptor = TlsAcceptor::from(tls_config);
-            info!(addr = %addr, "Agent HTTPS proxy listening");
 
-            let mut shutdown_rx = shutdown_rx;
-            loop {
-                tokio::select! {
-                    accept_result = listener.accept() => {
-                        let (tcp_stream, remote_addr) = match accept_result {
-                            Ok(r) => r,
+            // Helper to handle an accepted connection
+            let handle_connection =
+                |tcp_stream: tokio::net::TcpStream,
+                 remote_addr: SocketAddr,
+                 acceptor: TlsAcceptor,
+                 state: Arc<ProxyState>| {
+                    tokio::spawn(async move {
+                        let tls_stream = match acceptor.accept(tcp_stream).await {
+                            Ok(s) => s,
                             Err(e) => {
-                                warn!("TCP accept error: {e}");
-                                continue;
+                                debug!("TLS handshake failed from {remote_addr}: {e}");
+                                return;
                             }
                         };
 
-                        let acceptor = acceptor.clone();
-                        let state = state.clone();
+                        let io = TokioIo::new(tls_stream);
+                        let client_ip = remote_addr.ip();
 
-                        tokio::spawn(async move {
-                            let tls_stream = match acceptor.accept(tcp_stream).await {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    debug!("TLS handshake failed from {remote_addr}: {e}");
-                                    return;
-                                }
-                            };
-
-                            let io = TokioIo::new(tls_stream);
-                            let client_ip = remote_addr.ip();
-
-                            let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                                let state = state.clone();
-                                async move {
-                                    let resp = handle_request(state, client_ip, req).await;
-                                    Ok::<_, std::convert::Infallible>(resp)
-                                }
-                            });
-
-                            if let Err(e) = http1::Builder::new()
-                                .preserve_header_case(true)
-                                .title_case_headers(true)
-                                .serve_connection(io, service)
-                                .with_upgrades()
-                                .await
-                            {
-                                let msg = e.to_string();
-                                if !msg.contains("connection closed")
-                                    && !msg.contains("not connected")
-                                    && !msg.contains("connection reset")
-                                {
-                                    debug!("HTTP/1 error from {remote_addr}: {e}");
-                                }
+                        let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                            let state = state.clone();
+                            async move {
+                                let resp = handle_request(state, client_ip, req).await;
+                                Ok::<_, std::convert::Infallible>(resp)
                             }
                         });
+
+                        if let Err(e) = http1::Builder::new()
+                            .preserve_header_case(true)
+                            .title_case_headers(true)
+                            .serve_connection(io, service)
+                            .with_upgrades()
+                            .await
+                        {
+                            let msg = e.to_string();
+                            if !msg.contains("connection closed")
+                                && !msg.contains("not connected")
+                                && !msg.contains("connection reset")
+                            {
+                                debug!("HTTP/1 error from {remote_addr}: {e}");
+                            }
+                        }
+                    });
+                };
+
+            let mut shutdown_rx = shutdown_rx;
+            loop {
+                // Use a macro-like approach: always poll v6, conditionally poll v4
+                tokio::select! {
+                    // IPv6 listener (always active)
+                    accept_result = listener_v6.accept() => {
+                        match accept_result {
+                            Ok((tcp_stream, remote_addr)) => {
+                                handle_connection(tcp_stream, remote_addr, acceptor.clone(), state.clone());
+                            }
+                            Err(e) => {
+                                warn!("TCP accept error (v6): {e}");
+                            }
+                        }
+                    }
+
+                    // IPv4 listener (only if present)
+                    accept_result = async {
+                        match &listener_v4 {
+                            Some(l) => l.accept().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        match accept_result {
+                            Ok((tcp_stream, remote_addr)) => {
+                                handle_connection(tcp_stream, remote_addr, acceptor.clone(), state.clone());
+                            }
+                            Err(e) => {
+                                warn!("TCP accept error (v4): {e}");
+                            }
+                        }
                     }
 
                     _ = shutdown_rx.changed() => {
