@@ -19,6 +19,7 @@ hr-adblock = { path = "../hr-adblock" }
 hr-analytics = { path = "../hr-analytics" }
 hr-servers = { path = "../hr-servers" }
 hr-api = { path = "../hr-api" }
+leptos = { workspace = true, features = ["ssr", "islands"] }
 hr-firewall = { path = "../hr-firewall" }
 hr-registry = { path = "../hr-registry" }
 hr-lxd = { path = "../hr-lxd" }

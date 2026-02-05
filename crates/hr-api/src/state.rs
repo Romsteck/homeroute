@@ -10,9 +10,31 @@ use hr_dhcp::SharedDhcpState;
 use hr_firewall::FirewallEngine;
 use hr_proxy::{ProxyState, TlsManager};
 use hr_registry::AgentRegistry;
+use leptos::prelude::LeptosOptions;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// Combined state: API services + Leptos options.
+/// Manual `FromRef` impls let both API handlers (extracting `ApiState`) and
+/// Leptos (extracting `LeptosOptions`) coexist in the same router.
+#[derive(Clone)]
+pub struct AppState {
+    pub api: ApiState,
+    pub leptos_options: LeptosOptions,
+}
+
+impl axum::extract::FromRef<AppState> for ApiState {
+    fn from_ref(state: &AppState) -> Self {
+        state.api.clone()
+    }
+}
+
+impl axum::extract::FromRef<AppState> for LeptosOptions {
+    fn from_ref(state: &AppState) -> Self {
+        state.leptos_options.clone()
+    }
+}
 
 /// Shared application state for all API routes.
 #[derive(Clone)]

@@ -106,6 +106,44 @@ impl LxdClient {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
+    /// Execute a command inside a container with retries (useful for network-dependent commands).
+    pub async fn exec_with_retry(container: &str, cmd: &[&str], max_retries: u32) -> Result<String> {
+        let mut last_error = None;
+        for attempt in 0..max_retries {
+            match Self::exec(container, cmd).await {
+                Ok(output) => return Ok(output),
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt + 1 < max_retries {
+                        warn!(
+                            container,
+                            attempt = attempt + 1,
+                            max_retries,
+                            "Command failed, retrying in 3s..."
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                }
+            }
+        }
+        Err(last_error.unwrap())
+    }
+
+    /// Wait for network connectivity inside a container (DNS resolution working).
+    pub async fn wait_for_network(container: &str, timeout_secs: u32) -> Result<()> {
+        for i in 0..timeout_secs {
+            // Try to resolve a known domain to verify DNS is working
+            let result = Self::exec(container, &["bash", "-c", "getent hosts archive.ubuntu.com > /dev/null 2>&1"]).await;
+            if result.is_ok() {
+                info!(container, elapsed_secs = i + 1, "Network connectivity confirmed");
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        warn!(container, timeout_secs, "Network connectivity not confirmed after timeout, proceeding anyway");
+        Ok(())
+    }
+
     /// Create a storage volume and attach it to a container at the given path.
     pub async fn attach_storage_volume(
         container: &str,

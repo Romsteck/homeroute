@@ -4,7 +4,7 @@
 
 HomeRoute est un **binaire Rust unifié** qui gère tous les services réseau.
 
-- **Frontend**: React + Vite dans `/web`, servi statiquement par le proxy
+- **Frontend**: Leptos SSR + Islands dans `crates/hr-web/`, WASM client dans `crates/hr-web-client/`
 - **Backend**: Binaire Rust unique (Cargo workspace) dans `/opt/homeroute/crates/`
 - **Service systemd**: `homeroute.service`
 
@@ -24,7 +24,9 @@ crates/
 ├── hr-analytics/    # Capture trafic + agrégation (SQLite)
 ├── hr-servers/      # Gestion serveurs (monitoring, WoL, scheduler)
 ├── hr-system/       # Système (énergie, updates, réseau, DDNS Cloudflare)
-└── hr-api/          # Routeur API HTTP (axum, routes /api/*, WebSocket)
+├── hr-api/          # Routeur API HTTP (axum, routes /api/*, WebSocket)
+├── hr-web/          # Frontend Leptos (composants SSR + islands, server functions)
+└── hr-web-client/   # Point d'entrée WASM (hydration islands)
 ```
 
 ## Gestion du serveur
@@ -71,14 +73,20 @@ Les enregistrements DNS sont synchronisés automatiquement:
 ## Commandes utiles
 
 ```bash
-# Build tout
-cd /opt/homeroute && cargo build --release
+# Build tout (serveur + WASM + CSS)
+cd /opt/homeroute && make all
 
-# Build frontend
-cd /opt/homeroute/web && npm run build
+# Déployer (build + restart service)
+cd /opt/homeroute && make deploy
+
+# Build serveur uniquement
+cd /opt/homeroute && make server
+
+# Build frontend uniquement (WASM + CSS + assets)
+cd /opt/homeroute && make web
 
 # Tests
-cd /opt/homeroute && cargo test
+cd /opt/homeroute && make test
 
 # Redémarrer le service
 systemctl restart homeroute
@@ -88,7 +96,18 @@ systemctl reload homeroute
 
 # Logs
 journalctl -u homeroute -f
+
+# Vérifier le service
+curl -s http://localhost:4000/api/health | jq
 ```
+
+## Règles Leptos (OBLIGATOIRE)
+
+- **JAMAIS** lancer le serveur manuellement (`cargo run`, `cargo leptos serve`, etc.)
+- **JAMAIS** utiliser `cargo-leptos` — le build utilise le Makefile
+- **TOUJOURS** utiliser `systemctl` pour gérer le service
+- **TOUJOURS** utiliser `make deploy` pour build + restart
+- Pour tester après modification : `make deploy && curl -s http://localhost:4000/api/health`
 
 ## Workflow de mise à jour des agents (OBLIGATOIRE)
 

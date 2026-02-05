@@ -17,6 +17,9 @@ hr-servers = { path = "../hr-servers" }
 hr-system = { path = "../hr-system" }
 hr-firewall = { path = "../hr-firewall" }
 hr-registry = { path = "../hr-registry" }
+hr-web = { path = "../hr-web", features = ["ssr", "islands"] }
+leptos = { workspace = true, features = ["ssr", "islands"] }
+leptos_axum = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }
