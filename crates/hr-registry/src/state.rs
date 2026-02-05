@@ -958,17 +958,25 @@ WantedBy=multi-user.target
         LxdClient::exec(container, &["systemctl", "daemon-reload"]).await?;
         LxdClient::exec(container, &["systemctl", "enable", "--now", "hr-agent"]).await?;
 
-        // Install code-server
+        // Wait for network connectivity before installing packages
+        emit("Attente de la connectivite reseau...");
+        LxdClient::wait_for_network(container, 30).await?;
+
+        // Install code-server dependencies with retry
         emit("Installation des dependances...");
-        LxdClient::exec(
+        LxdClient::exec_with_retry(
             container,
-            &["bash", "-c", "apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1"],
+            &["bash", "-c", "apt-get update -qq && apt-get install -y -qq curl"],
+            3,
         )
-        .await?;
+        .await
+        .with_context(|| format!("Failed to install curl in {container}"))?;
+
         emit("Installation de code-server...");
-        LxdClient::exec(
+        LxdClient::exec_with_retry(
             container,
-            &["bash", "-c", "curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/usr/local > /dev/null 2>&1"],
+            &["bash", "-c", "curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/usr/local"],
+            3,
         )
         .await
         .with_context(|| format!("Failed to install code-server in {container}"))?;

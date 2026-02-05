@@ -646,7 +646,20 @@ async fn main() -> anyhow::Result<()> {
         registry: Some(registry.clone()),
     };
 
-    let api_router = hr_api::build_router(api_state);
+    let leptos_options = leptos::config::LeptosOptions::builder()
+        .output_name("hr_web_client")
+        .site_root(env.web_dist_path.to_string_lossy())
+        .site_pkg_dir("pkg")
+        .env(leptos::config::Env::PROD)
+        .site_addr(format!("[::]:{}", env.api_port).parse::<std::net::SocketAddr>().unwrap())
+        .build();
+
+    let app_state = hr_api::state::AppState {
+        api: api_state,
+        leptos_options,
+    };
+
+    let api_router = hr_api::build_router(app_state);
     let api_port = env.api_port;
 
     let reg = service_registry.clone();
