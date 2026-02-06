@@ -1,39 +1,32 @@
 use hr_adblock::AdblockEngine;
-use hr_analytics::store::AnalyticsStore;
 use hr_auth::AuthService;
 use hr_acme::AcmeManager;
 use hr_common::config::EnvConfig;
-use hr_common::events::EventBus;
+use hr_common::events::{EventBus, MigrationPhase};
 use hr_common::service_registry::SharedServiceRegistry;
 use hr_dns::SharedDnsState;
 use hr_dhcp::SharedDhcpState;
 use hr_firewall::FirewallEngine;
 use hr_proxy::{ProxyState, TlsManager};
 use hr_registry::AgentRegistry;
-use leptos::prelude::LeptosOptions;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Combined state: API services + Leptos options.
-/// Manual `FromRef` impls let both API handlers (extracting `ApiState`) and
-/// Leptos (extracting `LeptosOptions`) coexist in the same router.
-#[derive(Clone)]
-pub struct AppState {
-    pub api: ApiState,
-    pub leptos_options: LeptosOptions,
-}
-
-impl axum::extract::FromRef<AppState> for ApiState {
-    fn from_ref(state: &AppState) -> Self {
-        state.api.clone()
-    }
-}
-
-impl axum::extract::FromRef<AppState> for LeptosOptions {
-    fn from_ref(state: &AppState) -> Self {
-        state.leptos_options.clone()
-    }
+/// In-memory state of an active migration.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MigrationState {
+    pub app_id: String,
+    pub transfer_id: String,
+    pub source_host_id: String,
+    pub target_host_id: String,
+    pub phase: MigrationPhase,
+    pub progress_pct: u8,
+    pub bytes_transferred: u64,
+    pub total_bytes: u64,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub error: Option<String>,
 }
 
 /// Shared application state for all API routes.
@@ -48,10 +41,12 @@ pub struct ApiState {
     pub adblock: Arc<RwLock<AdblockEngine>>,
     pub events: Arc<EventBus>,
     pub env: Arc<EnvConfig>,
-    pub analytics: Arc<AnalyticsStore>,
     pub service_registry: SharedServiceRegistry,
     pub firewall: Option<Arc<FirewallEngine>>,
     pub registry: Option<Arc<AgentRegistry>>,
+
+    /// Active migrations keyed by transfer_id.
+    pub migrations: Arc<RwLock<HashMap<String, MigrationState>>>,
 
     /// Path to dns-dhcp-config.json
     pub dns_dhcp_config_path: PathBuf,

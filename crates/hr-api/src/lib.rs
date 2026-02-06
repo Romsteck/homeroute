@@ -3,15 +3,18 @@ pub mod state;
 
 use axum::http::{header, HeaderValue, Method};
 use axum::Router;
-use leptos::prelude::*;
-use leptos_axum::{generate_route_list, LeptosRoutes};
-use state::{ApiState, AppState};
+use state::ApiState;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 
-/// Build the complete router: JSON API on `/api/*`, Leptos SSR for everything else.
-pub fn build_router(state: AppState) -> Router {
-    let base = format!(".{}", state.api.env.base_domain);
+pub fn build_router(state: ApiState) -> Router {
+    let web_dist = state.env.web_dist_path.clone();
+    let index_html = web_dist.join("index.html");
+
+    let spa_fallback = ServeDir::new(&web_dist)
+        .fallback(ServeFile::new(&index_html));
+
+    let base = format!(".{}", state.env.base_domain);
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(move |origin: &HeaderValue, _| {
             origin
@@ -25,34 +28,11 @@ pub fn build_router(state: AppState) -> Router {
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::COOKIE])
         .allow_credentials(true);
 
-    // API routes: built with ApiState, finalized via .with_state()
-    let api: Router = api_routes().with_state(state.api.clone());
-
-    // Leptos SSR routes: Router<AppState> then finalized via .with_state()
-    let routes = generate_route_list(hr_web::app::App);
-    let site_root = state.leptos_options.site_root.to_string();
-    let auth_ctx = state.api.auth.clone();
-    let leptos: Router = Router::<AppState>::new()
-        .leptos_routes_with_context(
-            &state,
-            routes,
-            move || {
-                provide_context(auth_ctx.clone());
-            },
-            {
-                let leptos_options = state.leptos_options.clone();
-                move || hr_web::app::shell(leptos_options.clone())
-            },
-        )
-        .with_state(state);
-
-    // Merge: API takes priority (nested under /api), then Leptos SSR,
-    // then static files (WASM, CSS, assets) from target/site/
     Router::new()
-        .nest("/api", api)
-        .merge(leptos)
-        .fallback_service(ServeDir::new(site_root))
+        .nest("/api", api_routes())
+        .with_state(state)
         .layer(cors)
+        .fallback_service(spa_fallback)
 }
 
 fn api_routes() -> Router<ApiState> {
@@ -70,7 +50,7 @@ fn api_routes() -> Router<ApiState> {
         .nest("/acme", routes::acme::router())
         .nest("/energy", routes::energy::router())
         .nest("/updates", routes::updates::router())
-        .nest("/traffic", routes::traffic::router())
+        .nest("/hosts", routes::hosts::router())
         .nest("/servers", routes::servers::router())
         .nest("/wol", routes::wol::router())
         .nest("/services", routes::services::router())

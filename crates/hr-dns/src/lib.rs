@@ -9,15 +9,8 @@ pub mod logging;
 
 pub use config::DnsConfig;
 
-use std::collections::HashMap;
-use std::net::Ipv6Addr;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
-use hr_common::events::DnsTrafficEvent;
-
-/// Shared store for application DNS records (domain → IPv6).
-/// Updated by the registry when agents connect/disconnect.
-pub type AppDnsStore = Arc<RwLock<HashMap<String, Ipv6Addr>>>;
+use tokio::sync::RwLock;
 
 pub struct DnsState {
     pub config: config::DnsConfig,
@@ -28,10 +21,6 @@ pub struct DnsState {
     pub lease_store: Arc<RwLock<hr_dhcp::LeaseStore>>,
     pub adblock_enabled: bool,
     pub adblock_block_response: String,
-    /// Event sender for DNS traffic analytics
-    pub dns_events: Option<broadcast::Sender<DnsTrafficEvent>>,
-    /// Application DNS records (domain → IPv6), updated by registry
-    pub app_dns_store: AppDnsStore,
 }
 
 impl DnsState {

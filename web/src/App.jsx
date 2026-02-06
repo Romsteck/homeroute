@@ -10,7 +10,7 @@ import ReverseProxy from './pages/ReverseProxy';
 import Updates from './pages/Updates';
 import Energy from './pages/Energy';
 import Users from './pages/Users';
-import Traffic from './pages/Traffic';
+import Hosts from './pages/Hosts';
 import Servers from './pages/Servers';
 import Wol from './pages/Wol';
 import Certificates from './pages/Certificates';
@@ -101,7 +101,7 @@ function AppRoutes() {
               <Route path="/users" element={<Users />} />
               <Route path="/updates" element={<Updates />} />
               <Route path="/energy" element={<Energy />} />
-              <Route path="/traffic" element={<Traffic />} />
+              <Route path="/hosts" element={<Hosts />} />
               <Route path="/servers" element={<Servers />} />
               <Route path="/wol" element={<Wol />} />
               <Route path="/firewall" element={<Firewall />} />

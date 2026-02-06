@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::Ipv4Addr;
 
 use crate::protocol::{AgentMetrics, PowerPolicy, ServiceConfig};
 
@@ -13,14 +13,13 @@ pub struct Application {
     pub id: String,
     pub name: String,
     pub slug: String,
+    /// Host this application belongs to ("local" for the main server).
+    #[serde(default = "default_host_id")]
+    pub host_id: String,
     pub enabled: bool,
     pub container_name: String,
     /// Argon2 hash of the agent token.
     pub token_hash: String,
-    /// Stable host suffix for IPv6 address (combined with PD prefix).
-    pub ipv6_suffix: u16,
-    /// Currently assigned GUA (None if no prefix available).
-    pub ipv6_address: Option<Ipv6Addr>,
     /// IPv4 address reported by agent (for local DNS A records).
     #[serde(default)]
     pub ipv4_address: Option<Ipv4Addr>,
@@ -48,13 +47,6 @@ pub struct Application {
     /// Current metrics from agent (volatile, not persisted to disk).
     #[serde(skip)]
     pub metrics: Option<AgentMetrics>,
-
-    /// Certificate IDs (one per domain: frontend + each API).
-    #[serde(default)]
-    pub cert_ids: Vec<String>,
-    /// Cloudflare DNS record IDs (one per domain).
-    #[serde(default)]
-    pub cloudflare_record_ids: Vec<String>,
 }
 
 impl Application {
@@ -145,23 +137,20 @@ pub enum AgentStatus {
 pub struct RegistryState {
     #[serde(default)]
     pub applications: Vec<Application>,
-    #[serde(default = "default_next_suffix")]
-    pub next_suffix: u16,
 }
 
 fn default_true() -> bool {
     true
 }
 
-fn default_next_suffix() -> u16 {
-    2 // Start at ::2 (::1 is HomeRoute itself)
+fn default_host_id() -> String {
+    "local".to_string()
 }
 
 impl Default for RegistryState {
     fn default() -> Self {
         Self {
             applications: Vec::new(),
-            next_suffix: default_next_suffix(),
         }
     }
 }
@@ -171,6 +160,8 @@ impl Default for RegistryState {
 pub struct CreateApplicationRequest {
     pub name: String,
     pub slug: String,
+    #[serde(default)]
+    pub host_id: Option<String>,
     pub frontend: FrontendEndpoint,
     #[serde(default)]
     pub apis: Vec<ApiEndpoint>,
@@ -183,13 +174,21 @@ pub struct CreateApplicationRequest {
 }
 
 /// Request body for updating an application.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct UpdateApplicationRequest {
+    #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
+    pub host_id: Option<String>,
+    #[serde(default)]
     pub frontend: Option<FrontendEndpoint>,
+    #[serde(default)]
     pub apis: Option<Vec<ApiEndpoint>>,
+    #[serde(default)]
     pub code_server_enabled: Option<bool>,
+    #[serde(default)]
     pub services: Option<ServiceConfig>,
+    #[serde(default)]
     pub power_policy: Option<PowerPolicy>,
 }
 
@@ -257,11 +256,10 @@ mod tests {
             id: "test".into(),
             name: "Test".into(),
             slug: "myapp".into(),
+            host_id: "local".into(),
             enabled: true,
             container_name: "hr-myapp".into(),
             token_hash: String::new(),
-            ipv6_suffix: 2,
-            ipv6_address: None,
             ipv4_address: None,
             status: AgentStatus::Pending,
             last_heartbeat: None,
@@ -284,8 +282,6 @@ mod tests {
             services: ServiceConfig::default(),
             power_policy: PowerPolicy::default(),
             metrics: None,
-            cert_ids: vec![],
-            cloudflare_record_ids: vec![],
         }
     }
 
@@ -326,7 +322,6 @@ mod tests {
         let state = RegistryState::default();
         let json = serde_json::to_string(&state).unwrap();
         let parsed: RegistryState = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.next_suffix, 2);
         assert!(parsed.applications.is_empty());
     }
 }

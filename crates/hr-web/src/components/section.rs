@@ -2,7 +2,7 @@ use leptos::prelude::*;
 
 #[component]
 pub fn Section(
-    #[prop(optional)] title: Option<&'static str>,
+    #[prop(optional, into)] title: Option<String>,
     #[prop(default = false)] contrast: bool,
     #[prop(default = "")] class: &'static str,
     children: Children,

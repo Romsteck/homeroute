@@ -1,53 +1,66 @@
-use hr_common::events::ServerStatusEvent;
+use hr_common::events::{HostStatusEvent, ServerStatusEvent};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info};
 
+const HOSTS_FILE: &str = "/data/hosts.json";
 const SERVERS_FILE: &str = "/data/servers.json";
 const MONITOR_INTERVAL_SECS: u64 = 30;
 
-/// Run the server monitoring loop.
-/// Pings all servers every 30 seconds and updates their status in servers.json.
-/// Emits ServerStatusEvent on the event bus for each status change.
-pub async fn run_monitoring(events: Arc<broadcast::Sender<ServerStatusEvent>>) {
-    info!("Server monitoring started (interval: {}s)", MONITOR_INTERVAL_SECS);
+/// Run the host monitoring loop.
+/// Pings all hosts every 30 seconds and updates their status in hosts.json.
+/// Also updates legacy servers.json for backward compat during transition.
+/// Emits HostStatusEvent on the event bus for each status change.
+pub async fn run_monitoring(
+    host_events: Arc<broadcast::Sender<HostStatusEvent>>,
+    server_events: Arc<broadcast::Sender<ServerStatusEvent>>,
+) {
+    info!("Host monitoring started (interval: {}s)", MONITOR_INTERVAL_SECS);
 
     loop {
-        if let Err(e) = monitor_all_servers(&events).await {
+        if let Err(e) = monitor_all_hosts(&host_events, &server_events).await {
             error!("Monitoring cycle error: {}", e);
         }
         tokio::time::sleep(std::time::Duration::from_secs(MONITOR_INTERVAL_SECS)).await;
     }
 }
 
-async fn monitor_all_servers(
-    events: &broadcast::Sender<ServerStatusEvent>,
+async fn monitor_all_hosts(
+    host_events: &broadcast::Sender<HostStatusEvent>,
+    server_events: &broadcast::Sender<ServerStatusEvent>,
 ) -> Result<(), String> {
-    let content = match tokio::fs::read_to_string(SERVERS_FILE).await {
+    // Prefer hosts.json, fall back to servers.json
+    let (file_path, key) = if tokio::fs::metadata(HOSTS_FILE).await.is_ok() {
+        (HOSTS_FILE, "hosts")
+    } else {
+        (SERVERS_FILE, "servers")
+    };
+
+    let content = match tokio::fs::read_to_string(file_path).await {
         Ok(c) => c,
-        Err(_) => return Ok(()), // No servers file yet
+        Err(_) => return Ok(()),
     };
 
     let mut data: Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
-    let servers = match data.get_mut("servers").and_then(|s| s.as_array_mut()) {
+    let entries = match data.get_mut(key).and_then(|s| s.as_array_mut()) {
         Some(s) => s,
         None => return Ok(()),
     };
 
-    if servers.is_empty() {
+    if entries.is_empty() {
         return Ok(());
     }
 
-    // Ping all servers in parallel
+    // Ping all hosts in parallel
     let mut join_set = tokio::task::JoinSet::new();
-    for server in servers.iter() {
-        let host = server
+    for entry in entries.iter() {
+        let host = entry
             .get("host")
             .and_then(|h| h.as_str())
             .unwrap_or("")
             .to_string();
-        let id = server
+        let id = entry
             .get("id")
             .and_then(|i| i.as_str())
             .unwrap_or("")
@@ -68,14 +81,13 @@ async fn monitor_all_servers(
         results.push(result);
     }
 
-    // Update statuses
     let now = chrono::Utc::now().to_rfc3339();
 
     for (id, new_status, latency) in &results {
-        if let Some(server) = servers.iter_mut().find(|s| {
+        if let Some(entry) = entries.iter_mut().find(|s| {
             s.get("id").and_then(|i| i.as_str()) == Some(id)
         }) {
-            let old_status = server
+            let old_status = entry
                 .get("status")
                 .and_then(|s| s.as_str())
                 .unwrap_or("unknown");
@@ -84,12 +96,18 @@ async fn monitor_all_servers(
                 debug!("{}: {} -> {}", id, old_status, new_status);
             }
 
-            server["status"] = serde_json::json!(new_status);
-            server["latency"] = serde_json::json!(latency.unwrap_or(0));
-            server["lastSeen"] = serde_json::json!(&now);
+            entry["status"] = serde_json::json!(new_status);
+            entry["latency"] = serde_json::json!(latency.unwrap_or(0));
+            entry["lastSeen"] = serde_json::json!(&now);
 
-            // Emit status event
-            let _ = events.send(ServerStatusEvent {
+            // Emit host status event
+            let _ = host_events.send(HostStatusEvent {
+                host_id: id.clone(),
+                status: new_status.clone(),
+                latency_ms: *latency,
+            });
+            // Emit legacy server status event for backward compat
+            let _ = server_events.send(ServerStatusEvent {
                 server_id: id.clone(),
                 status: new_status.clone(),
                 latency_ms: *latency,
@@ -97,14 +115,13 @@ async fn monitor_all_servers(
         }
     }
 
-    // Always save to persist lastSeen and latency updates
     if !results.is_empty() {
         let content = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
-        let tmp = format!("{}.tmp", SERVERS_FILE);
+        let tmp = format!("{}.tmp", file_path);
         tokio::fs::write(&tmp, &content)
             .await
             .map_err(|e| e.to_string())?;
-        tokio::fs::rename(&tmp, SERVERS_FILE)
+        tokio::fs::rename(&tmp, file_path)
             .await
             .map_err(|e| e.to_string())?;
     }

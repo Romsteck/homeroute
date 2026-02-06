@@ -194,9 +194,6 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Shared store for application DNS records (registry ↔ DNS resolver)
-    let app_dns_store: hr_dns::AppDnsStore = Arc::new(RwLock::new(std::collections::HashMap::new()));
-
     let dns_state: hr_dns::SharedDnsState = Arc::new(RwLock::new(DnsState {
         config: dns_dhcp_config.dns.clone(),
         dns_cache,
@@ -206,8 +203,6 @@ async fn main() -> anyhow::Result<()> {
         lease_store: lease_store_for_dns.clone(),
         adblock_enabled: dns_dhcp_config.adblock.enabled,
         adblock_block_response: dns_dhcp_config.adblock.block_response.clone(),
-        dns_events: Some(events.dns_traffic.clone()),
-        app_dns_store: app_dns_store.clone(),
     }));
 
     // ── Initialize proxy ───────────────────────────────────────────────
@@ -261,8 +256,7 @@ async fn main() -> anyhow::Result<()> {
 
     let proxy_state = Arc::new(
         ProxyState::new(proxy_config.clone(), env.api_port)
-            .with_auth(auth.clone())
-            .with_events(events.http_traffic.clone()),
+            .with_auth(auth.clone()),
     );
 
     let https_port = proxy_config.https_port;
@@ -468,7 +462,7 @@ async fn main() -> anyhow::Result<()> {
 
     {
         let mut reg = service_registry.write().await;
-        for name in &["analytics-http", "analytics-dns", "aggregation", "monitoring", "wol-scheduler"] {
+        for name in &["monitoring", "wol-scheduler"] {
             reg.insert(name.to_string(), ServiceStatus {
                 name: name.to_string(),
                 state: ServiceState::Running,
@@ -480,68 +474,15 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // ── Analytics (Background) ─────────────────────────────────────────
-
-    let analytics_db_path = format!("{}/analytics.db", env.data_dir.display());
-    let analytics_store = Arc::new(
-        hr_analytics::store::AnalyticsStore::open(&analytics_db_path)
-            .expect("Failed to open analytics database"),
-    );
-    info!("Analytics store opened at {}", analytics_db_path);
-
-    // HTTP traffic capture (from proxy broadcast channel)
-    {
-        let store = analytics_store.clone();
-        let rx = events.http_traffic.subscribe();
-        let leases = lease_store_for_dns.clone();
-        tokio::spawn(async move {
-            hr_analytics::capture::run_http_capture(store, rx, leases).await;
-        });
-    }
-
-    // DNS traffic capture (from DNS broadcast channel)
-    {
-        let store = analytics_store.clone();
-        let rx = events.dns_traffic.subscribe();
-        let leases = lease_store_for_dns.clone();
-        tokio::spawn(async move {
-            hr_analytics::capture::run_dns_capture(store, rx, leases).await;
-        });
-    }
-
-    // Hourly aggregation (every 5 minutes)
-    {
-        let store = analytics_store.clone();
-        tokio::spawn(async move {
-            hr_analytics::aggregation::run_hourly_aggregation(store).await;
-        });
-    }
-
-    // Daily aggregation + cleanup (at 00:30 UTC)
-    {
-        let store = analytics_store.clone();
-        tokio::spawn(async move {
-            hr_analytics::aggregation::run_daily_aggregation(store).await;
-        });
-    }
-
     // ── Agent Registry ──────────────────────────────────────────────
 
     let registry_state_path =
         PathBuf::from("/var/lib/server-dashboard/agent-registry.json");
     let registry = Arc::new(AgentRegistry::new(
         registry_state_path,
-        acme.clone(),
-        firewall_engine.clone(),
         Arc::new(env.clone()),
         events.clone(),
-        app_dns_store.clone(),
     ));
-
-    // Migrate existing apps' DNS records to static_records
-    if let Err(e) = registry.migrate_dns_records().await {
-        warn!("Failed to migrate DNS records: {e}");
-    }
 
     // Ensure LXD profile exists
     {
@@ -565,56 +506,28 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Certificate renewal background task
-    {
-        let reg = registry.clone();
-        tokio::spawn(async move {
-            reg.run_cert_renewal().await;
-        });
-    }
+    // Connect proxy to registry for ActivityPing and Wake-on-Demand
+    proxy_state.set_registry(registry.clone());
 
-    // Prefix change watcher for agent registry
-    {
-        let reg = registry.clone();
-        let proxy_for_prefix = proxy_state.clone();
-        let base_domain_prefix = env.base_domain.clone();
-        let mut prefix_rx_registry = prefix_rx.clone();
-        tokio::spawn(async move {
-            loop {
-                if prefix_rx_registry.changed().await.is_err() {
-                    break;
-                }
-                let prefix_info = prefix_rx_registry.borrow().clone();
-                let prefix_str = prefix_info.map(|p| p.prefix.to_string());
-                reg.on_prefix_changed(prefix_str).await;
-
-                // Update passthrough map with new IPv6 addresses
-                let apps = reg.list_applications().await;
-                for app in &apps {
-                    if let Some(ipv6) = app.ipv6_address {
-                        let target = format!("[{}]:443", ipv6);
-                        for domain in app.domains(&base_domain_prefix) {
-                            proxy_for_prefix.set_passthrough(domain, target.clone());
-                        }
-                    } else {
-                        // Remove passthrough if no IPv6
-                        for domain in app.domains(&base_domain_prefix) {
-                            proxy_for_prefix.remove_passthrough(&domain);
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    // Populate TLS passthrough map for any applications that have IPv6 addresses
+    // Populate app routes for all applications with IPv4 addresses
     {
         let apps = registry.list_applications().await;
+        let base_domain = &env.base_domain;
         for app in &apps {
-            if let Some(ipv6) = app.ipv6_address {
-                let target = format!("[{}]:443", ipv6);
-                for domain in app.domains(&env.base_domain) {
-                    proxy_state.set_passthrough(domain, target.clone());
+            if let Some(ipv4) = app.ipv4_address {
+                for route in app.routes(base_domain) {
+                    proxy_state.set_app_route(
+                        route.domain,
+                        hr_proxy::AppRoute {
+                            app_id: app.id.clone(),
+                            host_id: app.host_id.clone(),
+                            target_ip: ipv4,
+                            target_port: route.target_port,
+                            auth_required: route.auth_required,
+                            allowed_groups: route.allowed_groups,
+                            service_type: hr_registry::ServiceType::App,
+                        },
+                    );
                 }
             }
         }
@@ -637,29 +550,16 @@ async fn main() -> anyhow::Result<()> {
         adblock: adblock.clone(),
         events: events.clone(),
         env: Arc::new(env.clone()),
-        analytics: analytics_store.clone(),
         dns_dhcp_config_path: env.dns_dhcp_config_path.clone(),
         proxy_config_path: env.proxy_config_path.clone(),
         reverseproxy_config_path: env.reverseproxy_config_path.clone(),
         service_registry: service_registry.clone(),
         firewall: firewall_engine,
         registry: Some(registry.clone()),
+        migrations: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
-    let leptos_options = leptos::config::LeptosOptions::builder()
-        .output_name("hr_web_client")
-        .site_root(env.web_dist_path.to_string_lossy())
-        .site_pkg_dir("pkg")
-        .env(leptos::config::Env::PROD)
-        .site_addr(format!("[::]:{}", env.api_port).parse::<std::net::SocketAddr>().unwrap())
-        .build();
-
-    let app_state = hr_api::state::AppState {
-        api: api_state,
-        leptos_options,
-    };
-
-    let api_router = hr_api::build_router(app_state);
+    let api_router = hr_api::build_router(api_state);
     let api_port = env.api_port;
 
     let reg = service_registry.clone();
@@ -767,17 +667,21 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // ── Server monitoring & scheduler (Background) ────────────────────
+    // ── Host monitoring & scheduler (Background) ───────────────────────
 
-    // Server monitoring (ping all servers every 30s)
+    // Migrate servers.json → hosts.json if needed
+    hr_api::routes::hosts::ensure_hosts_file().await;
+
+    // Host monitoring (ping all hosts every 30s)
     {
+        let host_events = Arc::new(events.host_status.clone());
         let server_events = Arc::new(events.server_status.clone());
         tokio::spawn(async move {
-            hr_servers::monitoring::run_monitoring(server_events).await;
+            hr_servers::monitoring::run_monitoring(host_events, server_events).await;
         });
     }
 
-    // WoL schedule executor (check cron schedules every 30s)
+    // Power schedule executor (check cron schedules every 30s)
     tokio::spawn(async move {
         hr_servers::scheduler::run_scheduler().await;
     });
@@ -855,89 +759,6 @@ async fn main() -> anyhow::Result<()> {
 
 // ── HTTPS server ───────────────────────────────────────────────────────
 
-/// Extract the SNI server name from a TLS ClientHello message (peeked bytes).
-/// Returns None if parsing fails or no SNI extension is present.
-fn extract_sni(buf: &[u8]) -> Option<String> {
-    // TLS record: type(1) version(2) length(2) then handshake
-    if buf.len() < 5 || buf[0] != 0x16 {
-        return None; // Not a TLS handshake record
-    }
-    let record_len = ((buf[3] as usize) << 8) | buf[4] as usize;
-    let handshake = &buf[5..buf.len().min(5 + record_len)];
-
-    // Handshake: type(1) length(3) ...
-    if handshake.is_empty() || handshake[0] != 0x01 {
-        return None; // Not ClientHello
-    }
-    if handshake.len() < 4 {
-        return None;
-    }
-    let hello_len =
-        ((handshake[1] as usize) << 16) | ((handshake[2] as usize) << 8) | handshake[3] as usize;
-    let hello = &handshake[4..handshake.len().min(4 + hello_len)];
-
-    // ClientHello: version(2) random(32) session_id_len(1) session_id(var) ...
-    if hello.len() < 34 {
-        return None;
-    }
-    let mut pos = 34; // skip version + random
-    if pos >= hello.len() {
-        return None;
-    }
-    let session_id_len = hello[pos] as usize;
-    pos += 1 + session_id_len;
-
-    // cipher_suites: length(2) then data
-    if pos + 2 > hello.len() {
-        return None;
-    }
-    let cs_len = ((hello[pos] as usize) << 8) | hello[pos + 1] as usize;
-    pos += 2 + cs_len;
-
-    // compression_methods: length(1) then data
-    if pos >= hello.len() {
-        return None;
-    }
-    let cm_len = hello[pos] as usize;
-    pos += 1 + cm_len;
-
-    // extensions: total_length(2) then extensions
-    if pos + 2 > hello.len() {
-        return None;
-    }
-    let ext_total = ((hello[pos] as usize) << 8) | hello[pos + 1] as usize;
-    pos += 2;
-    let ext_end = pos + ext_total;
-
-    while pos + 4 <= hello.len().min(ext_end) {
-        let ext_type = ((hello[pos] as u16) << 8) | hello[pos + 1] as u16;
-        let ext_len = ((hello[pos + 2] as usize) << 8) | hello[pos + 3] as usize;
-        pos += 4;
-        if ext_type == 0x0000 {
-            // SNI extension
-            // server_name_list: length(2) then entries
-            if pos + 2 > hello.len() {
-                return None;
-            }
-            let _list_len = ((hello[pos] as usize) << 8) | hello[pos + 1] as usize;
-            let mut p = pos + 2;
-            // entry: type(1) length(2) name(var)
-            if p + 3 > hello.len() {
-                return None;
-            }
-            let name_type = hello[p];
-            let name_len = ((hello[p + 1] as usize) << 8) | hello[p + 2] as usize;
-            p += 3;
-            if name_type == 0x00 && p + name_len <= hello.len() {
-                return String::from_utf8(hello[p..p + name_len].to_vec()).ok();
-            }
-            return None;
-        }
-        pos += ext_len;
-    }
-    None
-}
-
 async fn run_https_server(
     proxy_state: Arc<ProxyState>,
     tls_config: Arc<rustls::ServerConfig>,
@@ -968,50 +789,7 @@ async fn run_https_server(
         let client_ip = remote_addr.ip();
 
         tokio::spawn(async move {
-            // Peek at the first bytes to extract SNI for passthrough check
-            let mut peek_buf = [0u8; 1024];
-            let n = match tcp_stream.peek(&mut peek_buf).await {
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::debug!("TCP peek failed from {}: {}", remote_addr, e);
-                    return;
-                }
-            };
-
-            // Check if this SNI matches an agent passthrough domain
-            if let Some(sni) = extract_sni(&peek_buf[..n]) {
-                if let Some(target_addr) = proxy_state.get_passthrough(&sni) {
-                    tracing::debug!("TLS passthrough {} → {}", sni, target_addr);
-                    // Raw TCP passthrough to agent
-                    match tokio::net::TcpStream::connect(&target_addr).await {
-                        Ok(mut upstream) => {
-                            let mut client = tcp_stream;
-                            match tokio::io::copy_bidirectional(&mut client, &mut upstream).await {
-                                Ok((c2s, s2c)) => {
-                                    tracing::debug!(
-                                        "Passthrough {} closed: {}↑ {}↓",
-                                        sni, c2s, s2c
-                                    );
-                                }
-                                Err(e) => {
-                                    let msg = e.to_string();
-                                    if !msg.contains("connection reset")
-                                        && !msg.contains("broken pipe")
-                                    {
-                                        tracing::debug!("Passthrough {} IO error: {}", sni, e);
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Passthrough connect to {} failed: {}", target_addr, e);
-                        }
-                    }
-                    return;
-                }
-            }
-
-            // Normal TLS termination path
+            // TLS termination — all routing is handled at HTTP level by hr-proxy
             let tls_stream = match acceptor.accept(tcp_stream).await {
                 Ok(s) => s,
                 Err(e) => {

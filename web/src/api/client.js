@@ -111,6 +111,10 @@ export const stopApplicationService = (appId, serviceType) =>
 export const updateApplicationPowerPolicy = (appId, policy) =>
   api.put(`/applications/${appId}/power-policy`, policy);
 
+// Application Migration
+export const migrateApplication = (id, targetHostId) => api.post(`/applications/${id}/migrate`, { target_host_id: targetHostId });
+export const getMigrationStatus = (id) => api.get(`/applications/${id}/migration-status`);
+
 // Rust Proxy
 export const getRustProxyStatus = () => api.get('/rust-proxy/status');
 export const reloadRustProxy = () => api.post('/rust-proxy/reload');
@@ -177,35 +181,37 @@ export const createUserGroup = (data) => api.post('/users/groups', data);
 export const updateUserGroup = (id, data) => api.put(`/users/groups/${id}`, data);
 export const deleteUserGroup = (id) => api.delete(`/users/groups/${id}`);
 
-// ========== Traffic Analytics ==========
-
-export const getTrafficOverview = (timeRange) =>
-  api.get('/traffic/overview', { params: { timeRange } }).then(res => res.data);
-
-export const getTrafficTimeseries = (params) =>
-  api.get('/traffic/timeseries', { params }).then(res => res.data);
-
-export const getTopDevices = (timeRange) =>
-  api.get('/traffic/by-device', { params: { timeRange, limit: 10 } }).then(res => res.data);
-
-export const getTopEndpoints = (timeRange) =>
-  api.get('/traffic/by-endpoint', { params: { timeRange, limit: 10 } }).then(res => res.data);
-
-export const getApplicationBreakdown = (timeRange) =>
-  api.get('/traffic/by-application', { params: { timeRange } }).then(res => res.data);
-
-export const getDeviceTraffic = (mac, timeRange) =>
-  api.get(`/traffic/device/${mac}`, { params: { timeRange } }).then(res => res.data);
-
 export default api;
 
-export const getTopDomains = (timeRange, limit = 20) =>
-  api.get('/traffic/dns/top-domains', { params: { timeRange, limit } }).then(res => res.data);
+// ========== Hosts (unified servers + WoL) ==========
 
-export const getDnsByCategory = (timeRange) =>
-  api.get('/traffic/dns/by-category', { params: { timeRange } }).then(res => res.data);
+export const getHosts = () => api.get('/hosts');
+export const getHost = (id) => api.get(`/hosts/${id}`);
+export const addHost = (data) => api.post('/hosts', data);
+export const updateHost = (id, data) => api.put(`/hosts/${id}`, data);
+export const deleteHost = (id) => api.delete(`/hosts/${id}`);
+export const testHostConnection = (id) => api.post(`/hosts/${id}/test`);
+export const getHostInterfaces = (id) => api.get(`/hosts/${id}/interfaces`);
+export const refreshHostInterfaces = (id) => api.post(`/hosts/${id}/refresh-interfaces`);
+export const getHostInfo = (id) => api.post(`/hosts/${id}/info`);
+export const getHostGroups = () => api.get('/hosts/groups');
 
-// ========== Servers Management ==========
+// Hosts - Power actions
+export const wakeHost = (id) => api.post(`/hosts/${id}/wake`);
+export const shutdownHost = (id) => api.post(`/hosts/${id}/shutdown`);
+export const rebootHost = (id) => api.post(`/hosts/${id}/reboot`);
+export const bulkWakeHosts = (hostIds) => api.post('/hosts/bulk/wake', { hostIds });
+export const bulkShutdownHosts = (hostIds) => api.post('/hosts/bulk/shutdown', { hostIds });
+
+// Hosts - Schedules (nested under host)
+export const getHostSchedules = (hostId) => api.get(`/hosts/${hostId}/schedules`);
+export const addHostSchedule = (hostId, data) => api.post(`/hosts/${hostId}/schedules`, data);
+export const updateHostSchedule = (hostId, sid, data) => api.put(`/hosts/${hostId}/schedules/${sid}`, data);
+export const deleteHostSchedule = (hostId, sid) => api.delete(`/hosts/${hostId}/schedules/${sid}`);
+export const toggleHostSchedule = (hostId, sid) => api.post(`/hosts/${hostId}/schedules/${sid}/toggle`);
+export const executeHostSchedule = (hostId, sid) => api.post(`/hosts/${hostId}/schedules/${sid}/execute`);
+
+// ========== Servers Management (legacy) ==========
 
 export const getServers = () => api.get('/servers');
 export const getServer = (id) => api.get(`/servers/${id}`);
@@ -218,7 +224,7 @@ export const refreshServerInterfaces = (id) => api.post(`/servers/${id}/refresh-
 export const getServerInfo = (id) => api.get(`/servers/${id}/info`);
 export const getServerGroups = () => api.get('/servers/groups');
 
-// ========== Wake-on-LAN ==========
+// ========== Wake-on-LAN (legacy) ==========
 
 export const sendWakeOnLan = (id) => api.post(`/wol/${id}/wake`);
 export const shutdownServer = (id) => api.post(`/wol/${id}/shutdown`);

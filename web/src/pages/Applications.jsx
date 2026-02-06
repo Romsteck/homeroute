@@ -27,6 +27,7 @@ import {
   Cpu,
   HardDrive,
   Database,
+  ArrowRightLeft,
 } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
@@ -41,6 +42,8 @@ import {
   getUserGroups,
   startApplicationService,
   stopApplicationService,
+  migrateApplication,
+  getHosts,
 } from '../api/client';
 
 const STATUS_BADGES = {
@@ -76,6 +79,11 @@ function Applications() {
   const [editingApp, setEditingApp] = useState(null);
   const [tokenModal, setTokenModal] = useState(null); // { name, token }
   const [terminalApp, setTerminalApp] = useState(null); // app object for terminal modal
+  const [migrateModal, setMigrateModal] = useState(null); // app object or null
+  const [hosts, setHosts] = useState([]);
+  const [selectedHostId, setSelectedHostId] = useState('');
+  const [migrating, setMigrating] = useState(false);
+  const [migrations, setMigrations] = useState({}); // appId → { phase, progressPct, bytesTransferred, totalBytes, error }
 
   // Create form
   const [createForm, setCreateForm] = useState({
@@ -169,6 +177,31 @@ function Applications() {
               else if (serviceType === 'codeserver') updated.codeServerStatus = newStatus;
               return { ...prev, [appId]: updated };
             });
+          }
+        } else if (msg.type === 'migration:progress') {
+          const m = msg.data;
+          setMigrations(prev => ({
+            ...prev,
+            [m.appId]: {
+              phase: m.phase,
+              progressPct: m.progressPct,
+              bytesTransferred: m.bytesTransferred,
+              totalBytes: m.totalBytes,
+              error: m.error,
+            }
+          }));
+          // Auto-clear after complete/failed
+          if (m.phase === 'complete' || m.phase === 'failed') {
+            setTimeout(() => {
+              setMigrations(prev => {
+                const next = { ...prev };
+                delete next[m.appId];
+                return next;
+              });
+              if (m.phase === 'complete') {
+                fetchDataRef.current(); // refresh the list
+              }
+            }, 5000);
           }
         }
       } catch {}
@@ -365,6 +398,32 @@ function Applications() {
     }
   }
 
+  const openMigrateModal = async (app) => {
+    try {
+      const res = await getHosts();
+      const hostList = res.data.hosts || res.data || [];
+      setHosts(hostList);
+      setMigrateModal(app);
+      setSelectedHostId('');
+    } catch (err) {
+      console.error('Failed to fetch hosts:', err);
+    }
+  };
+
+  const handleMigrate = async () => {
+    if (!migrateModal || !selectedHostId) return;
+    setMigrating(true);
+    try {
+      await migrateApplication(migrateModal.id, selectedHostId);
+      setMigrateModal(null);
+    } catch (err) {
+      console.error('Migration failed:', err);
+      alert(err.response?.data?.error || 'Migration failed');
+    } finally {
+      setMigrating(false);
+    }
+  };
+
   async function handleServiceStart(appId, serviceType) {
     try {
       const res = await startApplicationService(appId, serviceType);
@@ -435,6 +494,57 @@ function Applications() {
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  }
+
+  // MigrationProgress inline component
+  function MigrationProgress({ migration }) {
+    if (!migration) return null;
+
+    const phaseLabels = {
+      stopping: 'Arret du service...',
+      exporting: 'Export du container...',
+      transferring: 'Transfert en cours...',
+      importing: 'Import sur la cible...',
+      starting: 'Demarrage...',
+      complete: 'Migration terminee!',
+      failed: 'Erreur de migration',
+    };
+
+    const formatBytes = (bytes) => {
+      if (bytes === 0) return '0 B';
+      const k = 1024;
+      const sizes = ['B', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    };
+
+    return (
+      <div className="mt-2 p-3 bg-gray-700/50 rounded-lg">
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-xs text-gray-300">
+            {phaseLabels[migration.phase] || migration.phase}
+          </span>
+          <span className="text-xs text-gray-400">{migration.progressPct}%</span>
+        </div>
+        <div className="w-full bg-gray-600 rounded-full h-2">
+          <div
+            className={`h-2 rounded-full transition-all duration-500 ${
+              migration.phase === 'failed' ? 'bg-red-500' :
+              migration.phase === 'complete' ? 'bg-green-500' : 'bg-blue-500'
+            }`}
+            style={{ width: `${migration.progressPct}%` }}
+          />
+        </div>
+        {migration.totalBytes > 0 && (
+          <div className="text-xs text-gray-500 mt-1">
+            {formatBytes(migration.bytesTransferred)} / {formatBytes(migration.totalBytes)}
+          </div>
+        )}
+        {migration.error && (
+          <div className="text-xs text-red-400 mt-1">{migration.error}</div>
+        )}
+      </div>
+    );
   }
 
   if (loading) {
@@ -520,7 +630,7 @@ function Applications() {
                           ) : (
                             <Container className="w-4 h-4 text-blue-400 flex-shrink-0" />
                           )}
-                          <div className="min-w-0">
+                          <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2">
                               <span className="font-medium truncate">{app.name}</span>
                               {!app.enabled && (
@@ -539,6 +649,7 @@ function Applications() {
                               {app.frontend.auth_required && <Key className="w-3 h-3 text-purple-400" />}
                               {app.frontend.local_only && <Shield className="w-3 h-3 text-yellow-400" />}
                             </div>
+                            <MigrationProgress migration={migrations[app.id]} />
                           </div>
                         </div>
                       </td>
@@ -650,6 +761,13 @@ function Applications() {
                             title="Terminal"
                           >
                             <Terminal className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => openMigrateModal(app)}
+                            className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded transition-colors"
+                            title="Migrer vers un autre hote"
+                          >
+                            <ArrowRightLeft className="w-4 h-4" />
                           </button>
                           <button
                             onClick={() => handleToggle(app.id, !app.enabled)}
@@ -1215,6 +1333,57 @@ function Applications() {
             </div>
             <div className="flex justify-end mt-4">
               <Button onClick={() => setTokenModal(null)}>Fermer</Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Migrate Modal */}
+      {migrateModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 rounded-xl p-6 w-full max-w-md border border-gray-700">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">Migrer {migrateModal.name}</h3>
+              <button onClick={() => setMigrateModal(null)} className="p-1 text-gray-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <p className="text-sm text-gray-400 mb-4">
+              Selectionnez l&apos;hote de destination pour migrer cette application.
+            </p>
+            <select
+              value={selectedHostId}
+              onChange={(e) => setSelectedHostId(e.target.value)}
+              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white mb-4"
+            >
+              <option value="">Choisir un hote...</option>
+              {hosts
+                .filter(h => h.id !== migrateModal.host_id && h.name !== 'HomeRoute')
+                .map(h => (
+                  <option key={h.id} value={h.id}>
+                    {h.name} ({h.host}) — {h.status}
+                  </option>
+                ))
+              }
+              {migrateModal.host_id !== 'local' && (
+                <option value="local">HomeRoute (local)</option>
+              )}
+            </select>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setMigrateModal(null)}
+                className="px-4 py-2 text-gray-300 hover:text-white transition-colors"
+              >
+                Annuler
+              </button>
+              <button
+                onClick={handleMigrate}
+                disabled={!selectedHostId || migrating}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg transition-colors flex items-center gap-2"
+              >
+                {migrating && <Loader2 className="w-4 h-4 animate-spin" />}
+                Migrer
+              </button>
             </div>
           </div>
         </div>

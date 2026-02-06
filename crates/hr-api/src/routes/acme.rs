@@ -121,14 +121,6 @@ async fn renew_certificates(State(state): State<ApiState>) -> Json<Value> {
         }
     }
 
-    // Push updated certs to all connected agents if any were renewed
-    if !renewed.is_empty() {
-        if let Some(registry) = &state.registry {
-            info!("Pushing certificate updates to agents");
-            registry.push_cert_updates().await;
-        }
-    }
-
     Json(json!({
         "success": errors.is_empty(),
         "renewed": renewed,
@@ -136,21 +128,12 @@ async fn renew_certificates(State(state): State<ApiState>) -> Json<Value> {
     }))
 }
 
-/// Force push certificates to all connected agents
-async fn push_certificates(State(state): State<ApiState>) -> Json<Value> {
-    if let Some(registry) = &state.registry {
-        info!("Force pushing certificate updates to all agents");
-        registry.push_cert_updates().await;
-        Json(json!({
-            "success": true,
-            "message": "Certificates pushed to all connected agents"
-        }))
-    } else {
-        Json(json!({
-            "success": false,
-            "error": "Registry not available"
-        }))
-    }
+/// Force push certificates (no-op: agents no longer handle TLS)
+async fn push_certificates(State(_state): State<ApiState>) -> Json<Value> {
+    Json(json!({
+        "success": true,
+        "message": "TLS is now handled centrally by hr-proxy. No agent push needed."
+    }))
 }
 
 /// Get wildcard certificate (main) for agents

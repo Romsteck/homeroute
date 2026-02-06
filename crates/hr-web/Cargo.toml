@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 leptos = { workspace = true }
@@ -13,8 +13,6 @@ leptos_router = { workspace = true }
 leptos_axum = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-wasm-bindgen = { workspace = true, optional = true }
-console_error_panic_hook = { version = "0.1", optional = true }
 
 # Server-side deps (only for SSR)
 hr-common = { path = "../hr-common", optional = true }
@@ -34,11 +32,6 @@ tokio = { workspace = true, optional = true }
 
 [features]
 default = []
-hydrate = [
-    "leptos/hydrate",
-    "dep:wasm-bindgen",
-    "dep:console_error_panic_hook",
-]
 ssr = [
     "leptos/ssr",
     "leptos_meta/ssr",
@@ -59,4 +52,3 @@ ssr = [
     "dep:axum",
     "dep:tokio",
 ]
-islands = ["leptos/islands"]

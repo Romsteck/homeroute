@@ -1,7 +1,7 @@
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Server, Network, Shield, ShieldCheck, Globe, Settings,
-  ArrowLeftRight, RefreshCw, Zap, Users, BarChart3, LogOut,
+  ArrowLeftRight, RefreshCw, Zap, Users, LogOut,
   User, Power, HardDrive, Lock, Boxes
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -28,9 +28,7 @@ const navGroups = [
   {
     label: 'Système',
     items: [
-      { to: '/servers', icon: HardDrive, label: 'Serveurs' },
-      { to: '/wol', icon: Power, label: 'Wake-on-LAN' },
-      { to: '/traffic', icon: BarChart3, label: 'Trafic' },
+      { to: '/hosts', icon: HardDrive, label: 'Hotes' },
       { to: '/users', icon: Users, label: 'Utilisateurs' },
       { to: '/updates', icon: RefreshCw, label: 'Mises à jour' },
       { to: '/energy', icon: Zap, label: 'Énergie' },

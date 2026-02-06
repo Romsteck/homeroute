@@ -1,10 +1,14 @@
 # Notes pour Claude Code
 
+> ⚠️ **Le frontend Leptos (`crates/hr-web/`) est temporairement obsolète.**
+> Ne pas modifier, maintenir ni supprimer ce code. Le frontend actif est l'application React/Vite dans `web/`.
+
 ## Architecture
 
 HomeRoute est un **binaire Rust unifié** qui gère tous les services réseau.
 
-- **Frontend**: Leptos SSR + Islands dans `crates/hr-web/`, WASM client dans `crates/hr-web-client/`
+- **Frontend**: Application React/Vite dans `web/` — servie comme fichiers statiques par le backend Rust
+- **Frontend (obsolète)**: `crates/hr-web/` contient une interface Leptos SSR temporairement obsolète — ne pas maintenir
 - **Backend**: Binaire Rust unique (Cargo workspace) dans `/opt/homeroute/crates/`
 - **Service systemd**: `homeroute.service`
 
@@ -25,8 +29,7 @@ crates/
 ├── hr-servers/      # Gestion serveurs (monitoring, WoL, scheduler)
 ├── hr-system/       # Système (énergie, updates, réseau, DDNS Cloudflare)
 ├── hr-api/          # Routeur API HTTP (axum, routes /api/*, WebSocket)
-├── hr-web/          # Frontend Leptos (composants SSR + islands, server functions)
-└── hr-web-client/   # Point d'entrée WASM (hydration islands)
+├── hr-web/          # ⚠️ OBSOLÈTE — Interface Leptos SSR (ne pas maintenir)
 ```
 
 ## Gestion du serveur
@@ -73,7 +76,7 @@ Les enregistrements DNS sont synchronisés automatiquement:
 ## Commandes utiles
 
 ```bash
-# Build tout (serveur + WASM + CSS)
+# Build tout (serveur + frontend Vite)
 cd /opt/homeroute && make all
 
 # Déployer (build + restart service)
@@ -82,7 +85,7 @@ cd /opt/homeroute && make deploy
 # Build serveur uniquement
 cd /opt/homeroute && make server
 
-# Build frontend uniquement (WASM + CSS + assets)
+# Build frontend Vite uniquement
 cd /opt/homeroute && make web
 
 # Tests
@@ -101,12 +104,12 @@ journalctl -u homeroute -f
 curl -s http://localhost:4000/api/health | jq
 ```
 
-## Règles Leptos (OBLIGATOIRE)
+## Règles Frontend (OBLIGATOIRE)
 
-- **JAMAIS** lancer le serveur manuellement (`cargo run`, `cargo leptos serve`, etc.)
-- **JAMAIS** utiliser `cargo-leptos` — le build utilise le Makefile
+- **JAMAIS** lancer le serveur manuellement (`cargo run`, etc.)
 - **TOUJOURS** utiliser `systemctl` pour gérer le service
 - **TOUJOURS** utiliser `make deploy` pour build + restart
+- **NE PAS** modifier le code Leptos dans `crates/hr-web/` — il est temporairement obsolète
 - Pour tester après modification : `make deploy && curl -s http://localhost:4000/api/health`
 
 ## Workflow de mise à jour des agents (OBLIGATOIRE)

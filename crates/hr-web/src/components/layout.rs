@@ -2,8 +2,7 @@ use leptos::prelude::*;
 use leptos_router::components::Outlet;
 
 use crate::components::icons::*;
-use crate::islands::logout_button::LogoutButton;
-use crate::server_fns::auth::get_current_user;
+use crate::server_fns::auth::{get_current_user, Logout};
 use crate::types::WebUserInfo;
 
 /// Protected layout that checks auth then renders Sidebar + content.
@@ -63,10 +62,11 @@ fn nav_class(href: &str, current: &str) -> &'static str {
     }
 }
 
-/// Sidebar navigation (SSR-only, except LogoutButton island).
+/// Sidebar navigation (pure SSR).
 #[component]
 fn Sidebar(user_info: WebUserInfo) -> impl IntoView {
     let path = current_path();
+    let logout_action = ServerAction::<Logout>::new();
 
     view! {
         <aside class="w-64 bg-gray-800 border-r border-gray-700 flex flex-col min-h-screen shrink-0">
@@ -159,7 +159,15 @@ fn Sidebar(user_info: WebUserInfo) -> impl IntoView {
                             }}
                         </div>
                     </div>
-                    <LogoutButton/>
+                    <ActionForm action=logout_action attr:class="inline">
+                        <button
+                            type="submit"
+                            title="Déconnexion"
+                            class="p-1.5 text-gray-400 hover:text-white transition-colors"
+                        >
+                            <IconLogOut class="w-5 h-5"/>
+                        </button>
+                    </ActionForm>
                 </div>
             </div>
         </aside>
