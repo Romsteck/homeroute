@@ -594,7 +594,6 @@ dependencies = [
  "hr-lxd",
  "hr-proxy",
  "hr-registry",
- "hr-servers",
  "http-body-util",
  "hyper",
  "hyper-util",

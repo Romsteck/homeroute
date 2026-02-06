@@ -16,7 +16,6 @@ hr-dns = { path = "../hr-dns" }
 hr-dhcp = { path = "../hr-dhcp" }
 hr-ipv6 = { path = "../hr-ipv6" }
 hr-adblock = { path = "../hr-adblock" }
-hr-servers = { path = "../hr-servers" }
 hr-api = { path = "../hr-api" }
 hr-firewall = { path = "../hr-firewall" }
 hr-registry = { path = "../hr-registry" }
