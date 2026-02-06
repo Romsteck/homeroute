@@ -355,7 +355,7 @@ function Updates() {
       )}
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-px">
         {/* Total Updates */}
         <Card title="Total mises a jour" icon={Package}>
           <div className="text-3xl font-bold text-blue-400">

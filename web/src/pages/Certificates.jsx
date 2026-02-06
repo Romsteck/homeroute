@@ -100,8 +100,8 @@ const Certificates = () => {
 
   if (loading) {
     return (
-      <div className="p-6">
-        <div className="text-center">Chargement...</div>
+      <div className="flex items-center justify-center h-full">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-400"></div>
       </div>
     );
   }
@@ -124,7 +124,7 @@ const Certificates = () => {
 
       <Section title="Fournisseur">
         <Card title="Let's Encrypt" icon={Shield}>
-          <div className="space-y-4">
+          <div className="space-y-px">
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-2">
                 <CheckCircle className="w-5 h-5 text-green-400" />

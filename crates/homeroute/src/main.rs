@@ -675,9 +675,8 @@ async fn main() -> anyhow::Result<()> {
     // Host monitoring (ping all hosts every 30s)
     {
         let host_events = Arc::new(events.host_status.clone());
-        let server_events = Arc::new(events.server_status.clone());
         tokio::spawn(async move {
-            hr_servers::monitoring::run_monitoring(host_events, server_events).await;
+            hr_servers::monitoring::run_monitoring(host_events).await;
         });
     }
 

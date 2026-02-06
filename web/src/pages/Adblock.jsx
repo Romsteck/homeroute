@@ -155,7 +155,7 @@ function Adblock() {
           </Card>
 
           <Card title="Whitelist" icon={Shield}>
-            <div className="space-y-4">
+            <div className="space-y-px">
               <div className="flex gap-2">
                 <input
                   type="text"
@@ -197,7 +197,7 @@ function Adblock() {
 
       <Section title="Recherche">
         <Card title="Rechercher un domaine bloqué" icon={Search}>
-          <div className="space-y-4">
+          <div className="space-y-px">
             <div className="flex gap-2">
               <input
                 type="text"

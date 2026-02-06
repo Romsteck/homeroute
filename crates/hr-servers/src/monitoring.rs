@@ -1,4 +1,4 @@
-use hr_common::events::{HostStatusEvent, ServerStatusEvent};
+use hr_common::events::HostStatusEvent;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -14,12 +14,11 @@ const MONITOR_INTERVAL_SECS: u64 = 30;
 /// Emits HostStatusEvent on the event bus for each status change.
 pub async fn run_monitoring(
     host_events: Arc<broadcast::Sender<HostStatusEvent>>,
-    server_events: Arc<broadcast::Sender<ServerStatusEvent>>,
 ) {
     info!("Host monitoring started (interval: {}s)", MONITOR_INTERVAL_SECS);
 
     loop {
-        if let Err(e) = monitor_all_hosts(&host_events, &server_events).await {
+        if let Err(e) = monitor_all_hosts(&host_events).await {
             error!("Monitoring cycle error: {}", e);
         }
         tokio::time::sleep(std::time::Duration::from_secs(MONITOR_INTERVAL_SECS)).await;
@@ -28,7 +27,6 @@ pub async fn run_monitoring(
 
 async fn monitor_all_hosts(
     host_events: &broadcast::Sender<HostStatusEvent>,
-    server_events: &broadcast::Sender<ServerStatusEvent>,
 ) -> Result<(), String> {
     // Prefer hosts.json, fall back to servers.json
     let (file_path, key) = if tokio::fs::metadata(HOSTS_FILE).await.is_ok() {
@@ -103,12 +101,6 @@ async fn monitor_all_hosts(
             // Emit host status event
             let _ = host_events.send(HostStatusEvent {
                 host_id: id.clone(),
-                status: new_status.clone(),
-                latency_ms: *latency,
-            });
-            // Emit legacy server status event for backward compat
-            let _ = server_events.send(ServerStatusEvent {
-                server_id: id.clone(),
                 status: new_status.clone(),
                 latency_ms: *latency,
             });

@@ -25,7 +25,6 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     debug!("WebSocket client connected");
 
     let mut host_rx = state.events.host_status.subscribe();
-    let mut server_rx = state.events.server_status.subscribe();
     let mut updates_rx = state.events.updates.subscribe();
     let mut agent_rx = state.events.agent_status.subscribe();
     let mut metrics_rx = state.events.agent_metrics.subscribe();
@@ -55,31 +54,6 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("WebSocket host_status lagged by {}", n);
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-
-            // Server status events (legacy)
-            result = server_rx.recv() => {
-                match result {
-                    Ok(event) => {
-                        let msg = json!({
-                            "type": "servers:status",
-                            "data": {
-                                "serverId": event.server_id,
-                                "online": event.status == "online",
-                                "status": event.status,
-                                "latency": event.latency_ms.unwrap_or(0),
-                                "lastSeen": chrono::Utc::now().to_rfc3339()
-                            }
-                        });
-                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("WebSocket server_status lagged by {}", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

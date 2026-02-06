@@ -294,7 +294,7 @@ export default function Hosts() {
             </p>
           </Card>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-px">
             {hosts.map((host) => (
               <Card key={host.id} title={host.name} icon={HardDrive}>
                 <div className="space-y-3">

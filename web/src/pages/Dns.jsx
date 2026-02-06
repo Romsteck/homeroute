@@ -62,8 +62,8 @@ function Dns() {
 
   function renderDnsTab() {
     return (
-      <div className="space-y-4">
-        <div className="grid grid-cols-3 gap-4">
+      <div className="space-y-px">
+        <div className="grid grid-cols-3 gap-px">
           <Section title="Serveurs DNS upstream" className="!mb-0">
             <div className="space-y-1">
               {config?.dnsServers?.map(server => (
@@ -137,8 +137,8 @@ function Dns() {
 
   function renderDhcpTab() {
     return (
-      <div className="space-y-4">
-        <div className="grid grid-cols-5 gap-4">
+      <div className="space-y-px">
+        <div className="grid grid-cols-5 gap-px">
           <Section title="Configuration DHCP" className="!mb-0">
             <dl className="space-y-3 text-sm">
               <div className="flex justify-between">
@@ -171,7 +171,7 @@ function Dns() {
           </Section>
 
           <Section title="Configuration IPv6" contrast className="!mb-0 col-span-3">
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-3 gap-px">
               <dl className="space-y-2 text-sm">
                 <div className="flex justify-between">
                   <dt className="text-gray-400">Router Advertisement</dt>
@@ -268,10 +268,10 @@ function Dns() {
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div>
       <PageHeader title="DNS / DHCP" icon={Server} />
 
-      <div className="flex flex-1 min-h-0">
+      <div className="flex flex-1">
         {/* Vertical Tab Sidebar */}
         <div className="w-56 border-r border-gray-700 bg-gray-800/50 flex-shrink-0">
           <button
@@ -299,7 +299,7 @@ function Dns() {
         </div>
 
         {/* Tab Content */}
-        <div className="flex-1 overflow-auto p-4">
+        <div className="flex-1 overflow-auto">
           {activeTab === 'dns' && renderDnsTab()}
           {activeTab === 'dhcp' && renderDhcpTab()}
         </div>
