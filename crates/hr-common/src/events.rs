@@ -5,8 +5,6 @@ use tokio::sync::broadcast;
 pub struct EventBus {
     /// Changements de statut hôtes (monitoring → websocket)
     pub host_status: broadcast::Sender<HostStatusEvent>,
-    /// Legacy alias (monitoring still emits both during transition)
-    pub server_status: broadcast::Sender<ServerStatusEvent>,
     /// Notifications de changement de config (API → services pour reload)
     pub config_changed: broadcast::Sender<ConfigChangeEvent>,
     /// System update events (updates → websocket)
@@ -27,7 +25,6 @@ impl EventBus {
     pub fn new() -> Self {
         Self {
             host_status: broadcast::channel(64).0,
-            server_status: broadcast::channel(64).0,
             config_changed: broadcast::channel(16).0,
             updates: broadcast::channel(256).0,
             agent_status: broadcast::channel(64).0,
@@ -48,13 +45,6 @@ impl Default for EventBus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostStatusEvent {
     pub host_id: String,
-    pub status: String,
-    pub latency_ms: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerStatusEvent {
-    pub server_id: String,
     pub status: String,
     pub latency_ms: Option<u64>,
 }

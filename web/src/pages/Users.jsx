@@ -453,7 +453,7 @@ function Users() {
 
   function renderGroupsTab() {
     return (
-      <div className="space-y-4">
+      <div className="space-y-px">
         <div className="flex justify-end">
           <Button
             variant="primary"

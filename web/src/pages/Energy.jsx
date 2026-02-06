@@ -292,7 +292,7 @@ function Energy() {
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-px">
         {/* CPU Info Card */}
         <Card title={`Infos CPU (${cpuModel})`} icon={Cpu}>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-px">
           {/* Temperature */}
           <div className="bg-gray-900 p-4">
             <div className="flex items-center gap-2 text-gray-400 mb-2">
@@ -376,9 +376,9 @@ function Energy() {
 
         {/* Mode Card */}
         <Card title="Mode" icon={Zap}>
-        <div className="flex flex-col md:flex-row gap-6">
+        <div className="flex flex-col md:flex-row gap-px">
           {/* Mode buttons */}
-          <div className="flex flex-wrap gap-4 justify-center md:justify-start">
+          <div className="flex flex-wrap gap-px justify-center md:justify-start">
             {['economy', 'auto', 'performance'].map(mode => {
               const Icon = MODE_ICONS[mode];
               const isActive = currentMode === mode;
@@ -421,9 +421,9 @@ function Energy() {
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-px">
         {/* Programmation Card */}
         <Card title="Programmation" icon={Clock}>
-          <div className="space-y-6">
+          <div className="space-y-px">
           {/* Schedule */}
-          <div className="space-y-4">
+          <div className="space-y-px">
             <div className="flex items-center gap-3">
               <button
                 onClick={async () => {
@@ -483,7 +483,7 @@ function Energy() {
           </div>
 
           {/* Auto-select */}
-          <div className="space-y-4">
+          <div className="space-y-px">
             <div className="flex items-center gap-3">
               <button
                 onClick={async () => {
@@ -586,8 +586,8 @@ function Energy() {
             </div>
 
             {autoSelect.enabled && (
-              <div className="bg-gray-900 p-4 space-y-4">
-                <div className="grid grid-cols-3 gap-3">
+              <div className="bg-gray-900 p-4 space-y-px">
+                <div className="grid grid-cols-3 gap-px">
                   <div>
                     <label className="block text-xs text-gray-400 mb-1">Seuil bas (req/s)</label>
                     <input

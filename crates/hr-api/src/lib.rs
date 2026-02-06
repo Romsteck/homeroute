@@ -51,8 +51,6 @@ fn api_routes() -> Router<ApiState> {
         .nest("/energy", routes::energy::router())
         .nest("/updates", routes::updates::router())
         .nest("/hosts", routes::hosts::router())
-        .nest("/servers", routes::servers::router())
-        .nest("/wol", routes::wol::router())
         .nest("/services", routes::services::router())
         .nest("/firewall", routes::firewall::router())
         .nest("/applications", routes::applications::router())

@@ -33,7 +33,7 @@ Refonte majeure de l'architecture pour support multi-hôte avec simplification d
 - [x] 2.3 Migration données servers.json → hosts.json
 - [x] 2.4 Service monitoring hôtes
 - [x] 2.5 Page React Hôtes (fusion Serveurs + WOL)
-- [ ] 2.6 Supprimer ancien code (legacy /servers + /wol conservés temporairement)
+- [x] 2.6 Supprimer ancien code (legacy /servers + /wol conservés temporairement)
 
 ### Phase 3 : Support multi-hôte
 - [x] 3.1 host_id sur Application
@@ -106,3 +106,12 @@ Refonte majeure de l'architecture pour support multi-hôte avec simplification d
 | 2026-02-06 | 3.2 | Créé crate hr-host-agent: WebSocket client, heartbeat, metrics /proc, reconnect | Done |
 | 2026-02-06 | 3.4 | WOD étendu: WoL magic packet pour hôtes offline, ServiceStart pour hôtes online | Done |
 | 2026-02-06 | 3.x | Integration: make all OK (86 tests, 0 failures), make deploy OK, health OK | Done |
+| 2026-02-06 | 4.1 | Protocole migration: ExportReady/TransferChunk/TransferComplete/ImportComplete + StartExport/StartImport/ReceiveChunk | Done |
+| 2026-02-06 | 4.3 | MigrationProgressEvent + MigrationPhase enum + broadcast channel + WS migration:progress | Done |
+| 2026-02-06 | 4.2 | API: POST /{id}/migrate + GET /{id}/migration-status + run_migration orchestration | Done |
+| 2026-02-06 | 4.1 | hr-host-agent: handle_export (lxc export + stream chunks) + handle_import (receive + lxc import) | Done |
+| 2026-02-06 | 4.4 | UI: bouton Migrer + modal sélection hôte + MigrationProgress avec progress bar temps réel | Done |
+| 2026-02-06 | 4.x | Integration: make all OK, make deploy OK, health OK — Phase 4 complete | Done |
+| 2026-02-06 | 2.6 | Supprimé servers.rs, wol.rs, Servers.jsx, Wol.jsx, ServerStatusEvent, legacy client.js | Done |
+| 2026-02-06 | 2.6 | Integration: make deploy OK, 77 tests (0 failures), health OK — Migration complète | Done |
+| 2026-02-06 | — | Supprimé crates/hr-web/ (Leptos SSR frontend), nettoyé configs et docs Leptos | Done | Done |

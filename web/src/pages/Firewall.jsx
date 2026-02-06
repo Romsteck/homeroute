@@ -179,7 +179,7 @@ function Firewall() {
   }
 
   return (
-    <div className="space-y-6 p-6">
+    <div>
       <PageHeader title="Firewall IPv6" icon={Shield}>
         <Button onClick={() => { resetForm(); setShowAddModal(true); }}>
           <Plus className="w-4 h-4 mr-1" />
@@ -188,10 +188,10 @@ function Firewall() {
       </PageHeader>
 
       {message && (
-        <div className={`p-3 flex items-center gap-2 text-sm ${
-          message.type === 'success' ? 'bg-green-900/50 text-green-400 border border-green-700' : 'bg-red-900/50 text-red-400 border border-red-700'
+        <div className={`p-4 flex items-center gap-2 ${
+          message.type === 'success' ? 'bg-green-900/50 text-green-400' : 'bg-red-900/50 text-red-400'
         }`}>
-          {message.type === 'success' ? <CheckCircle className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
+          {message.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <XCircle className="w-5 h-5" />}
           {message.text}
         </div>
       )}
@@ -199,7 +199,7 @@ function Firewall() {
       {/* Status */}
       <Card title="Statut" icon={Shield}>
         {status ? (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-px text-sm">
             <div>
               <span className="text-gray-400">État</span>
               <p className={status.enabled ? 'text-green-400 font-medium' : 'text-red-400 font-medium'}>
