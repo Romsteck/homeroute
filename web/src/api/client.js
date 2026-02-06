@@ -191,8 +191,6 @@ export const addHost = (data) => api.post('/hosts', data);
 export const updateHost = (id, data) => api.put(`/hosts/${id}`, data);
 export const deleteHost = (id) => api.delete(`/hosts/${id}`);
 export const testHostConnection = (id) => api.post(`/hosts/${id}/test`);
-export const getHostInterfaces = (id) => api.get(`/hosts/${id}/interfaces`);
-export const refreshHostInterfaces = (id) => api.post(`/hosts/${id}/refresh-interfaces`);
 export const getHostInfo = (id) => api.post(`/hosts/${id}/info`);
 export const getHostGroups = () => api.get('/hosts/groups');
 
@@ -203,11 +201,4 @@ export const rebootHost = (id) => api.post(`/hosts/${id}/reboot`);
 export const bulkWakeHosts = (hostIds) => api.post('/hosts/bulk/wake', { hostIds });
 export const bulkShutdownHosts = (hostIds) => api.post('/hosts/bulk/shutdown', { hostIds });
 
-// Hosts - Schedules (nested under host)
-export const getHostSchedules = (hostId) => api.get(`/hosts/${hostId}/schedules`);
-export const addHostSchedule = (hostId, data) => api.post(`/hosts/${hostId}/schedules`, data);
-export const updateHostSchedule = (hostId, sid, data) => api.put(`/hosts/${hostId}/schedules/${sid}`, data);
-export const deleteHostSchedule = (hostId, sid) => api.delete(`/hosts/${hostId}/schedules/${sid}`);
-export const toggleHostSchedule = (hostId, sid) => api.post(`/hosts/${hostId}/schedules/${sid}/toggle`);
-export const executeHostSchedule = (hostId, sid) => api.post(`/hosts/${hostId}/schedules/${sid}/execute`);
 
