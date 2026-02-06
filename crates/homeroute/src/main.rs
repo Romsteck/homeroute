@@ -462,7 +462,7 @@ async fn main() -> anyhow::Result<()> {
 
     {
         let mut reg = service_registry.write().await;
-        for name in &["monitoring", "wol-scheduler"] {
+        for name in &["monitoring"] {
             reg.insert(name.to_string(), ServiceStatus {
                 name: name.to_string(),
                 state: ServiceState::Running,
@@ -680,11 +680,6 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Power schedule executor (check cron schedules every 30s)
-    tokio::spawn(async move {
-        hr_servers::scheduler::run_scheduler().await;
-    });
-
     // ── SIGHUP handler ─────────────────────────────────────────────────
 
     tokio::spawn(async move {
@@ -737,7 +732,7 @@ async fn main() -> anyhow::Result<()> {
         "  Adblock: {} domains blocked",
         adblock.read().await.domain_count()
     );
-    info!("  Servers: monitoring every 30s, scheduler active");
+    info!("  Servers: monitoring every 30s");
 
     // Wait for shutdown signal
     tokio::signal::ctrl_c().await?;

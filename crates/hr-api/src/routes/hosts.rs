@@ -22,8 +22,6 @@ pub fn router() -> Router<ApiState> {
         .route("/{id}", get(get_host).put(update_host).delete(delete_host))
         // Connection
         .route("/{id}/test", post(test_connection))
-        .route("/{id}/interfaces", get(get_interfaces))
-        .route("/{id}/refresh-interfaces", post(refresh_interfaces))
         .route("/{id}/info", post(get_host_info))
         // Power actions
         .route("/{id}/wake", post(wake))
@@ -31,14 +29,6 @@ pub fn router() -> Router<ApiState> {
         .route("/{id}/reboot", post(reboot_host))
         .route("/bulk/wake", post(bulk_wake))
         .route("/bulk/shutdown", post(bulk_shutdown))
-        // Schedules (nested under host)
-        .route("/{id}/schedules", get(list_schedules).post(create_schedule))
-        .route(
-            "/{id}/schedules/{sid}",
-            get(get_schedule).put(update_schedule).delete(delete_schedule),
-        )
-        .route("/{id}/schedules/{sid}/toggle", post(toggle_schedule))
-        .route("/{id}/schedules/{sid}/execute", post(execute_schedule))
         // Host-agent WebSocket
         .route("/agent/ws", get(host_agent_ws))
 }
@@ -225,7 +215,6 @@ async fn add_host(Json(body): Json<AddHostRequest>) -> Json<Value> {
         "status": "unknown",
         "latency": 0,
         "lastSeen": null,
-        "schedules": [],
         "lxc": null,
         "createdAt": chrono::Utc::now().to_rfc3339()
     });
@@ -293,38 +282,6 @@ async fn test_connection(Path(id): Path<String>) -> Json<Value> {
 
     match ssh_command(addr, port, user, "echo ok").await {
         Ok(output) => Json(json!({"success": true, "output": output.trim()})),
-        Err(e) => Json(json!({"success": false, "error": e})),
-    }
-}
-
-async fn get_interfaces(Path(id): Path<String>) -> Json<Value> {
-    let data = load_hosts().await;
-    let host = match find_host(&data, &id) {
-        Some(h) => h,
-        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
-    };
-
-    let cached = host.get("interfaces").cloned().unwrap_or(json!([]));
-    Json(json!({"success": true, "interfaces": cached}))
-}
-
-async fn refresh_interfaces(Path(id): Path<String>) -> Json<Value> {
-    let mut data = load_hosts().await;
-    let host = match find_host_mut(&mut data, &id) {
-        Some(h) => h,
-        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
-    };
-
-    let addr = host.get("host").and_then(|h| h.as_str()).unwrap_or("").to_string();
-    let port = host.get("port").and_then(|p| p.as_u64()).unwrap_or(22) as u16;
-    let user = host.get("username").and_then(|u| u.as_str()).unwrap_or("root").to_string();
-
-    match get_remote_interfaces(&addr, port, &user).await {
-        Ok(ifaces) => {
-            host["interfaces"] = json!(ifaces);
-            let _ = save_hosts(&data).await;
-            Json(json!({"success": true, "interfaces": ifaces}))
-        }
         Err(e) => Json(json!({"success": false, "error": e})),
     }
 }
@@ -423,194 +380,6 @@ async fn bulk_shutdown(Json(body): Json<BulkRequest>) -> Json<Value> {
         }
     }
     Json(json!({"success": true, "results": results}))
-}
-
-// ── Schedules ────────────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct SchedulePath {
-    id: String,
-    sid: String,
-}
-
-async fn list_schedules(Path(id): Path<String>) -> Json<Value> {
-    let data = load_hosts().await;
-    let host = match find_host(&data, &id) {
-        Some(h) => h,
-        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
-    };
-
-    let schedules = host.get("schedules").cloned().unwrap_or(json!([]));
-    Json(json!({"success": true, "schedules": schedules}))
-}
-
-async fn get_schedule(Path(SchedulePath { id, sid }): Path<SchedulePath>) -> Json<Value> {
-    let data = load_hosts().await;
-    let host = match find_host(&data, &id) {
-        Some(h) => h,
-        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
-    };
-
-    if let Some(schedule) = find_schedule(host, &sid) {
-        return Json(json!({"success": true, "schedule": schedule}));
-    }
-    Json(json!({"success": false, "error": "Schedule non trouve"}))
-}
-
-#[derive(Deserialize)]
-struct CreateScheduleRequest {
-    action: String,
-    cron: String,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default = "default_true")]
-    enabled: bool,
-}
-
-fn default_true() -> bool { true }
-
-async fn create_schedule(
-    Path(id): Path<String>,
-    Json(body): Json<CreateScheduleRequest>,
-) -> Json<Value> {
-    if !["wake", "shutdown", "reboot"].contains(&body.action.as_str()) {
-        return Json(json!({"success": false, "error": "Action invalide. Doit etre: wake, shutdown, ou reboot"}));
-    }
-
-    let mut data = load_hosts().await;
-    let host = match find_host_mut(&mut data, &id) {
-        Some(h) => h,
-        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
-    };
-
-    let host_name = host.get("name").and_then(|n| n.as_str()).unwrap_or("unknown").to_string();
-
-    let sid = uuid::Uuid::new_v4().to_string();
-    let schedule = json!({
-        "id": sid,
-        "action": body.action,
-        "cron": body.cron,
-        "description": body.description.unwrap_or_else(|| format!("{} {}", body.action, host_name)),
-        "enabled": body.enabled,
-        "createdAt": chrono::Utc::now().to_rfc3339(),
-        "lastRun": null
-    });
-
-    let schedules = host
-        .get_mut("schedules")
-        .and_then(|s| s.as_array_mut());
-    match schedules {
-        Some(arr) => arr.push(schedule.clone()),
-        None => host["schedules"] = json!([schedule]),
-    }
-
-    if let Err(e) = save_hosts(&data).await {
-        return Json(json!({"success": false, "error": e}));
-    }
-
-    Json(json!({"success": true, "schedule": schedule}))
-}
-
-async fn update_schedule(
-    Path(SchedulePath { id, sid }): Path<SchedulePath>,
-    Json(updates): Json<Value>,
-) -> Json<Value> {
-    let mut data = load_hosts().await;
-    let host = match find_host_mut(&mut data, &id) {
-        Some(h) => h,
-        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
-    };
-
-    if let Some(schedules) = host.get_mut("schedules").and_then(|s| s.as_array_mut()) {
-        if let Some(schedule) = schedules.iter_mut().find(|s| s.get("id").and_then(|i| i.as_str()) == Some(&sid)) {
-            if let Some(obj) = updates.as_object() {
-                for (k, v) in obj {
-                    if k != "id" {
-                        schedule[k] = v.clone();
-                    }
-                }
-            }
-            schedule["updatedAt"] = json!(chrono::Utc::now().to_rfc3339());
-        } else {
-            return Json(json!({"success": false, "error": "Schedule non trouve"}));
-        }
-    }
-
-    if let Err(e) = save_hosts(&data).await {
-        return Json(json!({"success": false, "error": e}));
-    }
-    Json(json!({"success": true}))
-}
-
-async fn delete_schedule(Path(SchedulePath { id, sid }): Path<SchedulePath>) -> Json<Value> {
-    let mut data = load_hosts().await;
-    let host = match find_host_mut(&mut data, &id) {
-        Some(h) => h,
-        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
-    };
-
-    if let Some(schedules) = host.get_mut("schedules").and_then(|s| s.as_array_mut()) {
-        schedules.retain(|s| s.get("id").and_then(|i| i.as_str()) != Some(&sid));
-    }
-
-    if let Err(e) = save_hosts(&data).await {
-        return Json(json!({"success": false, "error": e}));
-    }
-    Json(json!({"success": true}))
-}
-
-async fn toggle_schedule(Path(SchedulePath { id, sid }): Path<SchedulePath>) -> Json<Value> {
-    let mut data = load_hosts().await;
-    let host = match find_host_mut(&mut data, &id) {
-        Some(h) => h,
-        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
-    };
-
-    if let Some(schedules) = host.get_mut("schedules").and_then(|s| s.as_array_mut()) {
-        if let Some(schedule) = schedules.iter_mut().find(|s| s.get("id").and_then(|i| i.as_str()) == Some(&sid)) {
-            let current = schedule.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true);
-            schedule["enabled"] = json!(!current);
-        }
-    }
-
-    if let Err(e) = save_hosts(&data).await {
-        return Json(json!({"success": false, "error": e}));
-    }
-    Json(json!({"success": true}))
-}
-
-async fn execute_schedule(Path(SchedulePath { id, sid }): Path<SchedulePath>) -> Json<Value> {
-    let data = load_hosts().await;
-    let host = match find_host(&data, &id) {
-        Some(h) => h,
-        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
-    };
-
-    let schedule = match find_schedule(host, &sid) {
-        Some(s) => s.clone(),
-        None => return Json(json!({"success": false, "error": "Schedule non trouve"})),
-    };
-
-    let action = schedule.get("action").and_then(|a| a.as_str()).unwrap_or("");
-    let result = match action {
-        "wake" => wake(Path(id.clone())).await,
-        "shutdown" => shutdown_host(Path(id.clone())).await,
-        "reboot" => reboot_host(Path(id.clone())).await,
-        _ => return Json(json!({"success": false, "error": "Action inconnue"})),
-    };
-
-    // Update lastRun
-    let mut data = load_hosts().await;
-    if let Some(host) = find_host_mut(&mut data, &id) {
-        if let Some(schedules) = host.get_mut("schedules").and_then(|s| s.as_array_mut()) {
-            if let Some(s) = schedules.iter_mut().find(|s| s.get("id").and_then(|i| i.as_str()) == Some(&sid)) {
-                s["lastRun"] = json!(chrono::Utc::now().to_rfc3339());
-            }
-        }
-    }
-    let _ = save_hosts(&data).await;
-
-    result
 }
 
 // ── Host-agent WebSocket ─────────────────────────────────────────────────
@@ -756,13 +525,6 @@ fn find_host_mut<'a>(data: &'a mut Value, id: &str) -> Option<&'a mut Value> {
         .as_array_mut()?
         .iter_mut()
         .find(|h| h.get("id").and_then(|i| i.as_str()) == Some(id))
-}
-
-fn find_schedule<'a>(host: &'a Value, sid: &str) -> Option<&'a Value> {
-    host.get("schedules")?
-        .as_array()?
-        .iter()
-        .find(|s| s.get("id").and_then(|i| i.as_str()) == Some(sid))
 }
 
 async fn send_wol(mac: &str) -> Result<(), String> {

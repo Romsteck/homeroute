@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
   HardDrive, Plus, Trash2, Edit, RefreshCw, Activity, X, Check,
-  Power, Play, Square, RotateCw, Clock, ChevronDown, ChevronUp
+  Power, Play, Square, RotateCw
 } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
@@ -14,14 +14,9 @@ import {
   updateHost,
   deleteHost,
   testHostConnection,
-  refreshHostInterfaces,
   wakeHost,
   shutdownHost,
-  rebootHost,
-  getHostSchedules,
-  addHostSchedule,
-  deleteHostSchedule,
-  toggleHostSchedule
+  rebootHost
 } from '../api/client';
 import useWebSocket from '../hooks/useWebSocket';
 
@@ -29,31 +24,16 @@ export default function Hosts() {
   const [hosts, setHosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
-  const [showScheduleModal, setShowScheduleModal] = useState(false);
-  const [scheduleHostId, setScheduleHostId] = useState(null);
-  const [expandedHost, setExpandedHost] = useState(null);
-
   // Add host form
   const [formData, setFormData] = useState({
     name: '',
     host: '',
     port: 22,
     username: 'root',
-    password: '',
-    groups: ''
+    password: ''
   });
   const [addingHost, setAddingHost] = useState(false);
   const [addError, setAddError] = useState('');
-
-  // Schedule form
-  const [scheduleForm, setScheduleForm] = useState({
-    action: 'wake',
-    cron: '0 7 * * *',
-    description: '',
-    enabled: true
-  });
-  const [addingSchedule, setAddingSchedule] = useState(false);
-  const [scheduleError, setScheduleError] = useState('');
 
   useWebSocket({
     'hosts:status': (data) => {
@@ -101,14 +81,8 @@ export default function Hosts() {
     setAddError('');
 
     try {
-      const groups = formData.groups
-        .split(',')
-        .map(g => g.trim())
-        .filter(g => g);
-
       const res = await addHost({
         ...formData,
-        groups,
         port: parseInt(formData.port)
       });
 
@@ -150,18 +124,6 @@ export default function Hosts() {
     }
   };
 
-  const handleRefreshInterfaces = async (id) => {
-    try {
-      const res = await refreshHostInterfaces(id);
-      if (res.data.success) {
-        alert(`${res.data.interfaces.length} interface(s) detectee(s)`);
-        loadHosts();
-      }
-    } catch (error) {
-      alert('Echec : ' + error.message);
-    }
-  };
-
   // ── Power actions ───────────────────────────
 
   const handleWake = async (id) => {
@@ -197,65 +159,11 @@ export default function Hosts() {
     }
   };
 
-  // ── Schedules ───────────────────────────────
-
-  const openScheduleModal = (hostId) => {
-    setScheduleHostId(hostId);
-    setShowScheduleModal(true);
-  };
-
-  const handleAddSchedule = async (e) => {
-    e.preventDefault();
-    setAddingSchedule(true);
-    setScheduleError('');
-
-    try {
-      const res = await addHostSchedule(scheduleHostId, scheduleForm);
-      if (res.data.success) {
-        // Reload hosts to get updated schedules
-        loadHosts();
-        setShowScheduleModal(false);
-        resetScheduleForm();
-      } else {
-        setScheduleError(res.data.error || 'Failed to add schedule');
-      }
-    } catch (error) {
-      setScheduleError(error.response?.data?.error || error.message);
-    } finally {
-      setAddingSchedule(false);
-    }
-  };
-
-  const handleDeleteSchedule = async (hostId, sid) => {
-    if (!confirm('Supprimer ce planning ?')) return;
-    try {
-      await deleteHostSchedule(hostId, sid);
-      loadHosts();
-    } catch (error) {
-      alert('Echec : ' + error.message);
-    }
-  };
-
-  const handleToggleSchedule = async (hostId, sid) => {
-    try {
-      await toggleHostSchedule(hostId, sid);
-      loadHosts();
-    } catch (error) {
-      alert('Echec : ' + error.message);
-    }
-  };
-
   // ── Form helpers ────────────────────────────
 
   const resetForm = () => {
-    setFormData({ name: '', host: '', port: 22, username: 'root', password: '', groups: '' });
+    setFormData({ name: '', host: '', port: 22, username: 'root', password: '' });
     setAddError('');
-  };
-
-  const resetScheduleForm = () => {
-    setScheduleForm({ action: 'wake', cron: '0 7 * * *', description: '', enabled: true });
-    setScheduleError('');
-    setScheduleHostId(null);
   };
 
   const getStatusColor = (status) => {
@@ -263,15 +171,6 @@ export default function Hosts() {
       case 'online': return 'success';
       case 'offline': return 'danger';
       default: return 'secondary';
-    }
-  };
-
-  const getActionColor = (action) => {
-    switch (action) {
-      case 'wake': return 'bg-green-600/20 text-green-400';
-      case 'shutdown': return 'bg-red-600/20 text-red-400';
-      case 'reboot': return 'bg-yellow-600/20 text-yellow-400';
-      default: return 'bg-blue-600/20 text-blue-400';
     }
   };
 
@@ -391,14 +290,6 @@ export default function Hosts() {
                       Test
                     </Button>
                     <Button
-                      variant="secondary"
-                      onClick={() => handleRefreshInterfaces(host.id)}
-                      className="flex-1 text-xs"
-                    >
-                      <RefreshCw className="w-3 h-3 mr-1" />
-                      Interfaces
-                    </Button>
-                    <Button
                       variant="danger"
                       onClick={() => handleDeleteHost(host.id)}
                       className="text-xs"
@@ -407,70 +298,6 @@ export default function Hosts() {
                     </Button>
                   </div>
 
-                  {/* Schedules toggle */}
-                  <div>
-                    <button
-                      onClick={() => setExpandedHost(expandedHost === host.id ? null : host.id)}
-                      className="flex items-center gap-1 text-sm text-gray-400 hover:text-white transition-colors w-full"
-                    >
-                      {expandedHost === host.id ? (
-                        <ChevronUp className="w-4 h-4" />
-                      ) : (
-                        <ChevronDown className="w-4 h-4" />
-                      )}
-                      <Clock className="w-3 h-3" />
-                      Plannings ({(host.schedules || []).length})
-                    </button>
-
-                    {expandedHost === host.id && (
-                      <div className="mt-2 space-y-2">
-                        {(host.schedules || []).length === 0 ? (
-                          <p className="text-xs text-gray-500">Aucun planning</p>
-                        ) : (
-                          (host.schedules || []).map((schedule) => (
-                            <div
-                              key={schedule.id}
-                              className="flex items-center justify-between bg-gray-700/30 p-2 text-xs"
-                            >
-                              <div className="flex items-center gap-2 flex-1">
-                                <span className={`px-1.5 py-0.5 ${getActionColor(schedule.action)}`}>
-                                  {schedule.action}
-                                </span>
-                                <span className="text-gray-300 font-mono">{schedule.cron}</span>
-                                {schedule.description && (
-                                  <span className="text-gray-500 truncate">{schedule.description}</span>
-                                )}
-                              </div>
-                              <div className="flex items-center gap-1">
-                                <label className="flex items-center gap-1 cursor-pointer">
-                                  <input
-                                    type="checkbox"
-                                    checked={schedule.enabled}
-                                    onChange={() => handleToggleSchedule(host.id, schedule.id)}
-                                    className="w-3 h-3"
-                                  />
-                                </label>
-                                <button
-                                  onClick={() => handleDeleteSchedule(host.id, schedule.id)}
-                                  className="text-gray-500 hover:text-red-400"
-                                >
-                                  <Trash2 className="w-3 h-3" />
-                                </button>
-                              </div>
-                            </div>
-                          ))
-                        )}
-                        <Button
-                          variant="secondary"
-                          onClick={() => openScheduleModal(host.id)}
-                          className="text-xs w-full"
-                        >
-                          <Plus className="w-3 h-3 mr-1" />
-                          Ajouter planning
-                        </Button>
-                      </div>
-                    )}
-                  </div>
                 </div>
               </Card>
             ))}
@@ -551,17 +378,6 @@ export default function Hosts() {
                 <p className="text-xs text-gray-400 mt-1">Utilise une seule fois pour configurer l'authentification par cle SSH</p>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Groupes (virgule)</label>
-                <input
-                  type="text"
-                  value={formData.groups}
-                  onChange={(e) => setFormData({ ...formData, groups: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
-                  placeholder="storage, critical"
-                />
-              </div>
-
               {addError && (
                 <div className="p-3 bg-red-900/20 border border-red-600 text-red-400 text-sm">{addError}</div>
               )}
@@ -583,94 +399,6 @@ export default function Hosts() {
         </div>
       )}
 
-      {/* Add Schedule Modal */}
-      {showScheduleModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 p-6 w-full max-w-md">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-bold text-white">Ajouter un planning</h2>
-              <button
-                onClick={() => { setShowScheduleModal(false); resetScheduleForm(); }}
-                className="text-gray-400 hover:text-white"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <form onSubmit={handleAddSchedule} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Action *</label>
-                <select
-                  value={scheduleForm.action}
-                  onChange={(e) => setScheduleForm({ ...scheduleForm, action: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
-                  required
-                >
-                  <option value="wake">Wake</option>
-                  <option value="shutdown">Shutdown</option>
-                  <option value="reboot">Reboot</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Expression cron *</label>
-                <input
-                  type="text"
-                  value={scheduleForm.cron}
-                  onChange={(e) => setScheduleForm({ ...scheduleForm, cron: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white font-mono focus:ring-2 focus:ring-blue-500"
-                  placeholder="0 7 * * *"
-                  required
-                />
-                <p className="text-xs text-gray-400 mt-1">
-                  Format : minute heure jour mois jour_semaine (ex: "0 7 * * *" = chaque jour a 7h)
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Description</label>
-                <input
-                  type="text"
-                  value={scheduleForm.description}
-                  onChange={(e) => setScheduleForm({ ...scheduleForm, description: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
-                  placeholder="Reveil quotidien"
-                />
-              </div>
-
-              <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  id="schedule-enabled"
-                  checked={scheduleForm.enabled}
-                  onChange={(e) => setScheduleForm({ ...scheduleForm, enabled: e.target.checked })}
-                  className="w-4 h-4"
-                />
-                <label htmlFor="schedule-enabled" className="text-sm text-gray-300 cursor-pointer">
-                  Activer immediatement
-                </label>
-              </div>
-
-              {scheduleError && (
-                <div className="p-3 bg-red-900/20 border border-red-600 text-red-400 text-sm">{scheduleError}</div>
-              )}
-
-              <div className="flex gap-2 pt-2">
-                <Button type="button" variant="secondary" onClick={() => { setShowScheduleModal(false); resetScheduleForm(); }} className="flex-1">
-                  Annuler
-                </Button>
-                <Button type="submit" disabled={addingSchedule} className="flex-1">
-                  {addingSchedule ? (
-                    <><RotateCw className="w-4 h-4 mr-2 animate-spin" />Ajout...</>
-                  ) : (
-                    <><Check className="w-4 h-4 mr-2" />Ajouter</>
-                  )}
-                </Button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
