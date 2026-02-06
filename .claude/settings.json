@@ -3,5 +3,8 @@
     "allow": [
       "Bash(git -C /opt/homeroute log --oneline)"
     ]
+  },
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
   }
 }

@@ -6,7 +6,6 @@ use axum::{
 };
 use hr_auth::forward_auth::{check_forward_auth, ForwardAuthResult};
 use hr_auth::AuthService;
-use hr_common::events::HttpTrafficEvent;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::rt::TokioIo;
@@ -14,11 +13,25 @@ use ipnet::IpNet;
 use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
 use tokio::net::TcpStream;
-use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
+
+use hr_registry::protocol::{ServiceAction, ServiceType};
+use hr_registry::AgentRegistry;
 
 use crate::config::{ProxyConfig, RouteConfig};
 use crate::logging::{self, AccessLogEntry, OptionalAccessLogger};
+
+/// Route to an agent-managed application (LXC container).
+#[derive(Debug, Clone)]
+pub struct AppRoute {
+    pub app_id: String,
+    pub host_id: String,
+    pub target_ip: std::net::Ipv4Addr,
+    pub target_port: u16,
+    pub auth_required: bool,
+    pub allowed_groups: Vec<String>,
+    pub service_type: ServiceType,
+}
 
 /// Snapshot of parsed config for fast lookups
 struct ConfigSnapshot {
@@ -36,13 +49,12 @@ pub struct ProxyState {
     pub access_logger: OptionalAccessLogger,
     /// Auth service (direct call, no HTTP round-trip)
     pub auth: Option<Arc<AuthService>>,
-    /// Event sender for HTTP traffic analytics
-    pub events: Option<broadcast::Sender<HttpTrafficEvent>>,
     /// Management API port for proxy.{base_domain} and auth.{base_domain}
     pub management_port: u16,
-    /// Agent TLS passthrough: domain → IPv6 socket address string (e.g. "[2a0d::6]:443")
-    /// When SNI matches, raw TCP is forwarded to the agent instead of TLS termination.
-    agent_passthrough: RwLock<std::collections::HashMap<String, String>>,
+    /// Application routes: domain → AppRoute (agent-managed LXC containers).
+    app_routes: RwLock<std::collections::HashMap<String, AppRoute>>,
+    /// Agent registry for ActivityPing and Wake-on-Demand.
+    registry: RwLock<Option<Arc<AgentRegistry>>>,
 }
 
 impl ProxyState {
@@ -65,9 +77,9 @@ impl ProxyState {
             }),
             access_logger,
             auth: None,
-            events: None,
             management_port,
-            agent_passthrough: RwLock::new(std::collections::HashMap::new()),
+            app_routes: RwLock::new(std::collections::HashMap::new()),
+            registry: RwLock::new(None),
         }
     }
 
@@ -77,10 +89,14 @@ impl ProxyState {
         self
     }
 
-    /// Set the event sender for traffic analytics
-    pub fn with_events(mut self, sender: broadcast::Sender<HttpTrafficEvent>) -> Self {
-        self.events = Some(sender);
-        self
+    /// Set the agent registry for ActivityPing and Wake-on-Demand.
+    pub fn set_registry(&self, registry: Arc<AgentRegistry>) {
+        *self.registry.write().unwrap() = Some(registry);
+    }
+
+    /// Get a clone of the registry reference.
+    fn get_registry(&self) -> Option<Arc<AgentRegistry>> {
+        self.registry.read().unwrap().clone()
     }
 
     /// Reload the proxy config (called on SIGHUP)
@@ -127,24 +143,24 @@ impl ProxyState {
         snapshot.config.clone()
     }
 
-    /// Add a TLS passthrough entry: domain → agent socket address (e.g. "[2a0d::6]:443")
-    pub fn set_passthrough(&self, domain: String, addr: String) {
-        let mut map = self.agent_passthrough.write().unwrap();
-        info!(domain = domain, addr = addr, "Added TLS passthrough");
-        map.insert(domain, addr);
+    /// Add an application route: domain → AppRoute
+    pub fn set_app_route(&self, domain: String, route: AppRoute) {
+        let mut map = self.app_routes.write().unwrap();
+        info!(domain = domain, target = %route.target_ip, port = route.target_port, "Added app route");
+        map.insert(domain, route);
     }
 
-    /// Remove a TLS passthrough entry by domain.
-    pub fn remove_passthrough(&self, domain: &str) {
-        let mut map = self.agent_passthrough.write().unwrap();
+    /// Remove an application route by domain.
+    pub fn remove_app_route(&self, domain: &str) {
+        let mut map = self.app_routes.write().unwrap();
         if map.remove(domain).is_some() {
-            info!(domain = domain, "Removed TLS passthrough");
+            info!(domain = domain, "Removed app route");
         }
     }
 
-    /// Look up a passthrough target for a given SNI domain.
-    pub fn get_passthrough(&self, domain: &str) -> Option<String> {
-        let map = self.agent_passthrough.read().unwrap();
+    /// Look up an application route for a given domain.
+    pub fn get_app_route(&self, domain: &str) -> Option<AppRoute> {
+        let map = self.app_routes.read().unwrap();
         map.get(domain).cloned()
     }
 }
@@ -196,28 +212,13 @@ pub async fn proxy_handler(
     state.access_logger.log(AccessLogEntry {
         timestamp: logging::now_timestamp(),
         client_ip: client_ip.to_string(),
-        host: host_for_log.clone(),
-        method: method.clone(),
-        path: path.clone(),
+        host: host_for_log,
+        method,
+        path,
         status,
         duration_ms,
-        user_agent: user_agent.clone(),
+        user_agent,
     });
-
-    // Broadcast event for analytics
-    if let Some(ref sender) = state.events {
-        let _ = sender.send(HttpTrafficEvent {
-            timestamp: logging::now_timestamp(),
-            client_ip: client_ip.to_string(),
-            host: host_for_log,
-            method,
-            path,
-            status,
-            duration_ms,
-            user_agent,
-            response_bytes: 0,
-        });
-    }
 
     result
 }
@@ -248,6 +249,144 @@ async fn proxy_handler_inner(
     let domain_only = host.split(':').next().unwrap_or(&host);
     let is_management = domain_only == format!("proxy.{}", base_domain)
         || domain_only == format!("auth.{}", base_domain);
+
+    // Check for agent-managed application routes (before static route lookup)
+    if !is_management {
+        if let Some(app_route) = state.get_app_route(domain_only) {
+            // Forward-auth if required
+            if app_route.auth_required {
+                if let Some(ref auth) = state.auth {
+                    let req_uri = req
+                        .uri()
+                        .path_and_query()
+                        .map(|pq| pq.to_string())
+                        .unwrap_or_else(|| "/".to_string());
+
+                    let cookie_value = req
+                        .headers()
+                        .get("cookie")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|cookies| {
+                            cookies
+                                .split(';')
+                                .find_map(|c| c.trim().strip_prefix("auth_session="))
+                        });
+
+                    match check_forward_auth(
+                        auth,
+                        cookie_value,
+                        domain_only,
+                        &req_uri,
+                        "https",
+                        &app_route.allowed_groups,
+                    ) {
+                        ForwardAuthResult::Success { user } => {
+                            if let Ok(v) = HeaderValue::from_str(&user.username) {
+                                req.headers_mut().insert("X-Forwarded-User", v);
+                            }
+                            if let Ok(v) = HeaderValue::from_str(&user.groups.join(",")) {
+                                req.headers_mut().insert("X-Forwarded-Groups", v);
+                            }
+                        }
+                        ForwardAuthResult::Unauthorized { login_url } => {
+                            return Err(ProxyError::AuthRequired(Some(login_url)));
+                        }
+                        ForwardAuthResult::Forbidden { message } => {
+                            warn!("App route auth forbidden for {}: {}", host, message);
+                            return Err(ProxyError::Forbidden);
+                        }
+                    }
+                }
+            }
+
+            // Check for WebSocket upgrade
+            let is_websocket = is_websocket_upgrade(&req);
+
+            if is_websocket {
+                debug!("WebSocket upgrade detected for app route {}", host);
+                let target_route = RouteConfig {
+                    id: app_route.app_id.clone(),
+                    domain: domain_only.to_string(),
+                    backend: "app".to_string(),
+                    target_host: app_route.target_ip.to_string(),
+                    target_port: app_route.target_port,
+                    local_only: false,
+                    require_auth: false,
+                    enabled: true,
+                    cert_id: None,
+                };
+                let path_and_query = req
+                    .uri()
+                    .path_and_query()
+                    .map(|x| x.to_string())
+                    .unwrap_or_else(|| "/".to_string());
+                let path_uri: Uri = path_and_query
+                    .parse()
+                    .unwrap_or_else(|_| "/".parse().unwrap());
+                match handle_websocket_upgrade(req, &target_route, path_uri).await {
+                    Ok(resp) => return Ok(resp),
+                    Err(ProxyError::UpstreamError(ref e)) if is_connection_refused(e) => {
+                        // WOD: wake host or start service on connection refused
+                        return Ok(handle_wod(&state, &app_route, &host).await);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            // Regular HTTP proxy to container
+            let path = req
+                .uri()
+                .path_and_query()
+                .map(|pq| pq.to_string())
+                .unwrap_or_else(|| "/".to_string());
+            let target_uri = format!(
+                "http://{}:{}{}",
+                app_route.target_ip, app_route.target_port, path
+            );
+            let uri: Uri = target_uri
+                .parse()
+                .map_err(|e| ProxyError::InvalidUri(format!("{}", e)))?;
+
+            // Forward headers
+            let headers = req.headers_mut();
+            if let Ok(v) = HeaderValue::from_str(&host) {
+                headers.insert("X-Forwarded-Host", v);
+            }
+            if let Ok(v) = HeaderValue::from_str(&client_ip.to_string()) {
+                headers.insert("X-Forwarded-For", v);
+            }
+            headers.insert("X-Forwarded-Proto", HeaderValue::from_static("https"));
+
+            // Remove hop-by-hop headers
+            headers.remove("connection");
+            headers.remove("upgrade");
+
+            *req.uri_mut() = uri;
+
+            match state.client.request(req).await {
+                Ok(resp) => {
+                    // ActivityPing: notify agent of activity for powersave tracking
+                    if let Some(registry) = state.get_registry() {
+                        let app_id = app_route.app_id.clone();
+                        let svc = app_route.service_type;
+                        tokio::spawn(async move {
+                            registry.send_activity_ping(&app_id, svc).await;
+                        });
+                    }
+                    return Ok(resp.into_response());
+                }
+                Err(e) => {
+                    let err_str = e.to_string();
+                    // Wake-on-Demand: if connection refused, wake host or start service
+                    if is_connection_refused(&err_str) {
+                        return Ok(handle_wod(&state, &app_route, &host).await);
+                    }
+                    warn!("App route proxy error for {}: {}", host, e);
+                    return Err(ProxyError::UpstreamError(err_str));
+                }
+            }
+        }
+    }
 
     let route = if is_management {
         RouteConfig {
@@ -539,6 +678,149 @@ impl IntoResponse for ProxyError {
             }
         }
     }
+}
+
+/// Check if an error message indicates connection failure (for Wake-on-Demand).
+/// Triggers on connection refused, connection reset, or generic connect errors
+/// which typically mean the backend service is down.
+fn is_connection_refused(err: &str) -> bool {
+    err.contains("Connection refused")
+        || err.contains("connection refused")
+        || err.contains("os error 111") // ECONNREFUSED on Linux
+        || err.contains("client error (Connect)")  // hyper-util connect error
+        || err.contains("Failed to connect to backend") // WebSocket connect error
+}
+
+/// Handle Wake-on-Demand for an app route, dispatching to WoL for offline
+/// remote hosts or ServiceCommand::Start for local/online hosts.
+async fn handle_wod(
+    state: &Arc<ProxyState>,
+    app_route: &AppRoute,
+    host: &str,
+) -> Response {
+    if app_route.host_id != "local" {
+        if let Some(registry) = state.get_registry() {
+            let host_id = app_route.host_id.clone();
+            let is_connected = registry.is_host_connected(&host_id).await;
+
+            if !is_connected {
+                // Host is offline — send WoL magic packet
+                if let Some(mac) = lookup_host_mac(&host_id).await {
+                    tokio::spawn(async move {
+                        if let Err(e) = send_wol_packet(&mac).await {
+                            warn!("WoL failed for host {}: {}", host_id, e);
+                        }
+                    });
+                    return wake_on_demand_page(host, "Reveil de l'hote en cours...");
+                }
+                // No MAC address found — fall through to default WOD page
+            } else {
+                // Host is online but service is down — start the service
+                let app_id = app_route.app_id.clone();
+                let svc = app_route.service_type;
+                tokio::spawn(async move {
+                    let _ = registry.send_service_command(&app_id, svc, ServiceAction::Start).await;
+                });
+                return wake_on_demand_page(host, "Demarrage du service...");
+            }
+        }
+    } else {
+        // Local host — existing behavior
+        if let Some(registry) = state.get_registry() {
+            let app_id = app_route.app_id.clone();
+            let svc = app_route.service_type;
+            tokio::spawn(async move {
+                let _ = registry.send_service_command(&app_id, svc, ServiceAction::Start).await;
+            });
+        }
+    }
+    wake_on_demand_page(host, "Demarrage du service...")
+}
+
+/// Look up the MAC address for a host from /data/hosts.json.
+async fn lookup_host_mac(host_id: &str) -> Option<String> {
+    let content = tokio::fs::read_to_string("/data/hosts.json").await.ok()?;
+    let data: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let hosts = data.get("hosts")?.as_array()?;
+    let host = hosts.iter().find(|h| {
+        h.get("id").and_then(|i| i.as_str()) == Some(host_id)
+    })?;
+    host.get("mac").and_then(|m| m.as_str()).map(|s| s.to_string())
+}
+
+/// Send a Wake-on-LAN magic packet to the given MAC address.
+async fn send_wol_packet(mac: &str) -> Result<(), String> {
+    let mac_bytes: Vec<u8> = mac
+        .split(':')
+        .filter_map(|b| u8::from_str_radix(b, 16).ok())
+        .collect();
+
+    if mac_bytes.len() != 6 {
+        return Err("Invalid MAC address".to_string());
+    }
+
+    let mut packet = vec![0xFFu8; 6];
+    for _ in 0..16 {
+        packet.extend_from_slice(&mac_bytes);
+    }
+
+    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| e.to_string())?;
+    socket.set_broadcast(true).map_err(|e| e.to_string())?;
+    socket
+        .send_to(&packet, "255.255.255.255:9")
+        .await
+        .map_err(|e| e.to_string())?;
+    let _ = socket.send_to(&packet, "10.0.0.255:9").await;
+
+    Ok(())
+}
+
+/// Serve a Wake-on-Demand page that auto-refreshes while the service starts.
+fn wake_on_demand_page(host: &str, message: &str) -> Response {
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="3">
+<title>Demarrage en cours...</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+background:#0f172a;color:#e2e8f0;display:flex;justify-content:center;align-items:center;
+min-height:100vh}}
+.card{{background:#1e293b;border-radius:16px;padding:3rem;text-align:center;
+max-width:420px;box-shadow:0 25px 50px rgba(0,0,0,.3)}}
+.spinner{{width:48px;height:48px;border:4px solid #334155;border-top-color:#3b82f6;
+border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 1.5rem}}
+@keyframes spin{{to{{transform:rotate(360deg)}}}}
+h1{{font-size:1.25rem;font-weight:600;margin-bottom:.75rem}}
+p{{color:#94a3b8;font-size:.9rem;line-height:1.5}}
+.host{{color:#60a5fa;font-family:monospace;font-size:.85rem;margin-top:1rem}}
+</style>
+</head>
+<body>
+<div class="card">
+<div class="spinner"></div>
+<h1>{message}</h1>
+<p>Cette page se rafraichit automatiquement.</p>
+<div class="host">{host}</div>
+</div>
+</body>
+</html>"#,
+        host = host,
+        message = message,
+    );
+
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header("Content-Type", "text/html; charset=utf-8")
+        .header("Retry-After", "3")
+        .body(Body::from(html))
+        .unwrap()
 }
 
 #[cfg(test)]

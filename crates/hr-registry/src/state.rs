@@ -1,8 +1,7 @@
 //! Agent registry: manages application lifecycle, agent connections,
-//! and orchestrates DNS/firewall/CA/Cloudflare updates.
+//! and pushes config to agents.
 
 use std::collections::HashMap;
-use std::net::Ipv6Addr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -11,16 +10,11 @@ use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 
-use hr_acme::{AcmeManager, WildcardType};
 use hr_common::config::EnvConfig;
 use hr_common::events::{AgentMetricsEvent, AgentStatusEvent, AgentUpdateEvent, AgentUpdateStatus, EventBus};
-use hr_dns::AppDnsStore;
-use hr_firewall::config::FirewallRule;
-use hr_firewall::FirewallEngine;
 use hr_lxd::LxdClient;
 
-use crate::cloudflare;
-use crate::protocol::{AgentMetrics, AgentRoute, PowerPolicy, RegistryMessage, ServiceAction, ServiceState, ServiceType};
+use crate::protocol::{AgentMetrics, ContainerInfo, HostMetrics, HostRegistryMessage, PowerPolicy, RegistryMessage, ServiceAction, ServiceState, ServiceType};
 use crate::types::{
     AgentNotifyResult, AgentSkipResult, AgentStatus, AgentUpdateStatusInfo,
     Application, CreateApplicationRequest, RegistryState, UpdateApplicationRequest,
@@ -34,27 +28,32 @@ struct AgentConnection {
     last_heartbeat: DateTime<Utc>,
 }
 
+/// In-memory host-agent connection state.
+pub struct HostConnection {
+    pub tx: mpsc::Sender<HostRegistryMessage>,
+    pub host_name: String,
+    pub connected_at: DateTime<Utc>,
+    pub last_heartbeat: DateTime<Utc>,
+    pub version: Option<String>,
+    pub metrics: Option<HostMetrics>,
+    pub containers: Vec<ContainerInfo>,
+}
+
 pub struct AgentRegistry {
     state: Arc<RwLock<RegistryState>>,
     state_path: PathBuf,
     connections: Arc<RwLock<HashMap<String, AgentConnection>>>,
-    acme: Arc<AcmeManager>,
-    firewall: Option<Arc<FirewallEngine>>,
+    pub host_connections: Arc<RwLock<HashMap<String, HostConnection>>>,
     env: Arc<EnvConfig>,
     events: Arc<EventBus>,
-    /// Shared DNS store for application domains → IPv6 addresses
-    app_dns_store: AppDnsStore,
 }
 
 impl AgentRegistry {
     /// Load or create the registry state from disk.
     pub fn new(
         state_path: PathBuf,
-        acme: Arc<AcmeManager>,
-        firewall: Option<Arc<FirewallEngine>>,
         env: Arc<EnvConfig>,
         events: Arc<EventBus>,
-        app_dns_store: AppDnsStore,
     ) -> Self {
         let state = match std::fs::read_to_string(&state_path) {
             Ok(content) => {
@@ -75,11 +74,9 @@ impl AgentRegistry {
             state: Arc::new(RwLock::new(state)),
             state_path,
             connections: Arc::new(RwLock::new(HashMap::new())),
-            acme,
-            firewall,
+            host_connections: Arc::new(RwLock::new(HashMap::new())),
             env,
             events,
-            app_dns_store,
         }
     }
 
@@ -99,22 +96,14 @@ impl AgentRegistry {
         let id = uuid::Uuid::new_v4().to_string();
         let container_name = format!("hr-{}", req.slug);
 
-        let suffix = {
-            let mut state = self.state.write().await;
-            let s = state.next_suffix;
-            state.next_suffix += 1;
-            s
-        };
-
         let app = Application {
             id: id.clone(),
             name: req.name,
             slug: req.slug,
+            host_id: req.host_id.unwrap_or_else(|| "local".to_string()),
             enabled: true,
             container_name: container_name.clone(),
             token_hash,
-            ipv6_suffix: suffix,
-            ipv6_address: None,
             ipv4_address: None,
             status: AgentStatus::Deploying,
             last_heartbeat: None,
@@ -126,8 +115,6 @@ impl AgentRegistry {
             services: req.services,
             power_policy: req.power_policy,
             metrics: None,
-            cert_ids: vec![],
-            cloudflare_record_ids: vec![],
         };
 
         // Store in state immediately so the UI can see the app
@@ -234,17 +221,16 @@ impl AgentRegistry {
 
     /// Update application endpoints/auth. Pushes new config to connected agent.
     pub async fn update_application(&self, id: &str, req: UpdateApplicationRequest) -> Result<Option<Application>> {
-        let base_domain = self.env.base_domain.clone();
         let mut state = self.state.write().await;
         let Some(app) = state.applications.iter_mut().find(|a| a.id == id) else {
             return Ok(None);
         };
 
-        // Capture old domains before modification
-        let old_domains = app.domains(&base_domain);
-
         if let Some(name) = req.name {
             app.name = name;
+        }
+        if let Some(host_id) = req.host_id {
+            app.host_id = host_id;
         }
         if let Some(frontend) = req.frontend {
             app.frontend = frontend;
@@ -262,79 +248,10 @@ impl AgentRegistry {
             app.power_policy = power_policy;
         }
 
-        // Get new domains after modification
-        let new_domains = app.domains(&base_domain);
-
         let app = app.clone();
         drop(state);
 
         self.persist().await?;
-
-        // Sync DNS if domains changed
-        if old_domains != new_domains {
-            // Identify added and removed domains
-            let removed: Vec<_> = old_domains
-                .iter()
-                .filter(|d| !new_domains.contains(d))
-                .cloned()
-                .collect();
-            let added: Vec<_> = new_domains
-                .iter()
-                .filter(|d| !old_domains.contains(d))
-                .cloned()
-                .collect();
-
-            // Remove old local DNS records
-            if !removed.is_empty() {
-                if let Err(e) = self.remove_local_dns_records(&removed) {
-                    warn!("Failed to remove old DNS records: {e}");
-                }
-            }
-            // Add/update new local DNS records
-            if let Some(ipv6) = app.ipv6_address {
-                if let Err(e) = self.sync_local_dns_records(&new_domains, ipv6, app.ipv4_address) {
-                    warn!("Failed to sync new DNS records: {e}");
-                }
-            }
-
-            // Sync Cloudflare DNS records
-            if let (Some(token), Some(zone_id)) = (&self.env.cf_api_token, &self.env.cf_zone_id) {
-                if let Some(ipv6) = app.ipv6_address {
-                    let ipv6_str = ipv6.to_string();
-
-                    // Create CF records for added domains
-                    for domain in &added {
-                        match cloudflare::upsert_aaaa_record(token, zone_id, domain, &ipv6_str, true).await {
-                            Ok(rid) => {
-                                let mut state = self.state.write().await;
-                                if let Some(app) = state.applications.iter_mut().find(|a| a.id == id) {
-                                    app.cloudflare_record_ids.push(rid);
-                                }
-                                drop(state);
-                                let _ = self.persist().await;
-                            }
-                            Err(e) => warn!(domain, "CF upsert failed: {e}"),
-                        }
-                    }
-
-                    // Delete CF records for removed domains
-                    for domain in &removed {
-                        match cloudflare::delete_record_by_name(token, zone_id, domain).await {
-                            Ok(Some(rid)) => {
-                                let mut state = self.state.write().await;
-                                if let Some(app) = state.applications.iter_mut().find(|a| a.id == id) {
-                                    app.cloudflare_record_ids.retain(|r| r != &rid);
-                                }
-                                drop(state);
-                                let _ = self.persist().await;
-                            }
-                            Ok(None) => {} // Record didn't exist
-                            Err(e) => warn!(domain, "CF delete failed: {e}"),
-                        }
-                    }
-                }
-            }
-        }
 
         // Push new config to connected agent if any
         self.push_config_to_agent(&app).await;
@@ -342,7 +259,7 @@ impl AgentRegistry {
         Ok(Some(app))
     }
 
-    /// Remove an application: delete LXC, firewall rules, CF records, certs.
+    /// Remove an application: disconnect agent and delete LXC container.
     pub async fn remove_application(&self, id: &str) -> Result<bool> {
         let app = {
             let mut state = self.state.write().await;
@@ -353,36 +270,12 @@ impl AgentRegistry {
             }
         };
 
-        // Remove from DNS store
-        self.remove_app_dns(&app).await;
-
         // Send shutdown to agent if connected
         {
             let conns = self.connections.read().await;
             if let Some(conn) = conns.get(&app.id) {
                 let _ = conn.tx.send(RegistryMessage::Shutdown).await;
             }
-        }
-
-        // Delete Cloudflare records
-        if let (Some(token), Some(zone_id)) = (&self.env.cf_api_token, &self.env.cf_zone_id) {
-            for record_id in &app.cloudflare_record_ids {
-                if let Err(e) = cloudflare::delete_record(token, zone_id, record_id).await {
-                    warn!(record_id, "Failed to delete CF record: {e}");
-                }
-            }
-        }
-
-        // Remove local DNS records
-        let domains = app.domains(&self.env.base_domain);
-        if let Err(e) = self.remove_local_dns_records(&domains) {
-            warn!("Failed to remove local DNS records: {e}");
-        }
-
-        // Remove firewall rule
-        if let Some(fw) = &self.firewall {
-            let rule_id = format!("agent-{}", app.id);
-            let _ = fw.remove_rule(&rule_id).await;
         }
 
         // Delete LXC container
@@ -442,14 +335,12 @@ impl AgentRegistry {
     }
 
     /// Called when an agent successfully connects and authenticates.
-    /// Issues certs, creates DNS records, adds firewall rule, pushes config.
-    /// If the agent reports its actual IPv6/IPv4 addresses, we use those.
+    /// Pushes simplified config (services + power_policy).
     pub async fn on_agent_connected(
         &self,
         app_id: &str,
         tx: mpsc::Sender<RegistryMessage>,
         agent_version: String,
-        reported_ipv6: Option<String>,
         reported_ipv4: Option<String>,
     ) -> Result<()> {
         let now = Utc::now();
@@ -467,56 +358,37 @@ impl AgentRegistry {
             );
         }
 
-        // Update status and IP addresses if reported by agent
-        {
+        // Update status and IPv4 address
+        let app = {
             let mut state = self.state.write().await;
-            if let Some(app) = state.applications.iter_mut().find(|a| a.id == app_id) {
+            let app = state.applications.iter_mut().find(|a| a.id == app_id);
+            if let Some(app) = app {
                 app.status = AgentStatus::Connected;
                 app.agent_version = Some(agent_version);
                 app.last_heartbeat = Some(now);
 
-                // Use agent's reported IPv6 if available (more accurate than computed)
-                if let Some(ref ipv6_str) = reported_ipv6 {
-                    if let Ok(addr) = ipv6_str.parse() {
-                        let old_addr = app.ipv6_address;
-                        app.ipv6_address = Some(addr);
-                        if old_addr != Some(addr) {
-                            info!(app_id, ipv6 = ipv6_str, "Updated app IPv6 from agent report");
-                        }
-                    }
-                }
-
-                // Use agent's reported IPv4 if available
                 if let Some(ref ipv4_str) = reported_ipv4 {
                     if let Ok(addr) = ipv4_str.parse() {
-                        let old_addr = app.ipv4_address;
                         app.ipv4_address = Some(addr);
-                        if old_addr != Some(addr) {
-                            info!(app_id, ipv4 = ipv4_str, "Updated app IPv4 from agent report");
-                        }
+                        info!(app_id, ipv4 = ipv4_str, "Updated app IPv4 from agent report");
                     }
                 }
-            }
-        }
 
-        // Issue certs, DNS, firewall, then push config
-        if let Err(e) = self.provision_and_push(app_id, &tx).await {
-            error!(app_id, "Failed to provision agent: {e}");
+                Some(app.clone())
+            } else {
+                None
+            }
+        };
+
+        // Push simplified config
+        if let Some(app) = app {
             let _ = tx
-                .send(RegistryMessage::AuthResult {
-                    success: false,
-                    error: Some(format!("Provisioning failed: {e}")),
+                .send(RegistryMessage::Config {
+                    config_version: 1,
+                    services: app.services.clone(),
+                    power_policy: app.power_policy.clone(),
                 })
                 .await;
-            return Err(e);
-        }
-
-        // Update the shared DNS store with app domains → IPv6
-        {
-            let state = self.state.read().await;
-            if let Some(app) = state.applications.iter().find(|a| a.id == app_id) {
-                self.update_app_dns(app).await;
-            }
         }
 
         self.persist().await?;
@@ -530,18 +402,10 @@ impl AgentRegistry {
             conns.remove(app_id);
         }
 
-        // Remove app domains from DNS store and update status
         {
             let mut state = self.state.write().await;
             if let Some(app) = state.applications.iter_mut().find(|a| a.id == app_id) {
                 app.status = AgentStatus::Disconnected;
-                // Clone app for DNS removal (outside the write lock)
-            }
-        }
-        {
-            let state = self.state.read().await;
-            if let Some(app) = state.applications.iter().find(|a| a.id == app_id) {
-                self.remove_app_dns(app).await;
             }
         }
 
@@ -591,306 +455,70 @@ impl AgentRegistry {
         }
     }
 
-    // ── Certificate renewal ───────────────────────────────────────
+    // ── Host-agent connection lifecycle ────────────────────────
 
-    /// Background task: check for ACME wildcard certificates needing renewal and push updates.
-    pub async fn run_cert_renewal(self: &Arc<Self>) {
-        // Check every 6 hours
-        let interval = std::time::Duration::from_secs(6 * 3600);
-        loop {
-            tokio::time::sleep(interval).await;
-
-            info!("Checking ACME wildcard certificates for renewal...");
-
-            let certs = match self.acme.certificates_needing_renewal() {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!("Failed to check cert renewal: {e}");
-                    continue;
-                }
-            };
-
-            if certs.is_empty() {
-                info!("No certificates need renewal");
-                continue;
-            }
-
-            // Renew certificates that need it
-            let mut renewed = 0;
-            for cert in &certs {
-                info!(wildcard = cert.id, expires = %cert.expires_at, "Renewing certificate...");
-                if let Err(e) = self.acme.request_wildcard(cert.wildcard_type).await {
-                    warn!(wildcard = cert.id, "Failed to renew wildcard cert: {e}");
-                } else {
-                    renewed += 1;
-                    info!(wildcard = cert.id, "Certificate renewed successfully");
-                }
-            }
-
-            if renewed > 0 {
-                info!(renewed, "Certificates renewed, pushing updates to all agents");
-                // Push updated certs to all connected agents
-                self.push_cert_updates().await;
-            }
-        }
-    }
-
-    /// Push certificate updates to all connected agents.
-    /// Called after wildcard certificate renewal.
-    pub async fn push_cert_updates(&self) {
-        let state = self.state.read().await;
-        let apps: Vec<_> = state.applications.clone();
-        drop(state);
-
-        for app in apps {
-            self.push_config_to_agent(&app).await;
-        }
-    }
-
-    // ── Prefix change handling ──────────────────────────────────
-
-    /// Called when the delegated IPv6 prefix changes. Recalculates all agent
-    /// addresses, updates Cloudflare and firewall, pushes updates to agents.
-    pub async fn on_prefix_changed(&self, prefix_str: Option<String>) {
-        let Some(prefix_str) = prefix_str else {
-            // Prefix withdrawn — clear all agent addresses and DNS store
-            let mut state = self.state.write().await;
-            for app in &mut state.applications {
-                app.ipv6_address = None;
-            }
-            // Clear DNS store
-            self.app_dns_store.write().await.clear();
-            let _ = self.persist_inner(&state).await;
-            return;
-        };
-
-        info!(prefix = prefix_str, "Prefix changed, updating all agents");
-
-        let mut state = self.state.write().await;
-        for app in &mut state.applications {
-            let new_addr = compute_ipv6(&prefix_str, app.ipv6_suffix);
-            let old_addr = app.ipv6_address;
-            app.ipv6_address = Some(new_addr);
-
-            // Update Cloudflare records
-            if old_addr != Some(new_addr) {
-                if let (Some(token), Some(zone_id)) = (&self.env.cf_api_token, &self.env.cf_zone_id)
-                {
-                    let base_domain = &self.env.base_domain;
-                    let domains = app.domains(base_domain);
-                    let ipv6_str = new_addr.to_string();
-
-                    let mut new_record_ids = Vec::new();
-                    for domain in &domains {
-                        match cloudflare::upsert_aaaa_record(token, zone_id, domain, &ipv6_str, true).await {
-                            Ok(rid) => new_record_ids.push(rid),
-                            Err(e) => warn!(domain, "CF upsert failed: {e}"),
-                        }
-                    }
-                    app.cloudflare_record_ids = new_record_ids;
-                }
-
-                // Update firewall rule
-                if let Some(fw) = &self.firewall {
-                    let rule_id = format!("agent-{}", app.id);
-                    let _ = fw.remove_rule(&rule_id).await;
-                    let _ = fw
-                        .add_rule(FirewallRule {
-                            id: rule_id,
-                            description: format!("Agent: {}", app.slug),
-                            protocol: "tcp".into(),
-                            dest_port: 443,
-                            dest_port_end: 0,
-                            dest_address: format!("{}/128", new_addr),
-                            source_address: String::new(),
-                            enabled: true,
-                        })
-                        .await;
-                }
-
-                // Push to connected agent
-                let conns = self.connections.read().await;
-                if let Some(conn) = conns.get(&app.id) {
-                    let _ = conn
-                        .tx
-                        .send(RegistryMessage::Ipv6Update {
-                            ipv6_address: new_addr.to_string(),
-                        })
-                        .await;
-                }
-            }
-        }
-
-        let _ = self.persist_inner(&state).await;
-
-        // Update DNS store for all apps with their new IPv6 addresses
-        for app in &state.applications {
-            self.update_app_dns(app).await;
-        }
-    }
-
-    // ── DNS store helpers ────────────────────────────────────────
-
-    /// Update the shared DNS store with an application's domains.
-    /// Called when an agent connects or its IPv6 address changes.
-    async fn update_app_dns(&self, app: &Application) {
-        let Some(ipv6) = app.ipv6_address else {
-            return;
-        };
-        if !app.enabled {
-            return;
-        }
-
-        let base_domain = &self.env.base_domain;
-        let domains = app.domains(base_domain);
-
-        let mut store = self.app_dns_store.write().await;
-        for domain in domains {
-            store.insert(domain.to_lowercase(), ipv6);
-        }
-        info!(app = app.slug, ipv6 = %ipv6, "Updated DNS store with app domains");
-    }
-
-    /// Remove an application's domains from the shared DNS store.
-    /// Called when an agent disconnects or is removed.
-    async fn remove_app_dns(&self, app: &Application) {
-        let base_domain = &self.env.base_domain;
-        let domains = app.domains(base_domain);
-
-        let mut store = self.app_dns_store.write().await;
-        for domain in &domains {
-            store.remove(&domain.to_lowercase());
-        }
-        info!(app = app.slug, "Removed app domains from DNS store");
-    }
-
-    // ── Local DNS static records (synced with Cloudflare) ────────
-
-    /// Add/update static DNS records (A and AAAA) for an application's domains.
-    /// These are stored in dns-dhcp-config.json and visible in the DNS page.
-    /// - AAAA records: IPv6 addresses (same as Cloudflare) for IPv6 clients
-    /// - A records: IPv4 addresses for IPv4-only clients (local DNS only)
-    fn sync_local_dns_records(
+    pub async fn on_host_connected(
         &self,
-        domains: &[String],
-        ipv6: std::net::Ipv6Addr,
-        ipv4: Option<std::net::Ipv4Addr>,
-    ) -> Result<()> {
-        let config_path = &self.env.dns_dhcp_config_path;
-        let content = std::fs::read_to_string(config_path)
-            .with_context(|| format!("Failed to read DNS config: {:?}", config_path))?;
-        let mut config: serde_json::Value = serde_json::from_str(&content)?;
-
-        let static_records = config["dns"]["static_records"]
-            .as_array_mut()
-            .ok_or_else(|| anyhow::anyhow!("Invalid DNS config: missing static_records"))?;
-
-        for domain in domains {
-            // Remove existing records with same name (both A and AAAA)
-            static_records.retain(|r| r["name"].as_str() != Some(domain.as_str()));
-
-            // Add AAAA record pointing to agent IPv6 (same as Cloudflare)
-            static_records.push(serde_json::json!({
-                "name": domain,
-                "type": "AAAA",
-                "value": ipv6.to_string(),
-                "ttl": 60
-            }));
-
-            // Add A record pointing to agent IPv4 (local DNS only, for v4 clients)
-            if let Some(v4) = ipv4 {
-                static_records.push(serde_json::json!({
-                    "name": domain,
-                    "type": "A",
-                    "value": v4.to_string(),
-                    "ttl": 60
-                }));
-            }
-        }
-
-        std::fs::write(config_path, serde_json::to_string_pretty(&config)?)?;
-        info!(domains = ?domains, ipv6 = %ipv6, ipv4 = ?ipv4, "Synced local DNS records (A + AAAA)");
-        Ok(())
+        host_id: String,
+        host_name: String,
+        tx: mpsc::Sender<HostRegistryMessage>,
+        version: String,
+    ) {
+        let conn = HostConnection {
+            tx,
+            host_name: host_name.clone(),
+            connected_at: Utc::now(),
+            last_heartbeat: Utc::now(),
+            version: Some(version.clone()),
+            metrics: None,
+            containers: Vec::new(),
+        };
+        self.host_connections.write().await.insert(host_id.clone(), conn);
+        info!("Host agent connected: {} ({})", host_name, host_id);
     }
 
-    /// Remove DNS records for specified domains.
-    fn remove_local_dns_records(&self, domains: &[String]) -> Result<()> {
-        let config_path = &self.env.dns_dhcp_config_path;
-        let content = std::fs::read_to_string(config_path)
-            .with_context(|| format!("Failed to read DNS config: {:?}", config_path))?;
-        let mut config: serde_json::Value = serde_json::from_str(&content)?;
-
-        let static_records = config["dns"]["static_records"]
-            .as_array_mut()
-            .ok_or_else(|| anyhow::anyhow!("Invalid DNS config: missing static_records"))?;
-
-        for domain in domains {
-            static_records.retain(|r| r["name"].as_str() != Some(domain.as_str()));
+    pub async fn on_host_disconnected(&self, host_id: &str) {
+        if let Some(conn) = self.host_connections.write().await.remove(host_id) {
+            info!("Host agent disconnected: {} ({})", conn.host_name, host_id);
         }
-
-        std::fs::write(config_path, serde_json::to_string_pretty(&config)?)?;
-        info!(domains = ?domains, "Removed local DNS records");
-        Ok(())
     }
 
-    /// Migrate existing applications' DNS records to static_records.
-    /// Called once at startup to populate DNS records for apps that existed before this feature.
-    pub async fn migrate_dns_records(&self) -> Result<()> {
-        let config_path = &self.env.dns_dhcp_config_path;
-        let content = std::fs::read_to_string(config_path)
-            .with_context(|| format!("Failed to read DNS config: {:?}", config_path))?;
-        let mut config: serde_json::Value = serde_json::from_str(&content)?;
+    pub async fn is_host_connected(&self, host_id: &str) -> bool {
+        self.host_connections.read().await.contains_key(host_id)
+    }
 
-        let static_records = config["dns"]["static_records"]
-            .as_array_mut()
-            .ok_or_else(|| anyhow::anyhow!("Invalid DNS config: missing static_records"))?;
-
-        let state = self.state.read().await;
-        let base_domain = &self.env.base_domain;
-        let mut added = 0;
-
-        for app in &state.applications {
-            if !app.enabled {
-                continue;
-            }
-            // Skip apps without IPv6 address
-            let Some(ipv6) = app.ipv6_address else {
-                continue;
-            };
-
-            let domains = app.domains(base_domain);
-            for domain in domains {
-                // Remove existing records (handles migration from old A-only to A+AAAA)
-                static_records.retain(|r| r["name"].as_str() != Some(&domain));
-
-                // Add AAAA record pointing to agent IPv6 (same as Cloudflare)
-                static_records.push(serde_json::json!({
-                    "name": domain,
-                    "type": "AAAA",
-                    "value": ipv6.to_string(),
-                    "ttl": 60
-                }));
-
-                // Add A record pointing to agent IPv4 (local DNS only)
-                if let Some(ipv4) = app.ipv4_address {
-                    static_records.push(serde_json::json!({
-                        "name": domain,
-                        "type": "A",
-                        "value": ipv4.to_string(),
-                        "ttl": 60
-                    }));
-                }
-
-                added += 1;
-            }
+    pub async fn update_host_heartbeat(&self, host_id: &str) {
+        if let Some(conn) = self.host_connections.write().await.get_mut(host_id) {
+            conn.last_heartbeat = Utc::now();
         }
+    }
 
-        if added > 0 {
-            std::fs::write(config_path, serde_json::to_string_pretty(&config)?)?;
-            info!(added, "Migrated DNS records for existing applications");
+    pub async fn update_host_metrics(&self, host_id: &str, metrics: HostMetrics) {
+        if let Some(conn) = self.host_connections.write().await.get_mut(host_id) {
+            conn.metrics = Some(metrics);
         }
+    }
 
-        Ok(())
+    pub async fn update_host_containers(&self, host_id: &str, containers: Vec<ContainerInfo>) {
+        if let Some(conn) = self.host_connections.write().await.get_mut(host_id) {
+            conn.containers = containers;
+        }
+    }
+
+    pub async fn send_host_command(
+        &self,
+        host_id: &str,
+        msg: HostRegistryMessage,
+    ) -> Result<(), String> {
+        let conns = self.host_connections.read().await;
+        match conns.get(host_id) {
+            Some(conn) => conn
+                .tx
+                .send(msg)
+                .await
+                .map_err(|e| format!("Failed to send to host {}: {}", host_id, e)),
+            None => Err(format!("Host {} not connected", host_id)),
+        }
     }
 
     // ── Internal helpers ────────────────────────────────────────
@@ -1070,170 +698,17 @@ WantedBy=multi-user.target
         Ok(())
     }
 
-    /// Create DNS records, add firewall rule, push full config with wildcard certs.
-    async fn provision_and_push(
-        &self,
-        app_id: &str,
-        tx: &mpsc::Sender<RegistryMessage>,
-    ) -> Result<()> {
-        let base_domain = self.env.base_domain.clone();
-        let mut state = self.state.write().await;
-        let app = state
-            .applications
-            .iter_mut()
-            .find(|a| a.id == app_id)
-            .ok_or_else(|| anyhow::anyhow!("App not found: {app_id}"))?;
-
-        // Get wildcard certificates for this app's domains
-        let domains = app.domains(&base_domain);
-        let routes = app.routes(&base_domain);
-        let mut agent_routes = Vec::new();
-
-        for route_info in &routes {
-            // Determine which wildcard to use based on domain
-            let wildcard_type = WildcardType::from_domain(&route_info.domain);
-
-            let (cert_pem, key_pem) = self
-                .acme
-                .get_cert_pem(wildcard_type)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to get wildcard cert for {}: {e}", route_info.domain))?;
-
-            agent_routes.push(AgentRoute {
-                domain: route_info.domain.clone(),
-                target_port: route_info.target_port,
-                cert_pem,
-                key_pem,
-                auth_required: route_info.auth_required,
-                allowed_groups: route_info.allowed_groups.clone(),
-            });
-        }
-        // No longer tracking per-domain cert_ids (using wildcards)
-        app.cert_ids = vec![];
-
-        // Create Cloudflare AAAA records
-        let ipv6_str = app
-            .ipv6_address
-            .map(|a| a.to_string())
-            .unwrap_or_default();
-
-        if !ipv6_str.is_empty() {
-            if let (Some(token), Some(zone_id)) = (&self.env.cf_api_token, &self.env.cf_zone_id) {
-                let mut record_ids = Vec::new();
-                for domain in &domains {
-                    match cloudflare::upsert_aaaa_record(token, zone_id, domain, &ipv6_str, true)
-                        .await
-                    {
-                        Ok(rid) => record_ids.push(rid),
-                        Err(e) => warn!(domain, "CF upsert failed (non-fatal): {e}"),
-                    }
-                }
-                app.cloudflare_record_ids = record_ids;
-            }
-
-            // Add firewall rule
-            if let Some(fw) = &self.firewall {
-                let rule_id = format!("agent-{}", app.id);
-                // Remove old rule if exists
-                let _ = fw.remove_rule(&rule_id).await;
-                fw.add_rule(FirewallRule {
-                    id: rule_id,
-                    description: format!("Agent: {}", app.slug),
-                    protocol: "tcp".into(),
-                    dest_port: 443,
-                    dest_port_end: 0,
-                    dest_address: format!("{}/128", ipv6_str),
-                    source_address: String::new(),
-                    enabled: true,
-                })
-                .await?;
-            }
-        }
-
-        // Sync local DNS records (A + AAAA with agent IPv4 and IPv6)
-        if let Some(ipv6) = app.ipv6_address {
-            if let Err(e) = self.sync_local_dns_records(&domains, ipv6, app.ipv4_address) {
-                warn!("Failed to sync local DNS records: {e}");
-            }
-        }
-
-        // Let's Encrypt certs are trusted by default - no CA PEM needed
-        let ca_pem = String::new();
-
-        let auth_url = format!("http://10.0.0.254:{}/api/auth/forward-check", self.env.api_port);
-        let dashboard_url = format!("https://hr.{}", self.env.base_domain);
-
-        // Push full config
-        tx.send(RegistryMessage::Config {
-            config_version: Utc::now().timestamp() as u64,
-            ipv6_address: ipv6_str,
-            routes: agent_routes,
-            ca_pem,
-            homeroute_auth_url: auth_url,
-            dashboard_url,
-            services: app.services.clone(),
-            power_policy: app.power_policy.clone(),
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("Failed to send config to agent"))?;
-
-        Ok(())
-    }
-
-    /// Push updated config to a connected agent (after endpoint changes).
+    /// Push simplified config to a connected agent (services + power_policy).
     async fn push_config_to_agent(&self, app: &Application) {
         let conns = self.connections.read().await;
         let Some(conn) = conns.get(&app.id) else {
             return;
         };
 
-        let base_domain = &self.env.base_domain;
-        let routes = app.routes(base_domain);
-        let mut agent_routes = Vec::new();
-
-        for route_info in &routes {
-            // Get wildcard cert for this domain
-            let wildcard_type = WildcardType::from_domain(&route_info.domain);
-
-            let (cert_pem, key_pem) = match self.acme.get_cert_pem(wildcard_type).await {
-                Ok(pems) => pems,
-                Err(e) => {
-                    warn!(domain = route_info.domain, "Failed to get wildcard cert: {e}");
-                    continue;
-                }
-            };
-
-            agent_routes.push(AgentRoute {
-                domain: route_info.domain.clone(),
-                target_port: route_info.target_port,
-                cert_pem,
-                key_pem,
-                auth_required: route_info.auth_required,
-                allowed_groups: route_info.allowed_groups.clone(),
-            });
-        }
-
-        // Let's Encrypt certs are trusted by default - no CA PEM needed
-        let ca_pem = String::new();
-
-        let auth_url = format!(
-            "http://10.0.0.254:{}/api/auth/forward-check",
-            self.env.api_port
-        );
-        let dashboard_url = format!("https://hr.{}", self.env.base_domain);
-
         let _ = conn
             .tx
             .send(RegistryMessage::Config {
-                config_version: Utc::now().timestamp() as u64,
-                ipv6_address: app
-                    .ipv6_address
-                    .map(|a| a.to_string())
-                    .unwrap_or_default(),
-                routes: agent_routes,
-                ca_pem,
-                homeroute_auth_url: auth_url,
-                dashboard_url,
+                config_version: 1,
                 services: app.services.clone(),
                 power_policy: app.power_policy.clone(),
             })
@@ -1346,6 +821,14 @@ WantedBy=multi-user.target
             action: action.to_string(),
             success: true,
         });
+    }
+
+    /// Send an activity ping to a connected agent to keep powersave alive.
+    pub async fn send_activity_ping(&self, app_id: &str, service_type: ServiceType) {
+        let connections = self.connections.read().await;
+        if let Some(conn) = connections.get(app_id) {
+            let _ = conn.tx.send(RegistryMessage::ActivityPing { service_type }).await;
+        }
     }
 
     // ── Agent Update ────────────────────────────────────────────────
@@ -1625,48 +1108,9 @@ fn verify_token(token: &str, hash: &str) -> bool {
         .is_ok()
 }
 
-// ── IPv6 helpers ────────────────────────────────────────────────
-
-/// Combine a /64 prefix string with a host suffix to form a full IPv6 address.
-fn compute_ipv6(prefix_str: &str, suffix: u16) -> Ipv6Addr {
-    // Parse prefix — strip any /NN prefix length
-    let prefix_clean = prefix_str.split('/').next().unwrap_or(prefix_str);
-
-    // Parse as Ipv6Addr, fall back to unspecified
-    let base: Ipv6Addr = prefix_clean.parse().unwrap_or(Ipv6Addr::UNSPECIFIED);
-    let segments = base.segments();
-
-    // Keep the first 4 segments (network /64) and set the host part
-    Ipv6Addr::new(
-        segments[0],
-        segments[1],
-        segments[2],
-        segments[3],
-        0,
-        0,
-        0,
-        suffix,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_compute_ipv6() {
-        let addr = compute_ipv6("2a0d:3341:b5b1:7500::1/64", 5);
-        assert_eq!(addr, "2a0d:3341:b5b1:7500::5".parse::<Ipv6Addr>().unwrap());
-    }
-
-    #[test]
-    fn test_compute_ipv6_no_prefix_len() {
-        let addr = compute_ipv6("2001:db8:abcd:1234::", 42);
-        assert_eq!(
-            addr,
-            "2001:db8:abcd:1234::2a".parse::<Ipv6Addr>().unwrap()
-        );
-    }
 
     #[test]
     fn test_token_roundtrip() {

@@ -1,0 +1,943 @@
+use axum::{
+    extract::{Path, State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use tokio::sync::mpsc;
+
+use crate::state::ApiState;
+
+const HOSTS_FILE: &str = "/data/hosts.json";
+const SSH_KEY_PATH: &str = "/data/ssh/id_rsa";
+const SSH_PUB_KEY_PATH: &str = "/data/ssh/id_rsa.pub";
+
+pub fn router() -> Router<ApiState> {
+    Router::new()
+        // Host CRUD
+        .route("/", get(list_hosts).post(add_host))
+        .route("/groups", get(list_groups))
+        .route("/{id}", get(get_host).put(update_host).delete(delete_host))
+        // Connection
+        .route("/{id}/test", post(test_connection))
+        .route("/{id}/interfaces", get(get_interfaces))
+        .route("/{id}/refresh-interfaces", post(refresh_interfaces))
+        .route("/{id}/info", post(get_host_info))
+        // Power actions
+        .route("/{id}/wake", post(wake))
+        .route("/{id}/shutdown", post(shutdown_host))
+        .route("/{id}/reboot", post(reboot_host))
+        .route("/bulk/wake", post(bulk_wake))
+        .route("/bulk/shutdown", post(bulk_shutdown))
+        // Schedules (nested under host)
+        .route("/{id}/schedules", get(list_schedules).post(create_schedule))
+        .route(
+            "/{id}/schedules/{sid}",
+            get(get_schedule).put(update_schedule).delete(delete_schedule),
+        )
+        .route("/{id}/schedules/{sid}/toggle", post(toggle_schedule))
+        .route("/{id}/schedules/{sid}/execute", post(execute_schedule))
+        // Host-agent WebSocket
+        .route("/agent/ws", get(host_agent_ws))
+}
+
+// ── Data access ──────────────────────────────────────────────────────────
+
+async fn load_hosts() -> Value {
+    match tokio::fs::read_to_string(HOSTS_FILE).await {
+        Ok(content) => serde_json::from_str(&content).unwrap_or(json!({"hosts": []})),
+        Err(_) => json!({"hosts": []}),
+    }
+}
+
+async fn save_hosts(data: &Value) -> Result<(), String> {
+    let content = serde_json::to_string_pretty(data).map_err(|e| e.to_string())?;
+    let tmp = format!("{}.tmp", HOSTS_FILE);
+    tokio::fs::write(&tmp, &content)
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::fs::rename(&tmp, HOSTS_FILE)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Migrate old servers.json + wol-schedules.json into hosts.json on first load.
+pub async fn ensure_hosts_file() {
+    if tokio::fs::metadata(HOSTS_FILE).await.is_ok() {
+        return;
+    }
+
+    let servers = match tokio::fs::read_to_string("/data/servers.json").await {
+        Ok(c) => serde_json::from_str::<Value>(&c)
+            .ok()
+            .and_then(|d| d.get("servers").cloned())
+            .and_then(|s| s.as_array().cloned())
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+
+    let schedules = match tokio::fs::read_to_string("/data/wol-schedules.json").await {
+        Ok(c) => serde_json::from_str::<Value>(&c)
+            .ok()
+            .and_then(|d| d.get("schedules").cloned())
+            .and_then(|s| s.as_array().cloned())
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+
+    let mut hosts: Vec<Value> = Vec::new();
+
+    for server in &servers {
+        let id = server.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+
+        // Collect schedules that belong to this server
+        let host_schedules: Vec<Value> = schedules
+            .iter()
+            .filter(|s| s.get("serverId").and_then(|i| i.as_str()) == Some(&id))
+            .cloned()
+            .collect();
+
+        let host = json!({
+            "id": id,
+            "name": server.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+            "host": server.get("host").and_then(|h| h.as_str()).unwrap_or(""),
+            "port": server.get("port").and_then(|p| p.as_u64()).unwrap_or(22),
+            "username": server.get("username").and_then(|u| u.as_str()).unwrap_or("root"),
+            "interface": server.get("interface"),
+            "mac": server.get("mac"),
+            "groups": server.get("groups").cloned().unwrap_or(json!([])),
+            "interfaces": server.get("interfaces").cloned().unwrap_or(json!([])),
+            "status": server.get("status").and_then(|s| s.as_str()).unwrap_or("unknown"),
+            "latency": server.get("latency").and_then(|l| l.as_u64()).unwrap_or(0),
+            "lastSeen": server.get("lastSeen"),
+            "schedules": host_schedules,
+            "lxc": null,
+            "createdAt": server.get("createdAt"),
+            "updatedAt": server.get("updatedAt")
+        });
+        hosts.push(host);
+    }
+
+    let data = json!({"hosts": hosts});
+    if let Err(e) = save_hosts(&data).await {
+        tracing::error!("Failed to create hosts.json: {}", e);
+    } else {
+        tracing::info!("Migrated {} servers + {} schedules → hosts.json", servers.len(), schedules.len());
+    }
+}
+
+// ── Host CRUD ────────────────────────────────────────────────────────────
+
+async fn list_hosts() -> Json<Value> {
+    let data = load_hosts().await;
+    let hosts = data.get("hosts").cloned().unwrap_or(json!([]));
+    Json(json!({"success": true, "hosts": hosts}))
+}
+
+async fn list_groups() -> Json<Value> {
+    let data = load_hosts().await;
+    let mut groups = std::collections::BTreeSet::new();
+    if let Some(hosts) = data.get("hosts").and_then(|s| s.as_array()) {
+        for host in hosts {
+            if let Some(hg) = host.get("groups").and_then(|g| g.as_array()) {
+                for g in hg {
+                    if let Some(name) = g.as_str() {
+                        groups.insert(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let groups: Vec<String> = groups.into_iter().collect();
+    Json(json!({"success": true, "groups": groups}))
+}
+
+async fn get_host(Path(id): Path<String>) -> Json<Value> {
+    let data = load_hosts().await;
+    if let Some(hosts) = data.get("hosts").and_then(|s| s.as_array()) {
+        if let Some(host) = hosts.iter().find(|h| h.get("id").and_then(|i| i.as_str()) == Some(&id)) {
+            return Json(json!({"success": true, "host": host}));
+        }
+    }
+    Json(json!({"success": false, "error": "Hote non trouve"}))
+}
+
+#[derive(Deserialize)]
+struct AddHostRequest {
+    name: String,
+    host: String,
+    #[serde(default = "default_port")]
+    port: u16,
+    #[serde(default = "default_user")]
+    username: String,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    interface: Option<String>,
+    #[serde(default)]
+    mac: Option<String>,
+    #[serde(default)]
+    groups: Vec<String>,
+}
+
+fn default_port() -> u16 { 22 }
+fn default_user() -> String { "root".to_string() }
+
+async fn add_host(Json(body): Json<AddHostRequest>) -> Json<Value> {
+    if let Err(e) = ensure_ssh_key().await {
+        return Json(json!({"success": false, "error": format!("SSH key error: {}", e)}));
+    }
+
+    if let Some(ref password) = body.password {
+        if let Err(e) = setup_ssh_key(&body.host, body.port, &body.username, password).await {
+            return Json(json!({"success": false, "error": format!("SSH setup failed: {}", e)}));
+        }
+    }
+
+    let interfaces = get_remote_interfaces(&body.host, body.port, &body.username).await;
+    let mac = body.mac.or_else(|| {
+        interfaces.as_ref().ok().and_then(|ifaces| {
+            ifaces.iter().find_map(|i| {
+                let name = i.get("ifname").and_then(|n| n.as_str()).unwrap_or("");
+                if body.interface.as_deref() == Some(name) || (body.interface.is_none() && name != "lo") {
+                    i.get("address").and_then(|a| a.as_str()).map(String::from)
+                } else {
+                    None
+                }
+            })
+        })
+    });
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let host = json!({
+        "id": id,
+        "name": body.name,
+        "host": body.host,
+        "port": body.port,
+        "username": body.username,
+        "interface": body.interface,
+        "mac": mac,
+        "groups": body.groups,
+        "interfaces": interfaces.unwrap_or_default(),
+        "status": "unknown",
+        "latency": 0,
+        "lastSeen": null,
+        "schedules": [],
+        "lxc": null,
+        "createdAt": chrono::Utc::now().to_rfc3339()
+    });
+
+    let mut data = load_hosts().await;
+    let hosts = data.get_mut("hosts").and_then(|s| s.as_array_mut());
+    match hosts {
+        Some(arr) => arr.push(host.clone()),
+        None => data["hosts"] = json!([host]),
+    }
+
+    if let Err(e) = save_hosts(&data).await {
+        return Json(json!({"success": false, "error": e}));
+    }
+
+    Json(json!({"success": true, "host": host}))
+}
+
+async fn update_host(Path(id): Path<String>, Json(updates): Json<Value>) -> Json<Value> {
+    let mut data = load_hosts().await;
+    if let Some(hosts) = data.get_mut("hosts").and_then(|s| s.as_array_mut()) {
+        if let Some(host) = hosts.iter_mut().find(|h| h.get("id").and_then(|i| i.as_str()) == Some(&id)) {
+            if let Some(obj) = updates.as_object() {
+                for (k, v) in obj {
+                    if k != "id" && k != "schedules" {
+                        host[k] = v.clone();
+                    }
+                }
+            }
+            host["updatedAt"] = json!(chrono::Utc::now().to_rfc3339());
+        } else {
+            return Json(json!({"success": false, "error": "Hote non trouve"}));
+        }
+    }
+
+    if let Err(e) = save_hosts(&data).await {
+        return Json(json!({"success": false, "error": e}));
+    }
+    Json(json!({"success": true}))
+}
+
+async fn delete_host(Path(id): Path<String>) -> Json<Value> {
+    let mut data = load_hosts().await;
+    if let Some(hosts) = data.get_mut("hosts").and_then(|s| s.as_array_mut()) {
+        hosts.retain(|h| h.get("id").and_then(|i| i.as_str()) != Some(&id));
+    }
+    if let Err(e) = save_hosts(&data).await {
+        return Json(json!({"success": false, "error": e}));
+    }
+    Json(json!({"success": true}))
+}
+
+// ── Connection & info ────────────────────────────────────────────────────
+
+async fn test_connection(Path(id): Path<String>) -> Json<Value> {
+    let data = load_hosts().await;
+    let host = match find_host(&data, &id) {
+        Some(h) => h,
+        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
+    };
+
+    let addr = host.get("host").and_then(|h| h.as_str()).unwrap_or("");
+    let port = host.get("port").and_then(|p| p.as_u64()).unwrap_or(22) as u16;
+    let user = host.get("username").and_then(|u| u.as_str()).unwrap_or("root");
+
+    match ssh_command(addr, port, user, "echo ok").await {
+        Ok(output) => Json(json!({"success": true, "output": output.trim()})),
+        Err(e) => Json(json!({"success": false, "error": e})),
+    }
+}
+
+async fn get_interfaces(Path(id): Path<String>) -> Json<Value> {
+    let data = load_hosts().await;
+    let host = match find_host(&data, &id) {
+        Some(h) => h,
+        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
+    };
+
+    let cached = host.get("interfaces").cloned().unwrap_or(json!([]));
+    Json(json!({"success": true, "interfaces": cached}))
+}
+
+async fn refresh_interfaces(Path(id): Path<String>) -> Json<Value> {
+    let mut data = load_hosts().await;
+    let host = match find_host_mut(&mut data, &id) {
+        Some(h) => h,
+        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
+    };
+
+    let addr = host.get("host").and_then(|h| h.as_str()).unwrap_or("").to_string();
+    let port = host.get("port").and_then(|p| p.as_u64()).unwrap_or(22) as u16;
+    let user = host.get("username").and_then(|u| u.as_str()).unwrap_or("root").to_string();
+
+    match get_remote_interfaces(&addr, port, &user).await {
+        Ok(ifaces) => {
+            host["interfaces"] = json!(ifaces);
+            let _ = save_hosts(&data).await;
+            Json(json!({"success": true, "interfaces": ifaces}))
+        }
+        Err(e) => Json(json!({"success": false, "error": e})),
+    }
+}
+
+async fn get_host_info(Path(id): Path<String>) -> Json<Value> {
+    let data = load_hosts().await;
+    let host = match find_host(&data, &id) {
+        Some(h) => h,
+        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
+    };
+
+    let addr = host.get("host").and_then(|h| h.as_str()).unwrap_or("");
+    let port = host.get("port").and_then(|p| p.as_u64()).unwrap_or(22) as u16;
+    let user = host.get("username").and_then(|u| u.as_str()).unwrap_or("root");
+
+    let info_cmd = "hostname && uname -r && uptime -p && free -b | head -2 && df -B1 / | tail -1";
+    match ssh_command(addr, port, user, info_cmd).await {
+        Ok(output) => Json(json!({"success": true, "info": output})),
+        Err(e) => Json(json!({"success": false, "error": e})),
+    }
+}
+
+// ── Power actions ────────────────────────────────────────────────────────
+
+async fn wake(Path(id): Path<String>) -> Json<Value> {
+    let data = load_hosts().await;
+    let host = match find_host(&data, &id) {
+        Some(h) => h,
+        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
+    };
+
+    let mac = match host.get("mac").and_then(|m| m.as_str()) {
+        Some(m) => m,
+        None => return Json(json!({"success": false, "error": "Adresse MAC non configuree"})),
+    };
+
+    match send_wol(mac).await {
+        Ok(()) => Json(json!({"success": true, "action": "wake", "mac": mac})),
+        Err(e) => Json(json!({"success": false, "error": e})),
+    }
+}
+
+async fn shutdown_host(Path(id): Path<String>) -> Json<Value> {
+    let data = load_hosts().await;
+    let host = match find_host(&data, &id) {
+        Some(h) => h,
+        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
+    };
+
+    ssh_power_action(&host, "poweroff || shutdown -h now").await
+}
+
+async fn reboot_host(Path(id): Path<String>) -> Json<Value> {
+    let data = load_hosts().await;
+    let host = match find_host(&data, &id) {
+        Some(h) => h,
+        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
+    };
+
+    ssh_power_action(&host, "reboot").await
+}
+
+#[derive(Deserialize)]
+struct BulkRequest {
+    #[serde(rename = "hostIds")]
+    host_ids: Vec<String>,
+}
+
+async fn bulk_wake(Json(body): Json<BulkRequest>) -> Json<Value> {
+    let data = load_hosts().await;
+    let mut results = Vec::new();
+    for id in &body.host_ids {
+        if let Some(host) = find_host(&data, id) {
+            if let Some(mac) = host.get("mac").and_then(|m| m.as_str()) {
+                let success = send_wol(mac).await.is_ok();
+                results.push(json!({"id": id, "success": success}));
+            } else {
+                results.push(json!({"id": id, "success": false, "error": "No MAC"}));
+            }
+        } else {
+            results.push(json!({"id": id, "success": false, "error": "Not found"}));
+        }
+    }
+    Json(json!({"success": true, "results": results}))
+}
+
+async fn bulk_shutdown(Json(body): Json<BulkRequest>) -> Json<Value> {
+    let data = load_hosts().await;
+    let mut results = Vec::new();
+    for id in &body.host_ids {
+        if let Some(host) = find_host(&data, id) {
+            let result = ssh_power_action(&host, "poweroff || shutdown -h now").await;
+            results.push(json!({"id": id, "result": result.0}));
+        } else {
+            results.push(json!({"id": id, "success": false, "error": "Not found"}));
+        }
+    }
+    Json(json!({"success": true, "results": results}))
+}
+
+// ── Schedules ────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct SchedulePath {
+    id: String,
+    sid: String,
+}
+
+async fn list_schedules(Path(id): Path<String>) -> Json<Value> {
+    let data = load_hosts().await;
+    let host = match find_host(&data, &id) {
+        Some(h) => h,
+        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
+    };
+
+    let schedules = host.get("schedules").cloned().unwrap_or(json!([]));
+    Json(json!({"success": true, "schedules": schedules}))
+}
+
+async fn get_schedule(Path(SchedulePath { id, sid }): Path<SchedulePath>) -> Json<Value> {
+    let data = load_hosts().await;
+    let host = match find_host(&data, &id) {
+        Some(h) => h,
+        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
+    };
+
+    if let Some(schedule) = find_schedule(host, &sid) {
+        return Json(json!({"success": true, "schedule": schedule}));
+    }
+    Json(json!({"success": false, "error": "Schedule non trouve"}))
+}
+
+#[derive(Deserialize)]
+struct CreateScheduleRequest {
+    action: String,
+    cron: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn default_true() -> bool { true }
+
+async fn create_schedule(
+    Path(id): Path<String>,
+    Json(body): Json<CreateScheduleRequest>,
+) -> Json<Value> {
+    if !["wake", "shutdown", "reboot"].contains(&body.action.as_str()) {
+        return Json(json!({"success": false, "error": "Action invalide. Doit etre: wake, shutdown, ou reboot"}));
+    }
+
+    let mut data = load_hosts().await;
+    let host = match find_host_mut(&mut data, &id) {
+        Some(h) => h,
+        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
+    };
+
+    let host_name = host.get("name").and_then(|n| n.as_str()).unwrap_or("unknown").to_string();
+
+    let sid = uuid::Uuid::new_v4().to_string();
+    let schedule = json!({
+        "id": sid,
+        "action": body.action,
+        "cron": body.cron,
+        "description": body.description.unwrap_or_else(|| format!("{} {}", body.action, host_name)),
+        "enabled": body.enabled,
+        "createdAt": chrono::Utc::now().to_rfc3339(),
+        "lastRun": null
+    });
+
+    let schedules = host
+        .get_mut("schedules")
+        .and_then(|s| s.as_array_mut());
+    match schedules {
+        Some(arr) => arr.push(schedule.clone()),
+        None => host["schedules"] = json!([schedule]),
+    }
+
+    if let Err(e) = save_hosts(&data).await {
+        return Json(json!({"success": false, "error": e}));
+    }
+
+    Json(json!({"success": true, "schedule": schedule}))
+}
+
+async fn update_schedule(
+    Path(SchedulePath { id, sid }): Path<SchedulePath>,
+    Json(updates): Json<Value>,
+) -> Json<Value> {
+    let mut data = load_hosts().await;
+    let host = match find_host_mut(&mut data, &id) {
+        Some(h) => h,
+        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
+    };
+
+    if let Some(schedules) = host.get_mut("schedules").and_then(|s| s.as_array_mut()) {
+        if let Some(schedule) = schedules.iter_mut().find(|s| s.get("id").and_then(|i| i.as_str()) == Some(&sid)) {
+            if let Some(obj) = updates.as_object() {
+                for (k, v) in obj {
+                    if k != "id" {
+                        schedule[k] = v.clone();
+                    }
+                }
+            }
+            schedule["updatedAt"] = json!(chrono::Utc::now().to_rfc3339());
+        } else {
+            return Json(json!({"success": false, "error": "Schedule non trouve"}));
+        }
+    }
+
+    if let Err(e) = save_hosts(&data).await {
+        return Json(json!({"success": false, "error": e}));
+    }
+    Json(json!({"success": true}))
+}
+
+async fn delete_schedule(Path(SchedulePath { id, sid }): Path<SchedulePath>) -> Json<Value> {
+    let mut data = load_hosts().await;
+    let host = match find_host_mut(&mut data, &id) {
+        Some(h) => h,
+        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
+    };
+
+    if let Some(schedules) = host.get_mut("schedules").and_then(|s| s.as_array_mut()) {
+        schedules.retain(|s| s.get("id").and_then(|i| i.as_str()) != Some(&sid));
+    }
+
+    if let Err(e) = save_hosts(&data).await {
+        return Json(json!({"success": false, "error": e}));
+    }
+    Json(json!({"success": true}))
+}
+
+async fn toggle_schedule(Path(SchedulePath { id, sid }): Path<SchedulePath>) -> Json<Value> {
+    let mut data = load_hosts().await;
+    let host = match find_host_mut(&mut data, &id) {
+        Some(h) => h,
+        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
+    };
+
+    if let Some(schedules) = host.get_mut("schedules").and_then(|s| s.as_array_mut()) {
+        if let Some(schedule) = schedules.iter_mut().find(|s| s.get("id").and_then(|i| i.as_str()) == Some(&sid)) {
+            let current = schedule.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true);
+            schedule["enabled"] = json!(!current);
+        }
+    }
+
+    if let Err(e) = save_hosts(&data).await {
+        return Json(json!({"success": false, "error": e}));
+    }
+    Json(json!({"success": true}))
+}
+
+async fn execute_schedule(Path(SchedulePath { id, sid }): Path<SchedulePath>) -> Json<Value> {
+    let data = load_hosts().await;
+    let host = match find_host(&data, &id) {
+        Some(h) => h,
+        None => return Json(json!({"success": false, "error": "Hote non trouve"})),
+    };
+
+    let schedule = match find_schedule(host, &sid) {
+        Some(s) => s.clone(),
+        None => return Json(json!({"success": false, "error": "Schedule non trouve"})),
+    };
+
+    let action = schedule.get("action").and_then(|a| a.as_str()).unwrap_or("");
+    let result = match action {
+        "wake" => wake(Path(id.clone())).await,
+        "shutdown" => shutdown_host(Path(id.clone())).await,
+        "reboot" => reboot_host(Path(id.clone())).await,
+        _ => return Json(json!({"success": false, "error": "Action inconnue"})),
+    };
+
+    // Update lastRun
+    let mut data = load_hosts().await;
+    if let Some(host) = find_host_mut(&mut data, &id) {
+        if let Some(schedules) = host.get_mut("schedules").and_then(|s| s.as_array_mut()) {
+            if let Some(s) = schedules.iter_mut().find(|s| s.get("id").and_then(|i| i.as_str()) == Some(&sid)) {
+                s["lastRun"] = json!(chrono::Utc::now().to_rfc3339());
+            }
+        }
+    }
+    let _ = save_hosts(&data).await;
+
+    result
+}
+
+// ── Host-agent WebSocket ─────────────────────────────────────────────────
+
+async fn host_agent_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<ApiState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_host_agent_socket(socket, state))
+}
+
+async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
+    use hr_registry::protocol::{HostAgentMessage, HostRegistryMessage};
+
+    let registry = match &state.registry {
+        Some(r) => r.clone(),
+        None => {
+            tracing::warn!("Host agent WS: no registry available");
+            return;
+        }
+    };
+
+    // Wait for Auth message (5s timeout)
+    let auth_msg = tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await;
+    let (host_id, host_name, version) = match auth_msg {
+        Ok(Some(Ok(Message::Text(text)))) => {
+            match serde_json::from_str::<HostAgentMessage>(&text) {
+                Ok(HostAgentMessage::Auth { token: _, host_name, version }) => {
+                    // Look up host by name in hosts.json
+                    let data = load_hosts().await;
+                    let host_id = data
+                        .get("hosts")
+                        .and_then(|h| h.as_array())
+                        .and_then(|hosts| {
+                            hosts.iter().find(|h| {
+                                h.get("name").and_then(|n| n.as_str()) == Some(&host_name)
+                            })
+                        })
+                        .and_then(|h| h.get("id").and_then(|i| i.as_str()))
+                        .map(|s| s.to_string());
+
+                    match host_id {
+                        Some(id) => (id, host_name, version),
+                        None => {
+                            tracing::warn!("Host agent auth failed: unknown host '{}'", host_name);
+                            let _ = socket.send(Message::Text(
+                                serde_json::to_string(&HostRegistryMessage::AuthResult {
+                                    success: false,
+                                    error: Some("Unknown host".to_string()),
+                                }).unwrap().into()
+                            )).await;
+                            return;
+                        }
+                    }
+                }
+                _ => {
+                    tracing::warn!("Host agent: expected Auth message");
+                    return;
+                }
+            }
+        }
+        _ => {
+            tracing::warn!("Host agent: auth timeout or error");
+            return;
+        }
+    };
+
+    // Send auth success
+    if socket.send(Message::Text(
+        serde_json::to_string(&HostRegistryMessage::AuthResult {
+            success: true,
+            error: None,
+        }).unwrap().into()
+    )).await.is_err() {
+        return;
+    }
+
+    tracing::info!("Host agent authenticated: {} ({})", host_name, host_id);
+
+    // Register connection
+    let (tx, mut rx) = mpsc::channel::<HostRegistryMessage>(32);
+    registry.on_host_connected(host_id.clone(), host_name.clone(), tx, version).await;
+
+    // Bidirectional message loop
+    loop {
+        tokio::select! {
+            // Messages from registry → host-agent
+            Some(msg) = rx.recv() => {
+                let text = match serde_json::to_string(&msg) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                if socket.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+            }
+            // Messages from host-agent → registry
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(agent_msg) = serde_json::from_str::<HostAgentMessage>(&text) {
+                            match agent_msg {
+                                HostAgentMessage::Heartbeat { .. } => {
+                                    registry.update_host_heartbeat(&host_id).await;
+                                }
+                                HostAgentMessage::Metrics(metrics) => {
+                                    registry.update_host_metrics(&host_id, metrics).await;
+                                }
+                                HostAgentMessage::ContainerList(containers) => {
+                                    registry.update_host_containers(&host_id, containers).await;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Ping(data))) => {
+                        if socket.send(Message::Pong(data)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    registry.on_host_disconnected(&host_id).await;
+    tracing::info!("Host agent disconnected: {} ({})", host_name, host_id);
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+fn find_host<'a>(data: &'a Value, id: &str) -> Option<&'a Value> {
+    data.get("hosts")?
+        .as_array()?
+        .iter()
+        .find(|h| h.get("id").and_then(|i| i.as_str()) == Some(id))
+}
+
+fn find_host_mut<'a>(data: &'a mut Value, id: &str) -> Option<&'a mut Value> {
+    data.get_mut("hosts")?
+        .as_array_mut()?
+        .iter_mut()
+        .find(|h| h.get("id").and_then(|i| i.as_str()) == Some(id))
+}
+
+fn find_schedule<'a>(host: &'a Value, sid: &str) -> Option<&'a Value> {
+    host.get("schedules")?
+        .as_array()?
+        .iter()
+        .find(|s| s.get("id").and_then(|i| i.as_str()) == Some(sid))
+}
+
+async fn send_wol(mac: &str) -> Result<(), String> {
+    let mac_bytes: Vec<u8> = mac
+        .split(':')
+        .filter_map(|b| u8::from_str_radix(b, 16).ok())
+        .collect();
+
+    if mac_bytes.len() != 6 {
+        return Err("Adresse MAC invalide".to_string());
+    }
+
+    let mut packet = vec![0xFFu8; 6];
+    for _ in 0..16 {
+        packet.extend_from_slice(&mac_bytes);
+    }
+
+    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| e.to_string())?;
+    socket.set_broadcast(true).map_err(|e| e.to_string())?;
+    socket
+        .send_to(&packet, "255.255.255.255:9")
+        .await
+        .map_err(|e| e.to_string())?;
+    let _ = socket.send_to(&packet, "10.0.0.255:9").await;
+
+    Ok(())
+}
+
+async fn ssh_power_action(host: &Value, command: &str) -> Json<Value> {
+    let addr = host.get("host").and_then(|h| h.as_str()).unwrap_or("");
+    let port = host.get("port").and_then(|p| p.as_u64()).unwrap_or(22);
+    let user = host.get("username").and_then(|u| u.as_str()).unwrap_or("root");
+
+    let output = tokio::process::Command::new("ssh")
+        .args([
+            "-i", SSH_KEY_PATH,
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "ConnectTimeout=15",
+            "-o", "BatchMode=yes",
+            "-p", &port.to_string(),
+            &format!("root@{}", addr),
+            command,
+        ])
+        .output()
+        .await;
+
+    match output {
+        Ok(o) if o.status.success() || o.status.code() == Some(255) => {
+            Json(json!({"success": true, "action": command.split_whitespace().next().unwrap_or(command)}))
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            Json(json!({"success": false, "error": format!("SSH error: {}", stderr)}))
+        }
+        Err(e) => Json(json!({"success": false, "error": e.to_string()})),
+    }
+}
+
+// ── SSH helpers ──────────────────────────────────────────────────────────
+
+async fn ensure_ssh_key() -> Result<(), String> {
+    if tokio::fs::metadata(SSH_KEY_PATH).await.is_ok() {
+        return Ok(());
+    }
+
+    let _ = tokio::fs::create_dir_all("/data/ssh").await;
+
+    let output = tokio::process::Command::new("ssh-keygen")
+        .args(["-t", "rsa", "-b", "4096", "-f", SSH_KEY_PATH, "-N", ""])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    let _ = tokio::fs::set_permissions(
+        SSH_KEY_PATH,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    ).await;
+
+    Ok(())
+}
+
+async fn setup_ssh_key(host: &str, port: u16, user: &str, password: &str) -> Result<(), String> {
+    let pub_key = tokio::fs::read_to_string(SSH_PUB_KEY_PATH)
+        .await
+        .map_err(|e| format!("Read pub key: {}", e))?;
+
+    let output = tokio::process::Command::new("sshpass")
+        .args([
+            "-p", password,
+            "ssh",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "ConnectTimeout=15",
+            "-p", &port.to_string(),
+            &format!("{}@{}", user, host),
+            &format!(
+                "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '{}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys",
+                pub_key.trim()
+            ),
+        ])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    Ok(())
+}
+
+async fn ssh_command(host: &str, port: u16, user: &str, command: &str) -> Result<String, String> {
+    let output = tokio::process::Command::new("ssh")
+        .args([
+            "-i", SSH_KEY_PATH,
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "ConnectTimeout=15",
+            "-o", "BatchMode=yes",
+            "-p", &port.to_string(),
+            &format!("root@{}", host),
+            command,
+        ])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("SSH failed: {}", stderr));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+async fn get_remote_interfaces(
+    host: &str,
+    port: u16,
+    user: &str,
+) -> Result<Vec<Value>, String> {
+    let output = ssh_command(host, port, user, "ip -j addr show 2>/dev/null || ip addr show").await?;
+
+    if let Ok(ifaces) = serde_json::from_str::<Vec<Value>>(&output) {
+        return Ok(ifaces);
+    }
+
+    let mut interfaces = Vec::new();
+    let mut current: Option<Value> = None;
+
+    for line in output.lines() {
+        if !line.starts_with(' ') && line.contains(':') {
+            if let Some(iface) = current.take() {
+                interfaces.push(iface);
+            }
+            let parts: Vec<&str> = line.split(':').collect();
+            if parts.len() >= 2 {
+                current = Some(json!({"ifname": parts[1].trim()}));
+            }
+        } else if let Some(ref mut iface) = current {
+            let line = line.trim();
+            if line.starts_with("link/ether") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if let Some(mac) = parts.get(1) {
+                    iface["address"] = json!(mac);
+                }
+            }
+        }
+    }
+    if let Some(iface) = current {
+        interfaces.push(iface);
+    }
+
+    Ok(interfaces)
+}

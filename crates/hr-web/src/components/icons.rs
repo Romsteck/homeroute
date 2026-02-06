@@ -220,3 +220,150 @@ pub fn IconLoader(#[prop(default = "w-5 h-5")] class: &'static str) -> impl Into
         </svg>
     }
 }
+
+#[component]
+pub fn IconWifi(#[prop(default = "w-5 h-5")] class: &'static str) -> impl IntoView {
+    view! {
+        <svg class=class viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 20h.01"/><path d="M2 8.82a15 15 0 0 1 20 0"/>
+            <path d="M5 12.859a10 10 0 0 1 14 0"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/>
+        </svg>
+    }
+}
+
+#[component]
+pub fn IconChevronRight(#[prop(default = "w-5 h-5")] class: &'static str) -> impl IntoView {
+    view! {
+        <svg class=class viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m9 18 6-6-6-6"/>
+        </svg>
+    }
+}
+
+#[component]
+pub fn IconClock(#[prop(default = "w-5 h-5")] class: &'static str) -> impl IntoView {
+    view! {
+        <svg class=class viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+        </svg>
+    }
+}
+
+#[component]
+pub fn IconCheck(#[prop(default = "w-5 h-5")] class: &'static str) -> impl IntoView {
+    view! {
+        <svg class=class viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 6 9 17l-5-5"/>
+        </svg>
+    }
+}
+
+#[component]
+pub fn IconX(#[prop(default = "w-5 h-5")] class: &'static str) -> impl IntoView {
+    view! {
+        <svg class=class viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+        </svg>
+    }
+}
+
+#[component]
+pub fn IconExternalLink(#[prop(default = "w-5 h-5")] class: &'static str) -> impl IntoView {
+    view! {
+        <svg class=class viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+        </svg>
+    }
+}
+
+#[component]
+pub fn IconMail(#[prop(default = "w-5 h-5")] class: &'static str) -> impl IntoView {
+    view! {
+        <svg class=class viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>
+        </svg>
+    }
+}
+
+#[component]
+pub fn IconPlus(#[prop(default = "w-5 h-5")] class: &'static str) -> impl IntoView {
+    view! {
+        <svg class=class viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 12h14"/><path d="M12 5v14"/>
+        </svg>
+    }
+}
+
+#[component]
+pub fn IconTrash(#[prop(default = "w-5 h-5")] class: &'static str) -> impl IntoView {
+    view! {
+        <svg class=class viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/>
+            <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
+        </svg>
+    }
+}
+
+#[component]
+pub fn IconEdit(#[prop(default = "w-5 h-5")] class: &'static str) -> impl IntoView {
+    view! {
+        <svg class=class viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/>
+        </svg>
+    }
+}
+
+#[component]
+pub fn IconSearch(#[prop(default = "w-5 h-5")] class: &'static str) -> impl IntoView {
+    view! {
+        <svg class=class viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+        </svg>
+    }
+}
+
+#[component]
+pub fn IconAlertTriangle(#[prop(default = "w-5 h-5")] class: &'static str) -> impl IntoView {
+    view! {
+        <svg class=class viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/>
+            <path d="M12 9v4"/><path d="M12 17h.01"/>
+        </svg>
+    }
+}
+
+#[component]
+pub fn IconPlay(#[prop(default = "w-5 h-5")] class: &'static str) -> impl IntoView {
+    view! {
+        <svg class=class viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="6 3 20 12 6 21 6 3"/>
+        </svg>
+    }
+}
+
+#[component]
+pub fn IconSquare(#[prop(default = "w-5 h-5")] class: &'static str) -> impl IntoView {
+    view! {
+        <svg class=class viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect width="18" height="18" x="3" y="3" rx="2"/>
+        </svg>
+    }
+}
+
+#[component]
+pub fn IconCheckCircle(#[prop(default = "w-5 h-5")] class: &'static str) -> impl IntoView {
+    view! {
+        <svg class=class viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>
+        </svg>
+    }
+}
+
+#[component]
+pub fn IconXCircle(#[prop(default = "w-5 h-5")] class: &'static str) -> impl IntoView {
+    view! {
+        <svg class=class viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>
+        </svg>
+    }
+}

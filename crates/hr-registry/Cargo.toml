@@ -5,9 +5,6 @@ edition.workspace = true
 
 [dependencies]
 hr-common = { path = "../hr-common" }
-hr-acme = { path = "../hr-acme" }
-hr-dns = { path = "../hr-dns" }
-hr-firewall = { path = "../hr-firewall" }
 hr-lxd = { path = "../hr-lxd" }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -16,9 +13,9 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-reqwest = { workspace = true }
 rand = { workspace = true }
 argon2 = { workspace = true }
 hex = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
 ring = { workspace = true }
+reqwest = { workspace = true }

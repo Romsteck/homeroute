@@ -24,16 +24,43 @@ async fn ws_handler(
 async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     debug!("WebSocket client connected");
 
+    let mut host_rx = state.events.host_status.subscribe();
     let mut server_rx = state.events.server_status.subscribe();
     let mut updates_rx = state.events.updates.subscribe();
     let mut agent_rx = state.events.agent_status.subscribe();
     let mut metrics_rx = state.events.agent_metrics.subscribe();
     let mut service_cmd_rx = state.events.service_command.subscribe();
     let mut agent_update_rx = state.events.agent_update.subscribe();
+    let mut migration_rx = state.events.migration_progress.subscribe();
 
     loop {
         tokio::select! {
-            // Server status events
+            // Host status events (new)
+            result = host_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({
+                            "type": "hosts:status",
+                            "data": {
+                                "hostId": event.host_id,
+                                "online": event.status == "online",
+                                "status": event.status,
+                                "latency": event.latency_ms.unwrap_or(0),
+                                "lastSeen": chrono::Utc::now().to_rfc3339()
+                            }
+                        });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("WebSocket host_status lagged by {}", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // Server status events (legacy)
             result = server_rx.recv() => {
                 match result {
                     Ok(event) => {
@@ -188,6 +215,33 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("WebSocket agent_update lagged by {}", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // Migration progress events
+            result = migration_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({
+                            "type": "migration:progress",
+                            "data": {
+                                "appId": event.app_id,
+                                "transferId": event.transfer_id,
+                                "phase": event.phase,
+                                "progressPct": event.progress_pct,
+                                "bytesTransferred": event.bytes_transferred,
+                                "totalBytes": event.total_bytes,
+                                "error": event.error,
+                            }
+                        });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("WebSocket migration_progress lagged by {}", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

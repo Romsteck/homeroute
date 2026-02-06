@@ -121,7 +121,7 @@ async fn handle_dns_query(query_bytes: &[u8], state: &SharedDnsState, src: Socke
     // Build response
     let response = packet::build_response(&query, &result.records, result.rcode);
 
-    // Log query and emit analytics event
+    // Log query
     if !query.questions.is_empty() {
         let q = &query.questions[0];
         let state_read = state.read().await;
@@ -134,19 +134,6 @@ async fn handle_dns_query(query_bytes: &[u8], state: &SharedDnsState, src: Socke
                 result.cached,
                 elapsed_ms,
             );
-        }
-
-        // Broadcast DNS event for analytics
-        if let Some(ref sender) = state_read.dns_events {
-            let _ = sender.send(hr_common::events::DnsTrafficEvent {
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                client_ip: src.ip().to_string(),
-                domain: q.name.clone(),
-                query_type: q.qtype.to_string(),
-                blocked: result.blocked,
-                cached: result.cached,
-                response_time_ms: elapsed_ms,
-            });
         }
     }
 

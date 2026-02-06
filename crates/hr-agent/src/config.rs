@@ -12,13 +12,6 @@ pub struct AgentConfig {
     pub token: String,
     /// Service/application name (slug)
     pub service_name: String,
-    /// Network interface for IPv6 address assignment
-    #[serde(default = "default_interface")]
-    pub interface: String,
-}
-
-fn default_interface() -> String {
-    "eth0".to_string()
 }
 
 impl AgentConfig {

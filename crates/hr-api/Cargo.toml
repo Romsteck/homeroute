@@ -12,14 +12,11 @@ hr-dns = { path = "../hr-dns" }
 hr-dhcp = { path = "../hr-dhcp" }
 hr-ipv6 = { path = "../hr-ipv6" }
 hr-adblock = { path = "../hr-adblock" }
-hr-analytics = { path = "../hr-analytics" }
 hr-servers = { path = "../hr-servers" }
 hr-system = { path = "../hr-system" }
 hr-firewall = { path = "../hr-firewall" }
 hr-registry = { path = "../hr-registry" }
-hr-web = { path = "../hr-web", features = ["ssr", "islands"] }
-leptos = { workspace = true, features = ["ssr", "islands"] }
-leptos_axum = { workspace = true }
+hr-lxd = { path = "../hr-lxd" }
 tokio = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }
@@ -36,3 +33,4 @@ reqwest = { workspace = true }
 tokio-stream = { workspace = true }
 ipnet = { workspace = true }
 ring = { workspace = true }
+base64 = { workspace = true }

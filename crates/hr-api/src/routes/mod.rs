@@ -12,7 +12,7 @@ pub mod rust_proxy;
 pub mod acme;
 pub mod energy;
 pub mod updates;
-pub mod traffic;
+pub mod hosts;
 pub mod servers;
 pub mod services;
 pub mod wol;

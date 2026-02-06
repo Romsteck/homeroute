@@ -5,4 +5,4 @@ pub mod cloudflare;
 
 pub use types::*;
 pub use protocol::*;
-pub use state::AgentRegistry;
+pub use state::{AgentRegistry, HostConnection};

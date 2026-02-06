@@ -1,19 +1,15 @@
 mod config;
 mod connection;
-mod ipv6;
 mod metrics;
-mod pages;
 mod powersave;
-mod proxy;
 mod services;
 mod update;
 
-use std::net::Ipv6Addr;
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use hr_registry::protocol::{AgentMessage, AgentMetrics, RegistryMessage, ServiceConfig, ServiceState};
 
@@ -34,11 +30,6 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Install rustls crypto provider
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install rustls crypto provider");
-
     info!("HomeRoute Agent starting...");
 
     let cfg = config::AgentConfig::load(CONFIG_PATH)?;
@@ -48,9 +39,6 @@ async fn main() -> Result<()> {
         "Config loaded"
     );
 
-    // Create the proxy (not yet listening — needs routes from HomeRoute)
-    let mut agent_proxy = proxy::AgentProxy::new()?;
-
     // Create metrics collector
     let metrics_collector = Arc::new(MetricsCollector::new());
 
@@ -59,17 +47,6 @@ async fn main() -> Result<()> {
 
     // Create powersave manager
     let powersave_manager = Arc::new(PowersaveManager::new(Arc::clone(&service_manager)));
-
-    // Connect powersave manager to the proxy for wake-on-request
-    agent_proxy.state().set_powersave(Arc::clone(&powersave_manager));
-
-    // Set app ID for WebSocket metrics filtering
-    agent_proxy.state().set_app_id(cfg.service_name.clone());
-
-    // Current assigned IPv6 address (if any)
-    let mut current_ipv6: Option<String> = None;
-    // Proxy task handle
-    let mut proxy_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     // Reconnection loop with exponential backoff
     let mut backoff = INITIAL_BACKOFF_SECS;
@@ -169,10 +146,6 @@ async fn main() -> Result<()> {
                                 backoff = INITIAL_BACKOFF_SECS;
                             }
                             handle_registry_message(
-                                &cfg,
-                                &mut agent_proxy,
-                                &mut current_ipv6,
-                                &mut proxy_handle,
                                 &service_manager,
                                 &powersave_manager,
                                 &state_change_tx,
@@ -193,7 +166,6 @@ async fn main() -> Result<()> {
                         new_state = ?change.new_state,
                         "Service state changed"
                     );
-                    // Could send ServiceStateChanged message here if needed
                 }
             }
         }
@@ -205,10 +177,6 @@ async fn main() -> Result<()> {
         // Drain any remaining messages
         while let Ok(msg) = registry_rx.try_recv() {
             handle_registry_message(
-                &cfg,
-                &mut agent_proxy,
-                &mut current_ipv6,
-                &mut proxy_handle,
                 &service_manager,
                 &powersave_manager,
                 &state_change_tx,
@@ -226,12 +194,7 @@ async fn main() -> Result<()> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_registry_message(
-    cfg: &config::AgentConfig,
-    proxy: &mut proxy::AgentProxy,
-    current_ipv6: &mut Option<String>,
-    proxy_handle: &mut Option<tokio::task::JoinHandle<()>>,
     service_manager: &Arc<RwLock<ServiceManager>>,
     powersave_manager: &Arc<PowersaveManager>,
     state_change_tx: &mpsc::Sender<ServiceStateChange>,
@@ -239,21 +202,8 @@ async fn handle_registry_message(
     msg: RegistryMessage,
 ) {
     match msg {
-        RegistryMessage::Config {
-            ipv6_address,
-            routes,
-            homeroute_auth_url,
-            dashboard_url,
-            services,
-            power_policy,
-            ..
-        } => {
-            info!(
-                routes = routes.len(),
-                ipv6 = ipv6_address,
-                dashboard_url = dashboard_url,
-                "Received full config from HomeRoute"
-            );
+        RegistryMessage::Config { services, power_policy, .. } => {
+            info!("Received config from HomeRoute");
 
             // Update service manager config
             {
@@ -263,55 +213,10 @@ async fn handle_registry_message(
 
             // Update power policy
             powersave_manager.set_policy(&power_policy);
-
-            // Apply IPv6 address
-            if !ipv6_address.is_empty() {
-                apply_ipv6(cfg, current_ipv6, &ipv6_address).await;
-            }
-
-            // Apply routes to proxy
-            if let Err(e) = proxy.apply_routes(&routes, &homeroute_auth_url) {
-                error!("Failed to apply routes: {e}");
-                return;
-            }
-
-            // Set dashboard URL for loading/down pages
-            if !dashboard_url.is_empty() {
-                proxy.state().set_dashboard_url(dashboard_url);
-            }
-
-            // Start or restart the proxy if we have an IPv6 address
-            if let Some(addr_str) = current_ipv6.as_deref() {
-                // Wait briefly for the IPv6 address to pass DAD and become available
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                start_proxy(proxy, proxy_handle, addr_str).await;
-            }
-        }
-
-        RegistryMessage::Ipv6Update { ipv6_address } => {
-            info!(ipv6 = ipv6_address, "IPv6 address updated");
-            apply_ipv6(cfg, current_ipv6, &ipv6_address).await;
-
-            // Restart proxy on new address
-            if let Some(addr_str) = current_ipv6.as_deref() {
-                start_proxy(proxy, proxy_handle, addr_str).await;
-            }
-        }
-
-        RegistryMessage::CertUpdate { routes } => {
-            info!(routes = routes.len(), "Certificate update received");
-            let auth_url = String::new(); // Keep existing auth_url
-            if let Err(e) = proxy.apply_routes(&routes, &auth_url) {
-                error!("Failed to apply cert update: {e}");
-            }
         }
 
         RegistryMessage::Shutdown => {
             info!("Shutdown requested by HomeRoute");
-            proxy.shutdown();
-            if let Some(handle) = proxy_handle.take() {
-                handle.abort();
-            }
             std::process::exit(0);
         }
 
@@ -366,91 +271,9 @@ async fn handle_registry_message(
                 })
                 .await;
         }
-    }
-}
 
-async fn apply_ipv6(
-    cfg: &config::AgentConfig,
-    current_ipv6: &mut Option<String>,
-    new_addr: &str,
-) {
-    // Remove old address if different
-    if let Some(old) = current_ipv6.as_ref() {
-        if old != new_addr {
-            if let Err(e) = ipv6::remove_address(&cfg.interface, old).await {
-                warn!("Failed to remove old IPv6: {e}");
-            }
+        RegistryMessage::ActivityPing { service_type } => {
+            powersave_manager.record_activity(service_type);
         }
     }
-
-    // Add new address
-    if let Err(e) = ipv6::add_address(&cfg.interface, new_addr).await {
-        error!("Failed to add IPv6 {new_addr}: {e}");
-        return;
-    }
-
-    *current_ipv6 = Some(new_addr.to_string());
-}
-
-async fn start_proxy(
-    proxy: &mut proxy::AgentProxy,
-    proxy_handle: &mut Option<tokio::task::JoinHandle<()>>,
-    addr_str: &str,
-) {
-    use std::net::Ipv4Addr;
-
-    // Stop existing proxy
-    proxy.shutdown();
-    if let Some(handle) = proxy_handle.take() {
-        handle.abort();
-        // Give the old listener a moment to release the port
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-
-    let bind_addr_v6: Ipv6Addr = match addr_str.parse() {
-        Ok(a) => a,
-        Err(e) => {
-            error!("Invalid IPv6 address {addr_str}: {e}");
-            return;
-        }
-    };
-
-    // Detect IPv4 address for dual-stack listening
-    let bind_addr_v4: Option<Ipv4Addr> = ipv6::get_ipv4_address("eth0")
-        .await
-        .and_then(|s| s.parse().ok());
-
-    if let Some(ref v4) = bind_addr_v4 {
-        info!(ipv6 = addr_str, ipv4 = %v4, "Starting HTTPS proxy on dual-stack (v6 + v4)");
-    } else {
-        info!(ipv6 = addr_str, "Starting HTTPS proxy on IPv6 only");
-    }
-
-    // Get the shared components needed for the spawned task
-    let listener_handle = proxy.spawn_listener(bind_addr_v6, bind_addr_v4);
-    match listener_handle {
-        Ok(handle) => {
-            *proxy_handle = Some(handle);
-        }
-        Err(e) => {
-            error!("Failed to start proxy listener: {e}");
-        }
-    }
-}
-
-/// Extract base URL from a full URL (e.g., "https://hr.example.com/api/..." -> "https://hr.example.com").
-fn extract_base_url(url: &str) -> Option<String> {
-    // Find scheme separator
-    let scheme_end = url.find("://")?;
-    let after_scheme = &url[scheme_end + 3..];
-
-    // Find end of host (first slash after scheme, or end of string)
-    let host_end = after_scheme.find('/').unwrap_or(after_scheme.len());
-    let host = &after_scheme[..host_end];
-
-    if host.is_empty() {
-        return None;
-    }
-
-    Some(format!("{}://{}", &url[..scheme_end], host))
 }

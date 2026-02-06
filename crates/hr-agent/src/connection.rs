@@ -9,7 +9,6 @@ use tracing::{debug, error, info, warn};
 use hr_registry::protocol::{AgentMessage, RegistryMessage};
 
 use crate::config::AgentConfig;
-use crate::ipv6;
 
 /// Connect to HomeRoute, authenticate, and handle bidirectional communication.
 /// - `registry_tx`: Channel to send received RegistryMessages to the main loop.
@@ -28,28 +27,19 @@ pub async fn run_connection(
 
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
-    // Detect our GUA IPv6 address
-    let ipv6_address = ipv6::get_gua_address("eth0", None).await;
-    if let Some(ref addr) = ipv6_address {
-        info!(addr, "Detected GUA IPv6 address");
-    } else {
-        warn!("No GUA IPv6 address detected on eth0");
-    }
-
     // Detect our IPv4 address
-    let ipv4_address = ipv6::get_ipv4_address("eth0").await;
+    let ipv4_address = detect_ipv4_address("eth0").await;
     if let Some(ref addr) = ipv4_address {
         info!(addr, "Detected IPv4 address");
     } else {
         warn!("No IPv4 address detected on eth0");
     }
 
-    // Send Auth message with our actual IPv6 and IPv4
+    // Send Auth message
     let auth_msg = AgentMessage::Auth {
         token: config.token.clone(),
         service_name: config.service_name.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        ipv6_address,
         ipv4_address,
     };
     let auth_json = serde_json::to_string(&auth_msg)?;
@@ -162,4 +152,29 @@ pub async fn run_connection(
     }
 
     Ok(())
+}
+
+/// Detect the IPv4 address on the given interface (for local DNS A records).
+async fn detect_ipv4_address(interface: &str) -> Option<String> {
+    let output = tokio::process::Command::new("ip")
+        .args(["-4", "-o", "addr", "show", "dev", interface, "scope", "global"])
+        .output()
+        .await
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if let Some(addr_idx) = parts.iter().position(|&p| p == "inet") {
+            if let Some(addr_cidr) = parts.get(addr_idx + 1) {
+                let addr = addr_cidr.split('/').next().unwrap_or(addr_cidr);
+                if addr.starts_with("127.") || addr.starts_with("169.254.") {
+                    continue;
+                }
+                return Some(addr.to_string());
+            }
+        }
+    }
+    None
 }

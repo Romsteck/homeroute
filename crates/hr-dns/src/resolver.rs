@@ -16,12 +16,11 @@ pub struct ResolveResult {
 
 /// Resolve a DNS query through the resolution chain:
 /// 1. DHCP lease hostnames (expand-hosts)
-/// 2. Static records
-/// 3. Application DNS records (container IPv6)
-/// 4. Wildcard local domain (fallback for unknown hosts)
-/// 5. Adblock filter
-/// 6. Cache
-/// 7. Upstream forward
+/// 2. Static records (exact match, then wildcard)
+/// 3. Wildcard local domain (fallback for unknown hosts)
+/// 4. Adblock filter
+/// 5. Cache
+/// 6. Upstream forward
 pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult {
     if query.questions.is_empty() {
         return ResolveResult {
@@ -60,7 +59,7 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
         }
     }
 
-    // 2. Static records
+    // 2. Static records (exact match)
     for static_rec in &config.static_records {
         if static_rec.name.to_lowercase() == *name {
             let matching_type = match static_rec.record_type.to_uppercase().as_str() {
@@ -84,22 +83,34 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
         }
     }
 
-    // 3. Application DNS records (domain → container IPv6)
-    // Check BEFORE wildcard so known apps resolve to their container IP
-    if matches!(qtype, RecordType::AAAA | RecordType::ANY) {
-        let app_store = state_read.app_dns_store.read().await;
-        if let Some(ipv6) = app_store.get(name) {
-            debug!("Resolved {} via app DNS store -> {}", name, ipv6);
-            return ResolveResult {
-                records: vec![DnsRecord::aaaa(name, *ipv6, 60)],
-                rcode: RCODE_NOERROR,
-                cached: false,
-                blocked: false,
-            };
+    // 2b. Static records (wildcard: *.example.com matches foo.example.com)
+    if let Some(dot_pos) = name.find('.') {
+        let wildcard = format!("*.{}", &name[dot_pos + 1..]);
+        for static_rec in &config.static_records {
+            if static_rec.name.to_lowercase() == wildcard {
+                let matching_type = match static_rec.record_type.to_uppercase().as_str() {
+                    "A" => RecordType::A,
+                    "AAAA" => RecordType::AAAA,
+                    "CNAME" => RecordType::CNAME,
+                    _ => continue,
+                };
+
+                if qtype == matching_type || qtype == RecordType::ANY {
+                    if let Some(record) = parse_static_record(name, static_rec, matching_type) {
+                        debug!("Resolved {} via wildcard static record ({})", name, wildcard);
+                        return ResolveResult {
+                            records: vec![record],
+                            rcode: RCODE_NOERROR,
+                            cached: false,
+                            blocked: false,
+                        };
+                    }
+                }
+            }
         }
     }
 
-    // 4. Wildcard local domain (*.mynetwk.biz -> server IP, fallback for unknown hosts)
+    // 3. Wildcard local domain (*.mynetwk.biz -> server IP, fallback for unknown hosts)
     if !config.local_domain.is_empty() {
         let is_local = name.ends_with(&format!(".{}", config.local_domain))
             || *name == config.local_domain;
@@ -155,7 +166,7 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
         }
     }
 
-    // 5. Adblock filter
+    // 4. Adblock filter
     if state_read.adblock_enabled && state_read.adblock.read().await.is_blocked(name) {
         debug!("Blocked {} via adblock", name);
         let records = match state_read.adblock_block_response.as_str() {
@@ -181,7 +192,7 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
         };
     }
 
-    // 6. Cache lookup (including negative cache)
+    // 5. Cache lookup (including negative cache)
     if let Some((cached_records, is_negative)) = state_read.dns_cache.get_with_negative(name, qtype).await {
         if is_negative {
             debug!("Resolved {} via negative cache (NXDOMAIN)", name);
@@ -201,7 +212,7 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
         };
     }
 
-    // 7. Upstream forward
+    // 6. Upstream forward
     let forward_bytes = build_forward_query(query);
 
     match state_read.upstream.forward(&forward_bytes).await {

@@ -93,9 +93,6 @@ pub enum AgentMessage {
         token: String,
         service_name: String,
         version: String,
-        /// Agent's actual GUA IPv6 address (obtained via DHCPv6/SLAAC).
-        #[serde(default)]
-        ipv6_address: Option<String>,
         /// Agent's IPv4 address (for local DNS A records).
         #[serde(default)]
         ipv4_address: Option<String>,
@@ -139,13 +136,6 @@ pub enum RegistryMessage {
     #[serde(rename = "config")]
     Config {
         config_version: u64,
-        ipv6_address: String,
-        routes: Vec<AgentRoute>,
-        ca_pem: String,
-        homeroute_auth_url: String,
-        /// Public HTTPS dashboard URL for loading pages.
-        #[serde(default)]
-        dashboard_url: String,
         /// Services to manage for powersave.
         #[serde(default)]
         services: ServiceConfig,
@@ -153,12 +143,6 @@ pub enum RegistryMessage {
         #[serde(default)]
         power_policy: PowerPolicy,
     },
-    /// Partial update: IPv6 changed (prefix rotation).
-    #[serde(rename = "ipv6_update")]
-    Ipv6Update { ipv6_address: String },
-    /// Partial update: certificates renewed.
-    #[serde(rename = "cert_update")]
-    CertUpdate { routes: Vec<AgentRoute> },
     /// Agent should self-update.
     #[serde(rename = "update_available")]
     UpdateAvailable {
@@ -178,18 +162,118 @@ pub enum RegistryMessage {
         service_type: ServiceType,
         action: ServiceAction,
     },
+    /// Activity ping to keep powersave timer alive.
+    #[serde(rename = "activity_ping")]
+    ActivityPing { service_type: ServiceType },
 }
 
-/// A single route the agent must serve (one per domain).
+// ── Host Agent Protocol ──────────────────────────────────────────────────
+
+/// Messages from host-agent → registry (via WebSocket)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentRoute {
-    pub domain: String,
-    pub target_port: u16,
-    pub cert_pem: String,
-    pub key_pem: String,
-    pub auth_required: bool,
-    #[serde(default)]
-    pub allowed_groups: Vec<String>,
+#[serde(tag = "type", content = "data")]
+pub enum HostAgentMessage {
+    Auth {
+        token: String,
+        host_name: String,
+        version: String,
+    },
+    Heartbeat {
+        uptime_secs: u64,
+        containers_running: u32,
+    },
+    Metrics(HostMetrics),
+    ContainerList(Vec<ContainerInfo>),
+    ExportReady {
+        transfer_id: String,
+        size_bytes: u64,
+    },
+    TransferChunk {
+        transfer_id: String,
+        data: String, // base64-encoded chunk
+    },
+    TransferComplete {
+        transfer_id: String,
+    },
+    ImportComplete {
+        transfer_id: String,
+        container_name: String,
+    },
+    ExportFailed {
+        transfer_id: String,
+        error: String,
+    },
+    ImportFailed {
+        transfer_id: String,
+        error: String,
+    },
+}
+
+/// Host system metrics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostMetrics {
+    pub cpu_percent: f32,
+    pub memory_used_bytes: u64,
+    pub memory_total_bytes: u64,
+    pub disk_used_bytes: u64,
+    pub disk_total_bytes: u64,
+    pub load_avg: [f32; 3],
+}
+
+/// LXC container info reported by host-agent
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerInfo {
+    pub name: String,
+    pub status: String,
+    pub ipv4: Option<String>,
+}
+
+/// Messages from registry → host-agent (via WebSocket)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum HostRegistryMessage {
+    AuthResult {
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    CreateContainer {
+        app_id: String,
+        slug: String,
+        config: String,
+    },
+    DeleteContainer {
+        container_name: String,
+    },
+    StartContainer {
+        container_name: String,
+    },
+    StopContainer {
+        container_name: String,
+    },
+    PushAgentUpdate {
+        version: String,
+        download_url: String,
+        sha256: String,
+    },
+    Shutdown {
+        drain: bool,
+    },
+    StartExport {
+        container_name: String,
+        transfer_id: String,
+    },
+    StartImport {
+        container_name: String,
+        transfer_id: String,
+    },
+    ReceiveChunk {
+        transfer_id: String,
+        data: String, // base64-encoded chunk
+    },
+    TransferComplete {
+        transfer_id: String,
+    },
 }
 
 #[cfg(test)]
@@ -202,7 +286,6 @@ mod tests {
             token: "abc".into(),
             service_name: "test".into(),
             version: "0.1.0".into(),
-            ipv6_address: Some("2a0d:3341:b5b1:7500::18".into()),
             ipv4_address: Some("10.0.0.100".into()),
         };
         let json = serde_json::to_string(&msg).unwrap();
