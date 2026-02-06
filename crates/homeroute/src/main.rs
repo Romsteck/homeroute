@@ -458,22 +458,6 @@ async fn main() -> anyhow::Result<()> {
         drop(reg);
     }
 
-    // ── Register background tasks in service registry ─────────────────
-
-    {
-        let mut reg = service_registry.write().await;
-        for name in &["monitoring"] {
-            reg.insert(name.to_string(), ServiceStatus {
-                name: name.to_string(),
-                state: ServiceState::Running,
-                priority: ServicePriorityLevel::Background,
-                restart_count: 0,
-                last_state_change: now_millis(),
-                error: None,
-            });
-        }
-    }
-
     // ── Agent Registry ──────────────────────────────────────────────
 
     let registry_state_path =
@@ -667,18 +651,8 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // ── Host monitoring & scheduler (Background) ───────────────────────
-
     // Migrate servers.json → hosts.json if needed
     hr_api::routes::hosts::ensure_hosts_file().await;
-
-    // Host monitoring (ping all hosts every 30s)
-    {
-        let host_events = Arc::new(events.host_status.clone());
-        tokio::spawn(async move {
-            hr_servers::monitoring::run_monitoring(host_events).await;
-        });
-    }
 
     // ── SIGHUP handler ─────────────────────────────────────────────────
 
@@ -732,7 +706,7 @@ async fn main() -> anyhow::Result<()> {
         "  Adblock: {} domains blocked",
         adblock.read().await.domain_count()
     );
-    info!("  Servers: monitoring every 30s");
+    info!("  Hosts: status via host-agent WebSocket");
 
     // Wait for shutdown signal
     tokio::signal::ctrl_c().await?;

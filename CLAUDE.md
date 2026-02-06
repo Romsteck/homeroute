@@ -99,6 +99,17 @@ journalctl -u homeroute -f
 curl -s http://localhost:4000/api/health | jq
 ```
 
+## Équipes d'agents (OBLIGATOIRE)
+
+- **TOUJOURS** créer une équipe d'agents (TeamCreate + Task) pour traiter les tâches dès que possible
+- Paralléliser le travail en répartissant les sous-tâches entre plusieurs agents spécialisés
+- Exemples de répartition :
+  - **Tâches fullstack** : un agent backend (Rust/API) + un agent frontend (React/Vite) en parallèle
+  - **Refactoring** : un agent par crate ou module concerné
+  - **Bug fixing** : un agent pour l'investigation + un agent pour le correctif
+  - **Ajout de feature** : un agent pour l'exploration/planification + des agents pour l'implémentation
+- Ne travailler seul (sans équipe) que pour les tâches triviales (correction d'un typo, modification d'une seule ligne, question simple)
+
 ## Règles Frontend (OBLIGATOIRE)
 
 - **JAMAIS** lancer le serveur manuellement (`cargo run`, etc.)

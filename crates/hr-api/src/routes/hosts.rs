@@ -13,6 +13,9 @@ use crate::state::ApiState;
 const HOSTS_FILE: &str = "/data/hosts.json";
 const SSH_KEY_PATH: &str = "/data/ssh/id_rsa";
 const SSH_PUB_KEY_PATH: &str = "/data/ssh/id_rsa.pub";
+const HOST_AGENT_BINARY: &str = "/opt/homeroute/data/agent-binaries/hr-host-agent";
+const HOMEROUTE_LAN_IP: &str = "10.0.0.254";
+const API_PORT: u16 = 4000;
 
 pub fn router() -> Router<ApiState> {
     Router::new()
@@ -200,6 +203,12 @@ async fn add_host(Json(body): Json<AddHostRequest>) -> Json<Value> {
             })
         })
     });
+
+    // Deploy hr-host-agent on the remote host
+    if let Err(e) = deploy_host_agent(&body.host, body.port, &body.username, body.password.as_deref(), &body.name).await {
+        return Json(json!({"success": false, "error": format!("Agent deploy failed: {}", e)}));
+    }
+    tracing::info!("hr-host-agent deployed on {}", body.host);
 
     let id = uuid::Uuid::new_v4().to_string();
     let host = json!({
@@ -393,6 +402,7 @@ async fn host_agent_ws(
 
 async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
     use hr_registry::protocol::{HostAgentMessage, HostRegistryMessage};
+    use hr_common::events::HostStatusEvent;
 
     let registry = match &state.registry {
         Some(r) => r.clone(),
@@ -408,7 +418,6 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
         Ok(Some(Ok(Message::Text(text)))) => {
             match serde_json::from_str::<HostAgentMessage>(&text) {
                 Ok(HostAgentMessage::Auth { token: _, host_name, version }) => {
-                    // Look up host by name in hosts.json
                     let data = load_hosts().await;
                     let host_id = data
                         .get("hosts")
@@ -463,6 +472,9 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
     let (tx, mut rx) = mpsc::channel::<HostRegistryMessage>(32);
     registry.on_host_connected(host_id.clone(), host_name.clone(), tx, version).await;
 
+    // Mark host online
+    update_host_status(&host_id, "online", &state.events.host_status).await;
+
     // Bidirectional message loop
     loop {
         tokio::select! {
@@ -484,6 +496,7 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                             match agent_msg {
                                 HostAgentMessage::Heartbeat { .. } => {
                                     registry.update_host_heartbeat(&host_id).await;
+                                    update_host_last_seen(&host_id).await;
                                 }
                                 HostAgentMessage::Metrics(metrics) => {
                                     registry.update_host_metrics(&host_id, metrics).await;
@@ -507,8 +520,40 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
         }
     }
 
+    // Mark host offline
+    update_host_status(&host_id, "offline", &state.events.host_status).await;
+
     registry.on_host_disconnected(&host_id).await;
     tracing::info!("Host agent disconnected: {} ({})", host_name, host_id);
+}
+
+// ── Agent status helpers ─────────────────────────────────────────────────
+
+async fn update_host_status(
+    host_id: &str,
+    status: &str,
+    host_events: &tokio::sync::broadcast::Sender<hr_common::events::HostStatusEvent>,
+) {
+    let mut data = load_hosts().await;
+    if let Some(host) = find_host_mut(&mut data, host_id) {
+        let now = chrono::Utc::now().to_rfc3339();
+        host["status"] = json!(status);
+        host["lastSeen"] = json!(&now);
+        let _ = save_hosts(&data).await;
+    }
+    let _ = host_events.send(hr_common::events::HostStatusEvent {
+        host_id: host_id.to_string(),
+        status: status.to_string(),
+        latency_ms: None,
+    });
+}
+
+async fn update_host_last_seen(host_id: &str) {
+    let mut data = load_hosts().await;
+    if let Some(host) = find_host_mut(&mut data, host_id) {
+        host["lastSeen"] = json!(chrono::Utc::now().to_rfc3339());
+        let _ = save_hosts(&data).await;
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -567,8 +612,8 @@ async fn ssh_power_action(host: &Value, command: &str) -> Json<Value> {
             "-o", "ConnectTimeout=15",
             "-o", "BatchMode=yes",
             "-p", &port.to_string(),
-            &format!("root@{}", addr),
-            command,
+            &format!("{}@{}", user, addr),
+            &format!("sudo {}", command),
         ])
         .output()
         .await;
@@ -649,7 +694,7 @@ async fn ssh_command(host: &str, port: u16, user: &str, command: &str) -> Result
             "-o", "ConnectTimeout=15",
             "-o", "BatchMode=yes",
             "-p", &port.to_string(),
-            &format!("root@{}", host),
+            &format!("{}@{}", user, host),
             command,
         ])
         .output()
@@ -702,4 +747,77 @@ async fn get_remote_interfaces(
     }
 
     Ok(interfaces)
+}
+
+// ── Host-agent deployment ────────────────────────────────────────────────
+
+async fn deploy_host_agent(host: &str, port: u16, user: &str, password: Option<&str>, host_name: &str) -> Result<(), String> {
+    if tokio::fs::metadata(HOST_AGENT_BINARY).await.is_err() {
+        return Err("hr-host-agent binary not found".to_string());
+    }
+
+    let password = password.ok_or("Password required for agent deployment")?;
+
+    // 1. SCP binary to /tmp/
+    let scp_output = tokio::process::Command::new("scp")
+        .args([
+            "-i", SSH_KEY_PATH,
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "ConnectTimeout=15",
+            "-P", &port.to_string(),
+            HOST_AGENT_BINARY,
+            &format!("{}@{}:/tmp/hr-host-agent", user, host),
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("SCP failed: {}", e))?;
+
+    if !scp_output.status.success() {
+        let stderr = String::from_utf8_lossy(&scp_output.stderr);
+        return Err(format!("SCP failed: {}", stderr));
+    }
+
+    // 2. Install via sshpass + sudo -S (password piped to stdin)
+    let config = format!(
+        r#"homeroute_url = "{HOMEROUTE_LAN_IP}:{API_PORT}"
+token = ""
+host_name = "{host_name}"
+"#,
+    );
+
+    let service_unit = r#"[Unit]
+Description=HomeRoute Host Agent
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/hr-host-agent
+Restart=always
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
+"#;
+
+    // Use a single sudo -S bash -c to run all commands with one password prompt
+    let inner_cmds = format!(
+        r#"mv /tmp/hr-host-agent /usr/local/bin/hr-host-agent && \
+chmod +x /usr/local/bin/hr-host-agent && \
+mkdir -p /etc/hr-host-agent && \
+cat > /etc/hr-host-agent/config.toml << 'CONF'
+{config}CONF
+cat > /etc/systemd/system/hr-host-agent.service << 'SVC'
+{service_unit}SVC
+systemctl daemon-reload && \
+systemctl enable --now hr-host-agent"#,
+    );
+
+    // Escape single quotes in inner_cmds for shell wrapping
+    let escaped = inner_cmds.replace('\'', "'\\''");
+
+    let setup_cmd = format!("echo '{password}' | sudo -S bash -c '{escaped}'");
+
+    ssh_command(host, port, user, &setup_cmd).await?;
+
+    Ok(())
 }
