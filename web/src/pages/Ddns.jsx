@@ -124,20 +124,33 @@ function Ddns() {
         </Button>
       </PageHeader>
 
+      {/* Mode indicator */}
+      {status?.mode === 'relay' && (
+        <div className="mb-4 bg-purple-900/30 border border-purple-700 p-3 flex items-center gap-2">
+          <div className="w-2 h-2 rounded-full bg-purple-400 animate-pulse" />
+          <span className="text-sm text-purple-300">Mode Cloud Relay — Le DNS pointe vers la VPS ({status.vpsIpv4 || '?'})</span>
+        </div>
+      )}
+
       <Section title="Configuration">
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-px">
           <Card title="Enregistrement" icon={Globe}>
             <div className="text-lg font-mono text-blue-400 break-all">
               {status?.config?.recordName || '-'}
             </div>
-            <p className="text-xs text-gray-500 mt-2">AAAA Record</p>
+            <p className="text-xs text-gray-500 mt-2">{status?.recordType || 'AAAA'} Record ({status?.mode === 'relay' ? 'relay' : 'direct'})</p>
           </Card>
 
-          <Card title="IPv6 Actuelle" icon={Wifi}>
+          <Card title={status?.mode === 'relay' ? 'VPS IPv4' : 'IPv6 Actuelle'} icon={Wifi}>
             <div className="text-sm font-mono text-green-400 break-all">
-              {status?.currentIpv6 || 'Non disponible'}
+              {status?.mode === 'relay'
+                ? (status?.vpsIpv4 || 'Non configure')
+                : (status?.currentIpv6 || 'Non disponible')
+              }
             </div>
-            <p className="text-xs text-gray-500 mt-2">Interface enp5s0</p>
+            <p className="text-xs text-gray-500 mt-2">
+              {status?.mode === 'relay' ? 'Cloud Relay VPS' : `Interface ${status?.interface || 'enp5s0'}`}
+            </p>
           </Card>
 
           <Card title="Zone ID" icon={Globe}>
@@ -241,19 +254,24 @@ function Ddns() {
           </Card>
 
           <Card title="Cloudflare Proxy" icon={Globe}>
-            <label className="flex items-center gap-3 cursor-pointer">
+            <label className={`flex items-center gap-3 ${status?.mode === 'relay' ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}>
               <input
                 type="checkbox"
-                checked={status?.config?.proxied ?? true}
+                checked={status?.mode === 'relay' ? false : (status?.config?.proxied ?? true)}
                 onChange={handleToggleProxied}
-                disabled={savingProxied}
-                className="w-4 h-4 border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500 focus:ring-offset-0 cursor-pointer"
+                disabled={savingProxied || status?.mode === 'relay'}
+                className="w-4 h-4 border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
               />
               <span className="text-sm text-gray-300">
                 {savingProxied ? 'Enregistrement...' : 'Proxied'}
               </span>
             </label>
-            <p className="text-xs text-gray-500 mt-2">Activer le proxy Cloudflare sur l'enregistrement DNS</p>
+            <p className="text-xs text-gray-500 mt-2">
+              {status?.mode === 'relay'
+                ? 'Desactive automatiquement en mode Cloud Relay (DNS-only)'
+                : "Activer le proxy Cloudflare sur l'enregistrement DNS"
+              }
+            </p>
           </Card>
         </div>
       </Section>
@@ -263,44 +281,62 @@ function Ddns() {
           <Card title="État" icon={Clock}>
             <dl className="space-y-4">
               <div className="flex justify-between items-center">
+                <dt className="text-gray-400">Mode</dt>
+                <dd className="font-mono text-sm">
+                  {status?.mode === 'relay' ? (
+                    <StatusBadge status="up">Relay (A)</StatusBadge>
+                  ) : (
+                    <StatusBadge status="unknown">Direct (AAAA)</StatusBadge>
+                  )}
+                </dd>
+              </div>
+              <div className="flex justify-between items-center">
                 <dt className="text-gray-400">Dernière mise à jour</dt>
                 <dd className="font-mono text-sm">
                   {status?.lastUpdate || 'Jamais'}
                 </dd>
               </div>
               <div className="flex justify-between items-center">
-                <dt className="text-gray-400">Dernière IP enregistrée</dt>
+                <dt className="text-gray-400">IP Cloudflare</dt>
                 <dd className="font-mono text-sm text-purple-400 break-all">
-                  {status?.lastIp || '-'}
+                  {status?.cloudflareIp || '-'}
                 </dd>
               </div>
               <div className="flex justify-between items-center">
-                <dt className="text-gray-400">État</dt>
+                <dt className="text-gray-400">Synchronisation</dt>
                 <dd>
-                  {status?.currentIpv6 ? (
-                    <StatusBadge status="up">Connecté</StatusBadge>
+                  {status?.inSync ? (
+                    <StatusBadge status="up">En sync</StatusBadge>
                   ) : (
-                    <StatusBadge status="down">Pas d&apos;IPv6</StatusBadge>
+                    <StatusBadge status="down">Desynchronise</StatusBadge>
                   )}
                 </dd>
               </div>
             </dl>
           </Card>
 
-          <Card title="Automatisation" icon={RefreshCw}>
+          <Card title="Gestion DNS" icon={RefreshCw}>
             <div className="space-y-3">
               <div className="bg-gray-900 p-3">
-                <div className="text-sm font-semibold mb-1">Cron Job</div>
-                <code className="text-xs text-green-400">*/2 * * * * /usr/local/bin/cloudflare-ddns-v6.sh</code>
-                <p className="text-xs text-gray-500 mt-2">Exécuté toutes les 2 minutes</p>
+                <div className="text-sm font-semibold mb-1">Mise à jour</div>
+                <p className="text-xs text-gray-400">
+                  Utilisez le bouton &quot;Forcer la mise à jour&quot; pour synchroniser l&apos;enregistrement DNS Cloudflare.
+                </p>
               </div>
               <div className="bg-gray-900 p-3">
-                <div className="text-sm font-semibold mb-1">Script</div>
-                <code className="text-xs text-gray-400">/usr/local/bin/cloudflare-ddns-v6.sh</code>
+                <div className="text-sm font-semibold mb-1">Type d&apos;enregistrement</div>
+                <code className="text-xs text-green-400">
+                  {status?.mode === 'relay'
+                    ? `A → ${status?.vpsIpv4 || '?'} (VPS relay)`
+                    : `AAAA → ${status?.currentIpv6 || '?'} (direct IPv6)`
+                  }
+                </code>
               </div>
               <div className="bg-gray-900 p-3">
-                <div className="text-sm font-semibold mb-1">Configuration</div>
-                <code className="text-xs text-gray-400">/etc/cloudflare-ddns.conf</code>
+                <div className="text-sm font-semibold mb-1">Basculement auto</div>
+                <p className="text-xs text-gray-400">
+                  Le DNS bascule automatiquement entre A (relay) et AAAA (direct) via la page Cloud Relay.
+                </p>
               </div>
             </div>
           </Card>

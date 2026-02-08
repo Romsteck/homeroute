@@ -321,6 +321,37 @@ pub async fn delete_a_record_by_name(
     Ok(Some(record_id))
 }
 
+/// Get the content (IPv4 address) of an existing A record.
+pub async fn get_a_record_content(
+    token: &str,
+    zone_id: &str,
+    record_name: &str,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let url = format!(
+        "{}/zones/{}/dns_records?type=A&name={}",
+        CF_API_BASE, zone_id, record_name
+    );
+
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    check_cf_errors(&body)?;
+
+    body.get("result")
+        .and_then(|r| r.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|r| r.get("content"))
+        .and_then(|c| c.as_str())
+        .map(String::from)
+        .ok_or_else(|| "Record not found".to_string())
+}
+
 /// Get the content (IPv6 address) of an existing AAAA record.
 pub async fn get_aaaa_record_content(
     token: &str,
@@ -363,13 +394,13 @@ pub async fn switch_to_relay_dns(
     let main_wildcard = format!("*.{}", base_domain);
     let code_wildcard = format!("*.code.{}", base_domain);
 
-    // 1. Upsert A record for *.base_domain → vps_ipv4 (proxied)
-    upsert_a_record(token, zone_id, &main_wildcard, vps_ipv4, true).await?;
-    info!(domain = %main_wildcard, ipv4 = vps_ipv4, "Relay DNS: set A record");
+    // 1. Upsert A record for *.base_domain → vps_ipv4 (DNS-only, no Cloudflare proxy)
+    upsert_a_record(token, zone_id, &main_wildcard, vps_ipv4, false).await?;
+    info!(domain = %main_wildcard, ipv4 = vps_ipv4, "Relay DNS: set A record (DNS-only)");
 
-    // 2. Upsert A record for *.code.base_domain → vps_ipv4 (proxied)
-    upsert_a_record(token, zone_id, &code_wildcard, vps_ipv4, true).await?;
-    info!(domain = %code_wildcard, ipv4 = vps_ipv4, "Relay DNS: set A record");
+    // 2. Upsert A record for *.code.base_domain → vps_ipv4 (DNS-only)
+    upsert_a_record(token, zone_id, &code_wildcard, vps_ipv4, false).await?;
+    info!(domain = %code_wildcard, ipv4 = vps_ipv4, "Relay DNS: set A record (DNS-only)");
 
     // 3. Delete AAAA record for *.base_domain (if exists)
     if let Some(id) = delete_record_by_name(token, zone_id, &main_wildcard).await? {

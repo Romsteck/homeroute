@@ -299,3 +299,13 @@ pub struct CloudRelayEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
+
+/// Command sent from the API to the tunnel client (e.g. push binary update).
+pub enum CloudRelayCommand {
+    /// Push a new binary to the VPS via the QUIC tunnel.
+    PushBinaryUpdate {
+        binary_data: Vec<u8>,
+        sha256: String,
+        response_tx: tokio::sync::oneshot::Sender<Result<String, String>>,
+    },
+}

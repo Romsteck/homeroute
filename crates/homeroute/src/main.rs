@@ -354,43 +354,61 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Cloud Relay tunnel client (Critical — only if enabled)
-    if env.cloud_relay_enabled {
-        if let Some(ref relay_host) = env.cloud_relay_host {
-            let relay_host = relay_host.clone();
-            let relay_port = env.cloud_relay_quic_port;
-            let data_dir = env.data_dir.clone();
-            let proxy_state_c = proxy_state.clone();
-            let tls_config_c = tls_config.clone();
-            let events_c = events.clone();
-            let reg = service_registry.clone();
-            spawn_supervised(
-                "cloud-relay-tunnel",
-                ServicePriority::Critical,
-                reg,
-                move || {
-                    let relay_host = relay_host.clone();
-                    let data_dir = data_dir.clone();
-                    let proxy_state = proxy_state_c.clone();
-                    let tls_config = tls_config_c.clone();
-                    let events = events_c.clone();
-                    async move {
-                        run_tunnel_client(
-                            &relay_host,
-                            relay_port,
-                            &data_dir,
-                            proxy_state,
-                            tls_config,
-                            events,
-                        )
-                        .await
-                    }
-                },
-            );
-            info!(port = relay_port, "Cloud relay tunnel client started");
-        } else {
-            warn!("CLOUD_RELAY_ENABLED=true but CLOUD_RELAY_HOST not set");
-        }
+    // Cloud Relay command channel (API → tunnel client for binary updates)
+    let (cloud_relay_cmd_tx, cloud_relay_cmd_rx) =
+        tokio::sync::mpsc::channel::<hr_common::events::CloudRelayCommand>(4);
+    let cloud_relay_cmd_rx = Arc::new(tokio::sync::Mutex::new(cloud_relay_cmd_rx));
+
+    // Cloud Relay enabled watch channel (API toggles, tunnel client reacts)
+    let (cloud_relay_enabled_tx, cloud_relay_enabled_rx) =
+        tokio::sync::watch::channel(env.cloud_relay_enabled);
+
+    // Shared cloud relay status (written by tunnel client, read by API)
+    let cloud_relay_status: Arc<tokio::sync::RwLock<Option<hr_api::state::CloudRelayInfo>>> =
+        Arc::new(tokio::sync::RwLock::new(None));
+
+    // Cloud Relay tunnel client — always spawned if host configured, waits for enable signal
+    if let Some(ref relay_host) = env.cloud_relay_host {
+        let relay_host = relay_host.clone();
+        let relay_port = env.cloud_relay_quic_port;
+        let data_dir = env.data_dir.clone();
+        let proxy_state_c = proxy_state.clone();
+        let tls_config_c = tls_config.clone();
+        let events_c = events.clone();
+        let cmd_rx = cloud_relay_cmd_rx.clone();
+        let enabled_rx = cloud_relay_enabled_rx.clone();
+        let status_handle = cloud_relay_status.clone();
+        let reg = service_registry.clone();
+        spawn_supervised(
+            "cloud-relay-tunnel",
+            ServicePriority::Critical,
+            reg,
+            move || {
+                let relay_host = relay_host.clone();
+                let data_dir = data_dir.clone();
+                let proxy_state = proxy_state_c.clone();
+                let tls_config = tls_config_c.clone();
+                let events = events_c.clone();
+                let cmd_rx = cmd_rx.clone();
+                let enabled_rx = enabled_rx.clone();
+                let status_handle = status_handle.clone();
+                async move {
+                    run_tunnel_client(
+                        &relay_host,
+                        relay_port,
+                        &data_dir,
+                        proxy_state,
+                        tls_config,
+                        events,
+                        cmd_rx,
+                        enabled_rx,
+                        status_handle,
+                    )
+                    .await
+                }
+            },
+        );
+        info!(port = relay_port, "Cloud relay tunnel supervisor started");
     }
 
     // ── IPv6 Prefix Delegation + RA ─────────────────────────────────
@@ -554,7 +572,9 @@ async fn main() -> anyhow::Result<()> {
         registry: Some(registry.clone()),
         migrations: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         dataverse_schemas: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        cloud_relay_status: Arc::new(tokio::sync::RwLock::new(None)),
+        cloud_relay_status: cloud_relay_status.clone(),
+        cloud_relay_enabled: cloud_relay_enabled_tx,
+        cloud_relay_cmd_tx: Some(cloud_relay_cmd_tx),
     };
 
     let api_router = hr_api::build_router(api_state);
@@ -778,14 +798,52 @@ async fn run_tunnel_client(
     proxy_state: Arc<ProxyState>,
     tls_config: Arc<rustls::ServerConfig>,
     events: Arc<EventBus>,
+    cmd_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<hr_common::events::CloudRelayCommand>>>,
+    mut enabled_rx: tokio::sync::watch::Receiver<bool>,
+    status_handle: Arc<tokio::sync::RwLock<Option<hr_api::state::CloudRelayInfo>>>,
 ) -> anyhow::Result<()> {
-    use hr_common::events::{CloudRelayEvent, CloudRelayStatus};
+    use hr_common::events::{CloudRelayCommand, CloudRelayEvent, CloudRelayStatus};
     use hr_tunnel::protocol::StreamHeader;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
     use tokio_rustls::TlsAcceptor;
 
+    // Helper: update shared status for API
+    let update_status = |status_handle: &Arc<tokio::sync::RwLock<Option<hr_api::state::CloudRelayInfo>>>,
+                         status: CloudRelayStatus,
+                         vps_ipv4: Option<String>| {
+        let handle = status_handle.clone();
+        async move {
+            *handle.write().await = Some(hr_api::state::CloudRelayInfo {
+                status,
+                vps_ipv4,
+                latency_ms: None,
+                active_streams: None,
+            });
+        }
+    };
+
+    // ── Wait until relay is enabled ──────────────────────────────────
+    loop {
+        if *enabled_rx.borrow_and_update() {
+            break;
+        }
+        info!("Cloud relay disabled, tunnel waiting for enable signal...");
+        update_status(&status_handle, CloudRelayStatus::Disconnected, None).await;
+        let _ = events.cloud_relay.send(CloudRelayEvent {
+            status: CloudRelayStatus::Disconnected,
+            latency_ms: None,
+            active_streams: None,
+            message: Some("Waiting for enable".to_string()),
+        });
+        enabled_rx
+            .changed()
+            .await
+            .map_err(|_| anyhow::anyhow!("Enabled watch channel closed"))?;
+    }
+
+    // ── Connect to VPS ───────────────────────────────────────────────
     let relay_dir = data_dir.join("cloud-relay");
 
     // Load mTLS client certificates
@@ -797,10 +855,14 @@ async fn run_tunnel_client(
         hr_tunnel::quic::build_client_config(&client_pem, &client_key_pem, &ca_pem)?;
 
     // Create QUIC endpoint (bind ephemeral port)
-    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
+    let mut endpoint = quinn::Endpoint::client("[::]:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
 
-    let server_addr: SocketAddr = format!("{}:{}", relay_host, relay_port).parse()?;
+    // Resolve hostname to IP (SocketAddr::parse only accepts IPs, not hostnames)
+    let server_addr = tokio::net::lookup_host(format!("{}:{}", relay_host, relay_port))
+        .await?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Failed to resolve relay host: {}", relay_host))?;
     let server_name = relay_host.to_string();
 
     info!(host = %relay_host, port = relay_port, "Connecting QUIC tunnel to cloud relay...");
@@ -817,6 +879,9 @@ async fn run_tunnel_client(
 
     info!("QUIC tunnel connected to {}", connection.remote_address());
 
+    // Read VPS IPv4 from config for status
+    let vps_ipv4 = load_relay_vps_ipv4(data_dir);
+    update_status(&status_handle, CloudRelayStatus::Connected, vps_ipv4).await;
     let _ = events.cloud_relay.send(CloudRelayEvent {
         status: CloudRelayStatus::Connected,
         latency_ms: None,
@@ -826,19 +891,55 @@ async fn run_tunnel_client(
 
     let tls_acceptor = TlsAcceptor::from(tls_config);
 
+    // Lock the command receiver for this tunnel session
+    let mut cmd_rx = cmd_rx.lock().await;
+
     // Accept incoming bidirectional streams (each = one TCP connection from the internet)
     loop {
-        let (mut quic_send, mut quic_recv) = match connection.accept_bi().await {
-            Ok(streams) => streams,
-            Err(e) => {
-                warn!("QUIC tunnel closed: {}", e);
-                let _ = events.cloud_relay.send(CloudRelayEvent {
-                    status: CloudRelayStatus::Disconnected,
-                    latency_ms: None,
-                    active_streams: None,
-                    message: Some(format!("Tunnel closed: {}", e)),
-                });
-                return Err(e.into());
+        let (mut quic_send, mut quic_recv) = tokio::select! {
+            result = connection.accept_bi() => {
+                match result {
+                    Ok(streams) => streams,
+                    Err(e) => {
+                        warn!("QUIC tunnel closed: {}", e);
+                        update_status(&status_handle, CloudRelayStatus::Disconnected, None).await;
+                        let _ = events.cloud_relay.send(CloudRelayEvent {
+                            status: CloudRelayStatus::Disconnected,
+                            latency_ms: None,
+                            active_streams: None,
+                            message: Some(format!("Tunnel closed: {}", e)),
+                        });
+                        return Err(e.into());
+                    }
+                }
+            }
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(CloudRelayCommand::PushBinaryUpdate { binary_data, sha256, response_tx }) => {
+                        let result = push_binary_update(&connection, &binary_data, &sha256).await;
+                        let _ = response_tx.send(result);
+                    }
+                    None => {
+                        // Channel closed, continue accepting streams
+                    }
+                }
+                continue;
+            }
+            _ = enabled_rx.changed() => {
+                if !*enabled_rx.borrow() {
+                    info!("Cloud relay disabled by user, closing tunnel");
+                    connection.close(0u32.into(), b"disabled");
+                    update_status(&status_handle, CloudRelayStatus::Disconnected, None).await;
+                    let _ = events.cloud_relay.send(CloudRelayEvent {
+                        status: CloudRelayStatus::Disconnected,
+                        latency_ms: None,
+                        active_streams: None,
+                        message: Some("Tunnel disabled by user".to_string()),
+                    });
+                    // Return error so supervisor restarts — will block at wait-for-enable
+                    anyhow::bail!("Cloud relay disabled");
+                }
+                continue;
             }
         };
 
@@ -954,6 +1055,55 @@ async fn run_tunnel_client(
             }
         });
     }
+}
+
+/// Push a binary update to the VPS via a QUIC unidirectional stream.
+/// Format: [4-byte length][JSON ControlMessage::BinaryUpdate][raw binary bytes]
+async fn push_binary_update(
+    connection: &quinn::Connection,
+    binary_data: &[u8],
+    sha256: &str,
+) -> Result<String, String> {
+    use hr_tunnel::protocol::ControlMessage;
+
+    // Open a uni stream to the VPS
+    let mut send = connection
+        .open_uni()
+        .await
+        .map_err(|e| format!("Failed to open QUIC stream: {}", e))?;
+
+    // Send the control message header
+    let msg = ControlMessage::BinaryUpdate {
+        size: binary_data.len() as u64,
+        sha256: sha256.to_string(),
+    };
+    let encoded = msg
+        .encode()
+        .map_err(|e| format!("Failed to encode message: {}", e))?;
+    send.write_all(&encoded)
+        .await
+        .map_err(|e| format!("Failed to send header: {}", e))?;
+
+    // Send the raw binary data
+    send.write_all(binary_data)
+        .await
+        .map_err(|e| format!("Failed to send binary: {}", e))?;
+
+    send.finish()
+        .map_err(|e| format!("Failed to finish stream: {}", e))?;
+
+    Ok(format!(
+        "Binary ({} bytes) pushed to VPS, service restarting",
+        binary_data.len()
+    ))
+}
+
+/// Read VPS IPv4 from relay config.json (best-effort).
+fn load_relay_vps_ipv4(data_dir: &std::path::Path) -> Option<String> {
+    let path = data_dir.join("cloud-relay/config.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    v.get("vps_ipv4")?.as_str().map(|s| s.to_string())
 }
 
 // ── HTTPS server ───────────────────────────────────────────────────────

@@ -2,7 +2,7 @@ use hr_adblock::AdblockEngine;
 use hr_auth::AuthService;
 use hr_acme::AcmeManager;
 use hr_common::config::EnvConfig;
-use hr_common::events::{CloudRelayStatus, EventBus, MigrationPhase};
+use hr_common::events::{CloudRelayCommand, CloudRelayStatus, EventBus, MigrationPhase};
 use hr_common::service_registry::SharedServiceRegistry;
 use hr_dns::SharedDnsState;
 use hr_dhcp::SharedDhcpState;
@@ -98,6 +98,12 @@ pub struct ApiState {
 
     /// Live cloud relay connection status.
     pub cloud_relay_status: Arc<RwLock<Option<CloudRelayInfo>>>,
+
+    /// Runtime-mutable cloud relay enabled flag (watch channel: API writes, tunnel reads).
+    pub cloud_relay_enabled: tokio::sync::watch::Sender<bool>,
+
+    /// Channel to send commands to the tunnel client (e.g. push binary update).
+    pub cloud_relay_cmd_tx: Option<tokio::sync::mpsc::Sender<CloudRelayCommand>>,
 
     /// Path to dns-dhcp-config.json
     pub dns_dhcp_config_path: PathBuf,

@@ -21,16 +21,30 @@ pub fn router() -> Router<ApiState> {
 async fn status(State(state): State<ApiState>) -> Json<Value> {
     let env = &state.env;
     let interface = &env.cf_interface;
+    let relay_enabled = *state.cloud_relay_enabled.borrow();
 
     // Get current IPv6 address
     let ipv6 = get_ipv6_address(interface).await;
 
-    // Get Cloudflare record if configured
+    // Load VPS IPv4 if relay mode
+    let vps_ipv4 = if relay_enabled {
+        load_relay_vps_ipv4(&env.data_dir)
+    } else {
+        None
+    };
+
+    // Get Cloudflare record if configured (A record in relay mode, AAAA in direct mode)
     let cf_ip = match (&env.cf_api_token, &env.cf_zone_id, &env.cf_record_name) {
         (Some(token), Some(zone_id), Some(record_name)) => {
-            cloudflare::get_aaaa_record_content(token, zone_id, record_name)
-                .await
-                .ok()
+            if relay_enabled {
+                cloudflare::get_a_record_content(token, zone_id, record_name)
+                    .await
+                    .ok()
+            } else {
+                cloudflare::get_aaaa_record_content(token, zone_id, record_name)
+                    .await
+                    .ok()
+            }
         }
         _ => None,
     };
@@ -38,6 +52,15 @@ async fn status(State(state): State<ApiState>) -> Json<Value> {
     let configured = env.cf_api_token.is_some()
         && env.cf_zone_id.is_some()
         && env.cf_record_name.is_some();
+
+    // Determine sync status
+    let in_sync = if relay_enabled {
+        // In relay mode: A record should match VPS IPv4
+        cf_ip.as_deref() == vps_ipv4.as_deref() && vps_ipv4.is_some()
+    } else {
+        // In direct mode: AAAA record should match on-prem IPv6
+        ipv6.as_deref() == cf_ip.as_deref()
+    };
 
     // Read last update log
     let log = tokio::fs::read_to_string("/data/ddns.log")
@@ -59,14 +82,20 @@ async fn status(State(state): State<ApiState>) -> Json<Value> {
         l.trim_start_matches('[').split(']').next().unwrap_or("").to_string()
     });
 
+    let mode = if relay_enabled { "relay" } else { "direct" };
+    let record_type = if relay_enabled { "A" } else { "AAAA" };
+
     Json(json!({
         "success": true,
         "status": {
             "configured": configured,
             "interface": interface,
+            "mode": mode,
+            "recordType": record_type,
             "currentIpv6": ipv6,
+            "vpsIpv4": vps_ipv4,
             "cloudflareIp": cf_ip,
-            "inSync": ipv6.as_deref() == cf_ip.as_deref(),
+            "inSync": in_sync,
             "lastUpdate": last_update,
             "lastIp": cf_ip,
             "config": {
@@ -82,6 +111,7 @@ async fn status(State(state): State<ApiState>) -> Json<Value> {
 
 async fn force_update(State(state): State<ApiState>) -> Json<Value> {
     let env = &state.env;
+    let relay_enabled = *state.cloud_relay_enabled.borrow();
 
     let token = match &env.cf_api_token {
         Some(t) => t,
@@ -97,13 +127,13 @@ async fn force_update(State(state): State<ApiState>) -> Json<Value> {
     };
 
     // Cloud relay mode: update A record with VPS IPv4
-    if env.cloud_relay_enabled {
-        let vps_ipv4 = match &env.cloud_relay_host {
-            Some(host) => host.clone(),
-            None => return Json(json!({"success": false, "error": "Cloud relay enabled but CLOUD_RELAY_HOST not configured"})),
+    if relay_enabled {
+        let vps_ipv4 = match load_relay_vps_ipv4(&env.data_dir) {
+            Some(ip) => ip,
+            None => return Json(json!({"success": false, "error": "Cloud relay active mais IPv4 VPS introuvable dans la config"})),
         };
 
-        match cloudflare::upsert_a_record(token, zone_id, record_name, &vps_ipv4, env.cf_proxied).await {
+        match cloudflare::upsert_a_record(token, zone_id, record_name, &vps_ipv4, false).await {
             Ok(_record_id) => {
                 log_ddns(&format!("Updated {} to A {} (relay mode)", record_name, vps_ipv4)).await;
                 Json(json!({"success": true, "ipv4": vps_ipv4, "mode": "relay"}))
@@ -230,6 +260,14 @@ async fn get_ipv6_address(interface: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Load VPS IPv4 from cloud-relay config.json.
+fn load_relay_vps_ipv4(data_dir: &std::path::Path) -> Option<String> {
+    let path = data_dir.join("cloud-relay/config.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    v.get("vps_ipv4")?.as_str().map(|s| s.to_string())
 }
 
 async fn log_ddns(message: &str) {

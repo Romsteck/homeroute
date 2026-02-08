@@ -32,3 +32,4 @@ ipnet = { workspace = true }
 ring = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
+sha2 = "0.10"
