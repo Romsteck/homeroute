@@ -29,6 +29,8 @@ pub struct EventBus {
     pub host_power: broadcast::Sender<HostPowerEvent>,
     /// Cloud relay status events (tunnel client → websocket)
     pub cloud_relay: broadcast::Sender<CloudRelayEvent>,
+    /// Certificate ready events (ACME → main for dynamic TLS loading)
+    pub cert_ready: broadcast::Sender<CertReadyEvent>,
 }
 
 impl EventBus {
@@ -47,6 +49,7 @@ impl EventBus {
             host_metrics: broadcast::channel(64).0,
             host_power: broadcast::channel(64).0,
             cloud_relay: broadcast::channel(64).0,
+            cert_ready: broadcast::channel(16).0,
         }
     }
 }
@@ -298,6 +301,15 @@ pub struct CloudRelayEvent {
     pub active_streams: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// Emitted when a new TLS certificate is ready to be loaded.
+#[derive(Debug, Clone)]
+pub struct CertReadyEvent {
+    pub slug: String,
+    pub wildcard_domain: String,
+    pub cert_path: String,
+    pub key_path: String,
 }
 
 /// Command sent from the API to the tunnel client (e.g. push binary update).

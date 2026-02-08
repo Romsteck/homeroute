@@ -101,11 +101,19 @@ async fn enable_relay(
 
     // Switch DNS to relay mode
     if let (Some(token), Some(zone_id)) = (&state.env.cf_api_token, &state.env.cf_zone_id) {
+        // Collect app slugs for per-app wildcard DNS records
+        let app_slugs: Vec<String> = if let Some(ref registry) = state.registry {
+            registry.list_applications().await.iter().map(|a| a.slug.clone()).collect()
+        } else {
+            vec![]
+        };
+
         hr_registry::cloudflare::switch_to_relay_dns(
             token,
             zone_id,
             &state.env.base_domain,
             &relay_config.vps_ipv4,
+            &app_slugs,
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -141,11 +149,19 @@ async fn disable_relay(
         let ipv6 = get_public_ipv6(&state.env.cf_interface)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+        // Collect app slugs for per-app wildcard DNS records
+        let app_slugs: Vec<String> = if let Some(ref registry) = state.registry {
+            registry.list_applications().await.iter().map(|a| a.slug.clone()).collect()
+        } else {
+            vec![]
+        };
+
         hr_registry::cloudflare::switch_to_direct_dns(
             token,
             zone_id,
             &state.env.base_domain,
             &ipv6,
+            &app_slugs,
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;

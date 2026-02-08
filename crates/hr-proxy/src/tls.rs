@@ -90,12 +90,18 @@ impl ResolvesServerCert for SniResolver {
             return Some(key);
         }
 
-        // Try wildcard match (e.g., *.example.com for sub.example.com)
-        if let Some(dot_pos) = server_name.find('.') {
-            let wildcard = format!("*.{}", &server_name[dot_pos + 1..]);
+        // Walk up domain levels trying wildcard matches (most-specific first).
+        // For "code.www.mynetwk.biz":
+        //   1. Try *.www.mynetwk.biz  → matches per-app cert
+        //   2. Try *.mynetwk.biz      → matches global cert
+        let mut remaining = server_name;
+        while let Some(dot_pos) = remaining.find('.') {
+            let parent = &remaining[dot_pos + 1..];
+            let wildcard = format!("*.{}", parent);
             if let Some(key) = certs.get(&wildcard).cloned() {
                 return Some(key);
             }
+            remaining = parent;
         }
 
         // Use fallback certificate if available
@@ -165,6 +171,20 @@ impl TlsManager {
         self.resolver.insert(domain.to_string(), Arc::new(certified_key));
         info!("Loaded TLS certificate for domain: {} (from {})", domain, cert_path);
         Ok(())
+    }
+
+    /// Load a CertifiedKey from PEM file paths without inserting it
+    pub fn load_cert_from_files(&self, cert_path: &std::path::Path, key_path: &std::path::Path) -> Result<Arc<CertifiedKey>> {
+        let certified_key = load_certified_key_from_paths(
+            &cert_path.to_string_lossy(),
+            &key_path.to_string_lossy(),
+        )?;
+        Ok(Arc::new(certified_key))
+    }
+
+    /// Insert a certified key for a domain pattern (e.g. "*.mynetwk.biz")
+    pub fn add_cert(&self, domain: &str, key: Arc<CertifiedKey>) {
+        self.resolver.insert(domain.to_string(), key);
     }
 
     /// Set the fallback certificate from PEM file paths (for ACME/Let's Encrypt certs)

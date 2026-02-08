@@ -46,8 +46,6 @@ async fn save_rp_config(state: &ApiState, config: &Value) -> Result<(), String> 
 
 /// Sync all routes to rust-proxy-config.json and reload proxy
 async fn sync_and_reload(state: &ApiState) -> Result<(), String> {
-    use hr_acme::WildcardType;
-
     let rp_config = load_rp_config(state).await?;
     let base_domain = rp_config
         .get("baseDomain")
@@ -124,10 +122,10 @@ async fn sync_and_reload(state: &ApiState) -> Result<(), String> {
     if let Ok(new_proxy_config) =
         hr_proxy::ProxyConfig::load_from_file(proxy_config_path)
     {
-        // Load ACME wildcard certificates into TLS manager
-        for wt in [WildcardType::Main, WildcardType::Code] {
-            if let Ok(cert_info) = state.acme.get_certificate(wt) {
-                let wildcard_domain = wt.domain_pattern(&base_domain);
+        // Load all ACME wildcard certificates into TLS manager (global, legacy code, per-app)
+        if let Ok(certs) = state.acme.list_certificates() {
+            for cert_info in &certs {
+                let wildcard_domain = cert_info.wildcard_type.domain_pattern(&base_domain);
                 if let Err(e) = state.tls_manager.load_certificate_from_pem(
                     &wildcard_domain,
                     &cert_info.cert_path,
@@ -389,8 +387,6 @@ async fn certificates_status(State(state): State<ApiState>) -> Json<Value> {
 }
 
 async fn renew_certificates(State(state): State<ApiState>) -> Json<Value> {
-    use hr_acme::WildcardType;
-
     let candidates = match state.acme.certificates_needing_renewal() {
         Ok(c) => c,
         Err(e) => return Json(json!({"success": false, "error": format!("{e}")})),

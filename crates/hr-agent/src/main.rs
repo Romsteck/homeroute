@@ -261,11 +261,12 @@ async fn handle_registry_message(
             // Update power policy
             powersave_manager.set_policy(&power_policy);
 
-            // Build and publish routes
+            // Build and publish routes using per-app subdomain scheme:
+            // app.{slug}.{base}, {api}.{slug}.{base}, code.{slug}.{base}
             let mut routes = Vec::new();
             if let Some(ref fe) = frontend {
                 routes.push(AgentRoute {
-                    domain: format!("{}.{}", slug, base_domain),
+                    domain: format!("app.{}.{}", slug, base_domain),
                     target_port: fe.target_port,
                     service_type: ServiceType::App,
                     auth_required: fe.auth_required,
@@ -274,7 +275,7 @@ async fn handle_registry_message(
             }
             for api in &apis {
                 routes.push(AgentRoute {
-                    domain: format!("{}-{}.{}", slug, api.slug, base_domain),
+                    domain: format!("{}.{}.{}", api.slug, slug, base_domain),
                     target_port: api.target_port,
                     service_type: ServiceType::App,
                     auth_required: api.auth_required,
@@ -283,7 +284,7 @@ async fn handle_registry_message(
             }
             if code_server_enabled {
                 routes.push(AgentRoute {
-                    domain: format!("{}.code.{}", slug, base_domain),
+                    domain: format!("code.{}.{}", slug, base_domain),
                     target_port: 13337,
                     service_type: ServiceType::CodeServer,
                     auth_required: true,

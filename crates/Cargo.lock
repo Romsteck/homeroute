@@ -894,6 +894,7 @@ dependencies = [
  "argon2",
  "chrono",
  "hex",
+ "hr-acme",
  "hr-common",
  "hr-lxd",
  "rand",

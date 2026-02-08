@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 
+use hr_acme::AcmeManager;
 use hr_common::config::EnvConfig;
 use hr_common::events::{AgentMetricsEvent, AgentStatusEvent, AgentUpdateEvent, AgentUpdateStatus, EventBus, HostPowerEvent, HostPowerState, PowerAction, WakeResult};
 use hr_lxd::LxdClient;
@@ -67,6 +68,8 @@ pub struct AgentRegistry {
     pub transfer_container_names: Arc<RwLock<HashMap<String, String>>>,
     /// Host power state machine for WOL dedup, conflict detection, and progress tracking.
     host_power_states: Arc<RwLock<HashMap<String, HostPowerInfo>>>,
+    /// ACME manager for per-app wildcard certificate lifecycle.
+    acme: RwLock<Option<Arc<AcmeManager>>>,
 }
 
 impl AgentRegistry {
@@ -102,7 +105,15 @@ impl AgentRegistry {
             exec_signals: Arc::new(RwLock::new(HashMap::new())),
             transfer_container_names: Arc::new(RwLock::new(HashMap::new())),
             host_power_states: Arc::new(RwLock::new(HashMap::new())),
+            acme: RwLock::new(None),
         }
+    }
+
+    /// Set the ACME manager for per-app wildcard certificate lifecycle.
+    /// Called after the ACME manager is initialized in the main supervisor.
+    pub async fn set_acme(&self, acme: Arc<AcmeManager>) {
+        *self.acme.write().await = Some(acme);
+        info!("ACME manager registered with agent registry");
     }
 
     // ── Application CRUD ────────────────────────────────────────
@@ -222,6 +233,24 @@ impl AgentRegistry {
             message: Some("Deploiement termine".to_string()),
         });
 
+        // Request per-app wildcard certificate (*.{slug}.{base_domain})
+        {
+            let acme_guard = self.acme.read().await;
+            if let Some(acme) = acme_guard.clone() {
+                let slug_owned = slug.to_string();
+                tokio::spawn(async move {
+                    match acme.request_app_wildcard(&slug_owned).await {
+                        Ok(_cert) => {
+                            info!(slug = %slug_owned, "Per-app wildcard certificate issued");
+                        }
+                        Err(e) => {
+                            warn!(slug = %slug_owned, error = %e, "Failed to issue per-app wildcard certificate");
+                        }
+                    }
+                });
+            }
+        }
+
         info!(app = slug, container = container_name, "Background deploy complete");
     }
 
@@ -310,6 +339,28 @@ impl AgentRegistry {
         // Delete LXC container
         if let Err(e) = LxdClient::delete_container(&app.container_name).await {
             warn!(container = app.container_name, "Failed to delete container: {e}");
+        }
+
+        // Delete per-app wildcard certificate
+        {
+            let acme_guard = self.acme.read().await;
+            if let Some(ref acme) = *acme_guard {
+                if let Err(e) = acme.delete_app_certificate(&app.slug) {
+                    warn!(slug = app.slug, error = %e, "Failed to delete app certificate");
+                }
+            }
+        }
+
+        // Delete per-app wildcard DNS record if Cloudflare credentials available
+        if let (Some(token), Some(zone_id)) = (&self.env.cf_api_token, &self.env.cf_zone_id) {
+            if let Err(e) = crate::cloudflare::delete_app_wildcard_dns(
+                token,
+                zone_id,
+                &app.slug,
+                &self.env.base_domain,
+            ).await {
+                warn!(slug = app.slug, error = %e, "Failed to delete app wildcard DNS");
+            }
         }
 
         self.persist().await?;

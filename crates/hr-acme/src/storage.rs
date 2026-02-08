@@ -27,25 +27,40 @@ impl AcmeStorage {
         self.base_path.join("account.json")
     }
 
-    /// Path to certificate file for a wildcard type
-    pub fn cert_path(&self, wildcard_type: WildcardType) -> PathBuf {
+    /// Path to certificate file by cert ID string
+    pub fn cert_path_by_id(&self, cert_id: &str) -> PathBuf {
         self.base_path
             .join("certs")
-            .join(format!("{}.crt", wildcard_type.id()))
+            .join(format!("{}.crt", cert_id))
+    }
+
+    /// Path to private key file by cert ID string
+    pub fn key_path_by_id(&self, cert_id: &str) -> PathBuf {
+        self.base_path
+            .join("keys")
+            .join(format!("{}.key", cert_id))
+    }
+
+    /// Path to full chain certificate by cert ID string
+    pub fn chain_path_by_id(&self, cert_id: &str) -> PathBuf {
+        self.base_path
+            .join("certs")
+            .join(format!("{}-chain.crt", cert_id))
+    }
+
+    /// Path to certificate file for a wildcard type
+    pub fn cert_path(&self, wildcard_type: &WildcardType) -> PathBuf {
+        self.cert_path_by_id(&wildcard_type.id())
     }
 
     /// Path to private key file for a wildcard type
-    pub fn key_path(&self, wildcard_type: WildcardType) -> PathBuf {
-        self.base_path
-            .join("keys")
-            .join(format!("{}.key", wildcard_type.id()))
+    pub fn key_path(&self, wildcard_type: &WildcardType) -> PathBuf {
+        self.key_path_by_id(&wildcard_type.id())
     }
 
     /// Path to full chain certificate
-    pub fn chain_path(&self, wildcard_type: WildcardType) -> PathBuf {
-        self.base_path
-            .join("certs")
-            .join(format!("{}-chain.crt", wildcard_type.id()))
+    pub fn chain_path(&self, wildcard_type: &WildcardType) -> PathBuf {
+        self.chain_path_by_id(&wildcard_type.id())
     }
 
     /// Path to certificate index file
@@ -98,7 +113,7 @@ impl AcmeStorage {
     }
 
     /// Check if certificate files exist
-    pub fn cert_exists(&self, wildcard_type: WildcardType) -> bool {
+    pub fn cert_exists(&self, wildcard_type: &WildcardType) -> bool {
         self.cert_path(wildcard_type).exists() && self.key_path(wildcard_type).exists()
     }
 }

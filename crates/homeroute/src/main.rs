@@ -4,7 +4,7 @@ use hr_adblock::AdblockEngine;
 use hr_auth::AuthService;
 use hr_acme::{AcmeConfig, AcmeManager, WildcardType};
 use hr_common::config::EnvConfig;
-use hr_common::events::EventBus;
+use hr_common::events::{CertReadyEvent, EventBus};
 use hr_common::service_registry::{
     new_service_registry, now_millis, ServicePriorityLevel, ServiceState, ServiceStatus,
 };
@@ -19,7 +19,7 @@ use std::sync::Arc;
 use supervisor::{spawn_supervised, ServicePriority};
 use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Combined config from dns-dhcp-config.json (matches the original file layout)
 #[derive(serde::Deserialize, Default)]
@@ -104,15 +104,25 @@ async fn main() -> anyhow::Result<()> {
         }
     );
 
-    // Request wildcard certificates if not present
-    for wt in [WildcardType::Main, WildcardType::Code] {
-        if acme.get_certificate(wt).is_err() {
-            info!("Requesting wildcard certificate for {:?}...", wt);
-            match acme.request_wildcard(wt).await {
-                Ok(cert) => info!("Wildcard certificate issued: {} (expires {})", cert.id, cert.expires_at),
-                Err(e) => warn!("Failed to request wildcard {:?}: {}", wt, e),
-            }
+    // Request global wildcard certificate if not present
+    if acme.get_certificate(WildcardType::Global).is_err() {
+        info!("Requesting global wildcard certificate...");
+        match acme.request_wildcard(WildcardType::Global).await {
+            Ok(cert) => info!("Global wildcard certificate issued: {} (expires {})", cert.id, cert.expires_at),
+            Err(e) => warn!("Failed to request global wildcard: {}", e),
         }
+    }
+
+    // Remove legacy code wildcard certificate (replaced by per-app wildcards)
+    if acme.get_certificate(WildcardType::LegacyCode).is_ok() {
+        info!("Removing legacy code wildcard certificate (replaced by per-app wildcards)");
+        let mut index = acme.list_certificates().unwrap_or_default();
+        index.retain(|c| c.wildcard_type != WildcardType::LegacyCode);
+        let _ = acme.storage().save_index(&index);
+        let _ = std::fs::remove_file(acme.storage().cert_path(&WildcardType::LegacyCode));
+        let _ = std::fs::remove_file(acme.storage().key_path(&WildcardType::LegacyCode));
+        let _ = std::fs::remove_file(acme.storage().chain_path(&WildcardType::LegacyCode));
+        info!("Legacy code wildcard certificate removed");
     }
 
     // ── Load DNS/DHCP/IPv6/Adblock config ──────────────────────────────
@@ -220,30 +230,27 @@ async fn main() -> anyhow::Result<()> {
 
     let tls_manager = TlsManager::new(env.acme_storage_path.clone());
 
-    // Load ACME wildcard certificates for proxy
-    // All *.mynetwk.biz domains use the main wildcard
-    // All *.code.mynetwk.biz domains use the code wildcard
-    for wt in [WildcardType::Main, WildcardType::Code] {
-        match acme.get_certificate(wt) {
-            Ok(cert_info) => {
-                // Load the wildcard cert into TLS manager with a representative domain
-                let domain = wt.domain_pattern(&env.base_domain);
-                if let Err(e) = tls_manager.load_certificate_from_pem(
-                    &domain,
-                    &cert_info.cert_path,
-                    &cert_info.key_path,
-                ) {
-                    error!("Failed to load wildcard cert for {}: {}", domain, e);
+    // Load all certificates from ACME index (global, legacy code, and per-app wildcards)
+    let certs = acme.list_certificates().unwrap_or_default();
+    for cert_info in &certs {
+        let cert_path = std::path::Path::new(&cert_info.cert_path);
+        let key_path = std::path::Path::new(&cert_info.key_path);
+        if cert_path.exists() && key_path.exists() {
+            match tls_manager.load_cert_from_files(cert_path, key_path) {
+                Ok(certified_key) => {
+                    let domain = cert_info.wildcard_type.domain_pattern(&env.base_domain);
+                    tls_manager.add_cert(&domain, certified_key);
+                    info!(domain = %domain, "Loaded certificate");
                 }
-            }
-            Err(e) => {
-                warn!("Wildcard cert {:?} not available: {}", wt, e);
+                Err(e) => {
+                    warn!(cert_id = %cert_info.id, error = %e, "Failed to load certificate");
+                }
             }
         }
     }
 
-    // Set main wildcard as fallback for unknown SNI domains
-    if let Ok(cert_info) = acme.get_certificate(WildcardType::Main) {
+    // Set global wildcard as fallback for unknown SNI domains
+    if let Ok(cert_info) = acme.get_certificate(WildcardType::Global) {
         if let Err(e) = tls_manager.set_fallback_certificate_from_pem(
             &cert_info.cert_path,
             &cert_info.key_path,
@@ -496,6 +503,58 @@ async fn main() -> anyhow::Result<()> {
         events.clone(),
     ));
 
+    // Provide ACME manager to registry for per-app certificate management
+    registry.set_acme(acme.clone()).await;
+
+    // Request per-app wildcard certificates for existing applications that don't have one yet
+    {
+        let apps = registry.list_applications().await;
+        let acme_init = acme.clone();
+        let events_init = events.clone();
+        let base_domain_init = env.base_domain.clone();
+        let tls_init = tls_manager.clone();
+        let missing_apps: Vec<_> = apps
+            .iter()
+            .filter(|app| acme_init.get_app_certificate(&app.slug).is_err())
+            .map(|app| app.slug.clone())
+            .collect();
+
+        if !missing_apps.is_empty() {
+            info!(
+                count = missing_apps.len(),
+                "Requesting per-app wildcard certificates for existing applications"
+            );
+            tokio::spawn(async move {
+                for slug in missing_apps {
+                    info!(slug = %slug, "Requesting per-app wildcard certificate");
+                    match acme_init.request_app_wildcard(&slug).await {
+                        Ok(cert) => {
+                            let domain = cert.wildcard_type.domain_pattern(&base_domain_init);
+                            // Load into TLS manager immediately
+                            let cert_path = std::path::Path::new(&cert.cert_path);
+                            let key_path = std::path::Path::new(&cert.key_path);
+                            if let Ok(certified_key) = tls_init.load_cert_from_files(cert_path, key_path) {
+                                tls_init.add_cert(&domain, certified_key);
+                            }
+                            let _ = events_init.cert_ready.send(CertReadyEvent {
+                                slug: slug.clone(),
+                                wildcard_domain: domain.clone(),
+                                cert_path: cert.cert_path.clone(),
+                                key_path: cert.key_path.clone(),
+                            });
+                            info!(slug = %slug, domain = %domain, "Per-app wildcard certificate issued");
+                        }
+                        Err(e) => {
+                            warn!(slug = %slug, error = %e, "Failed to request per-app wildcard certificate");
+                        }
+                    }
+                    // Stagger requests to avoid Let's Encrypt rate limits
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                }
+            });
+        }
+    }
+
     // Ensure LXD profile exists
     {
         let lan_bridge = dns_dhcp_config
@@ -683,6 +742,69 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
         }
+    }
+
+    // CertReady listener — dynamically load new certificates into TLS manager
+    {
+        let tls_mgr = tls_manager.clone();
+        let mut cert_rx = events.cert_ready.subscribe();
+        tokio::spawn(async move {
+            while let Ok(event) = cert_rx.recv().await {
+                let cert_path = std::path::Path::new(&event.cert_path);
+                let key_path = std::path::Path::new(&event.key_path);
+                match tls_mgr.load_cert_from_files(cert_path, key_path) {
+                    Ok(certified_key) => {
+                        tls_mgr.add_cert(&event.wildcard_domain, certified_key);
+                        info!(domain = %event.wildcard_domain, "Dynamically loaded new certificate");
+                    }
+                    Err(e) => {
+                        warn!(domain = %event.wildcard_domain, error = %e, "Failed to load dynamic certificate");
+                    }
+                }
+            }
+        });
+    }
+
+    // Certificate renewal task — checks every 12 hours for expiring certificates
+    {
+        let acme_renewal = acme.clone();
+        let events_renewal = events.clone();
+        let base_domain_renewal = env.base_domain.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(12 * 3600)).await;
+                info!("Checking for certificate renewals...");
+                match acme_renewal.certificates_needing_renewal() {
+                    Ok(certs) if !certs.is_empty() => {
+                        for cert_info in certs {
+                            info!(cert_id = %cert_info.id, "Renewing certificate");
+                            match acme_renewal.request_wildcard(cert_info.wildcard_type.clone()).await {
+                                Ok(new_cert) => {
+                                    let domain = new_cert.wildcard_type.domain_pattern(&base_domain_renewal);
+                                    let _ = events_renewal.cert_ready.send(CertReadyEvent {
+                                        slug: match &new_cert.wildcard_type {
+                                            hr_acme::WildcardType::App { slug } => slug.clone(),
+                                            _ => String::new(),
+                                        },
+                                        wildcard_domain: domain,
+                                        cert_path: new_cert.cert_path.clone(),
+                                        key_path: new_cert.key_path.clone(),
+                                    });
+                                    info!(cert_id = %new_cert.id, "Certificate renewed successfully");
+                                }
+                                Err(e) => {
+                                    warn!(cert_id = %cert_info.id, error = %e, "Failed to renew certificate");
+                                }
+                            }
+                            // Stagger renewals to avoid rate limits
+                            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                        }
+                    }
+                    Ok(_) => debug!("No certificates need renewal"),
+                    Err(e) => warn!(error = %e, "Failed to check certificate renewals"),
+                }
+            }
+        });
     }
 
     // Migrate servers.json → hosts.json if needed

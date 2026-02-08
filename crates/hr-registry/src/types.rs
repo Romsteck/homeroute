@@ -54,21 +54,23 @@ pub struct Application {
 
 impl Application {
     /// Return all domains this application serves.
+    /// Uses per-app subdomain scheme: `app.{slug}.{base}`, `code.{slug}.{base}`, `{api}.{slug}.{base}`.
     pub fn domains(&self, base_domain: &str) -> Vec<String> {
-        let mut domains = vec![format!("{}.{}", self.slug, base_domain)];
+        let mut domains = vec![format!("app.{}.{}", self.slug, base_domain)];
         for api in &self.apis {
-            domains.push(format!("{}-{}.{}", self.slug, api.slug, base_domain));
+            domains.push(format!("{}.{}.{}", api.slug, self.slug, base_domain));
         }
         if self.code_server_enabled {
-            domains.push(format!("{}.code.{}", self.slug, base_domain));
+            domains.push(format!("code.{}.{}", self.slug, base_domain));
         }
         domains
     }
 
     /// Return all (domain, port, auth_required, allowed_groups) tuples for agent routing.
+    /// Uses per-app subdomain scheme: `app.{slug}.{base}`, `code.{slug}.{base}`, `{api}.{slug}.{base}`.
     pub fn routes(&self, base_domain: &str) -> Vec<RouteInfo> {
         let mut routes = vec![RouteInfo {
-            domain: format!("{}.{}", self.slug, base_domain),
+            domain: format!("app.{}.{}", self.slug, base_domain),
             target_port: self.frontend.target_port,
             auth_required: self.frontend.auth_required,
             allowed_groups: self.frontend.allowed_groups.clone(),
@@ -76,7 +78,7 @@ impl Application {
         }];
         for api in &self.apis {
             routes.push(RouteInfo {
-                domain: format!("{}-{}.{}", self.slug, api.slug, base_domain),
+                domain: format!("{}.{}.{}", api.slug, self.slug, base_domain),
                 target_port: api.target_port,
                 auth_required: api.auth_required,
                 allowed_groups: api.allowed_groups.clone(),
@@ -85,7 +87,7 @@ impl Application {
         }
         if self.code_server_enabled {
             routes.push(RouteInfo {
-                domain: format!("{}.code.{}", self.slug, base_domain),
+                domain: format!("code.{}.{}", self.slug, base_domain),
                 target_port: CODE_SERVER_PORT,
                 auth_required: true,
                 allowed_groups: vec![],
@@ -93,6 +95,12 @@ impl Application {
             });
         }
         routes
+    }
+
+    /// Return the wildcard domain for this application's per-app certificate.
+    /// e.g., `*.{slug}.{base_domain}`
+    pub fn wildcard_domain(&self, base_domain: &str) -> String {
+        format!("*.{}.{}", self.slug, base_domain)
     }
 }
 
@@ -304,9 +312,9 @@ mod tests {
         assert_eq!(
             domains,
             vec![
-                "myapp.example.com",
-                "myapp-api.example.com",
-                "myapp.code.example.com",
+                "app.myapp.example.com",
+                "api.myapp.example.com",
+                "code.myapp.example.com",
             ]
         );
     }
@@ -315,7 +323,7 @@ mod tests {
     fn test_domains_no_code_server() {
         let app = make_test_app(false);
         let domains = app.domains("example.com");
-        assert_eq!(domains, vec!["myapp.example.com", "myapp-api.example.com"]);
+        assert_eq!(domains, vec!["app.myapp.example.com", "api.myapp.example.com"]);
     }
 
     #[test]
@@ -324,9 +332,15 @@ mod tests {
         let routes = app.routes("example.com");
         assert_eq!(routes.len(), 3);
         let cs_route = &routes[2];
-        assert_eq!(cs_route.domain, "myapp.code.example.com");
+        assert_eq!(cs_route.domain, "code.myapp.example.com");
         assert_eq!(cs_route.target_port, CODE_SERVER_PORT);
         assert!(cs_route.auth_required);
+    }
+
+    #[test]
+    fn test_wildcard_domain() {
+        let app = make_test_app(true);
+        assert_eq!(app.wildcard_domain("example.com"), "*.myapp.example.com");
     }
 
     #[test]
