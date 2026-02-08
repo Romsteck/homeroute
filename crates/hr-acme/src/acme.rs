@@ -3,12 +3,12 @@ use crate::storage::AcmeStorage;
 use crate::types::{AcmeConfig, AcmeError, AcmeResult, CertificateInfo, WildcardType};
 use chrono::{Duration, Utc};
 use instant_acme::{
-    Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, KeyAuthorization,
-    NewAccount, NewOrder, OrderStatus,
+    Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, NewAccount,
+    NewOrder, OrderStatus,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// ACME certificate manager for Let's Encrypt
 pub struct AcmeManager {
@@ -178,8 +178,8 @@ impl AcmeManager {
             challenge_records.push((dns_name.clone(), record_id));
 
             // Wait for DNS propagation
-            info!("Waiting for DNS propagation (15 seconds)...");
-            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            info!("Waiting for DNS propagation (45 seconds)...");
+            tokio::time::sleep(std::time::Duration::from_secs(45)).await;
 
             // Tell ACME server to validate the challenge
             order
@@ -271,9 +271,9 @@ impl AcmeManager {
         };
 
         // Save certificate and key
-        let cert_path = self.storage.cert_path(wildcard_type);
-        let key_path = self.storage.key_path(wildcard_type);
-        let chain_path = self.storage.chain_path(wildcard_type);
+        let cert_path = self.storage.cert_path(&wildcard_type);
+        let key_path = self.storage.key_path(&wildcard_type);
+        let chain_path = self.storage.chain_path(&wildcard_type);
 
         self.storage.write_file(&cert_path, &cert_chain)?;
         self.storage.write_file(&key_path, &key_pair.serialize_pem())?;
@@ -281,8 +281,8 @@ impl AcmeManager {
 
         let now = Utc::now();
         let cert_info = CertificateInfo {
-            id: wildcard_type.id().to_string(),
-            wildcard_type,
+            id: wildcard_type.id(),
+            wildcard_type: wildcard_type.clone(),
             domains: vec![wildcard_domain.clone()],
             issued_at: now,
             expires_at: now + Duration::days(90), // Let's Encrypt certs are valid 90 days
@@ -328,10 +328,11 @@ impl AcmeManager {
     /// Get a specific certificate by wildcard type
     pub fn get_certificate(&self, wildcard_type: WildcardType) -> AcmeResult<CertificateInfo> {
         let index = self.storage.load_index()?;
+        let wt_id = wildcard_type.id();
         index
             .into_iter()
             .find(|c| c.wildcard_type == wildcard_type)
-            .ok_or_else(|| AcmeError::CertificateNotFound(wildcard_type.id().to_string()))
+            .ok_or_else(|| AcmeError::CertificateNotFound(wt_id))
     }
 
     /// Get certificates that need renewal
@@ -345,13 +346,11 @@ impl AcmeManager {
 
     /// Get certificate and key PEM for a wildcard type
     pub async fn get_cert_pem(&self, wildcard_type: WildcardType) -> AcmeResult<(String, String)> {
-        let cert_path = self.storage.cert_path(wildcard_type);
-        let key_path = self.storage.key_path(wildcard_type);
+        let cert_path = self.storage.cert_path(&wildcard_type);
+        let key_path = self.storage.key_path(&wildcard_type);
 
         if !cert_path.exists() || !key_path.exists() {
-            return Err(AcmeError::CertificateNotFound(
-                wildcard_type.id().to_string(),
-            ));
+            return Err(AcmeError::CertificateNotFound(wildcard_type.id()));
         }
 
         let cert_pem = tokio::fs::read_to_string(&cert_path)
@@ -364,6 +363,39 @@ impl AcmeManager {
         Ok((cert_pem, key_pem))
     }
 
+    /// Request a wildcard certificate for a specific application
+    pub async fn request_app_wildcard(&self, slug: &str) -> AcmeResult<CertificateInfo> {
+        self.request_wildcard(WildcardType::for_app(slug)).await
+    }
+
+    /// Request the global wildcard certificate
+    pub async fn request_global_wildcard(&self) -> AcmeResult<CertificateInfo> {
+        self.request_wildcard(WildcardType::Global).await
+    }
+
+    /// Get certificate info for a specific application
+    pub fn get_app_certificate(&self, slug: &str) -> AcmeResult<CertificateInfo> {
+        self.get_certificate(WildcardType::for_app(slug))
+    }
+
+    /// Delete certificate for a specific application
+    pub fn delete_app_certificate(&self, slug: &str) -> AcmeResult<()> {
+        let wt = WildcardType::for_app(slug);
+        let cert_id = wt.id();
+
+        // Remove from index
+        let mut index = self.storage.load_index()?;
+        index.retain(|c| c.wildcard_type != wt);
+        self.storage.save_index(&index)?;
+
+        // Remove cert and key files (ignore errors if files don't exist)
+        let _ = std::fs::remove_file(self.storage.cert_path_by_id(&cert_id));
+        let _ = std::fs::remove_file(self.storage.key_path_by_id(&cert_id));
+        let _ = std::fs::remove_file(self.storage.chain_path_by_id(&cert_id));
+
+        Ok(())
+    }
+
     /// Get the base domain
     pub fn base_domain(&self) -> &str {
         &self.config.base_domain
@@ -372,5 +404,10 @@ impl AcmeManager {
     /// Get renewal threshold in days
     pub fn renewal_threshold_days(&self) -> u32 {
         self.config.renewal_threshold_days
+    }
+
+    /// Get a reference to the storage
+    pub fn storage(&self) -> &AcmeStorage {
+        &self.storage
     }
 }

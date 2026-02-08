@@ -383,69 +383,116 @@ pub async fn get_aaaa_record_content(
         .ok_or_else(|| "Record not found".to_string())
 }
 
-/// Switch Cloudflare DNS to relay mode: create A record for VPS IPv4, remove AAAA record for on-prem.
-/// Handles both the main wildcard (*.base_domain) and code wildcard (*.code.base_domain).
+/// Create or update a wildcard DNS record for a per-app subdomain.
+/// In relay mode: A record → VPS IPv4 (DNS-only, proxied=false)
+/// In direct mode: AAAA record → on-prem IPv6 (proxied=true via Cloudflare)
+pub async fn upsert_app_wildcard_dns(
+    token: &str,
+    zone_id: &str,
+    slug: &str,
+    base_domain: &str,
+    ip: &str,
+    proxied: bool,
+    record_type: &str, // "A" or "AAAA"
+) -> Result<String, String> {
+    let name = format!("*.{}.{}", slug, base_domain);
+    match record_type {
+        "A" => upsert_a_record(token, zone_id, &name, ip, proxied).await,
+        "AAAA" => upsert_aaaa_record(token, zone_id, &name, ip, proxied).await,
+        _ => Err(format!("Unsupported record type: {}", record_type)),
+    }
+}
+
+/// Delete wildcard DNS records (both A and AAAA) for a per-app subdomain.
+pub async fn delete_app_wildcard_dns(
+    token: &str,
+    zone_id: &str,
+    slug: &str,
+    base_domain: &str,
+) -> Result<(), String> {
+    let name = format!("*.{}.{}", slug, base_domain);
+    // Delete both A and AAAA records if they exist
+    let _ = delete_a_record_by_name(token, zone_id, &name).await;
+    let _ = delete_record_by_name(token, zone_id, &name).await;
+    info!(slug, domain = %name, "Deleted app wildcard DNS records");
+    Ok(())
+}
+
+/// Switch Cloudflare DNS to relay mode: create A records for VPS IPv4, remove AAAA records.
+/// Handles the global wildcard (*.base_domain) and per-app wildcards (*.{slug}.base_domain).
 pub async fn switch_to_relay_dns(
     token: &str,
     zone_id: &str,
     base_domain: &str,
     vps_ipv4: &str,
+    app_slugs: &[String],
 ) -> Result<(), String> {
     let main_wildcard = format!("*.{}", base_domain);
-    let code_wildcard = format!("*.code.{}", base_domain);
 
     // 1. Upsert A record for *.base_domain → vps_ipv4 (DNS-only, no Cloudflare proxy)
     upsert_a_record(token, zone_id, &main_wildcard, vps_ipv4, false).await?;
     info!(domain = %main_wildcard, ipv4 = vps_ipv4, "Relay DNS: set A record (DNS-only)");
 
-    // 2. Upsert A record for *.code.base_domain → vps_ipv4 (DNS-only)
-    upsert_a_record(token, zone_id, &code_wildcard, vps_ipv4, false).await?;
-    info!(domain = %code_wildcard, ipv4 = vps_ipv4, "Relay DNS: set A record (DNS-only)");
+    // 2. Upsert A records for per-app wildcards → vps_ipv4 (DNS-only)
+    for slug in app_slugs {
+        let app_wildcard = format!("*.{}.{}", slug, base_domain);
+        upsert_a_record(token, zone_id, &app_wildcard, vps_ipv4, false).await?;
+        info!(domain = %app_wildcard, ipv4 = vps_ipv4, "Relay DNS: set app A record (DNS-only)");
+    }
 
     // 3. Delete AAAA record for *.base_domain (if exists)
     if let Some(id) = delete_record_by_name(token, zone_id, &main_wildcard).await? {
         info!(domain = %main_wildcard, record_id = %id, "Relay DNS: removed AAAA record");
     }
 
-    // 4. Delete AAAA record for *.code.base_domain (if exists)
-    if let Some(id) = delete_record_by_name(token, zone_id, &code_wildcard).await? {
-        info!(domain = %code_wildcard, record_id = %id, "Relay DNS: removed AAAA record");
+    // 4. Delete AAAA records for per-app wildcards (if exist)
+    for slug in app_slugs {
+        let app_wildcard = format!("*.{}.{}", slug, base_domain);
+        if let Some(id) = delete_record_by_name(token, zone_id, &app_wildcard).await? {
+            info!(domain = %app_wildcard, record_id = %id, "Relay DNS: removed app AAAA record");
+        }
     }
 
-    info!(base_domain, vps_ipv4, "Cloudflare DNS switched to relay mode");
+    info!(base_domain, vps_ipv4, app_count = app_slugs.len(), "Cloudflare DNS switched to relay mode");
     Ok(())
 }
 
-/// Switch Cloudflare DNS back to direct mode: create AAAA record for on-prem IPv6, remove A record for VPS.
-/// Handles both the main wildcard and code wildcard.
+/// Switch Cloudflare DNS back to direct mode: create AAAA records for on-prem IPv6, remove A records.
+/// Handles the global wildcard and per-app wildcards (*.{slug}.base_domain).
 pub async fn switch_to_direct_dns(
     token: &str,
     zone_id: &str,
     base_domain: &str,
     onprem_ipv6: &str,
+    app_slugs: &[String],
 ) -> Result<(), String> {
     let main_wildcard = format!("*.{}", base_domain);
-    let code_wildcard = format!("*.code.{}", base_domain);
 
     // 1. Upsert AAAA record for *.base_domain → onprem_ipv6 (proxied)
     upsert_aaaa_record(token, zone_id, &main_wildcard, onprem_ipv6, true).await?;
     info!(domain = %main_wildcard, ipv6 = onprem_ipv6, "Direct DNS: set AAAA record");
 
-    // 2. Upsert AAAA record for *.code.base_domain → onprem_ipv6 (proxied)
-    upsert_aaaa_record(token, zone_id, &code_wildcard, onprem_ipv6, true).await?;
-    info!(domain = %code_wildcard, ipv6 = onprem_ipv6, "Direct DNS: set AAAA record");
+    // 2. Upsert AAAA records for per-app wildcards → onprem_ipv6 (proxied)
+    for slug in app_slugs {
+        let app_wildcard = format!("*.{}.{}", slug, base_domain);
+        upsert_aaaa_record(token, zone_id, &app_wildcard, onprem_ipv6, true).await?;
+        info!(domain = %app_wildcard, ipv6 = onprem_ipv6, "Direct DNS: set app AAAA record");
+    }
 
     // 3. Delete A record for *.base_domain (if exists)
     if let Some(id) = delete_a_record_by_name(token, zone_id, &main_wildcard).await? {
         info!(domain = %main_wildcard, record_id = %id, "Direct DNS: removed A record");
     }
 
-    // 4. Delete A record for *.code.base_domain (if exists)
-    if let Some(id) = delete_a_record_by_name(token, zone_id, &code_wildcard).await? {
-        info!(domain = %code_wildcard, record_id = %id, "Direct DNS: removed A record");
+    // 4. Delete A records for per-app wildcards (if exist)
+    for slug in app_slugs {
+        let app_wildcard = format!("*.{}.{}", slug, base_domain);
+        if let Some(id) = delete_a_record_by_name(token, zone_id, &app_wildcard).await? {
+            info!(domain = %app_wildcard, record_id = %id, "Direct DNS: removed app A record");
+        }
     }
 
-    info!(base_domain, onprem_ipv6, "Cloudflare DNS switched to direct mode");
+    info!(base_domain, onprem_ipv6, app_count = app_slugs.len(), "Cloudflare DNS switched to direct mode");
     Ok(())
 }
 

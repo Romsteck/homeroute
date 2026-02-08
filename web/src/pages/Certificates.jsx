@@ -87,14 +87,17 @@ const Certificates = () => {
     return diffDays;
   }
 
-  function getTypeLabel(wildcardType) {
-    switch (wildcardType) {
-      case 'Main':
-        return 'Applications';
-      case 'Code':
-        return 'Code Server';
+  function getTypeLabel(cert) {
+    if (cert.type_display) return cert.type_display;
+    switch (cert.type) {
+      case 'global':
+        return 'Global (Dashboard)';
+      case 'legacy_code':
+        return 'Code Server (Legacy)';
+      case 'app':
+        return `App: ${cert.id?.replace('app-', '') || ''}`;
       default:
-        return wildcardType;
+        return cert.type || cert.wildcard_type || '';
     }
   }
 
@@ -205,11 +208,17 @@ const Certificates = () => {
                           <span className="font-medium text-lg">
                             {cert.domains && cert.domains.length > 0
                               ? cert.domains[0]
-                              : `*.${cert.wildcard_type === 'Code' ? 'code.' : ''}mynetwk.biz`}
+                              : cert.id || 'Certificat'}
                           </span>
                         </div>
-                        <span className="px-2 py-0.5 bg-gray-700 text-gray-300 text-xs rounded">
-                          {getTypeLabel(cert.wildcard_type)}
+                        <span className={`px-2 py-0.5 text-xs rounded ${
+                          cert.type === 'app'
+                            ? 'bg-purple-900/30 text-purple-300'
+                            : cert.type === 'global'
+                            ? 'bg-blue-900/30 text-blue-300'
+                            : 'bg-gray-700 text-gray-300'
+                        }`}>
+                          {getTypeLabel(cert)}
                         </span>
                       </div>
 
