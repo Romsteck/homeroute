@@ -18,11 +18,21 @@ const navGroups = [
       { to: '/dns', icon: Server, label: 'DNS / DHCP' },
       { to: '/adblock', icon: Shield, label: 'AdBlock' },
       { to: '/ddns', icon: Globe, label: 'Dynamic DNS' },
+    ],
+  },
+  {
+    label: 'Services',
+    items: [
       { to: '/reverseproxy', icon: ArrowLeftRight, label: 'Reverse Proxy' },
-      { to: '/applications', icon: Boxes, label: 'Applications' },
-      { to: '/dataverse', icon: Database, label: 'Dataverse' },
       { to: '/certificates', icon: Lock, label: 'Certificats' },
       { to: '/cloud-relay', icon: Cloud, label: 'Cloud Relay' },
+    ],
+  },
+  {
+    label: 'Applications',
+    items: [
+      { to: '/applications', icon: Boxes, label: 'Applications' },
+      { to: '/dataverse', icon: Database, label: 'Dataverse' },
     ],
   },
   {
