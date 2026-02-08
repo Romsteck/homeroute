@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Cloud, Power, PowerOff, RefreshCw, Server, Activity, Wifi, Settings, Upload } from 'lucide-react';
+import { Cloud, Power, PowerOff, RefreshCw, Server, Activity, Wifi, Upload, ArrowUpCircle } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
 import StatusBadge from '../components/StatusBadge';
@@ -9,7 +9,7 @@ import ConfirmModal from '../components/ConfirmModal';
 import useWebSocket from '../hooks/useWebSocket';
 import {
   getCloudRelayStatus, enableCloudRelay, disableCloudRelay,
-  bootstrapCloudRelay, updateCloudRelayConfig,
+  bootstrapCloudRelay, pushCloudRelayUpdate,
 } from '../api/client';
 
 function CloudRelay() {
@@ -18,13 +18,12 @@ function CloudRelay() {
   const [enabling, setEnabling] = useState(false);
   const [disabling, setDisabling] = useState(false);
   const [bootstrapping, setBootstrapping] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const [updateLog, setUpdateLog] = useState(null);
   const [bootstrapLog, setBootstrapLog] = useState(null);
   const [showDisableConfirm, setShowDisableConfirm] = useState(false);
   const [showBootstrapForm, setShowBootstrapForm] = useState(false);
   const [bootstrapForm, setBootstrapForm] = useState({ host: '', ssh_user: 'root', ssh_port: '22', ssh_password: '' });
-  const [configEditing, setConfigEditing] = useState(false);
-  const [configForm, setConfigForm] = useState({ host: '', ssh_user: '', ssh_port: '' });
-  const [savingConfig, setSavingConfig] = useState(false);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -113,25 +112,27 @@ function CloudRelay() {
     }
   }
 
-  async function handleSaveConfig() {
-    setSavingConfig(true);
+  async function handleUpdate() {
+    setUpdating(true);
+    setUpdateLog(null);
     try {
-      const payload = {};
-      if (configForm.host.trim()) payload.host = configForm.host.trim();
-      if (configForm.ssh_user.trim()) payload.ssh_user = configForm.ssh_user.trim();
-      if (configForm.ssh_port.trim()) payload.ssh_port = parseInt(configForm.ssh_port);
-      await updateCloudRelayConfig(payload);
-      setConfigEditing(false);
-      await fetchStatus();
+      const res = await pushCloudRelayUpdate();
+      if (res.data.success) {
+        setUpdateLog({ success: true, message: res.data.message });
+      } else {
+        setUpdateLog({ success: false, message: res.data.error || 'Erreur inconnue' });
+      }
     } catch (error) {
-      console.error('Config save error:', error);
+      const msg = error.response?.data || error.message;
+      setUpdateLog({ success: false, message: typeof msg === 'string' ? msg : JSON.stringify(msg) });
     } finally {
-      setSavingConfig(false);
+      setUpdating(false);
     }
   }
 
   const isConnected = status?.status === 'connected';
   const isEnabled = status?.enabled;
+  const isBootstrapped = !!status?.vps_host;
 
   if (loading) {
     return (
@@ -204,7 +205,7 @@ function CloudRelay() {
       <Section title="Actions" contrast>
         <div className="flex flex-wrap gap-3">
           {!isEnabled ? (
-            <Button onClick={handleEnable} loading={enabling} variant="success">
+            <Button onClick={handleEnable} loading={enabling} variant="success" disabled={!isBootstrapped}>
               <Power className="w-4 h-4" />
               Activer le relay
             </Button>
@@ -214,24 +215,30 @@ function CloudRelay() {
               Desactiver le relay
             </Button>
           )}
-          <Button onClick={() => setShowBootstrapForm(!showBootstrapForm)} variant="primary">
-            <Upload className="w-4 h-4" />
-            Bootstrap VPS
-          </Button>
           <Button onClick={() => {
-            setConfigEditing(!configEditing);
-            if (!configEditing) {
-              setConfigForm({
-                host: status?.vps_host || '',
-                ssh_user: '',
-                ssh_port: '',
-              });
+            if (!showBootstrapForm && status) {
+              setBootstrapForm(f => ({
+                ...f,
+                host: status.vps_host || f.host,
+                ssh_user: status.ssh_user || f.ssh_user,
+                ssh_port: status.ssh_port ? String(status.ssh_port) : f.ssh_port,
+              }));
             }
-          }} variant="secondary">
-            <Settings className="w-4 h-4" />
-            Configuration
+            setShowBootstrapForm(!showBootstrapForm);
+          }} variant="primary">
+            <Upload className="w-4 h-4" />
+            {isBootstrapped ? 'Re-bootstrap VPS' : 'Bootstrap VPS'}
           </Button>
+          {isBootstrapped && isConnected && (
+            <Button onClick={handleUpdate} loading={updating} variant="secondary">
+              <ArrowUpCircle className="w-4 h-4" />
+              Mettre a jour l&apos;agent VPS
+            </Button>
+          )}
         </div>
+        {!isBootstrapped && !isEnabled && (
+          <p className="text-xs text-gray-500 mt-2">Commencez par bootstrapper une VPS pour activer le relay.</p>
+        )}
 
         {/* Bootstrap Form */}
         {showBootstrapForm && (
@@ -272,7 +279,7 @@ function CloudRelay() {
                 </div>
               </div>
               <div>
-                <label className="block text-xs text-gray-400 mb-1">Mot de passe SSH (optionnel, pour sudo)</label>
+                <label className="block text-xs text-gray-400 mb-1">Mot de passe SSH</label>
                 <input
                   type="password"
                   value={bootstrapForm.ssh_password}
@@ -306,50 +313,12 @@ function CloudRelay() {
           </div>
         )}
 
-        {/* Config Editor */}
-        {configEditing && (
-          <div className="mt-4 bg-gray-800 border border-gray-700 p-4 max-w-lg">
-            <h3 className="text-sm font-semibold mb-3">Modifier la configuration</h3>
-            <div className="space-y-3">
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">Hote VPS</label>
-                <input
-                  type="text"
-                  value={configForm.host}
-                  onChange={(e) => setConfigForm(f => ({ ...f, host: e.target.value }))}
-                  placeholder="vps.example.com"
-                  className="w-full bg-gray-900 border border-gray-600 px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-blue-500"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">Utilisateur SSH</label>
-                  <input
-                    type="text"
-                    value={configForm.ssh_user}
-                    onChange={(e) => setConfigForm(f => ({ ...f, ssh_user: e.target.value }))}
-                    className="w-full bg-gray-900 border border-gray-600 px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-blue-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">Port SSH</label>
-                  <input
-                    type="number"
-                    value={configForm.ssh_port}
-                    onChange={(e) => setConfigForm(f => ({ ...f, ssh_port: e.target.value }))}
-                    className="w-full bg-gray-900 border border-gray-600 px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-blue-500"
-                  />
-                </div>
-              </div>
-              <div className="flex gap-2 pt-2">
-                <Button onClick={handleSaveConfig} loading={savingConfig} variant="success">
-                  Enregistrer
-                </Button>
-                <Button onClick={() => setConfigEditing(false)} variant="secondary">
-                  Annuler
-                </Button>
-              </div>
-            </div>
+        {/* Update Result */}
+        {updateLog && (
+          <div className={`mt-4 p-3 border ${updateLog.success ? 'border-green-700 bg-green-900/20' : 'border-red-700 bg-red-900/20'}`}>
+            <p className={`text-sm ${updateLog.success ? 'text-green-400' : 'text-red-400'}`}>
+              {updateLog.message}
+            </p>
           </div>
         )}
       </Section>

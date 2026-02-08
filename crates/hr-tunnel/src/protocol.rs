@@ -62,6 +62,8 @@ pub enum ControlMessage {
     Pong { ts: u64, latency_us: u64 },
     RelayStats { active_streams: u32, total_bytes: u64 },
     Shutdown { reason: String },
+    /// Binary update: sent on a uni stream, followed by `size` raw bytes of the new binary.
+    BinaryUpdate { size: u64, sha256: String },
 }
 
 impl ControlMessage {

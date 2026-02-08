@@ -22,3 +22,4 @@ bytes = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }
+sha2 = "0.10"

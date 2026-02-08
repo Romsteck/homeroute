@@ -164,6 +164,7 @@ export const enableCloudRelay = () => api.post('/cloud-relay/enable');
 export const disableCloudRelay = () => api.post('/cloud-relay/disable');
 export const bootstrapCloudRelay = (data) => api.post('/cloud-relay/bootstrap', data, { timeout: 300000 });
 export const updateCloudRelayConfig = (config) => api.put('/cloud-relay/config', config);
+export const pushCloudRelayUpdate = () => api.post('/cloud-relay/update', {}, { timeout: 120000 });
 
 // Dataverse
 export const getDataverseOverview = () => api.get('/dataverse/overview');

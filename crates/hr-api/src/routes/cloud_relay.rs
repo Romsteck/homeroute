@@ -15,6 +15,8 @@ struct RelayStatusResponse {
     status: String, // "connected", "disconnected", "reconnecting", "error"
     vps_host: Option<String>,
     vps_ipv4: Option<String>,
+    ssh_user: Option<String>,
+    ssh_port: Option<u16>,
     latency_ms: Option<u64>,
     active_streams: Option<u32>,
 }
@@ -39,12 +41,9 @@ struct BootstrapRequest {
 /// Relay config stored at data/cloud-relay/config.json
 #[derive(Deserialize)]
 struct RelayConfig {
-    #[allow(dead_code)]
     vps_host: String,
     vps_ipv4: String,
-    #[allow(dead_code)]
     ssh_user: String,
-    #[allow(dead_code)]
     ssh_port: u16,
     #[allow(dead_code)]
     quic_port: u16,
@@ -57,21 +56,37 @@ pub fn router() -> Router<ApiState> {
         .route("/disable", post(disable_relay))
         .route("/bootstrap", post(bootstrap_vps))
         .route("/config", put(update_config))
+        .route("/update", post(push_update))
 }
 
 /// GET /api/cloud-relay/status
 async fn get_status(State(state): State<ApiState>) -> Json<RelayStatusResponse> {
     let relay_info = state.cloud_relay_status.read().await;
     let env = &state.env;
+    let enabled = *state.cloud_relay_enabled.borrow();
+
+    // Read config.json for VPS info (may have been written by bootstrap after service start)
+    let disk_config = load_relay_config(&env.data_dir).ok();
+
+    let vps_host = env
+        .cloud_relay_host
+        .clone()
+        .or_else(|| disk_config.as_ref().map(|c| c.vps_host.clone()));
+    let vps_ipv4 = relay_info
+        .as_ref()
+        .and_then(|info| info.vps_ipv4.clone())
+        .or_else(|| disk_config.as_ref().map(|c| c.vps_ipv4.clone()));
 
     Json(RelayStatusResponse {
-        enabled: env.cloud_relay_enabled,
+        enabled,
         status: relay_info
             .as_ref()
             .map(|info| info.status.to_string())
             .unwrap_or_else(|| "disconnected".to_string()),
-        vps_host: env.cloud_relay_host.clone(),
-        vps_ipv4: relay_info.as_ref().and_then(|info| info.vps_ipv4.clone()),
+        vps_host,
+        vps_ipv4,
+        ssh_user: disk_config.as_ref().map(|c| c.ssh_user.clone()),
+        ssh_port: disk_config.as_ref().map(|c| c.ssh_port),
         latency_ms: relay_info.as_ref().and_then(|info| info.latency_ms),
         active_streams: relay_info.as_ref().and_then(|info| info.active_streams),
     })
@@ -96,9 +111,10 @@ async fn enable_relay(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
-    // Update .env file
+    // Update .env file and in-memory state (watch channel notifies tunnel client)
     update_env_var("CLOUD_RELAY_ENABLED", "true")
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let _ = state.cloud_relay_enabled.send(true);
 
     // Emit event
     let _ = state
@@ -135,9 +151,10 @@ async fn disable_relay(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
-    // Update .env file
+    // Update .env file and in-memory state (watch channel notifies tunnel client)
     update_env_var("CLOUD_RELAY_ENABLED", "false")
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let _ = state.cloud_relay_enabled.send(false);
 
     // Emit event
     let _ = state
@@ -205,30 +222,12 @@ async fn bootstrap_vps(
     let ssh_user = &req.ssh_user;
     let host = &req.host;
     let ssh_port_str = ssh_port.to_string();
+    let password = req.ssh_password.as_deref();
 
     // 4. SCP binary + certs to VPS /tmp/
-    let scp_args = [
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "ConnectTimeout=15",
-        "-P", &ssh_port_str,
-    ];
-
-    // SCP binary
-    let output = tokio::process::Command::new("scp")
-        .args(&scp_args)
-        .arg(binary_path)
-        .arg(&format!("{}@{}:/tmp/hr-cloud-relay", ssh_user, host))
-        .output()
+    run_scp(password, &ssh_port_str, binary_path, &format!("{}@{}:/tmp/hr-cloud-relay", ssh_user, host))
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("SCP failed: {}", e)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("SCP binary failed: {}", stderr),
-        ));
-    }
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("SCP binary failed: {}", e)))?;
 
     // SCP certs (write to temp files, then SCP)
     let tmp_dir = std::env::temp_dir().join(format!("hr-bootstrap-{}", std::process::id()));
@@ -245,23 +244,14 @@ async fn bootstrap_vps(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     for cert_file in ["ca.pem", "server.pem", "server-key.pem"] {
-        let output = tokio::process::Command::new("scp")
-            .args(&scp_args)
-            .arg(tmp_dir.join(cert_file))
-            .arg(&format!("{}@{}:/tmp/{}", ssh_user, host, cert_file))
-            .output()
-            .await
-            .map_err(|e| {
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("SCP cert failed: {}", e))
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("SCP {} failed: {}", cert_file, stderr),
-            ));
-        }
+        run_scp(
+            password,
+            &ssh_port_str,
+            tmp_dir.join(cert_file).to_str().unwrap(),
+            &format!("{}@{}:/tmp/{}", ssh_user, host, cert_file),
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("SCP {} failed: {}", cert_file, e)))?;
     }
 
     // 5. SSH: install binary, write config, create systemd unit, start
@@ -302,61 +292,28 @@ cat > /etc/hr-cloud-relay/config.toml << 'CONF'
 cat > /etc/systemd/system/hr-cloud-relay.service << 'SVC'
 {service_unit}SVC
 systemctl daemon-reload && \
-systemctl enable --now hr-cloud-relay
+systemctl enable hr-cloud-relay && \
+systemctl restart hr-cloud-relay
 "#
     );
 
-    let ssh_cmd = if let Some(ref password) = req.ssh_password {
+    let ssh_cmd = if password.is_some() {
         let escaped = setup_script.replace('\'', "'\\''");
-        format!("echo '{}' | sudo -S bash -c '{}'", password, escaped)
+        format!("echo '{}' | sudo -S bash -c '{}'", password.unwrap(), escaped)
     } else {
         format!("bash -c '{}'", setup_script.replace('\'', "'\\''"))
     };
 
-    let output = tokio::process::Command::new("ssh")
-        .args([
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "ConnectTimeout=15",
-            "-p",
-            &ssh_port_str,
-            &format!("{}@{}", ssh_user, host),
-            &ssh_cmd,
-        ])
-        .output()
+    run_ssh(password, &ssh_port_str, &format!("{}@{}", ssh_user, host), &ssh_cmd)
         .await
-        .map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("SSH setup failed: {}", e))
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("VPS setup failed: {}", stderr),
-        ));
-    }
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("VPS setup failed: {}", e)))?;
 
     // 6. Get VPS public IPv4
-    let ip_output = tokio::process::Command::new("ssh")
-        .args([
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-p",
-            &ssh_port_str,
-            &format!("{}@{}", ssh_user, host),
-            "curl -4 -s ifconfig.me",
-        ])
-        .output()
+    let ip_output = run_ssh_output(password, &ssh_port_str, &format!("{}@{}", ssh_user, host), "curl -4 -s ifconfig.me")
         .await
-        .map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get VPS IP: {}", e))
-        })?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get VPS IP: {}", e)))?;
 
-    let vps_ipv4 = String::from_utf8_lossy(&ip_output.stdout)
-        .trim()
-        .to_string();
+    let vps_ipv4 = ip_output.trim().to_string();
 
     // 7. Save relay config locally
     let relay_config = serde_json::json!({
@@ -406,6 +363,66 @@ async fn update_config(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
     Ok(Json(serde_json::json!({ "success": true })))
+}
+
+/// POST /api/cloud-relay/update — Push the local hr-cloud-relay binary to VPS via QUIC tunnel.
+async fn push_update(
+    State(state): State<ApiState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    use sha2::{Digest, Sha256};
+
+    // 1. Read the binary from disk
+    let binary_path = "/opt/homeroute/crates/target/release/hr-cloud-relay";
+    let binary_data = tokio::fs::read(binary_path)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "hr-cloud-relay binary not found at {}. Run 'cargo build --release -p hr-cloud-relay' first. ({})",
+                    binary_path, e
+                ),
+            )
+        })?;
+
+    // 2. Compute SHA256
+    let sha256 = format!("{:x}", Sha256::digest(&binary_data));
+
+    // 3. Send via command channel to tunnel client
+    let tx = state.cloud_relay_cmd_tx.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Cloud relay command channel not available".to_string(),
+        )
+    })?;
+
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    tx.send(hr_common::events::CloudRelayCommand::PushBinaryUpdate {
+        binary_data,
+        sha256,
+        response_tx,
+    })
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Tunnel client not running or channel full".to_string(),
+        )
+    })?;
+
+    // 4. Wait for response from the tunnel client
+    let result = response_rx.await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Tunnel client dropped the response channel".to_string(),
+        )
+    })?;
+
+    match result {
+        Ok(message) => Ok(Json(serde_json::json!({ "success": true, "message": message }))),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
+    }
 }
 
 // ── Helper functions ──────────────────────────────────────────────────
@@ -464,6 +481,52 @@ fn get_public_ipv6(interface: &str) -> Result<String, String> {
         }
     }
     Err(format!("No global IPv6 found on {}", interface))
+}
+
+/// Run an SCP command, wrapping with sshpass if a password is provided.
+async fn run_scp(password: Option<&str>, port: &str, src: &str, dst: &str) -> Result<(), String> {
+    let mut cmd = if let Some(pw) = password {
+        let mut c = tokio::process::Command::new("sshpass");
+        c.args(["-p", pw, "scp"]);
+        c
+    } else {
+        tokio::process::Command::new("scp")
+    };
+    cmd.args(["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15", "-P", port]);
+    cmd.arg(src).arg(dst);
+
+    let output = cmd.output().await.map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(())
+}
+
+/// Run an SSH command, wrapping with sshpass if a password is provided.
+async fn run_ssh(password: Option<&str>, port: &str, target: &str, command: &str) -> Result<(), String> {
+    let output = run_ssh_raw(password, port, target, command).await?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(())
+}
+
+/// Run an SSH command and return stdout as String.
+async fn run_ssh_output(password: Option<&str>, port: &str, target: &str, command: &str) -> Result<String, String> {
+    let output = run_ssh_raw(password, port, target, command).await?;
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+async fn run_ssh_raw(password: Option<&str>, port: &str, target: &str, command: &str) -> Result<std::process::Output, String> {
+    let mut cmd = if let Some(pw) = password {
+        let mut c = tokio::process::Command::new("sshpass");
+        c.args(["-p", pw, "ssh"]);
+        c
+    } else {
+        tokio::process::Command::new("ssh")
+    };
+    cmd.args(["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15", "-p", port, target, command]);
+    cmd.output().await.map_err(|e| e.to_string())
 }
 
 /// RAII guard for temp directory cleanup.
