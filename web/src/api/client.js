@@ -63,13 +63,6 @@ export const renewCertificates = () => api.post('/reverseproxy/certificates/rene
 export const reloadProxy = () => api.post('/reverseproxy/reload');
 export const getCertificatesStatus = () => api.get('/reverseproxy/certificates/status');
 
-// Applications (Agent-based LXC)
-export const getApplications = () => api.get('/applications');
-export const createApplication = (app) => api.post('/applications', app);
-export const updateApplication = (id, updates) => api.put(`/applications/${id}`, updates);
-export const deleteApplication = (id) => api.delete(`/applications/${id}`);
-export const toggleApplication = (id, enabled) => api.post(`/applications/${id}/toggle`, { enabled });
-
 // Application Service Control (powersave)
 export const startApplicationService = (appId, serviceType) =>
   api.post(`/applications/${appId}/services/${serviceType}/start`);
@@ -165,18 +158,18 @@ export const bootstrapCloudRelay = (data) => api.post('/cloud-relay/bootstrap', 
 export const updateCloudRelayConfig = (config) => api.put('/cloud-relay/config', config);
 export const pushCloudRelayUpdate = () => api.post('/cloud-relay/update', {}, { timeout: 120000 });
 
-// Containers V2 (nspawn)
-export const getContainersV2 = () => api.get('/containers');
-export const createContainerV2 = (data) => api.post('/containers', data);
-export const updateContainerV2 = (id, data) => api.put(`/containers/${id}`, data);
-export const deleteContainerV2 = (id) => api.delete(`/containers/${id}`);
-export const startContainerV2 = (id) => api.post(`/containers/${id}/start`);
-export const stopContainerV2 = (id) => api.post(`/containers/${id}/stop`);
-export const migrateContainerV2 = (id, targetHostId) => api.post(`/containers/${id}/migrate`, { target_host_id: targetHostId });
-export const getMigrationStatusV2 = (id) => api.get(`/containers/${id}/migrate/status`);
-export const cancelMigrationV2 = (id) => api.post(`/containers/${id}/migrate/cancel`);
-export const getContainersV2Config = () => api.get('/containers/config');
-export const updateContainersV2Config = (data) => api.put('/containers/config', data);
+// Containers (nspawn)
+export const getContainers = () => api.get('/containers');
+export const createContainer = (data) => api.post('/containers', data);
+export const updateContainer = (id, data) => api.put(`/containers/${id}`, data);
+export const deleteContainer = (id) => api.delete(`/containers/${id}`);
+export const startContainer = (id) => api.post(`/containers/${id}/start`);
+export const stopContainer = (id) => api.post(`/containers/${id}/stop`);
+export const migrateContainer = (id, targetHostId) => api.post(`/containers/${id}/migrate`, { target_host_id: targetHostId });
+export const getMigrationStatus = (id) => api.get(`/containers/${id}/migrate/status`);
+export const cancelMigration = (id) => api.post(`/containers/${id}/migrate/cancel`);
+export const getContainersConfig = () => api.get('/containers/config');
+export const updateContainersConfig = (data) => api.put('/containers/config', data);
 
 // Dataverse
 export const getDataverseOverview = () => api.get('/dataverse/overview');

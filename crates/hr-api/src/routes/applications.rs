@@ -9,23 +9,18 @@ use axum::http::header;
 use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command;
+use tokio::io::AsyncReadExt;
 use tracing::{error, info, warn};
 
 use hr_proxy::AppRoute;
 use hr_registry::protocol::{AgentMessage, HostRegistryMessage, PowerPolicy, ServiceAction, ServiceType};
-use hr_registry::types::{CreateApplicationRequest, TriggerUpdateRequest, UpdateApplicationRequest};
+use hr_registry::types::TriggerUpdateRequest;
 use hr_common::events::{MigrationPhase, MigrationProgressEvent};
 
 use crate::state::{ApiState, MigrationState};
 
 pub fn router() -> Router<ApiState> {
     Router::new()
-        .route("/", get(list_applications).post(create_application))
-        .route("/{id}", put(update_application).delete(delete_application))
-        .route("/{id}/toggle", post(toggle_application))
-        .route("/{id}/token", get(regenerate_token))
         .route("/{id}/services/{service_type}/start", post(start_service))
         .route("/{id}/services/{service_type}/stop", post(stop_service))
         .route("/{id}/power-policy", put(update_power_policy))
@@ -35,106 +30,9 @@ pub fn router() -> Router<ApiState> {
         .route("/agents/update", post(trigger_agent_update))
         .route("/agents/update/status", get(get_update_status))
         .route("/agents/ws", get(agent_ws))
-        .route("/{id}/terminal", get(terminal_ws))
 }
 
 // ── REST handlers ────────────────────────────────────────────
-
-async fn list_applications(State(state): State<ApiState>) -> impl IntoResponse {
-    let Some(registry) = &state.registry else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"success": false, "error": "Registry not available"}))).into_response();
-    };
-    let apps = registry.list_applications().await;
-    // Filter out Containers V2 (nspawn) — they have their own /api/containers endpoint
-    let apps: Vec<_> = apps.into_iter().filter(|a| !a.container_name.starts_with("hr-v2-")).collect();
-    Json(serde_json::json!({"success": true, "applications": apps})).into_response()
-}
-
-async fn create_application(
-    State(state): State<ApiState>,
-    Json(req): Json<CreateApplicationRequest>,
-) -> impl IntoResponse {
-    let Some(registry) = &state.registry else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"success": false, "error": "Registry not available"}))).into_response();
-    };
-
-    match registry.create_application(req).await {
-        Ok((app, token)) => {
-            info!(slug = app.slug, "Application created via API");
-            Json(serde_json::json!({"success": true, "application": app, "token": token})).into_response()
-        }
-        Err(e) => {
-            error!("Failed to create application: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": e.to_string()}))).into_response()
-        }
-    }
-}
-
-async fn update_application(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-    Json(req): Json<UpdateApplicationRequest>,
-) -> impl IntoResponse {
-    let Some(registry) = &state.registry else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"success": false, "error": "Registry not available"}))).into_response();
-    };
-
-    match registry.update_application(&id, req).await {
-        Ok(Some(app)) => Json(serde_json::json!({"success": true, "application": app})).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": "Not found"}))).into_response(),
-        Err(e) => {
-            error!("Failed to update application: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": e.to_string()}))).into_response()
-        }
-    }
-}
-
-async fn delete_application(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    let Some(registry) = &state.registry else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"success": false, "error": "Registry not available"}))).into_response();
-    };
-
-    // Remove app routes before deleting
-    {
-        let apps = registry.list_applications().await;
-        if let Some(app) = apps.iter().find(|a| a.id == id) {
-            let base_domain = &state.env.base_domain;
-            for domain in app.domains(base_domain) {
-                state.proxy.remove_app_route(&domain);
-            }
-        }
-    }
-
-    match registry.remove_application(&id).await {
-        Ok(true) => Json(serde_json::json!({"success": true})).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": "Not found"}))).into_response(),
-        Err(e) => {
-            error!("Failed to delete application: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": e.to_string()}))).into_response()
-        }
-    }
-}
-
-async fn toggle_application(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    let Some(registry) = &state.registry else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"success": false, "error": "Registry not available"}))).into_response();
-    };
-
-    match registry.toggle_application(&id).await {
-        Ok(Some(enabled)) => Json(serde_json::json!({"success": true, "enabled": enabled})).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": "Not found"}))).into_response(),
-        Err(e) => {
-            error!("Failed to toggle application: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": e.to_string()}))).into_response()
-        }
-    }
-}
 
 async fn start_service(
     State(state): State<ApiState>,
@@ -218,27 +116,6 @@ async fn update_power_policy(
     }
 }
 
-async fn regenerate_token(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    let Some(registry) = &state.registry else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"success": false, "error": "Registry not available"}))).into_response();
-    };
-
-    match registry.regenerate_token(&id).await {
-        Ok(Some(token)) => {
-            info!(app_id = id, "Token regenerated via API");
-            Json(serde_json::json!({"success": true, "token": token})).into_response()
-        }
-        Ok(None) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": "Not found"}))).into_response(),
-        Err(e) => {
-            error!("Failed to regenerate token: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": e.to_string()}))).into_response()
-        }
-    }
-}
-
 // ── Agent update handlers ────────────────────────────────────
 
 /// Trigger update to all connected agents (or specific ones).
@@ -310,7 +187,7 @@ async fn get_update_status(State(state): State<ApiState>) -> impl IntoResponse {
     }
 }
 
-/// Fix a failed agent update via LXC exec (local) or remote exec (remote host).
+/// Fix a failed agent update via machinectl exec (local) or remote exec (remote host).
 async fn fix_agent_update(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -327,9 +204,9 @@ async fn fix_agent_update(
     let app = registry.get_application(&id).await;
     match app {
         Some(app) if app.host_id == "local" => {
-            match registry.fix_agent_via_lxc(&id).await {
+            match registry.fix_agent_via_exec(&id).await {
                 Ok(output) => {
-                    info!(app_id = id, "Agent fixed via LXC exec");
+                    info!(app_id = id, "Agent fixed via machinectl exec");
                     Json(serde_json::json!({"success": true, "output": output})).into_response()
                 }
                 Err(e) => {
@@ -772,133 +649,4 @@ pub(crate) async fn stream_to_remote(
     Ok((transferred, sequence))
 }
 
-// LXD inter-host migration removed — nspawn migration is in container_manager.rs
-
-// ── WebSocket terminal (lxc exec) ───────────────────────────
-
-async fn terminal_ws(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-    ws: WebSocketUpgrade,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_terminal_ws(state, id, socket))
-}
-
-async fn handle_terminal_ws(state: ApiState, app_id: String, mut socket: WebSocket) {
-    let Some(registry) = &state.registry else {
-        let _ = socket.send(Message::Close(None)).await;
-        return;
-    };
-
-    // Look up the application to get the container name
-    let apps = registry.list_applications().await;
-    let Some(app) = apps.iter().find(|a| a.id == app_id) else {
-        let _ = socket
-            .send(Message::Text(
-                serde_json::json!({"error": "Application not found"})
-                    .to_string()
-                    .into(),
-            ))
-            .await;
-        let _ = socket.send(Message::Close(None)).await;
-        return;
-    };
-    let container = app.container_name.clone();
-
-    info!(container, "Terminal WebSocket opened");
-
-    // Spawn lxc exec with interactive shell
-    let mut child = match Command::new("lxc")
-        .args([
-            "exec",
-            &container,
-            "--force-interactive",
-            "--env",
-            "TERM=xterm-256color",
-            "--",
-            "/bin/bash",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            error!(container, "Failed to spawn lxc exec: {e}");
-            let _ = socket
-                .send(Message::Text(
-                    serde_json::json!({"error": format!("Failed to start shell: {e}")})
-                        .to_string()
-                        .into(),
-                ))
-                .await;
-            let _ = socket.send(Message::Close(None)).await;
-            return;
-        }
-    };
-
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
-
-    let mut stdout_buf = vec![0u8; 4096];
-    let mut stderr_buf = vec![0u8; 4096];
-
-    loop {
-        tokio::select! {
-            // stdout → WebSocket
-            n = stdout.read(&mut stdout_buf) => {
-                match n {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if socket.send(Message::Binary(stdout_buf[..n].to_vec().into())).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-            // stderr → WebSocket
-            n = stderr.read(&mut stderr_buf) => {
-                match n {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if socket.send(Message::Binary(stderr_buf[..n].to_vec().into())).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-            // WebSocket → stdin
-            ws_msg = socket.recv() => {
-                match ws_msg {
-                    Some(Ok(Message::Text(text))) => {
-                        if stdin.write_all(text.as_bytes()).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(Message::Binary(data))) => {
-                        if stdin.write_all(&data).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    _ => {}
-                }
-            }
-            // Process exited
-            status = child.wait() => {
-                match status {
-                    Ok(s) => info!(container, status = ?s, "Shell process exited"),
-                    Err(e) => error!(container, "Shell process error: {e}"),
-                }
-                break;
-            }
-        }
-    }
-
-    // Clean up
-    let _ = child.kill().await;
-    let _ = socket.send(Message::Close(None)).await;
-    info!(container, "Terminal WebSocket closed");
-}
+// Inter-host nspawn migration is in container_manager.rs

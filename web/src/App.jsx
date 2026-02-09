@@ -11,9 +11,8 @@ import Energy from './pages/Energy';
 import Users from './pages/Users';
 import Hosts from './pages/Hosts';
 import Certificates from './pages/Certificates';
-import Applications from './pages/Applications';
 import Dataverse from './pages/Dataverse';
-import ContainersV2 from './pages/ContainersV2';
+import Containers from './pages/Containers';
 import CloudRelay from './pages/CloudRelay';
 import Login from './pages/Login';
 import Profile from './pages/Profile';
@@ -100,8 +99,7 @@ function AppRoutes() {
               <Route path="/updates" element={<Updates />} />
               <Route path="/energy" element={<Energy />} />
               <Route path="/hosts" element={<Hosts />} />
-              <Route path="/applications" element={<Applications />} />
-              <Route path="/containers" element={<ContainersV2 />} />
+              <Route path="/containers" element={<Containers />} />
               <Route path="/dataverse" element={<Dataverse />} />
               <Route path="/certificates" element={<Certificates />} />
               <Route path="/cloud-relay" element={<CloudRelay />} />

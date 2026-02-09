@@ -69,7 +69,6 @@ pub struct ContainerV2Record {
     pub host_id: String,
     pub status: ContainerV2Status,
     pub created_at: DateTime<Utc>,
-    pub migrated_from_lxd_app_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -170,7 +169,7 @@ impl ContainerManager {
         let host_id = req.host_id.clone().unwrap_or_else(|| "local".to_string());
         let container_name = format!("hr-v2-{}", req.slug);
 
-        // Create application in registry (headless — no LXD deploy)
+        // Create application in registry (headless — container deploy is managed separately)
         let create_req = CreateApplicationRequest {
             name: req.name.clone(),
             slug: req.slug.clone(),
@@ -197,7 +196,6 @@ impl ContainerManager {
             host_id: host_id.clone(),
             status: ContainerV2Status::Deploying,
             created_at: Utc::now(),
-            migrated_from_lxd_app_id: None,
         };
 
         // Persist the record

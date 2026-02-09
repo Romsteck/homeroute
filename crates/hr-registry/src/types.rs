@@ -7,7 +7,7 @@ use crate::protocol::{AgentMetrics, PowerPolicy, ServiceConfig, ServiceType};
 /// Port that code-server listens on inside each container.
 pub const CODE_SERVER_PORT: u16 = 13337;
 
-/// A registered application with its LXC container and agent.
+/// A registered application with its container and agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Application {
     pub id: String,

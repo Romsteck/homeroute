@@ -22,9 +22,9 @@ crates/
 ├── hr-adblock/      # Moteur adblock (FxHashSet, sources, whitelist)
 ├── hr-acme/         # Let's Encrypt ACME (wildcards DNS-01 via Cloudflare)
 ├── hr-firewall/     # Firewall IPv6 (nftables)
-├── hr-lxd/          # Gestion containers LXD
+├── hr-container/    # Gestion containers systemd-nspawn
 ├── hr-registry/     # Registry des applications/agents
-├── hr-agent/        # Agent binaire déployé dans les containers LXC
+├── hr-agent/        # Agent binaire déployé dans les containers nspawn
 ├── hr-host-agent/   # Agent hôte
 ├── hr-api/          # Routeur API HTTP (axum, routes /api/*, WebSocket)
 ```
@@ -67,7 +67,7 @@ Sauf en mode Cloud Gateway
 
 Les enregistrements DNS sont synchronisés automatiquement:
 - **Cloudflare**: AAAA → IPv6 agent (proxied)
-- **DNS local**: A → IPv4 agent + AAAA → IPv6 agent (direct aux containers LXC)
+- **DNS local**: A → IPv4 agent + AAAA → IPv6 agent (direct aux containers nspawn)
 
 ## Commandes utiles
 
@@ -159,8 +159,8 @@ Si un agent ne se reconnecte pas après la mise à jour:
 # Via API (recommandé):
 curl -X POST http://localhost:4000/api/applications/{id}/update/fix
 
-# Ou manuellement via LXC:
-lxc exec hr-{slug} -- bash -c "curl -fsSL http://10.0.0.254:4000/api/applications/agents/binary -o /usr/local/bin/hr-agent && chmod +x /usr/local/bin/hr-agent && systemctl restart hr-agent"
+# Ou manuellement via machinectl:
+machinectl shell hr-v2-{slug} /bin/bash -c "curl -fsSL http://10.0.0.254:4000/api/applications/agents/binary -o /usr/local/bin/hr-agent && chmod +x /usr/local/bin/hr-agent && systemctl restart hr-agent"
 ```
 
 ### Checklist de vérification

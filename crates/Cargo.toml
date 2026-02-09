@@ -11,8 +11,6 @@ members = [
     "hr-ipv6",
     "hr-adblock",
     "hr-api",
-
-    "hr-lxd",
     "hr-container",
     "hr-registry",
     "hr-agent",
