@@ -175,7 +175,7 @@ function Applications() {
         setAppMetrics(prev => {
           const current = prev[appId] || {};
           const updated = { ...current };
-          if (serviceType === 'codeserver') updated.codeServerStatus = newStatus;
+          if (serviceType === 'code_server') updated.codeServerStatus = newStatus;
           return { ...prev, [appId]: updated };
         });
       }
