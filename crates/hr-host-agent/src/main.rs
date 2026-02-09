@@ -147,6 +147,13 @@ async fn run_connection(config: &Config) -> Result<(), String> {
 
     let (cpu_tx, mut cpu_rx) = tokio::sync::watch::channel(0.0f32);
 
+    // Terminal sessions for remote shell access
+    struct TerminalSession {
+        stdin: tokio::process::ChildStdin,
+        kill_tx: tokio::sync::oneshot::Sender<()>,
+    }
+    let mut terminal_sessions: HashMap<String, TerminalSession> = HashMap::new();
+
     // Heartbeat task
     let tx_hb = tx.clone();
     let heartbeat_handle = tokio::spawn(async move {
@@ -658,6 +665,152 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                     }
                                 }
                             }
+                            Ok(HostRegistryMessage::TerminalOpen { session_id, container_name }) => {
+                                info!(session_id = %session_id, container = %container_name, "Opening terminal session");
+                                let tx_term = tx.clone();
+                                let sid = session_id.clone();
+
+                                // Get the container's leader PID via machinectl show
+                                let leader_pid = match tokio::process::Command::new("machinectl")
+                                    .args(["show", &container_name, "--property=Leader", "--value"])
+                                    .output()
+                                    .await
+                                {
+                                    Ok(output) if output.status.success() => {
+                                        String::from_utf8_lossy(&output.stdout).trim().to_string()
+                                    }
+                                    Ok(output) => {
+                                        let stderr = String::from_utf8_lossy(&output.stderr);
+                                        error!(container = %container_name, "Failed to get leader PID: {stderr}");
+                                        let _ = tx_term.send(OutgoingWsMessage::Text(HostAgentMessage::TerminalClosed {
+                                            session_id: sid, exit_code: None,
+                                        })).await;
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        error!(container = %container_name, "machinectl show error: {e}");
+                                        let _ = tx_term.send(OutgoingWsMessage::Text(HostAgentMessage::TerminalClosed {
+                                            session_id: sid, exit_code: None,
+                                        })).await;
+                                        continue;
+                                    }
+                                };
+
+                                let nsenter_cmd = format!(
+                                    "nsenter -t {} -m -u -i -n -p -- /bin/bash -l",
+                                    leader_pid
+                                );
+                                match tokio::process::Command::new("script")
+                                    .args(["-qfec", &nsenter_cmd, "/dev/null"])
+                                    .env("TERM", "xterm-256color")
+                                    .env("HOME", "/root")
+                                    .stdin(std::process::Stdio::piped())
+                                    .stdout(std::process::Stdio::piped())
+                                    .stderr(std::process::Stdio::piped())
+                                    .spawn()
+                                {
+                                    Ok(mut child) => {
+                                        let child_stdin = child.stdin.take().expect("child stdin");
+                                        let mut child_stdout = child.stdout.take().expect("child stdout");
+                                        let mut child_stderr = child.stderr.take().expect("child stderr");
+                                        let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
+
+                                        terminal_sessions.insert(sid.clone(), TerminalSession {
+                                            stdin: child_stdin,
+                                            kill_tx,
+                                        });
+
+                                        // Send TerminalOpened
+                                        let _ = tx_term.send(OutgoingWsMessage::Text(HostAgentMessage::TerminalOpened {
+                                            session_id: sid.clone(),
+                                        })).await;
+
+                                        // Spawn task to read stdout/stderr and send TerminalData
+                                        let tx_reader = tx_term.clone();
+                                        let reader_sid = sid.clone();
+                                        tokio::spawn(async move {
+                                            use tokio::io::AsyncReadExt;
+                                            let mut stdout_buf = vec![0u8; 4096];
+                                            let mut stderr_buf = vec![0u8; 4096];
+                                            let exit_code;
+                                            loop {
+                                                tokio::select! {
+                                                    n = child_stdout.read(&mut stdout_buf) => {
+                                                        match n {
+                                                            Ok(0) | Err(_) => {
+                                                                exit_code = child.wait().await.ok().and_then(|s| s.code());
+                                                                break;
+                                                            }
+                                                            Ok(n) => {
+                                                                if tx_reader.send(OutgoingWsMessage::Text(HostAgentMessage::TerminalData {
+                                                                    session_id: reader_sid.clone(),
+                                                                    data: stdout_buf[..n].to_vec(),
+                                                                })).await.is_err() {
+                                                                    exit_code = None;
+                                                                    let _ = child.kill().await;
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    n = child_stderr.read(&mut stderr_buf) => {
+                                                        match n {
+                                                            Ok(0) | Err(_) => {
+                                                                exit_code = child.wait().await.ok().and_then(|s| s.code());
+                                                                break;
+                                                            }
+                                                            Ok(n) => {
+                                                                if tx_reader.send(OutgoingWsMessage::Text(HostAgentMessage::TerminalData {
+                                                                    session_id: reader_sid.clone(),
+                                                                    data: stderr_buf[..n].to_vec(),
+                                                                })).await.is_err() {
+                                                                    exit_code = None;
+                                                                    let _ = child.kill().await;
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    _ = &mut kill_rx => {
+                                                        let _ = child.kill().await;
+                                                        exit_code = child.wait().await.ok().and_then(|s| s.code());
+                                                        break;
+                                                    }
+                                                    status = child.wait() => {
+                                                        exit_code = status.ok().and_then(|s| s.code());
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            // Send TerminalClosed
+                                            let _ = tx_reader.send(OutgoingWsMessage::Text(HostAgentMessage::TerminalClosed {
+                                                session_id: reader_sid,
+                                                exit_code,
+                                            })).await;
+                                        });
+                                    }
+                                    Err(e) => {
+                                        error!(session_id = %sid, "Failed to spawn terminal: {e}");
+                                        let _ = tx_term.send(OutgoingWsMessage::Text(HostAgentMessage::TerminalClosed {
+                                            session_id: sid, exit_code: None,
+                                        })).await;
+                                    }
+                                }
+                            }
+                            Ok(HostRegistryMessage::TerminalData { session_id, data }) => {
+                                if let Some(session) = terminal_sessions.get_mut(&session_id) {
+                                    use tokio::io::AsyncWriteExt;
+                                    if let Err(e) = session.stdin.write_all(&data).await {
+                                        warn!(session_id = %session_id, "Terminal stdin write error: {e}");
+                                    }
+                                }
+                            }
+                            Ok(HostRegistryMessage::TerminalClose { session_id }) => {
+                                info!(session_id = %session_id, "Closing terminal session");
+                                if let Some(session) = terminal_sessions.remove(&session_id) {
+                                    let _ = session.kill_tx.send(());
+                                }
+                            }
                             Ok(HostRegistryMessage::AuthResult { .. }) => {
                                 // Already handled during auth phase
                             }
@@ -752,6 +905,12 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                 }
             }
         }
+    }
+
+    // Clean up terminal sessions on disconnect
+    for (sid, session) in terminal_sessions {
+        info!(session_id = %sid, "Cleaning up terminal session on disconnect");
+        let _ = session.kill_tx.send(());
     }
 
     // Clean up orphaned nspawn imports on disconnect
