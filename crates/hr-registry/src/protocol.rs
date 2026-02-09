@@ -306,6 +306,20 @@ pub enum HostAgentMessage {
     },
     /// Nspawn container list reported by host-agent.
     NspawnContainerList(Vec<NspawnContainerInfo>),
+    /// Terminal output data from a remote shell session.
+    TerminalData {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    /// Terminal session opened successfully.
+    TerminalOpened {
+        session_id: String,
+    },
+    /// Terminal session closed.
+    TerminalClosed {
+        session_id: String,
+        exit_code: Option<i32>,
+    },
 }
 
 /// Nspawn container info reported by host-agent.
@@ -440,6 +454,20 @@ pub enum HostRegistryMessage {
         storage_path: String,
         transfer_id: String,
         network_mode: String,
+    },
+    /// Open a terminal session in a container on this host.
+    TerminalOpen {
+        session_id: String,
+        container_name: String,
+    },
+    /// Terminal input data from the user.
+    TerminalData {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    /// Close a terminal session.
+    TerminalClose {
+        session_id: String,
     },
 }
 

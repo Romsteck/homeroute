@@ -325,15 +325,13 @@ async fn handle_terminal_ws(state: ApiState, container_id: String, mut socket: W
         return;
     };
 
-    // Look up the container record to get the container name
+    // Look up the container record to get the container name and host_id
     let containers = mgr.list_containers().await;
-    let container_name = containers
+    let container_record = containers
         .iter()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(&container_id))
-        .and_then(|c| c.get("container_name").and_then(|v| v.as_str()))
-        .map(|s| s.to_string());
+        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(&container_id));
 
-    let Some(container) = container_name else {
+    let Some(record) = container_record else {
         let _ = socket
             .send(Message::Text(
                 serde_json::json!({"error": "Container not found"})
@@ -345,11 +343,46 @@ async fn handle_terminal_ws(state: ApiState, container_id: String, mut socket: W
         return;
     };
 
-    info!(container, "Container V2 terminal WebSocket opened");
+    let container = record
+        .get("container_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let host_id = record
+        .get("host_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("local")
+        .to_string();
 
+    if container.is_empty() {
+        let _ = socket
+            .send(Message::Text(
+                serde_json::json!({"error": "Container not found"})
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    }
+
+    info!(container, host_id, "Container V2 terminal WebSocket opened");
+
+    if host_id == "local" {
+        handle_terminal_local(&container, &mut socket).await;
+    } else {
+        handle_terminal_remote(&state, &host_id, &container, &mut socket).await;
+    }
+
+    let _ = socket.send(Message::Close(None)).await;
+    info!(container, "Container V2 terminal WebSocket closed");
+}
+
+/// Handle terminal for a local container (machinectl + nsenter).
+async fn handle_terminal_local(container: &str, socket: &mut WebSocket) {
     // Get the container's leader PID via machinectl show
     let leader_pid = match Command::new("machinectl")
-        .args(["show", &container, "--property=Leader", "--value"])
+        .args(["show", container, "--property=Leader", "--value"])
         .output()
         .await
     {
@@ -366,7 +399,6 @@ async fn handle_terminal_ws(state: ApiState, container_id: String, mut socket: W
                         .into(),
                 ))
                 .await;
-            let _ = socket.send(Message::Close(None)).await;
             return;
         }
         Err(e) => {
@@ -378,7 +410,6 @@ async fn handle_terminal_ws(state: ApiState, container_id: String, mut socket: W
                         .into(),
                 ))
                 .await;
-            let _ = socket.send(Message::Close(None)).await;
             return;
         }
     };
@@ -407,7 +438,6 @@ async fn handle_terminal_ws(state: ApiState, container_id: String, mut socket: W
                         .into(),
                 ))
                 .await;
-            let _ = socket.send(Message::Close(None)).await;
             return;
         }
     };
@@ -468,6 +498,127 @@ async fn handle_terminal_ws(state: ApiState, container_id: String, mut socket: W
     }
 
     let _ = child.kill().await;
-    let _ = socket.send(Message::Close(None)).await;
-    info!(container, "Container V2 terminal WebSocket closed");
+}
+
+/// Handle terminal for a remote container (proxied through host-agent WebSocket).
+async fn handle_terminal_remote(
+    state: &ApiState,
+    host_id: &str,
+    container: &str,
+    socket: &mut WebSocket,
+) {
+    let registry = match &state.registry {
+        Some(r) => r,
+        None => {
+            let _ = socket
+                .send(Message::Text(
+                    serde_json::json!({"error": "Registry not available"})
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+            return;
+        }
+    };
+
+    if !registry.is_host_connected(host_id).await {
+        let _ = socket
+            .send(Message::Text(
+                serde_json::json!({"error": "Host is not connected"})
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        return;
+    }
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+
+    // Register session so data from host-agent is routed to us
+    registry.register_terminal_session(&session_id, tx).await;
+
+    // Send TerminalOpen to host-agent
+    if let Err(e) = registry
+        .send_host_command(
+            host_id,
+            hr_registry::protocol::HostRegistryMessage::TerminalOpen {
+                session_id: session_id.clone(),
+                container_name: container.to_string(),
+            },
+        )
+        .await
+    {
+        error!(container, host_id, "Failed to send TerminalOpen: {e}");
+        let _ = socket
+            .send(Message::Text(
+                serde_json::json!({"error": format!("Failed to open remote terminal: {e}")})
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        registry.unregister_terminal_session(&session_id).await;
+        return;
+    }
+
+    info!(container, host_id, session_id, "Remote terminal session started");
+
+    // Bidirectional relay loop
+    loop {
+        tokio::select! {
+            // Data from host-agent (terminal output) → WebSocket client
+            data = rx.recv() => {
+                match data {
+                    Some(d) if d.is_empty() => {
+                        // Empty data signals session closed by host-agent
+                        break;
+                    }
+                    Some(d) => {
+                        if socket.send(Message::Binary(d.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break, // Channel closed
+                }
+            }
+            // Data from WebSocket client (user input) → host-agent
+            ws_msg = socket.recv() => {
+                match ws_msg {
+                    Some(Ok(Message::Text(text))) => {
+                        let _ = registry.send_host_command(
+                            host_id,
+                            hr_registry::protocol::HostRegistryMessage::TerminalData {
+                                session_id: session_id.clone(),
+                                data: text.as_bytes().to_vec(),
+                            },
+                        ).await;
+                    }
+                    Some(Ok(Message::Binary(data))) => {
+                        let _ = registry.send_host_command(
+                            host_id,
+                            hr_registry::protocol::HostRegistryMessage::TerminalData {
+                                session_id: session_id.clone(),
+                                data: data.to_vec(),
+                            },
+                        ).await;
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Cleanup: send TerminalClose and unregister
+    let _ = registry
+        .send_host_command(
+            host_id,
+            hr_registry::protocol::HostRegistryMessage::TerminalClose {
+                session_id: session_id.clone(),
+            },
+        )
+        .await;
+    registry.unregister_terminal_session(&session_id).await;
+
+    info!(container, host_id, session_id, "Remote terminal session ended");
 }

@@ -1108,6 +1108,17 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                                         }
                                     }
                                 }
+                                HostAgentMessage::TerminalData { session_id, data } => {
+                                    registry.send_terminal_data(&session_id, data).await;
+                                }
+                                HostAgentMessage::TerminalOpened { session_id } => {
+                                    tracing::debug!(session_id = %session_id, "Remote terminal opened");
+                                }
+                                HostAgentMessage::TerminalClosed { session_id, exit_code } => {
+                                    tracing::info!(session_id = %session_id, ?exit_code, "Remote terminal closed");
+                                    // Send empty data to signal close to the API WS handler
+                                    registry.send_terminal_data(&session_id, Vec::new()).await;
+                                }
                                 HostAgentMessage::Auth { .. } => {}
                                 HostAgentMessage::NspawnContainerList(_) => {
                                     // TODO: track nspawn containers separately if needed

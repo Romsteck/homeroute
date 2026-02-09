@@ -79,6 +79,8 @@ pub struct AgentRegistry {
     host_power_states: Arc<RwLock<HashMap<String, HostPowerInfo>>>,
     /// ACME manager for per-app wildcard certificate lifecycle.
     acme: RwLock<Option<Arc<AcmeManager>>>,
+    /// Terminal sessions: maps session_id → sender for data from host-agent to API WS handler.
+    terminal_sessions: Arc<RwLock<HashMap<String, mpsc::Sender<Vec<u8>>>>>,
 }
 
 impl AgentRegistry {
@@ -116,6 +118,7 @@ impl AgentRegistry {
             transfer_relay_targets: Arc::new(RwLock::new(HashMap::new())),
             host_power_states: Arc::new(RwLock::new(HashMap::new())),
             acme: RwLock::new(None),
+            terminal_sessions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -1798,6 +1801,26 @@ WantedBy=multi-user.target
             if removed > 0 {
                 tracing::info!("Cleaned up {} stale transfer relay target mappings", removed);
             }
+        }
+    }
+
+    // ── Terminal session management ────────────────────────────
+
+    /// Register a terminal session so data from a host-agent can be routed to the API WS handler.
+    pub async fn register_terminal_session(&self, session_id: &str, tx: mpsc::Sender<Vec<u8>>) {
+        self.terminal_sessions.write().await.insert(session_id.to_string(), tx);
+    }
+
+    /// Unregister a terminal session.
+    pub async fn unregister_terminal_session(&self, session_id: &str) {
+        self.terminal_sessions.write().await.remove(session_id);
+    }
+
+    /// Forward terminal data from a host-agent to the registered API WS handler.
+    pub async fn send_terminal_data(&self, session_id: &str, data: Vec<u8>) {
+        let sessions = self.terminal_sessions.read().await;
+        if let Some(tx) = sessions.get(session_id) {
+            let _ = tx.send(data).await;
         }
     }
 

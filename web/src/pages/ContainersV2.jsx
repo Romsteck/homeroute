@@ -39,6 +39,8 @@ import {
   cancelMigrationV2,
   getReverseProxyConfig,
   getHosts,
+  startApplicationService,
+  stopApplicationService,
 } from '../api/client';
 
 const STATUS_BADGES = {
@@ -161,6 +163,19 @@ function ContainersV2() {
         [appId]: { codeServerStatus, appStatus, dbStatus, memoryBytes, cpuPercent }
       }));
     },
+    'agent:service-command': (data) => {
+      const { appId, serviceType, action, success } = data;
+      if (success && appId) {
+        const statusMap = { started: 'running', stopped: 'stopped', starting: 'starting', stopping: 'stopping' };
+        const newStatus = statusMap[action] || action;
+        setAppMetrics(prev => {
+          const current = prev[appId] || {};
+          const updated = { ...current };
+          if (serviceType === 'codeserver') updated.codeServerStatus = newStatus;
+          return { ...prev, [appId]: updated };
+        });
+      }
+    },
     'hosts:status': (data) => {
       const { hostId, status } = data;
       setHosts(prev => prev.map(h =>
@@ -180,6 +195,14 @@ function ContainersV2() {
       }));
       if (data.phase === 'complete') {
         setTimeout(() => fetchDataRef.current(), 1000);
+        // Auto-dismiss migration progress after 5 seconds
+        setTimeout(() => {
+          setMigrations(prev => {
+            const next = { ...prev };
+            delete next[data.appId];
+            return next;
+          });
+        }, 5000);
       }
     },
   });
@@ -306,6 +329,28 @@ function ContainersV2() {
       }
     } catch {
       setMessage({ type: 'error', text: 'Erreur' });
+    }
+  }
+
+  async function handleServiceStart(appId, serviceType) {
+    try {
+      const res = await startApplicationService(appId, serviceType);
+      if (!res.data.success) {
+        setMessage({ type: 'error', text: res.data.error || 'Erreur' });
+      }
+    } catch {
+      setMessage({ type: 'error', text: 'Erreur de connexion' });
+    }
+  }
+
+  async function handleServiceStop(appId, serviceType) {
+    try {
+      const res = await stopApplicationService(appId, serviceType);
+      if (!res.data.success) {
+        setMessage({ type: 'error', text: res.data.error || 'Erreur' });
+      }
+    } catch {
+      setMessage({ type: 'error', text: 'Erreur de connexion' });
     }
   }
 
@@ -531,6 +576,7 @@ function ContainersV2() {
                   <th className="text-left py-2 px-3 font-medium">IPv4</th>
                   <th className="text-right py-2 px-3 font-medium">CPU</th>
                   <th className="text-right py-2 px-3 font-medium">RAM</th>
+                  <th className="text-left py-2 px-3 font-medium">Services</th>
                   <th className="text-right py-2 px-3 font-medium">Actions</th>
                 </tr>
               </thead>
@@ -623,6 +669,44 @@ function ContainersV2() {
                         </span>
                       </td>
 
+                      {/* Services */}
+                      <td className="py-3 px-3">
+                        {!isMigrating && displayStatus === 'connected' && container.code_server_enabled ? (
+                          <div className="flex items-center gap-2 text-xs">
+                            <button
+                              onClick={() => metrics?.codeServerStatus === 'running'
+                                ? handleServiceStop(container.id, 'code-server')
+                                : handleServiceStart(container.id, 'code-server')
+                              }
+                              className={`flex items-center gap-1 px-1.5 py-0.5 transition-colors ${
+                                metrics?.codeServerStatus === 'running'
+                                  ? 'text-green-400 bg-green-900/30 hover:bg-green-900/50'
+                                  : metrics?.codeServerStatus === 'starting'
+                                  ? 'text-blue-400 bg-blue-900/30'
+                                  : 'text-gray-400 bg-gray-700/30 hover:bg-gray-700/50'
+                              }`}
+                              title={`code-server: ${metrics?.codeServerStatus || 'stopped'}`}
+                            >
+                              <Code2 className="w-3 h-3" />
+                              {metrics?.codeServerStatus === 'running' ? <Square className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
+                            </button>
+                            {metrics?.codeServerStatus === 'running' && baseDomain && (
+                              <a
+                                href={`https://code.${container.slug}.${baseDomain}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-cyan-400 hover:text-cyan-300 transition-colors"
+                                title="Ouvrir IDE"
+                              >
+                                IDE
+                              </a>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-gray-600">-</span>
+                        )}
+                      </td>
+
                       {/* Actions */}
                       <td className="py-3 px-3">
                         <div className={`flex items-center justify-end gap-1 ${isMigrating ? 'opacity-50 pointer-events-none' : ''}`}>
@@ -651,17 +735,6 @@ function ContainersV2() {
                           >
                             <Terminal className="w-4 h-4" />
                           </button>
-                          {container.code_server_enabled && baseDomain && (
-                            <a
-                              href={`https://code.${container.slug}.${baseDomain}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="p-1.5 text-purple-400 hover:text-purple-300 hover:bg-purple-900/30 transition-colors"
-                              title="code-server"
-                            >
-                              <Code2 className="w-4 h-4" />
-                            </a>
-                          )}
                           <button
                             onClick={() => openMigrateModal(container)}
                             disabled={isMigrating}
