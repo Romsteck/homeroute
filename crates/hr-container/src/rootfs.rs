@@ -58,11 +58,29 @@ pub async fn bootstrap_ubuntu(container_name: &str, storage_path: &Path) -> Resu
         &networkd_link,
     ).await;
 
-    // 3. Install essential packages list for the rootfs
-    // (dbus is needed for machinectl shell to work properly)
+    // 3. Disable IPv6 (containers lack IPv6 routing, causes DNS failures in Node.js)
+    let sysctl_dir = rootfs.join("etc/sysctl.d");
+    tokio::fs::create_dir_all(&sysctl_dir).await.ok();
+    tokio::fs::write(
+        sysctl_dir.join("99-disable-ipv6.conf"),
+        "net.ipv6.conf.all.disable_ipv6 = 1\nnet.ipv6.conf.default.disable_ipv6 = 1\n",
+    ).await.context("failed to write sysctl ipv6 config")?;
+
+    // 3b. Force curl to use IPv4 (sysctl alone doesn't prevent AAAA DNS queries)
+    tokio::fs::write(rootfs.join("root/.curlrc"), "--ipv4\n").await
+        .context("failed to write .curlrc")?;
+
+    // 3c. Prefer IPv4 in getaddrinfo (affects all glibc-based DNS resolution)
+    tokio::fs::write(
+        rootfs.join("etc/gai.conf"),
+        "precedence ::ffff:0:0/96  100\n",
+    ).await.context("failed to write gai.conf")?;
+
+    // 4. Install essential packages in the rootfs via chroot
+    // (dbus is needed for machinectl shell, curl for runtime installs)
     let setup_script = r#"
         apt-get update -qq 2>/dev/null
-        apt-get install -y -qq dbus systemd-sysv iproute2 2>/dev/null
+        apt-get install -y -qq dbus systemd-sysv iproute2 curl ca-certificates 2>/dev/null
         systemctl enable systemd-networkd 2>/dev/null || true
     "#;
 

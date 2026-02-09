@@ -243,8 +243,18 @@ impl PowersaveManager {
                     error!(service_type = ?service_type, error = %e, "Failed to start service");
                     self.set_state(service_type, ServiceState::Stopped);
                 } else {
-                    self.set_state(service_type, ServiceState::Running);
-                    self.record_activity(service_type);
+                    // Brief delay to verify the process didn't immediately crash
+                    // (e.g. binary not found = exit 203/EXEC)
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    let actual = mgr.get_state(service_type).await;
+                    if actual == ServiceState::Running {
+                        self.set_state(service_type, ServiceState::Running);
+                        self.record_activity(service_type);
+                    } else {
+                        warn!(service_type = ?service_type, actual_state = ?actual,
+                              "Service failed to stay running after start");
+                        self.set_state(service_type, actual);
+                    }
                 }
 
                 let _ = state_tx

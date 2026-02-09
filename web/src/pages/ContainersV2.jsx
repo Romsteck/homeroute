@@ -23,6 +23,7 @@ import {
   Play,
   Square,
   ArrowRightLeft,
+  Pencil,
 } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
@@ -79,6 +80,9 @@ function ContainersV2() {
   const [selectedHostId, setSelectedHostId] = useState('');
   const [migrating, setMigrating] = useState(false);
   const [migrations, setMigrations] = useState({});
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editingContainer, setEditingContainer] = useState(null);
+  const [editForm, setEditForm] = useState(null);
 
   // Agent metrics state
   const [appMetrics, setAppMetrics] = useState({});
@@ -171,7 +175,7 @@ function ContainersV2() {
         setAppMetrics(prev => {
           const current = prev[appId] || {};
           const updated = { ...current };
-          if (serviceType === 'codeserver') updated.codeServerStatus = newStatus;
+          if (serviceType === 'code_server') updated.codeServerStatus = newStatus;
           return { ...prev, [appId]: updated };
         });
       }
@@ -351,6 +355,60 @@ function ContainersV2() {
       }
     } catch {
       setMessage({ type: 'error', text: 'Erreur de connexion' });
+    }
+  }
+
+  function openEditModal(container) {
+    setEditingContainer(container);
+    setEditForm({
+      name: container.name,
+      frontend: {
+        target_port: String(container.frontend?.target_port || ''),
+        auth_required: container.frontend?.auth_required || false,
+        allowed_groups: container.frontend?.allowed_groups || [],
+        local_only: container.frontend?.local_only || false,
+      },
+      apis: (container.apis || []).map(a => ({ ...a, target_port: String(a.target_port) })),
+      code_server_enabled: container.code_server_enabled !== false,
+    });
+    setShowEditModal(true);
+  }
+
+  async function handleEdit() {
+    if (!editForm || !editingContainer) return;
+    setSaving(true);
+    try {
+      const payload = {
+        name: editForm.name,
+        frontend: {
+          target_port: parseInt(editForm.frontend.target_port),
+          auth_required: editForm.frontend.auth_required,
+          allowed_groups: editForm.frontend.allowed_groups,
+          local_only: editForm.frontend.local_only,
+        },
+        apis: editForm.apis.map(a => ({
+          slug: a.slug.toLowerCase(),
+          target_port: parseInt(a.target_port),
+          auth_required: a.auth_required,
+          allowed_groups: a.allowed_groups || [],
+          local_only: a.local_only || false,
+        })),
+        code_server_enabled: editForm.code_server_enabled,
+      };
+      const res = await updateContainerV2(editingContainer.id, payload);
+      if (res.data.success) {
+        setShowEditModal(false);
+        setEditingContainer(null);
+        setEditForm(null);
+        setMessage({ type: 'success', text: 'Conteneur modifie' });
+        fetchData();
+      } else {
+        setMessage({ type: 'error', text: res.data.error || 'Erreur' });
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: error.response?.data?.error || 'Erreur' });
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -569,9 +627,6 @@ function ContainersV2() {
               <thead>
                 <tr className="text-xs text-gray-500 border-b border-gray-700">
                   <th className="text-left py-2 px-3 font-medium">Nom</th>
-                  <th className="text-left py-2 px-3 font-medium">Slug</th>
-                  <th className="text-left py-2 px-3 font-medium">Conteneur</th>
-                  <th className="text-left py-2 px-3 font-medium">Hote</th>
                   <th className="text-left py-2 px-3 font-medium">Status</th>
                   <th className="text-left py-2 px-3 font-medium">IPv4</th>
                   <th className="text-right py-2 px-3 font-medium">CPU</th>
@@ -581,181 +636,221 @@ function ContainersV2() {
                 </tr>
               </thead>
               <tbody>
-                {containers.map(container => {
-                  const displayStatus = container.agent_status || container.status;
-                  const isDeploying = displayStatus === 'deploying' || container.status === 'deploying';
-                  const metrics = appMetrics[container.id];
-                  const isMigrating = !!migrations[container.id];
-                  const hostName = container.host_id === 'local' || !container.host_id
-                    ? 'HomeRoute'
-                    : (hosts.find(h => h.id === container.host_id)?.name || container.host_id);
+                {(() => {
+                  const groups = [];
+                  const localContainers = containers.filter(c => !c.host_id || c.host_id === 'local');
+                  if (localContainers.length > 0) {
+                    groups.push({ hostId: 'local', hostName: 'HomeRoute', hostStatus: 'online', items: localContainers });
+                  }
+                  const remoteHostIds = [...new Set(containers.filter(c => c.host_id && c.host_id !== 'local').map(c => c.host_id))];
+                  for (const hid of remoteHostIds) {
+                    const host = hosts.find(h => h.id === hid);
+                    groups.push({
+                      hostId: hid,
+                      hostName: host?.name || hid,
+                      hostStatus: host?.status || 'offline',
+                      items: containers.filter(c => c.host_id === hid),
+                    });
+                  }
+                  groups.sort((a, b) => a.hostId === 'local' ? -1 : b.hostId === 'local' ? 1 : a.hostName.localeCompare(b.hostName));
 
-                  return (
-                    <tr key={container.id} className="border-b border-gray-800 hover:bg-gray-800/30">
-                      {/* Name */}
-                      <td className="py-3 px-3">
-                        <div className="flex items-center gap-2">
-                          {isDeploying ? (
-                            <Loader2 className="w-4 h-4 text-blue-400 animate-spin flex-shrink-0" />
-                          ) : (
-                            <Container className="w-4 h-4 text-blue-400 flex-shrink-0" />
-                          )}
-                          <span className="font-medium truncate">{container.name}</span>
-                        </div>
-                      </td>
-
-                      {/* Slug */}
-                      <td className="py-3 px-3">
-                        <span className="text-xs font-mono text-gray-400">{container.slug}</span>
-                      </td>
-
-                      {/* Container Name */}
-                      <td className="py-3 px-3">
-                        <span className="text-xs font-mono text-gray-500">{container.container_name}</span>
-                      </td>
-
-                      {/* Host */}
-                      <td className="py-3 px-3">
-                        <div className="flex items-center gap-1 text-xs text-gray-400">
-                          <HardDrive className="w-3 h-3" />
-                          {hostName}
-                        </div>
-                      </td>
-
-                      {/* Status */}
-                      <td className="py-3 px-3">
-                        {isMigrating ? (
-                          <MigrationProgress
-                            appId={container.id}
-                            migration={migrations[container.id]}
-                            onDismiss={() => setMigrations(prev => {
-                              const next = { ...prev };
-                              delete next[container.id];
-                              return next;
-                            })}
-                          />
-                        ) : isDeploying ? (
-                          <div>
-                            <span className="text-xs px-2 py-0.5 text-blue-400 bg-blue-900/30">Deploiement</span>
-                            <p className="text-xs text-gray-500 mt-1 truncate max-w-32">{container._deployMessage}</p>
+                  return groups.map(group => {
+                    const isHostOffline = group.hostId !== 'local' && group.hostStatus !== 'online';
+                    return [
+                      <tr key={`host-${group.hostId}`} className="bg-gray-800/60">
+                        <td colSpan={7} className="py-2 px-3">
+                          <div className="flex items-center gap-2 text-sm">
+                            <HardDrive className="w-4 h-4 text-gray-400" />
+                            <span className="font-medium text-gray-300">{group.hostName}</span>
+                            <span className={`w-2 h-2 rounded-full ${isHostOffline ? 'bg-red-500' : 'bg-green-500'}`} />
+                            {isHostOffline && <span className="text-xs text-red-400">Hors ligne</span>}
+                            <span className="text-xs text-gray-600 ml-auto">{group.items.length} conteneur{group.items.length > 1 ? 's' : ''}</span>
                           </div>
-                        ) : (
-                          <StatusBadge status={displayStatus} />
-                        )}
-                      </td>
+                        </td>
+                      </tr>,
+                      ...group.items.map(container => {
+                        const displayStatus = container.agent_status || container.status;
+                        const isDeploying = displayStatus === 'deploying' || container.status === 'deploying';
+                        const metrics = appMetrics[container.id];
+                        const isMigrating = !!migrations[container.id];
 
-                      {/* IPv4 */}
-                      <td className="py-3 px-3">
-                        <span className="text-xs font-mono text-gray-400">
-                          {container.ipv4_address || container.ipv4 || '-'}
-                        </span>
-                      </td>
+                        return (
+                          <tr key={container.id} className={`border-b border-gray-800 hover:bg-gray-800/50 transition-colors ${isHostOffline ? 'opacity-60' : ''}`}>
+                            {/* Name */}
+                            <td className="py-3 px-3">
+                              <div className="flex items-center gap-2">
+                                {isDeploying ? (
+                                  <Loader2 className="w-4 h-4 text-blue-400 animate-spin flex-shrink-0" />
+                                ) : (
+                                  <Container className="w-4 h-4 text-blue-400 flex-shrink-0" />
+                                )}
+                                <div className="min-w-0 flex-1">
+                                  <span className="font-medium truncate">{container.name}</span>
+                                  {baseDomain && (
+                                    <div className="flex items-center gap-2 text-xs text-gray-500">
+                                      <a
+                                        href={`https://app.${container.slug}.${baseDomain}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="font-mono hover:text-blue-400"
+                                      >
+                                        app.{container.slug}.{baseDomain}
+                                      </a>
+                                      {container.frontend?.auth_required && <Key className="w-3 h-3 text-purple-400" />}
+                                      {container.frontend?.local_only && <Shield className="w-3 h-3 text-yellow-400" />}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </td>
 
-                      {/* CPU */}
-                      <td className="py-3 px-3 text-right">
-                        <span className={`font-mono text-sm ${
-                          !isMigrating && displayStatus === 'connected' && metrics?.cpuPercent > 80 ? 'text-red-400' :
-                          !isMigrating && displayStatus === 'connected' && metrics?.cpuPercent > 50 ? 'text-yellow-400' :
-                          !isMigrating && displayStatus === 'connected' && metrics?.cpuPercent > 0 ? 'text-green-400' : 'text-gray-600'
-                        }`}>
-                          {!isMigrating && displayStatus === 'connected' && metrics?.cpuPercent !== undefined ? `${metrics.cpuPercent.toFixed(1)}%` : '-'}
-                        </span>
-                      </td>
+                            {/* Status */}
+                            <td className="py-3 px-3">
+                              {isMigrating ? (
+                                <MigrationProgress
+                                  appId={container.id}
+                                  migration={migrations[container.id]}
+                                  onDismiss={() => setMigrations(prev => {
+                                    const next = { ...prev };
+                                    delete next[container.id];
+                                    return next;
+                                  })}
+                                />
+                              ) : isDeploying ? (
+                                <div>
+                                  <span className="text-xs px-2 py-0.5 text-blue-400 bg-blue-900/30">Deploiement</span>
+                                  {container._deployMessage && (
+                                    <p className="text-xs text-gray-500 mt-1 truncate max-w-48">{container._deployMessage}</p>
+                                  )}
+                                </div>
+                              ) : (
+                                <StatusBadge status={displayStatus} />
+                              )}
+                            </td>
 
-                      {/* RAM */}
-                      <td className="py-3 px-3 text-right">
-                        <span className="font-mono text-sm text-gray-400">
-                          {!isMigrating && displayStatus === 'connected' && metrics?.memoryBytes ? formatBytes(metrics.memoryBytes) : '-'}
-                        </span>
-                      </td>
+                            {/* IPv4 */}
+                            <td className="py-3 px-3">
+                              <span className="text-xs font-mono text-gray-400">
+                                {container.ipv4_address || container.ipv4 || '-'}
+                              </span>
+                            </td>
 
-                      {/* Services */}
-                      <td className="py-3 px-3">
-                        {!isMigrating && displayStatus === 'connected' && container.code_server_enabled ? (
-                          <div className="flex items-center gap-2 text-xs">
-                            <button
-                              onClick={() => metrics?.codeServerStatus === 'running'
-                                ? handleServiceStop(container.id, 'code-server')
-                                : handleServiceStart(container.id, 'code-server')
-                              }
-                              className={`flex items-center gap-1 px-1.5 py-0.5 transition-colors ${
-                                metrics?.codeServerStatus === 'running'
-                                  ? 'text-green-400 bg-green-900/30 hover:bg-green-900/50'
-                                  : metrics?.codeServerStatus === 'starting'
-                                  ? 'text-blue-400 bg-blue-900/30'
-                                  : 'text-gray-400 bg-gray-700/30 hover:bg-gray-700/50'
-                              }`}
-                              title={`code-server: ${metrics?.codeServerStatus || 'stopped'}`}
-                            >
-                              <Code2 className="w-3 h-3" />
-                              {metrics?.codeServerStatus === 'running' ? <Square className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
-                            </button>
-                            {metrics?.codeServerStatus === 'running' && baseDomain && (
-                              <a
-                                href={`https://code.${container.slug}.${baseDomain}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-cyan-400 hover:text-cyan-300 transition-colors"
-                                title="Ouvrir IDE"
-                              >
-                                IDE
-                              </a>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-xs text-gray-600">-</span>
-                        )}
-                      </td>
+                            {/* CPU */}
+                            <td className="py-3 px-3 text-right">
+                              <span className={`font-mono text-sm ${
+                                !isMigrating && displayStatus === 'connected' && metrics?.cpuPercent > 80 ? 'text-red-400' :
+                                !isMigrating && displayStatus === 'connected' && metrics?.cpuPercent > 50 ? 'text-yellow-400' :
+                                !isMigrating && displayStatus === 'connected' && metrics?.cpuPercent > 0 ? 'text-green-400' : 'text-gray-600'
+                              }`}>
+                                {!isMigrating && displayStatus === 'connected' && metrics?.cpuPercent !== undefined ? `${metrics.cpuPercent.toFixed(1)}%` : '-'}
+                              </span>
+                            </td>
 
-                      {/* Actions */}
-                      <td className="py-3 px-3">
-                        <div className={`flex items-center justify-end gap-1 ${isMigrating ? 'opacity-50 pointer-events-none' : ''}`}>
-                          {displayStatus === 'connected' ? (
-                            <button
-                              onClick={() => handleStop(container.id)}
-                              className="p-1.5 text-yellow-400 hover:text-yellow-300 hover:bg-yellow-900/30 transition-colors"
-                              title="Arreter"
-                            >
-                              <Square className="w-4 h-4" />
-                            </button>
-                          ) : displayStatus !== 'deploying' ? (
-                            <button
-                              onClick={() => handleStart(container.id)}
-                              className="p-1.5 text-green-400 hover:text-green-300 hover:bg-green-900/30 transition-colors"
-                              title="Demarrer"
-                            >
-                              <Play className="w-4 h-4" />
-                            </button>
-                          ) : null}
-                          <button
-                            onClick={() => setTerminalContainer(container)}
-                            disabled={isMigrating}
-                            className="p-1.5 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/30 transition-colors"
-                            title="Terminal"
-                          >
-                            <Terminal className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={() => openMigrateModal(container)}
-                            disabled={isMigrating}
-                            className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded transition-colors"
-                            title="Migrer vers un autre hote"
-                          >
-                            <ArrowRightLeft className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={() => handleDelete(container.id, container.name)}
-                            disabled={isMigrating}
-                            className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/30 transition-colors"
-                            title="Supprimer"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
+                            {/* RAM */}
+                            <td className="py-3 px-3 text-right">
+                              <span className="font-mono text-sm text-gray-400">
+                                {!isMigrating && displayStatus === 'connected' && metrics?.memoryBytes ? formatBytes(metrics.memoryBytes) : '-'}
+                              </span>
+                            </td>
+
+                            {/* Services */}
+                            <td className="py-3 px-3">
+                              {!isMigrating && displayStatus === 'connected' && container.code_server_enabled ? (
+                                <div className="flex items-center gap-2 text-xs">
+                                  <button
+                                    onClick={() => metrics?.codeServerStatus === 'running'
+                                      ? handleServiceStop(container.id, 'code-server')
+                                      : handleServiceStart(container.id, 'code-server')
+                                    }
+                                    className={`flex items-center gap-1 px-1.5 py-0.5 transition-colors ${
+                                      metrics?.codeServerStatus === 'running'
+                                        ? 'text-green-400 bg-green-900/30 hover:bg-green-900/50'
+                                        : metrics?.codeServerStatus === 'starting'
+                                        ? 'text-blue-400 bg-blue-900/30'
+                                        : 'text-gray-400 bg-gray-700/30 hover:bg-gray-700/50'
+                                    }`}
+                                    title={`code-server: ${metrics?.codeServerStatus || 'stopped'}`}
+                                  >
+                                    <Code2 className="w-3 h-3" />
+                                    {metrics?.codeServerStatus === 'running' ? <Square className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
+                                  </button>
+                                  {metrics?.codeServerStatus === 'running' && baseDomain && (
+                                    <a
+                                      href={`https://code.${container.slug}.${baseDomain}`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="text-cyan-400 hover:text-cyan-300 transition-colors"
+                                      title="Ouvrir IDE"
+                                    >
+                                      IDE
+                                    </a>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-xs text-gray-600">-</span>
+                              )}
+                            </td>
+
+                            {/* Actions */}
+                            <td className="py-3 px-3">
+                              <div className={`flex items-center justify-end gap-1 ${isMigrating ? 'opacity-50 pointer-events-none' : ''} ${isHostOffline ? 'opacity-50 pointer-events-none' : ''}`}>
+                                {displayStatus === 'connected' ? (
+                                  <button
+                                    onClick={() => handleStop(container.id)}
+                                    className="p-1.5 text-yellow-400 hover:text-yellow-300 hover:bg-yellow-900/30 transition-colors"
+                                    title="Arreter"
+                                  >
+                                    <Square className="w-4 h-4" />
+                                  </button>
+                                ) : displayStatus !== 'deploying' ? (
+                                  <button
+                                    onClick={() => handleStart(container.id)}
+                                    className="p-1.5 text-green-400 hover:text-green-300 hover:bg-green-900/30 transition-colors"
+                                    title="Demarrer"
+                                  >
+                                    <Play className="w-4 h-4" />
+                                  </button>
+                                ) : null}
+                                <button
+                                  onClick={() => setTerminalContainer(container)}
+                                  disabled={isMigrating}
+                                  className="p-1.5 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/30 transition-colors"
+                                  title="Terminal"
+                                >
+                                  <Terminal className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => openEditModal(container)}
+                                  disabled={isMigrating}
+                                  className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 transition-colors"
+                                  title="Modifier"
+                                >
+                                  <Pencil className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => openMigrateModal(container)}
+                                  disabled={isMigrating}
+                                  className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded transition-colors"
+                                  title="Migrer vers un autre hote"
+                                >
+                                  <ArrowRightLeft className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => handleDelete(container.id, container.name)}
+                                  disabled={isMigrating}
+                                  className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/30 transition-colors"
+                                  title="Supprimer"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    ];
+                  });
+                })()}
               </tbody>
             </table>
           </div>
@@ -968,6 +1063,181 @@ function ContainersV2() {
             <div className="flex justify-end gap-2 mt-6">
               <Button variant="secondary" onClick={() => setShowCreateModal(false)}>Annuler</Button>
               <Button onClick={handleCreate} loading={saving}>Creer</Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Modal */}
+      {showEditModal && editingContainer && editForm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-800 p-6 w-full max-w-2xl border border-gray-700 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-bold">Modifier {editingContainer.name}</h2>
+              <span className="text-xs text-gray-500 bg-gray-900/50 px-2 py-1 font-mono">{editingContainer.slug}</span>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-gray-400 mb-1">Nom d&apos;affichage</label>
+                <input
+                  type="text"
+                  value={editForm.name}
+                  onChange={e => setEditForm({ ...editForm, name: e.target.value })}
+                  className="w-full px-3 py-2 bg-gray-900 border border-gray-600 text-sm"
+                />
+              </div>
+
+              {/* Frontend */}
+              <div className="border border-gray-700 p-4">
+                <div className="text-xs text-blue-400 mb-2 font-mono flex items-center gap-1">
+                  <Globe className="w-3 h-3" />
+                  app.{editingContainer.slug}.{baseDomain}
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Port local</label>
+                    <input
+                      type="number"
+                      value={editForm.frontend.target_port}
+                      onChange={e => setEditForm({ ...editForm, frontend: { ...editForm.frontend, target_port: e.target.value } })}
+                      className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 text-sm"
+                    />
+                  </div>
+                  <div className="flex items-end gap-4">
+                    <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={editForm.frontend.auth_required}
+                        onChange={e => setEditForm({ ...editForm, frontend: { ...editForm.frontend, auth_required: e.target.checked } })}
+                        className="rounded"
+                      />
+                      <Key className="w-3 h-3 text-purple-400" /> Auth
+                    </label>
+                    <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={editForm.frontend.local_only}
+                        onChange={e => setEditForm({ ...editForm, frontend: { ...editForm.frontend, local_only: e.target.checked } })}
+                        className="rounded"
+                      />
+                      <Shield className="w-3 h-3 text-yellow-400" /> Local
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              {/* code-server */}
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={editForm.code_server_enabled}
+                  onChange={e => setEditForm({ ...editForm, code_server_enabled: e.target.checked })}
+                  className="rounded"
+                />
+                <Code2 className="w-4 h-4 text-cyan-400" />
+                code-server IDE
+                {baseDomain && editForm.code_server_enabled && (
+                  <span className="text-xs text-gray-500 font-mono ml-2">code.{editingContainer.slug}.{baseDomain}</span>
+                )}
+              </label>
+
+              {/* APIs */}
+              <div className="border border-gray-700 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="text-sm font-medium flex items-center gap-2">
+                    <Server className="w-4 h-4 text-green-400" />
+                    APIs
+                  </div>
+                  <Button
+                    variant="secondary"
+                    onClick={() => setEditForm({
+                      ...editForm,
+                      apis: [...editForm.apis, { slug: '', target_port: '', auth_required: false, allowed_groups: [], local_only: false }]
+                    })}
+                  >
+                    <Plus className="w-3 h-3" /> Ajouter API
+                  </Button>
+                </div>
+                {editForm.apis.length === 0 ? (
+                  <p className="text-xs text-gray-500">Aucune API</p>
+                ) : (
+                  <div className="space-y-3">
+                    {editForm.apis.map((api, i) => (
+                      <div key={i} className="flex items-start gap-3 bg-gray-900/30 p-3 border border-gray-700">
+                        <div className="flex-1 grid grid-cols-3 gap-2">
+                          <div>
+                            <label className="block text-xs text-gray-500 mb-1">Slug</label>
+                            <input
+                              type="text"
+                              value={api.slug}
+                              onChange={e => {
+                                const apis = [...editForm.apis];
+                                apis[i] = { ...apis[i], slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') };
+                                setEditForm({ ...editForm, apis });
+                              }}
+                              className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 text-sm font-mono"
+                            />
+                            {api.slug && (
+                              <p className="text-xs text-gray-500 mt-0.5 font-mono">{api.slug}.{editingContainer.slug}.{baseDomain}</p>
+                            )}
+                          </div>
+                          <div>
+                            <label className="block text-xs text-gray-500 mb-1">Port</label>
+                            <input
+                              type="number"
+                              value={api.target_port}
+                              onChange={e => {
+                                const apis = [...editForm.apis];
+                                apis[i] = { ...apis[i], target_port: e.target.value };
+                                setEditForm({ ...editForm, apis });
+                              }}
+                              className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 text-sm"
+                            />
+                          </div>
+                          <div className="flex items-end gap-3">
+                            <label className="flex items-center gap-1 text-xs cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={api.auth_required}
+                                onChange={e => {
+                                  const apis = [...editForm.apis];
+                                  apis[i] = { ...apis[i], auth_required: e.target.checked };
+                                  setEditForm({ ...editForm, apis });
+                                }}
+                                className="rounded"
+                              />
+                              <Key className="w-3 h-3 text-purple-400" />
+                            </label>
+                            <label className="flex items-center gap-1 text-xs cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={api.local_only || false}
+                                onChange={e => {
+                                  const apis = [...editForm.apis];
+                                  apis[i] = { ...apis[i], local_only: e.target.checked };
+                                  setEditForm({ ...editForm, apis });
+                                }}
+                                className="rounded"
+                              />
+                              <Shield className="w-3 h-3 text-yellow-400" />
+                            </label>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => setEditForm({ ...editForm, apis: editForm.apis.filter((_, j) => j !== i) })}
+                          className="text-gray-500 hover:text-red-400 p-1 mt-5"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 mt-6">
+              <Button variant="secondary" onClick={() => { setShowEditModal(false); setEditingContainer(null); }}>Annuler</Button>
+              <Button onClick={handleEdit} loading={saving}>Sauvegarder</Button>
             </div>
           </div>
         </div>

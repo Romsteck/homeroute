@@ -6,7 +6,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -15,14 +15,14 @@ use tracing::{error, info};
 use hr_common::events::MigrationPhase;
 
 use crate::container_manager::{
-    ContainerV2Config, CreateContainerRequest, MigrateContainerRequest,
+    ContainerV2Config, CreateContainerRequest, MigrateContainerRequest, UpdateContainerRequest,
 };
 use crate::state::ApiState;
 
 pub fn router() -> Router<ApiState> {
     Router::new()
         .route("/", get(list_containers).post(create_container))
-        .route("/{id}", axum::routing::delete(delete_container))
+        .route("/{id}", put(update_container).delete(delete_container))
         .route("/{id}/start", post(start_container))
         .route("/{id}/stop", post(stop_container))
         .route("/{id}/terminal", get(terminal_ws))
@@ -100,6 +100,37 @@ async fn delete_container(
             .into_response(),
         Err(e) => {
             error!("Failed to delete container V2: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"success": false, "error": e})),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn update_container(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateContainerRequest>,
+) -> impl IntoResponse {
+    let Some(ref mgr) = state.container_manager else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"success": false, "error": "Container manager not available"})),
+        )
+            .into_response();
+    };
+
+    match mgr.update_container(&id, req).await {
+        Ok(true) => Json(serde_json::json!({"success": true})).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"success": false, "error": "Not found"})),
+        )
+            .into_response(),
+        Err(e) => {
+            error!("Failed to update container V2: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"success": false, "error": e})),
