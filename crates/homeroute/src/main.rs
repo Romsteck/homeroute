@@ -555,20 +555,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Ensure LXD profile exists
-    {
-        let lan_bridge = dns_dhcp_config
-            .ipv6
-            .interface
-            .clone();
-        let lan_bridge = if lan_bridge.is_empty() { "br-lan".to_string() } else { lan_bridge };
-        tokio::spawn(async move {
-            if let Err(e) = hr_lxd::profile::ensure_profile(&lan_bridge, "default").await {
-                warn!("Failed to ensure LXD profile: {e}");
-            }
-        });
-    }
-
     // Heartbeat monitor
     {
         let reg = registry.clone();

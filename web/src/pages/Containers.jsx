@@ -30,14 +30,14 @@ import Button from '../components/Button';
 import PageHeader from '../components/PageHeader';
 import useWebSocket from '../hooks/useWebSocket';
 import {
-  getContainersV2,
-  createContainerV2,
-  updateContainerV2,
-  deleteContainerV2,
-  startContainerV2,
-  stopContainerV2,
-  migrateContainerV2,
-  cancelMigrationV2,
+  getContainers,
+  createContainer,
+  updateContainer,
+  deleteContainer,
+  startContainer,
+  stopContainer,
+  migrateContainer,
+  cancelMigration,
   getReverseProxyConfig,
   getHosts,
   startApplicationService,
@@ -65,7 +65,7 @@ function StatusBadge({ status, message }) {
   );
 }
 
-function ContainersV2() {
+function Containers() {
   const [containers, setContainers] = useState([]);
   const [baseDomain, setBaseDomain] = useState('');
   const [hosts, setHosts] = useState([]);
@@ -100,7 +100,7 @@ function ContainersV2() {
   const fetchData = useCallback(async () => {
     try {
       const [containersRes, configRes, hostsRes] = await Promise.all([
-        getContainersV2(),
+        getContainers(),
         getReverseProxyConfig(),
         getHosts().catch(() => ({ data: { hosts: [] } })),
       ]);
@@ -267,7 +267,7 @@ function ContainersV2() {
         code_server_enabled: createForm.code_server_enabled,
       };
 
-      const res = await createContainerV2(payload);
+      const res = await createContainer(payload);
       if (res.data.success) {
         setShowCreateModal(false);
         setCreateForm({
@@ -291,7 +291,7 @@ function ContainersV2() {
   async function handleDelete(id, name) {
     if (!confirm(`Supprimer "${name}" ?\nCeci detruira le conteneur nspawn, les enregistrements DNS et les certificats.`)) return;
     try {
-      const res = await deleteContainerV2(id);
+      const res = await deleteContainer(id);
       if (res.data.success) {
         setMessage({ type: 'success', text: 'Conteneur supprime' });
         fetchData();
@@ -305,7 +305,7 @@ function ContainersV2() {
 
   async function handleStart(id) {
     try {
-      const res = await startContainerV2(id);
+      const res = await startContainer(id);
       if (res.data.success) {
         setMessage({ type: 'success', text: 'Conteneur demarre' });
         fetchData();
@@ -322,7 +322,7 @@ function ContainersV2() {
 
   async function handleStop(id) {
     try {
-      const res = await stopContainerV2(id);
+      const res = await stopContainer(id);
       if (res.data.success) {
         setMessage({ type: 'success', text: 'Conteneur arrete' });
         fetchData();
@@ -395,7 +395,7 @@ function ContainersV2() {
         })),
         code_server_enabled: editForm.code_server_enabled,
       };
-      const res = await updateContainerV2(editingContainer.id, payload);
+      const res = await updateContainer(editingContainer.id, payload);
       if (res.data.success) {
         setShowEditModal(false);
         setEditingContainer(null);
@@ -431,7 +431,7 @@ function ContainersV2() {
     if (!confirm(`Migrer ${migrateModal.name} vers ${targetName} ?\n\nLe conteneur sera arrete pendant la migration.`)) return;
     setMigrating(true);
     try {
-      await migrateContainerV2(migrateModal.id, selectedHostId);
+      await migrateContainer(migrateModal.id, selectedHostId);
       setMigrateModal(null);
     } catch (err) {
       console.error('Migration failed:', err);
@@ -498,7 +498,7 @@ function ContainersV2() {
 
     const handleCancel = async () => {
       try {
-        await cancelMigrationV2(appId);
+        await cancelMigration(appId);
       } catch (err) {
         console.error('Cancel migration failed:', err);
       }
@@ -576,7 +576,7 @@ function ContainersV2() {
 
   return (
     <div>
-      <PageHeader title="Containers V2" icon={Container}>
+      <PageHeader title="Containers" icon={Container}>
         <Button onClick={fetchData} variant="secondary">
           <RefreshCw className="w-4 h-4" />
           Rafraichir
@@ -618,7 +618,7 @@ function ContainersV2() {
         {containers.length === 0 ? (
           <div className="text-center py-8 text-gray-500">
             <Container className="w-12 h-12 mx-auto mb-2 opacity-50" />
-            <p>Aucun conteneur V2</p>
+            <p>Aucun conteneur</p>
             <p className="text-xs mt-2">Creez un conteneur nspawn pour deployer une application</p>
           </div>
         ) : (
@@ -861,7 +861,7 @@ function ContainersV2() {
       {showCreateModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-gray-800 p-6 w-full max-w-2xl border border-gray-700 max-h-[90vh] overflow-y-auto">
-            <h2 className="text-xl font-bold mb-4">Nouveau conteneur V2</h2>
+            <h2 className="text-xl font-bold mb-4">Nouveau conteneur</h2>
             <div className="space-y-4">
               {/* Name + Slug */}
               <div className="grid grid-cols-2 gap-4">
@@ -1417,4 +1417,4 @@ function TerminalModal({ container, onClose }) {
   );
 }
 
-export default ContainersV2;
+export default Containers;

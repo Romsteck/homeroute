@@ -611,7 +611,6 @@ dependencies = [
  "hr-dhcp",
  "hr-dns",
  "hr-ipv6",
- "hr-lxd",
  "hr-proxy",
  "hr-registry",
  "hr-tunnel",
@@ -703,7 +702,6 @@ dependencies = [
  "hr-dhcp",
  "hr-dns",
  "hr-ipv6",
- "hr-lxd",
  "hr-proxy",
  "hr-registry",
  "hr-tunnel",
@@ -867,17 +865,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hr-lxd"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "hr-proxy"
 version = "0.1.0"
 dependencies = [
@@ -912,7 +899,6 @@ dependencies = [
  "hex",
  "hr-acme",
  "hr-common",
- "hr-lxd",
  "rand",
  "rand_core 0.6.4",
  "reqwest",
