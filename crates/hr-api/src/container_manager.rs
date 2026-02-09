@@ -94,6 +94,17 @@ pub struct MigrateContainerRequest {
     pub target_host_id: String,
 }
 
+#[derive(Deserialize)]
+pub struct UpdateContainerRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub frontend: Option<hr_registry::types::FrontendEndpoint>,
+    #[serde(default)]
+    pub apis: Option<Vec<hr_registry::types::ApiEndpoint>>,
+    #[serde(default)]
+    pub code_server_enabled: Option<bool>,
+}
+
 // ── ContainerManager ─────────────────────────────────────────────
 
 pub struct ContainerManager {
@@ -323,6 +334,45 @@ impl ContainerManager {
             }
         }
         let _ = self.save_state().await;
+        Ok(true)
+    }
+
+    /// Update a V2 container's configuration (endpoints, name, code-server).
+    pub async fn update_container(&self, id: &str, req: UpdateContainerRequest) -> Result<bool, String> {
+        // Check container exists
+        let exists = {
+            let state = self.state.read().await;
+            state.containers.iter().any(|c| c.id == id)
+        };
+        if !exists {
+            return Ok(false);
+        }
+
+        // Build UpdateApplicationRequest
+        let update_req = UpdateApplicationRequest {
+            name: req.name.clone(),
+            frontend: req.frontend,
+            apis: req.apis,
+            code_server_enabled: req.code_server_enabled,
+            ..Default::default()
+        };
+
+        self.registry
+            .update_application(id, update_req)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Update name in V2 state if provided
+        if let Some(ref new_name) = req.name {
+            let mut state = self.state.write().await;
+            if let Some(c) = state.containers.iter_mut().find(|c| c.id == id) {
+                c.name = new_name.clone();
+            }
+            drop(state);
+            let _ = self.save_state().await;
+        }
+
+        info!(id, "Container V2 updated via API");
         Ok(true)
     }
 
@@ -565,7 +615,8 @@ interface = "{agent_interface}"
         // Phase 4: Push systemd unit
         let unit_content = r#"[Unit]
 Description=HomeRoute Agent
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/hr-agent
@@ -600,15 +651,11 @@ WantedBy=multi-user.target
             warn!(container = container_name, "Network wait failed: {e}");
         }
 
-        // Phase 7: Install dependencies
+        // Phase 7: Install dependencies (curl now pre-installed in rootfs, this is a safety net)
         emit("Installation des dependances...");
         let _ = NspawnClient::exec_with_retry(
             container_name,
-            &[
-                "bash",
-                "-c",
-                "apt-get update -qq && apt-get install -y -qq curl",
-            ],
+            &["apt-get update -qq && apt-get install -y -qq curl ca-certificates"],
             3,
         )
         .await;
@@ -617,11 +664,23 @@ WantedBy=multi-user.target
         emit("Installation de code-server...");
         let _ = NspawnClient::exec_with_retry(
             container_name,
-            &[
-                "bash",
-                "-c",
-                "curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/usr/local",
-            ],
+            &["curl -4 -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/usr/local"],
+            3,
+        )
+        .await;
+
+        // Phase 8b: Install Claude Code CLI (direct binary download, skips `claude install`
+        // which needs network access from Node.js)
+        emit("Installation de Claude Code CLI...");
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &[concat!(
+                "GCS=https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases",
+                " && VERSION=$(curl -4 -fsSL $GCS/latest)",
+                " && ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/')",
+                " && curl -4 -fsSL -o /usr/local/bin/claude $GCS/$VERSION/linux-$ARCH/claude",
+                " && chmod +x /usr/local/bin/claude",
+            )],
             3,
         )
         .await;
@@ -646,26 +705,15 @@ WantedBy=multi-user.target
   }
 }
 "#;
-        let tmp_mcp = PathBuf::from(format!("/tmp/mcp-v2-{slug}.json"));
-        let _ = tokio::fs::write(&tmp_mcp, mcp_config).await;
-        let _ =
-            NspawnClient::push_file(container_name, &tmp_mcp, "root/workspace/.mcp.json", storage)
-                .await;
-        let _ = tokio::fs::remove_file(&tmp_mcp).await;
+        // Write directly to the workspace directory (not rootfs) since /root/workspace
+        // is a bind mount from {storage}/{container}-workspace/
+        let ws_dir = storage.join(format!("{container_name}-workspace"));
+        let _ = tokio::fs::write(ws_dir.join(".mcp.json"), mcp_config).await;
 
         // Phase 11: Deploy CLAUDE.md
         emit("Deploiement CLAUDE.md Dataverse...");
         let claude_md_content = include_str!("../../hr-registry/src/dataverse_claude_md.txt");
-        let tmp_claude = PathBuf::from(format!("/tmp/claude-md-v2-{slug}.md"));
-        let _ = tokio::fs::write(&tmp_claude, claude_md_content).await;
-        let _ = NspawnClient::push_file(
-            container_name,
-            &tmp_claude,
-            "root/workspace/CLAUDE.md",
-            storage,
-        )
-        .await;
-        let _ = tokio::fs::remove_file(&tmp_claude).await;
+        let _ = tokio::fs::write(ws_dir.join("CLAUDE.md"), claude_md_content).await;
 
         // Phase 12: Configure code-server
         emit("Configuration de code-server...");
@@ -740,7 +788,29 @@ WantedBy=multi-user.target
         .await;
         let _ = tokio::fs::remove_file(&tmp_cs_unit).await;
 
-        // code-server setup unit (Claude Code extension)
+        // code-server extension update helper script
+        // Uses curl to download VSIX (reads /root/.curlrc --ipv4) to bypass Node.js DNS
+        // which fails on IPv6-only domains when IPv6 is disabled in the container
+        let cs_ext_script = r#"#!/bin/bash
+set -e
+VSIX_URL=$(curl -fsSL https://open-vsx.org/api/Anthropic/claude-code/latest \
+  | grep -o '"download":"[^"]*"' | head -1 | grep -o 'http[^"]*')
+curl -fsSL -o /tmp/claude-code.vsix "$VSIX_URL"
+/usr/local/bin/code-server --install-extension /tmp/claude-code.vsix
+rm -f /tmp/claude-code.vsix
+"#;
+        let tmp_ext_script = PathBuf::from(format!("/tmp/cs-ext-v2-{slug}.sh"));
+        let _ = tokio::fs::write(&tmp_ext_script, cs_ext_script).await;
+        let _ = NspawnClient::push_file(
+            container_name,
+            &tmp_ext_script,
+            "usr/local/bin/update-claude-ext.sh",
+            storage,
+        )
+        .await;
+        let _ = tokio::fs::remove_file(&tmp_ext_script).await;
+        let _ = NspawnClient::exec(container_name, &["chmod", "+x", "/usr/local/bin/update-claude-ext.sh"]).await;
+
         let cs_setup_unit = r#"[Unit]
 Description=code-server Claude Code extension updater
 After=network-online.target code-server.service
@@ -748,8 +818,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStartPre=-/usr/local/bin/code-server --uninstall-extension Anthropic.claude-code
-ExecStart=/usr/local/bin/code-server --install-extension Anthropic.claude-code
+ExecStart=/usr/local/bin/update-claude-ext.sh
 RemainAfterExit=true
 Environment=HOME=/root
 
@@ -772,9 +841,20 @@ WantedBy=multi-user.target
         let _ =
             NspawnClient::exec(container_name, &["systemctl", "enable", "--now", "code-server"])
                 .await;
+
+        // Install Claude Code extension during provisioning (don't rely only on boot service)
+        emit("Installation extension Claude Code...");
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["/usr/local/bin/update-claude-ext.sh"],
+            3,
+        )
+        .await;
+
+        // Enable the setup service for future boots/updates
         let _ = NspawnClient::exec(
             container_name,
-            &["systemctl", "enable", "--now", "code-server-setup"],
+            &["systemctl", "enable", "code-server-setup"],
         )
         .await;
 
@@ -788,6 +868,10 @@ WantedBy=multi-user.target
             status: "pending".to_string(),
             message: Some("Deploiement termine".to_string()),
         });
+
+        // Request per-app wildcard certificate (*.{slug}.{base_domain})
+        emit("Certificat ACME wildcard...");
+        self.registry.request_app_cert(slug).await;
 
         info!(container = container_name, "Container V2 deploy complete");
     }

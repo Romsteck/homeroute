@@ -128,6 +128,11 @@ pub enum AgentMessage {
         version: u64,
         db_size_bytes: u64,
     },
+    /// Agent reports a new/changed IPv4 address (e.g. after container restart).
+    #[serde(rename = "ip_update")]
+    IpUpdate {
+        ipv4_address: String,
+    },
 }
 
 /// A route published by an agent for reverse proxy registration.

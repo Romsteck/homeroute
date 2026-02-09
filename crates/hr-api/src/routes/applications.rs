@@ -606,6 +606,10 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
                                 };
                                 state.dataverse_schemas.write().await.insert(app_id.clone(), cached);
                             }
+                            Ok(AgentMessage::IpUpdate { ipv4_address }) => {
+                                info!(app_id, ipv4_address, "Agent reported IP update");
+                                registry.handle_ip_update(&app_id, &ipv4_address).await;
+                            }
                             Ok(AgentMessage::PublishRoutes { routes }) => {
                                 info!(app_id, count = routes.len(), "Agent published routes");
                                 let apps = registry.list_applications().await;

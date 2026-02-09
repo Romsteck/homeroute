@@ -62,6 +62,24 @@ pub struct HostPowerInfo {
     pub mac_address: Option<String>,
 }
 
+fn service_state_str(s: ServiceState) -> String {
+    match s {
+        ServiceState::Running => "running".to_string(),
+        ServiceState::Stopped => "stopped".to_string(),
+        ServiceState::Starting => "starting".to_string(),
+        ServiceState::Stopping => "stopping".to_string(),
+        ServiceState::ManuallyOff => "manually_off".to_string(),
+    }
+}
+
+fn service_type_str(t: ServiceType) -> &'static str {
+    match t {
+        ServiceType::CodeServer => "code_server",
+        ServiceType::App => "app",
+        ServiceType::Db => "db",
+    }
+}
+
 pub struct AgentRegistry {
     state: Arc<RwLock<RegistryState>>,
     state_path: PathBuf,
@@ -127,6 +145,25 @@ impl AgentRegistry {
     pub async fn set_acme(&self, acme: Arc<AcmeManager>) {
         *self.acme.write().await = Some(acme);
         info!("ACME manager registered with agent registry");
+    }
+
+    /// Request a per-app wildcard certificate (*.{slug}.{base_domain}).
+    /// Spawns a background task; non-blocking.
+    pub async fn request_app_cert(&self, slug: &str) {
+        let acme_guard = self.acme.read().await;
+        if let Some(acme) = acme_guard.clone() {
+            let slug_owned = slug.to_string();
+            tokio::spawn(async move {
+                match acme.request_app_wildcard(&slug_owned).await {
+                    Ok(_cert) => {
+                        info!(slug = %slug_owned, "Per-app wildcard certificate issued");
+                    }
+                    Err(e) => {
+                        warn!(slug = %slug_owned, error = %e, "Failed to issue per-app wildcard certificate");
+                    }
+                }
+            });
+        }
     }
 
     // ── Application CRUD ────────────────────────────────────────
@@ -1185,7 +1222,8 @@ interface = "eth0"
         // Push systemd unit
         let unit_content = r#"[Unit]
 Description=HomeRoute Agent
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/hr-agent
@@ -1440,9 +1478,9 @@ WantedBy=multi-user.target
     /// Handle metrics received from an agent: update in-memory state and broadcast to WebSocket.
     pub async fn handle_metrics(&self, app_id: &str, metrics: AgentMetrics) {
         // Convert ServiceState to string for broadcast
-        let code_server_status = format!("{:?}", metrics.code_server_status).to_lowercase();
-        let app_status = format!("{:?}", metrics.app_status).to_lowercase();
-        let db_status = format!("{:?}", metrics.db_status).to_lowercase();
+        let code_server_status = service_state_str(metrics.code_server_status);
+        let app_status = service_state_str(metrics.app_status);
+        let db_status = service_state_str(metrics.db_status);
 
         // Update in-memory metrics (not persisted)
         {
@@ -1462,6 +1500,33 @@ WantedBy=multi-user.target
             cpu_percent: metrics.cpu_percent,
             code_server_idle_secs: metrics.code_server_idle_secs,
         });
+    }
+
+    /// Handle an IP update from an agent (e.g. after container restart with new DHCP lease).
+    /// Updates the stored IPv4 address and pushes a Config refresh so the agent re-publishes routes.
+    pub async fn handle_ip_update(&self, app_id: &str, ipv4_str: &str) {
+        let updated_app = {
+            let mut state = self.state.write().await;
+            if let Some(app) = state.applications.iter_mut().find(|a| a.id == app_id) {
+                if let Ok(addr) = ipv4_str.parse() {
+                    let old = app.ipv4_address;
+                    app.ipv4_address = Some(addr);
+                    info!(app_id, old = ?old, new = ipv4_str, "Updated app IPv4 from agent IP update");
+                    Some(app.clone())
+                } else {
+                    warn!(app_id, ipv4_str, "Invalid IPv4 in IpUpdate");
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        if let Some(app) = updated_app {
+            let _ = self.persist().await;
+            // Push fresh Config so the agent re-publishes routes with the new IP
+            self.push_config_to_agent(&app).await;
+        }
     }
 
     /// Handle schema metadata received from an agent: cache and broadcast to WebSocket.
@@ -1520,7 +1585,7 @@ WantedBy=multi-user.target
 
         let _ = self.events.service_command.send(ServiceCommandEvent {
             app_id: app_id.to_string(),
-            service_type: format!("{:?}", service_type).to_lowercase(),
+            service_type: service_type_str(service_type).to_string(),
             action: action.to_string(),
             success: true,
         });

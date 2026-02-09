@@ -35,6 +35,9 @@ pub async fn run_connection(
         warn!(interface = %config.interface, "No IPv4 address detected");
     }
 
+    // Track initial IP for change detection after container restart
+    let initial_ip = ipv4_address.clone();
+
     // Send Auth message
     let auth_msg = AgentMessage::Auth {
         token: config.token.clone(),
@@ -77,6 +80,29 @@ pub async fn run_connection(
             interval.tick().await;
             if heartbeat_tx.send(()).await.is_err() {
                 break;
+            }
+        }
+    });
+
+    // Start periodic IP check task (detects IP changes after container restart)
+    let (ip_check_tx, mut ip_check_rx) = mpsc::channel::<String>(1);
+    let ip_check_interface = config.interface.clone();
+    let ip_check_last = initial_ip;
+    tokio::spawn(async move {
+        // Wait a bit before first check to let network settle
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        let mut prev_ip = ip_check_last;
+        loop {
+            interval.tick().await;
+            if let Some(new_ip) = detect_ipv4_address(&ip_check_interface).await {
+                if prev_ip.as_ref() != Some(&new_ip) {
+                    info!(new_ip, prev = ?prev_ip, "IPv4 address changed, notifying HomeRoute");
+                    prev_ip = Some(new_ip.clone());
+                    if ip_check_tx.send(new_ip).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
@@ -148,6 +174,17 @@ pub async fn run_connection(
                     break;
                 }
             }
+
+            // IP address change detected
+            Some(new_ip) = ip_check_rx.recv() => {
+                info!(new_ip, "Sending IP update to HomeRoute");
+                let msg = AgentMessage::IpUpdate { ipv4_address: new_ip };
+                let json = serde_json::to_string(&msg)?;
+                if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                    error!("Failed to send IP update");
+                    break;
+                }
+            }
         }
     }
 
@@ -155,7 +192,43 @@ pub async fn run_connection(
 }
 
 /// Detect the IPv4 address on the given interface (for local DNS A records).
+/// Falls back to scanning all interfaces if the configured one has no IP
+/// (e.g. after migration where the interface name changes from host0 to mv-*).
 async fn detect_ipv4_address(interface: &str) -> Option<String> {
+    // First try the configured interface
+    if let Some(addr) = detect_ipv4_on_interface(interface).await {
+        return Some(addr);
+    }
+
+    // Fallback: scan all global-scope IPv4 addresses
+    let output = tokio::process::Command::new("ip")
+        .args(["-4", "-o", "addr", "show", "scope", "global"])
+        .output()
+        .await
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if let Some(addr_idx) = parts.iter().position(|&p| p == "inet") {
+            if let Some(addr_cidr) = parts.get(addr_idx + 1) {
+                let addr = addr_cidr.split('/').next().unwrap_or(addr_cidr);
+                if addr.starts_with("127.") || addr.starts_with("169.254.") {
+                    continue;
+                }
+                // Log which interface was used as fallback
+                let iface = parts.get(1).unwrap_or(&"?");
+                info!(addr, interface = *iface, configured = interface, "IPv4 detected via fallback (interface mismatch)");
+                return Some(addr.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Try to detect IPv4 on a specific interface.
+async fn detect_ipv4_on_interface(interface: &str) -> Option<String> {
     let output = tokio::process::Command::new("ip")
         .args(["-4", "-o", "addr", "show", "dev", interface, "scope", "global"])
         .output()
