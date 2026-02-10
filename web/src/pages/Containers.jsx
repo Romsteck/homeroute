@@ -446,7 +446,7 @@ function Containers() {
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(0)) + ' ' + sizes[i];
   }
 
   // MigrationProgress inline component
@@ -755,37 +755,17 @@ function Containers() {
 
                             {/* Services */}
                             <td className="py-3 px-3">
-                              {!isMigrating && displayStatus === 'connected' && container.code_server_enabled ? (
-                                <div className="flex items-center gap-2 text-xs">
-                                  <button
-                                    onClick={() => metrics?.codeServerStatus === 'running'
-                                      ? handleServiceStop(container.id, 'code-server')
-                                      : handleServiceStart(container.id, 'code-server')
-                                    }
-                                    className={`flex items-center gap-1 px-1.5 py-0.5 transition-colors ${
-                                      metrics?.codeServerStatus === 'running'
-                                        ? 'text-green-400 bg-green-900/30 hover:bg-green-900/50'
-                                        : metrics?.codeServerStatus === 'starting'
-                                        ? 'text-blue-400 bg-blue-900/30'
-                                        : 'text-gray-400 bg-gray-700/30 hover:bg-gray-700/50'
-                                    }`}
-                                    title={`code-server: ${metrics?.codeServerStatus || 'stopped'}`}
-                                  >
-                                    <Code2 className="w-3 h-3" />
-                                    {metrics?.codeServerStatus === 'running' ? <Square className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
-                                  </button>
-                                  {metrics?.codeServerStatus === 'running' && baseDomain && (
-                                    <a
-                                      href={`https://code.${container.slug}.${baseDomain}`}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="text-cyan-400 hover:text-cyan-300 transition-colors"
-                                      title="Ouvrir IDE"
-                                    >
-                                      IDE
-                                    </a>
-                                  )}
-                                </div>
+                              {!isMigrating && displayStatus === 'connected' && container.code_server_enabled && baseDomain ? (
+                                <a
+                                  href={`https://code.${container.slug}.${baseDomain}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs text-cyan-400 hover:text-cyan-300 bg-cyan-900/20 hover:bg-cyan-900/40 transition-colors"
+                                  title="Ouvrir IDE"
+                                >
+                                  <Code2 className="w-3 h-3" />
+                                  IDE
+                                </a>
                               ) : (
                                 <span className="text-xs text-gray-600">-</span>
                               )}

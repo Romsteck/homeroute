@@ -96,16 +96,13 @@ async fn main() -> Result<()> {
                 let app_status = powersave_mgr.get_state(hr_registry::protocol::ServiceType::App);
                 let db_status = powersave_mgr.get_state(hr_registry::protocol::ServiceType::Db);
 
-                // Get idle times
-                let code_server_idle_secs = powersave_mgr.idle_secs(hr_registry::protocol::ServiceType::CodeServer);
-
                 let metrics = AgentMetrics {
                     code_server_status,
                     app_status,
                     db_status,
                     memory_bytes,
                     cpu_percent,
-                    code_server_idle_secs,
+                    code_server_idle_secs: 0,
                 };
 
                 if metrics_tx.send(AgentMessage::Metrics(metrics)).await.is_err() {
@@ -113,13 +110,6 @@ async fn main() -> Result<()> {
                     break;
                 }
             }
-        });
-
-        // Spawn idle checker task
-        let powersave_for_idle = Arc::clone(&powersave_manager);
-        let state_tx_for_idle = state_change_tx.clone();
-        let idle_checker_handle = tokio::spawn(async move {
-            powersave_for_idle.run_idle_checker(state_tx_for_idle).await;
         });
 
         // Spawn schema metadata sender task (every 60 seconds)
@@ -218,7 +208,6 @@ async fn main() -> Result<()> {
 
         // Cancel background tasks
         metrics_handle.abort();
-        idle_checker_handle.abort();
         schema_handle.abort();
 
         // Drain any remaining messages
@@ -249,7 +238,7 @@ async fn handle_registry_message(
     msg: RegistryMessage,
 ) {
     match msg {
-        RegistryMessage::Config { services, power_policy, base_domain, slug, frontend, apis, code_server_enabled, .. } => {
+        RegistryMessage::Config { services, base_domain, slug, frontend, apis, code_server_enabled, .. } => {
             info!("Received config from HomeRoute");
 
             // Update service manager config
@@ -257,9 +246,6 @@ async fn handle_registry_message(
                 let mut mgr = service_manager.write().unwrap();
                 mgr.update_config(&services);
             }
-
-            // Update power policy
-            powersave_manager.set_policy(&power_policy);
 
             // Build and publish routes using per-app subdomain scheme:
             // app.{slug}.{base}, {api}.{slug}.{base}, code.{slug}.{base}
@@ -314,14 +300,6 @@ async fn handle_registry_message(
             }
         }
 
-        RegistryMessage::PowerPolicyUpdate(policy) => {
-            info!(
-                code_server_timeout = ?policy.code_server_idle_timeout_secs,
-                "Power policy update received"
-            );
-            powersave_manager.set_policy(&policy);
-        }
-
         RegistryMessage::ServiceCommand { service_type, action } => {
             info!(
                 service_type = ?service_type,
@@ -354,8 +332,6 @@ async fn handle_registry_message(
                 .await;
         }
 
-        RegistryMessage::ActivityPing { service_type } => {
-            powersave_manager.record_activity(service_type);
-        }
+        _ => {}
     }
 }
