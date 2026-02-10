@@ -19,7 +19,7 @@ use hr_common::events::{MigrationPhase, MigrationProgressEvent};
 use hr_acme::types::WildcardType;
 use hr_dns::config::StaticRecord;
 
-use crate::state::{ApiState, MigrationState};
+use crate::state::{ApiState, DeployPhase, DeployState, MigrationState};
 
 pub fn router() -> Router<ApiState> {
     Router::new()
@@ -27,6 +27,8 @@ pub fn router() -> Router<ApiState> {
         .route("/{id}/services/{service_type}/stop", post(stop_service))
         .route("/{id}/power-policy", put(update_power_policy))
         .route("/{id}/update/fix", post(fix_agent_update))
+        .route("/{id}/deploy", post(deploy_to_production))
+        .route("/deploys/{deploy_id}", get(get_deploy_status))
         .route("/agents/version", get(agent_version))
         .route("/agents/binary", get(agent_binary))
         .route("/agents/certs", get(agent_certs))
@@ -116,6 +118,281 @@ async fn update_power_policy(
             error!("Failed to update power policy: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": e.to_string()}))).into_response()
         }
+    }
+}
+
+// ── Deploy (dev → prod) handlers ─────────────────────────────
+
+/// POST /api/applications/{dev_id}/deploy
+/// Accepts multipart/form-data with an `artifact` field (tarball).
+/// Stops the prod app service, copies the artifact into the prod container, restarts the service.
+async fn deploy_to_production(
+    State(state): State<ApiState>,
+    Path(dev_id): Path<String>,
+    mut multipart: axum::extract::Multipart,
+) -> impl IntoResponse {
+    let Some(registry) = &state.registry else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"success": false, "error": "Registry not available"}))).into_response();
+    };
+
+    // Look up the dev app
+    let dev_app = match registry.get_application(&dev_id).await {
+        Some(app) => app,
+        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": "Dev application not found"}))).into_response(),
+    };
+
+    // Validate it's a dev container
+    if dev_app.environment != hr_registry::types::Environment::Development {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": "Source application is not a development environment"}))).into_response();
+    }
+
+    // Look up linked prod container
+    let prod_id = match &dev_app.linked_app_id {
+        Some(id) => id.clone(),
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": "No linked production application"}))).into_response(),
+    };
+
+    let prod_app = match registry.get_application(&prod_id).await {
+        Some(app) => app,
+        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": "Linked production application not found"}))).into_response(),
+    };
+
+    if prod_app.environment != hr_registry::types::Environment::Production {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": "Linked application is not a production environment"}))).into_response();
+    }
+
+    // Extract artifact from multipart
+    let mut artifact_data: Option<Vec<u8>> = None;
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "artifact" {
+            match field.bytes().await {
+                Ok(bytes) => artifact_data = Some(bytes.to_vec()),
+                Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": format!("Failed to read artifact: {e}")}))).into_response(),
+            }
+        }
+    }
+
+    let artifact_data = match artifact_data {
+        Some(d) => d,
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": "Missing 'artifact' field in multipart form"}))).into_response(),
+    };
+
+    // Create deploy state
+    let deploy_id = uuid::Uuid::new_v4().to_string();
+    {
+        let mut deploys = state.deploys.write().await;
+        deploys.insert(deploy_id.clone(), DeployState {
+            deploy_id: deploy_id.clone(),
+            dev_id: dev_id.clone(),
+            prod_id: prod_id.clone(),
+            phase: DeployPhase::Stopping,
+            error: None,
+            started_at: chrono::Utc::now(),
+        });
+    }
+
+    info!(deploy_id, dev_id, prod_id = prod_id.as_str(), artifact_bytes = artifact_data.len(), "Deploy to production started");
+
+    // Clone prod_id before moving into the spawned task
+    let prod_id_for_response = prod_id.clone();
+
+    // Spawn the deploy task in the background
+    let registry = registry.clone();
+    let deploys = state.deploys.clone();
+    let prod_container = prod_app.container_name.clone();
+    let prod_host = prod_app.host_id.clone();
+    let deploy_id_clone = deploy_id.clone();
+
+    tokio::spawn(async move {
+        execute_deploy(
+            &registry,
+            &deploys,
+            &deploy_id_clone,
+            &prod_id,
+            &prod_container,
+            &prod_host,
+            artifact_data,
+        ).await;
+    });
+
+    Json(serde_json::json!({
+        "success": true,
+        "deploy_id": deploy_id,
+        "dev_id": dev_id,
+        "prod_id": prod_id_for_response,
+    })).into_response()
+}
+
+/// Background task that executes the deploy pipeline: stop → copy → start.
+async fn execute_deploy(
+    registry: &Arc<hr_registry::AgentRegistry>,
+    deploys: &Arc<tokio::sync::RwLock<std::collections::HashMap<String, DeployState>>>,
+    deploy_id: &str,
+    prod_id: &str,
+    prod_container: &str,
+    prod_host: &str,
+    artifact_data: Vec<u8>,
+) {
+    // Phase 1: Stop prod app service
+    info!(deploy_id, "Deploy phase: stopping prod app service");
+    match registry.send_service_command(prod_id, ServiceType::App, ServiceAction::Stop).await {
+        Ok(true) => {}
+        Ok(false) => {
+            warn!(deploy_id, "Prod agent not connected, skipping service stop");
+        }
+        Err(e) => {
+            warn!(deploy_id, "Failed to stop prod service (continuing): {e}");
+        }
+    }
+    // Brief pause to allow service to stop
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Phase 2: Upload artifact to prod container
+    update_deploy_phase(deploys, deploy_id, DeployPhase::Uploading, None).await;
+    info!(deploy_id, "Deploy phase: uploading artifact to prod container");
+
+    // Write artifact to a temp file, then machinectl copy-to
+    let tmp_path = format!("/tmp/deploy-{}.tar.gz", deploy_id);
+    if let Err(e) = tokio::fs::write(&tmp_path, &artifact_data).await {
+        let err = format!("Failed to write temp artifact: {e}");
+        error!(deploy_id, "{err}");
+        update_deploy_phase(deploys, deploy_id, DeployPhase::Failed, Some(err)).await;
+        return;
+    }
+
+    let dest_path = "/opt/app/deploy-artifact.tar.gz";
+
+    if prod_host == "local" {
+        // Local container: machinectl copy-to + extract
+        let copy = tokio::process::Command::new("machinectl")
+            .args(["copy-to", prod_container, &tmp_path, dest_path])
+            .output()
+            .await;
+        match copy {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let err = format!("machinectl copy-to failed: {stderr}");
+                error!(deploy_id, "{err}");
+                update_deploy_phase(deploys, deploy_id, DeployPhase::Failed, Some(err)).await;
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return;
+            }
+            Err(e) => {
+                let err = format!("Failed to run machinectl: {e}");
+                error!(deploy_id, "{err}");
+                update_deploy_phase(deploys, deploy_id, DeployPhase::Failed, Some(err)).await;
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return;
+            }
+        }
+
+        // Extract inside the container
+        let extract = tokio::process::Command::new("machinectl")
+            .args(["shell", prod_container, "/bin/bash", "-c",
+                &format!("cd /opt/app && tar xzf {} --overwrite && rm -f {}", dest_path, dest_path)])
+            .output()
+            .await;
+        match extract {
+            Ok(out) if out.status.success() => {
+                info!(deploy_id, "Artifact extracted in prod container");
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let err = format!("Failed to extract artifact: {stderr}");
+                error!(deploy_id, "{err}");
+                update_deploy_phase(deploys, deploy_id, DeployPhase::Failed, Some(err)).await;
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return;
+            }
+            Err(e) => {
+                let err = format!("machinectl shell failed: {e}");
+                error!(deploy_id, "{err}");
+                update_deploy_phase(deploys, deploy_id, DeployPhase::Failed, Some(err)).await;
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return;
+            }
+        }
+    } else {
+        // Remote container: copy + extract via host agent exec
+        // Write artifact into the container via machinectl on the remote host
+        let cmd = vec![
+            "bash".to_string(), "-c".to_string(),
+            format!("cd /opt/app && tar xzf {} --overwrite && rm -f {}", dest_path, dest_path),
+        ];
+        match registry.exec_in_remote_container(prod_host, prod_container, cmd).await {
+            Ok((true, _, _)) => {
+                info!(deploy_id, "Artifact extracted in remote prod container");
+            }
+            Ok((false, _, stderr)) => {
+                let err = format!("Remote extract failed: {stderr}");
+                error!(deploy_id, "{err}");
+                update_deploy_phase(deploys, deploy_id, DeployPhase::Failed, Some(err)).await;
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return;
+            }
+            Err(e) => {
+                let err = format!("Remote exec failed: {e}");
+                error!(deploy_id, "{err}");
+                update_deploy_phase(deploys, deploy_id, DeployPhase::Failed, Some(err)).await;
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return;
+            }
+        }
+    }
+
+    // Clean up temp file
+    let _ = tokio::fs::remove_file(&tmp_path).await;
+
+    // Phase 3: Start prod app service
+    update_deploy_phase(deploys, deploy_id, DeployPhase::Starting, None).await;
+    info!(deploy_id, "Deploy phase: starting prod app service");
+
+    match registry.send_service_command(prod_id, ServiceType::App, ServiceAction::Start).await {
+        Ok(true) => {}
+        Ok(false) => {
+            warn!(deploy_id, "Prod agent not connected, could not start service");
+        }
+        Err(e) => {
+            warn!(deploy_id, "Failed to start prod service: {e}");
+        }
+    }
+
+    // Mark complete
+    update_deploy_phase(deploys, deploy_id, DeployPhase::Complete, None).await;
+    info!(deploy_id, "Deploy to production completed successfully");
+}
+
+/// Update the deploy phase in the shared state.
+async fn update_deploy_phase(
+    deploys: &Arc<tokio::sync::RwLock<std::collections::HashMap<String, DeployState>>>,
+    deploy_id: &str,
+    phase: DeployPhase,
+    error: Option<String>,
+) {
+    let mut d = deploys.write().await;
+    if let Some(state) = d.get_mut(deploy_id) {
+        state.phase = phase;
+        state.error = error;
+    }
+}
+
+/// GET /api/applications/deploys/{deploy_id}
+async fn get_deploy_status(
+    State(state): State<ApiState>,
+    Path(deploy_id): Path<String>,
+) -> impl IntoResponse {
+    let deploys = state.deploys.read().await;
+    match deploys.get(&deploy_id) {
+        Some(deploy) => Json(serde_json::json!({
+            "success": true,
+            "deploy": deploy,
+        })).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "success": false,
+            "error": "Deploy not found",
+        }))).into_response(),
     }
 }
 
@@ -466,6 +743,7 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
         let reject = hr_registry::protocol::RegistryMessage::AuthResult {
             success: false,
             error: Some("Invalid credentials".into()),
+            app_id: None,
         };
         let _ = socket.send(Message::Text(serde_json::to_string(&reject).unwrap().into())).await;
         let _ = socket.send(Message::Close(None)).await;
@@ -492,6 +770,7 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
     let success = hr_registry::protocol::RegistryMessage::AuthResult {
         success: true,
         error: None,
+        app_id: Some(app_id.clone()),
     };
     if socket.send(Message::Text(serde_json::to_string(&success).unwrap().into())).await.is_err() {
         registry.on_agent_disconnected(&app_id).await;
@@ -549,14 +828,14 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
                                 registry.handle_schema_metadata(&app_id, tables.clone(), relations.clone(), version, db_size_bytes).await;
 
                                 // Update the Dataverse schema cache in ApiState
-                                let slug = registry.list_applications().await
-                                    .iter()
-                                    .find(|a| a.id == app_id)
-                                    .map(|a| a.slug.clone())
-                                    .unwrap_or_default();
+                                let apps = registry.list_applications().await;
+                                let app_info = apps.iter().find(|a| a.id == app_id);
+                                let slug = app_info.map(|a| a.slug.clone()).unwrap_or_default();
+                                let app_env = app_info.map(|a| a.environment).unwrap_or_default();
                                 let cached = crate::state::CachedDataverseSchema {
                                     app_id: app_id.clone(),
                                     slug,
+                                    environment: app_env,
                                     tables: tables.iter().map(|t| crate::state::CachedTableInfo {
                                         name: t.name.clone(),
                                         slug: t.slug.clone(),

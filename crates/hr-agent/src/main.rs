@@ -295,8 +295,10 @@ async fn start_mcp_with_registry() -> Result<()> {
         Message::Text(text) => serde_json::from_str(&text)?,
         other => anyhow::bail!("Unexpected message type during auth: {other:?}"),
     };
-    match auth_result {
-        RegistryMessage::AuthResult { success: true, .. } => {}
+    let app_id = match auth_result {
+        RegistryMessage::AuthResult { success: true, app_id, .. } => {
+            app_id.unwrap_or_default()
+        }
         RegistryMessage::AuthResult {
             success: false,
             error,
@@ -308,7 +310,33 @@ async fn start_mcp_with_registry() -> Result<()> {
             );
         }
         _ => anyhow::bail!("Unexpected message during auth handshake"),
+    };
+
+    // Read the Config message to get the environment
+    let mut environment = hr_registry::types::Environment::Development;
+    // Try to get the Config message with a short timeout
+    if let Ok(Some(Ok(msg))) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        ws_stream.next(),
+    ).await {
+        if let Message::Text(text) = msg {
+            if let Ok(RegistryMessage::Config { environment: env, .. }) = serde_json::from_str::<RegistryMessage>(&text) {
+                environment = env;
+            }
+        }
     }
+
+    // Build deploy context
+    let api_base_url = format!("http://{}:{}", cfg.homeroute_address, cfg.homeroute_port);
+    let deploy_ctx = if !app_id.is_empty() {
+        Some(mcp::DeployContext {
+            app_id,
+            api_base_url,
+            environment,
+        })
+    } else {
+        None
+    };
 
     // Set up the channels
     let schema_signals: mcp::SchemaQuerySignals =
@@ -351,8 +379,8 @@ async fn start_mcp_with_registry() -> Result<()> {
         }
     });
 
-    // Run the MCP stdio server with registry access
-    let result = mcp::run_mcp_server_with_registry(Some(outbound_tx), Some(schema_signals)).await;
+    // Run the MCP stdio server with registry access and deploy context
+    let result = mcp::run_mcp_server_with_registry(Some(outbound_tx), Some(schema_signals), deploy_ctx).await;
 
     // Clean up background tasks
     ws_write_handle.abort();
@@ -373,7 +401,7 @@ async fn handle_registry_message(
     msg: RegistryMessage,
 ) {
     match msg {
-        RegistryMessage::Config { services, base_domain, slug, frontend, apis, code_server_enabled, .. } => {
+        RegistryMessage::Config { services, base_domain, slug, frontend, environment, code_server_enabled, .. } => {
             info!("Received config from HomeRoute");
 
             // Update service manager config
@@ -387,7 +415,7 @@ async fn handle_registry_message(
                 &base_domain,
                 &slug,
                 frontend.as_ref(),
-                &apis,
+                environment,
                 code_server_enabled,
             );
 
@@ -405,36 +433,43 @@ async fn handle_registry_message(
                 }
             }
 
-            // Build and publish routes using per-app subdomain scheme:
-            // {slug}.{base}, {api}.{slug}.{base}, code.{slug}.{base}
+            // Build and publish routes based on environment:
+            // Dev: dev.{slug}.{base} + code.{slug}.{base} (if enabled)
+            // Prod: {slug}.{base}
             // All routes point to port 443 (agent proxy handles internal routing)
             let mut routes = Vec::new();
-            if frontend.is_some() {
-                routes.push(AgentRoute {
-                    domain: format!("{}.{}", slug, base_domain),
-                    target_port: 443,
-                    service_type: ServiceType::App,
-                    auth_required: false,
-                    allowed_groups: vec![],
-                });
-            }
-            for api in &apis {
-                routes.push(AgentRoute {
-                    domain: format!("{}.{}.{}", api.slug, slug, base_domain),
-                    target_port: 443,
-                    service_type: ServiceType::App,
-                    auth_required: false,
-                    allowed_groups: vec![],
-                });
-            }
-            if code_server_enabled {
-                routes.push(AgentRoute {
-                    domain: format!("code.{}.{}", slug, base_domain),
-                    target_port: 443,
-                    service_type: ServiceType::CodeServer,
-                    auth_required: false,
-                    allowed_groups: vec![],
-                });
+            match environment {
+                hr_registry::types::Environment::Development => {
+                    if frontend.is_some() {
+                        routes.push(AgentRoute {
+                            domain: format!("dev.{}.{}", slug, base_domain),
+                            target_port: 443,
+                            service_type: ServiceType::App,
+                            auth_required: false,
+                            allowed_groups: vec![],
+                        });
+                    }
+                    if code_server_enabled {
+                        routes.push(AgentRoute {
+                            domain: format!("code.{}.{}", slug, base_domain),
+                            target_port: 443,
+                            service_type: ServiceType::CodeServer,
+                            auth_required: false,
+                            allowed_groups: vec![],
+                        });
+                    }
+                }
+                hr_registry::types::Environment::Production => {
+                    if frontend.is_some() {
+                        routes.push(AgentRoute {
+                            domain: format!("{}.{}", slug, base_domain),
+                            target_port: 443,
+                            service_type: ServiceType::App,
+                            auth_required: false,
+                            allowed_groups: vec![],
+                        });
+                    }
+                }
             }
             if !routes.is_empty() {
                 let routes_count = routes.len();

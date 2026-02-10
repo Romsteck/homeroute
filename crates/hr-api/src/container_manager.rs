@@ -67,6 +67,8 @@ pub struct ContainerV2Record {
     pub slug: String,
     pub container_name: String,
     pub host_id: String,
+    #[serde(default)]
+    pub environment: hr_registry::types::Environment,
     pub status: ContainerV2Status,
     pub created_at: DateTime<Utc>,
 }
@@ -77,7 +79,9 @@ pub struct CreateContainerRequest {
     pub slug: String,
     pub frontend: hr_registry::types::FrontendEndpoint,
     #[serde(default)]
-    pub apis: Vec<hr_registry::types::ApiEndpoint>,
+    pub environment: hr_registry::types::Environment,
+    #[serde(default)]
+    pub linked_app_id: Option<String>,
     #[serde(default = "default_true")]
     pub code_server_enabled: bool,
     #[serde(default)]
@@ -98,8 +102,6 @@ pub struct UpdateContainerRequest {
     #[serde(default)]
     pub name: Option<String>,
     pub frontend: Option<hr_registry::types::FrontendEndpoint>,
-    #[serde(default)]
-    pub apis: Option<Vec<hr_registry::types::ApiEndpoint>>,
     #[serde(default)]
     pub code_server_enabled: Option<bool>,
 }
@@ -167,7 +169,10 @@ impl ContainerManager {
         req: CreateContainerRequest,
     ) -> Result<(ContainerV2Record, String), String> {
         let host_id = req.host_id.clone().unwrap_or_else(|| "local".to_string());
-        let container_name = format!("hr-v2-{}", req.slug);
+        let container_name = match req.environment {
+            hr_registry::types::Environment::Production => format!("hr-v2-{}", req.slug),
+            hr_registry::types::Environment::Development => format!("hr-v2-{}-dev", req.slug),
+        };
 
         // Create application in registry (headless — container deploy is managed separately)
         let create_req = CreateApplicationRequest {
@@ -175,7 +180,8 @@ impl ContainerManager {
             slug: req.slug.clone(),
             host_id: Some(host_id.clone()),
             frontend: req.frontend.clone(),
-            apis: req.apis.clone(),
+            environment: req.environment,
+            linked_app_id: req.linked_app_id.clone(),
             code_server_enabled: req.code_server_enabled,
             services: Default::default(),
             power_policy: Default::default(),
@@ -194,6 +200,7 @@ impl ContainerManager {
             slug: req.slug.clone(),
             container_name: container_name.clone(),
             host_id: host_id.clone(),
+            environment: req.environment,
             status: ContainerV2Status::Deploying,
             created_at: Utc::now(),
         };
@@ -210,9 +217,18 @@ impl ContainerManager {
         let app_id = app.id.clone();
         let slug = req.slug.clone();
         let token_deploy = token.clone();
+        let environment = req.environment;
         tokio::spawn(async move {
-            mgr.run_nspawn_deploy(&app_id, &slug, &container_name, &host_id, &token_deploy)
-                .await;
+            match environment {
+                hr_registry::types::Environment::Development => {
+                    mgr.run_nspawn_deploy_dev(&app_id, &slug, &container_name, &host_id, &token_deploy)
+                        .await;
+                }
+                hr_registry::types::Environment::Production => {
+                    mgr.run_nspawn_deploy_prod(&app_id, &slug, &container_name, &host_id, &token_deploy)
+                        .await;
+                }
+            }
         });
 
         Ok((record, token))
@@ -350,7 +366,6 @@ impl ContainerManager {
         let update_req = UpdateApplicationRequest {
             name: req.name.clone(),
             frontend: req.frontend,
-            apis: req.apis,
             code_server_enabled: req.code_server_enabled,
             ..Default::default()
         };
@@ -392,8 +407,9 @@ impl ContainerManager {
                     entry["metrics"] = serde_json::to_value(metrics).unwrap_or_default();
                 }
                 entry["frontend"] = serde_json::to_value(&app.frontend).unwrap_or_default();
-                entry["apis"] = serde_json::to_value(&app.apis).unwrap_or_default();
                 entry["code_server_enabled"] = serde_json::json!(app.code_server_enabled);
+                entry["environment"] = serde_json::to_value(&app.environment).unwrap_or_default();
+                entry["linked_app_id"] = serde_json::json!(app.linked_app_id);
             }
             result.push(entry);
         }
@@ -506,7 +522,7 @@ impl ContainerManager {
 
     // ── Background deploy ────────────────────────────────────────
 
-    async fn run_nspawn_deploy(
+    async fn run_nspawn_deploy_dev(
         &self,
         app_id: &str,
         slug: &str,
@@ -871,7 +887,182 @@ WantedBy=multi-user.target
         emit("Certificat ACME wildcard...");
         self.registry.request_app_cert(slug).await;
 
-        info!(container = container_name, "Container V2 deploy complete");
+        info!(container = container_name, "Container V2 dev deploy complete");
+    }
+
+    /// Deploy a production container: agent binary + config + systemd unit only.
+    /// No code-server, no Claude Code CLI, no MCP config, no CLAUDE.md, no extensions.
+    async fn run_nspawn_deploy_prod(
+        &self,
+        app_id: &str,
+        slug: &str,
+        container_name: &str,
+        host_id: &str,
+        token: &str,
+    ) {
+        let emit = |message: &str| {
+            let _ = self.events.agent_status.send(AgentStatusEvent {
+                app_id: app_id.to_string(),
+                slug: slug.to_string(),
+                status: "deploying".to_string(),
+                message: Some(message.to_string()),
+            });
+        };
+
+        let storage_path = self.resolve_storage_path(host_id).await;
+        let storage = Path::new(&storage_path);
+
+        let network_mode = match self.resolve_network_mode(host_id).await {
+            Ok(nm) => nm,
+            Err(e) => {
+                error!(container = container_name, "Network mode resolution failed: {e}");
+                emit(&format!("Erreur: {e}"));
+                self.set_container_status(app_id, ContainerV2Status::Error)
+                    .await;
+                return;
+            }
+        };
+
+        // Phase 1: Create the nspawn container
+        emit("Creation du conteneur nspawn...");
+        if let Err(e) = NspawnClient::create_container(container_name, storage, &network_mode).await {
+            error!(container = container_name, "Nspawn creation failed: {e}");
+            emit(&format!("Erreur: {e}"));
+            self.set_container_status(app_id, ContainerV2Status::Error)
+                .await;
+            return;
+        }
+
+        // Phase 2: Deploy agent binary
+        emit("Deploiement du binaire agent...");
+        let agent_binary = PathBuf::from("/opt/homeroute/data/agent-binaries/hr-agent");
+        if !agent_binary.exists() {
+            let msg = "Agent binary not found";
+            emit(msg);
+            self.set_container_status(app_id, ContainerV2Status::Error)
+                .await;
+            return;
+        }
+
+        if let Err(e) =
+            NspawnClient::push_file(container_name, &agent_binary, "usr/local/bin/hr-agent", storage)
+                .await
+        {
+            error!(container = container_name, "Failed to push agent binary: {e}");
+            emit(&format!("Erreur: {e}"));
+            self.set_container_status(app_id, ContainerV2Status::Error)
+                .await;
+            return;
+        }
+
+        if let Err(e) = NspawnClient::exec(
+            container_name,
+            &["chmod", "+x", "/usr/local/bin/hr-agent"],
+        )
+        .await
+        {
+            error!(container = container_name, "chmod failed: {e}");
+            emit(&format!("Erreur: {e}"));
+            self.set_container_status(app_id, ContainerV2Status::Error)
+                .await;
+            return;
+        }
+
+        // Phase 3: Generate and push agent config
+        emit("Configuration de l'agent...");
+        let api_port = self.env.api_port;
+        let agent_interface = if let Some(parent) = network_mode.strip_prefix("macvlan:") {
+            format!("mv-{parent}")
+        } else {
+            "host0".to_string()
+        };
+        let config_content = format!(
+            r#"homeroute_address = "10.0.0.254"
+homeroute_port = {api_port}
+token = "{token}"
+service_name = "{slug}"
+interface = "{agent_interface}"
+"#
+        );
+
+        let tmp_config = PathBuf::from(format!("/tmp/hr-agent-v2-{slug}.toml"));
+        if let Err(e) = tokio::fs::write(&tmp_config, &config_content).await {
+            error!("Failed to write tmp config: {e}");
+            self.set_container_status(app_id, ContainerV2Status::Error)
+                .await;
+            return;
+        }
+        let _ = NspawnClient::push_file(container_name, &tmp_config, "etc/hr-agent.toml", storage).await;
+        let _ = tokio::fs::remove_file(&tmp_config).await;
+
+        // Phase 4: Push systemd unit
+        let unit_content = r#"[Unit]
+Description=HomeRoute Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/hr-agent
+Restart=always
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
+"#;
+        let tmp_unit = PathBuf::from(format!("/tmp/hr-agent-v2-{slug}.service"));
+        let _ = tokio::fs::write(&tmp_unit, unit_content).await;
+        let _ = NspawnClient::push_file(
+            container_name,
+            &tmp_unit,
+            "etc/systemd/system/hr-agent.service",
+            storage,
+        )
+        .await;
+        let _ = tokio::fs::remove_file(&tmp_unit).await;
+
+        // Phase 5: Enable and start agent
+        emit("Demarrage de l'agent...");
+        let _ = NspawnClient::exec(container_name, &["systemctl", "daemon-reload"]).await;
+        let _ =
+            NspawnClient::exec(container_name, &["systemctl", "enable", "--now", "hr-agent"])
+                .await;
+
+        // Phase 6: Wait for network
+        emit("Attente de la connectivite reseau...");
+        if let Err(e) = NspawnClient::wait_for_network(container_name, 30).await {
+            warn!(container = container_name, "Network wait failed: {e}");
+        }
+
+        // Phase 7: Install dependencies (curl for agent binary updates)
+        emit("Installation des dependances...");
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["apt-get update -qq && apt-get install -y -qq curl ca-certificates"],
+            3,
+        )
+        .await;
+
+        // Phase 8: Create workspace
+        emit("Creation du volume workspace...");
+        let _ = NspawnClient::create_workspace(container_name, storage).await;
+
+        // Update status
+        self.set_container_status(app_id, ContainerV2Status::Running)
+            .await;
+
+        let _ = self.events.agent_status.send(AgentStatusEvent {
+            app_id: app_id.to_string(),
+            slug: slug.to_string(),
+            status: "pending".to_string(),
+            message: Some("Deploiement termine".to_string()),
+        });
+
+        // Request per-app wildcard certificate (*.{slug}.{base_domain})
+        emit("Certificat ACME wildcard...");
+        self.registry.request_app_cert(slug).await;
+
+        info!(container = container_name, "Container V2 prod deploy complete");
     }
 
     /// Update the status of a container V2 record and the corresponding application.

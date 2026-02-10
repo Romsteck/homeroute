@@ -7,6 +7,20 @@ use crate::protocol::{AgentMetrics, PowerPolicy, ServiceConfig, ServiceType};
 /// Port that code-server listens on inside each container.
 pub const CODE_SERVER_PORT: u16 = 13337;
 
+/// Application environment: development or production.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Environment {
+    Development,
+    Production,
+}
+
+impl Default for Environment {
+    fn default() -> Self {
+        Self::Development
+    }
+}
+
 /// A registered application with its container and agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Application {
@@ -16,6 +30,12 @@ pub struct Application {
     /// Host this application belongs to ("local" for the main server).
     #[serde(default = "default_host_id")]
     pub host_id: String,
+    /// Environment: development or production.
+    #[serde(default)]
+    pub environment: Environment,
+    /// Linked app ID (dev ↔ prod pairing).
+    #[serde(default)]
+    pub linked_app_id: Option<String>,
     pub enabled: bool,
     pub container_name: String,
     /// Argon2 hash of the agent token.
@@ -30,9 +50,6 @@ pub struct Application {
 
     /// Frontend endpoint configuration.
     pub frontend: FrontendEndpoint,
-    /// Optional API endpoints (each gets a sub-domain).
-    #[serde(default)]
-    pub apis: Vec<ApiEndpoint>,
 
     /// Whether code-server IDE is enabled for this application.
     #[serde(default = "default_true")]
@@ -54,47 +71,57 @@ pub struct Application {
 
 impl Application {
     /// Return all domains this application serves.
-    /// Uses per-app subdomain scheme: `{slug}.{base}`, `code.{slug}.{base}`, `{api}.{slug}.{base}`.
+    /// Dev: `dev.{slug}.{base}`, `code.{slug}.{base}` (if code_server_enabled).
+    /// Prod: `{slug}.{base}`.
     pub fn domains(&self, base_domain: &str) -> Vec<String> {
-        let mut domains = vec![format!("{}.{}", self.slug, base_domain)];
-        for api in &self.apis {
-            domains.push(format!("{}.{}.{}", api.slug, self.slug, base_domain));
+        match self.environment {
+            Environment::Development => {
+                let mut domains = vec![format!("dev.{}.{}", self.slug, base_domain)];
+                if self.code_server_enabled {
+                    domains.push(format!("code.{}.{}", self.slug, base_domain));
+                }
+                domains
+            }
+            Environment::Production => {
+                vec![format!("{}.{}", self.slug, base_domain)]
+            }
         }
-        if self.code_server_enabled {
-            domains.push(format!("code.{}.{}", self.slug, base_domain));
-        }
-        domains
     }
 
     /// Return all (domain, port, auth_required, allowed_groups) tuples for agent routing.
-    /// Uses per-app subdomain scheme: `{slug}.{base}`, `code.{slug}.{base}`, `{api}.{slug}.{base}`.
+    /// Dev: `dev.{slug}.{base}` + `code.{slug}.{base}` (if code_server_enabled).
+    /// Prod: `{slug}.{base}`.
     pub fn routes(&self, base_domain: &str) -> Vec<RouteInfo> {
-        let mut routes = vec![RouteInfo {
-            domain: format!("{}.{}", self.slug, base_domain),
-            target_port: self.frontend.target_port,
-            auth_required: self.frontend.auth_required,
-            allowed_groups: self.frontend.allowed_groups.clone(),
-            service_type: ServiceType::App,
-        }];
-        for api in &self.apis {
-            routes.push(RouteInfo {
-                domain: format!("{}.{}.{}", api.slug, self.slug, base_domain),
-                target_port: api.target_port,
-                auth_required: api.auth_required,
-                allowed_groups: api.allowed_groups.clone(),
-                service_type: ServiceType::App,
-            });
+        match self.environment {
+            Environment::Development => {
+                let mut routes = vec![RouteInfo {
+                    domain: format!("dev.{}.{}", self.slug, base_domain),
+                    target_port: self.frontend.target_port,
+                    auth_required: self.frontend.auth_required,
+                    allowed_groups: self.frontend.allowed_groups.clone(),
+                    service_type: ServiceType::App,
+                }];
+                if self.code_server_enabled {
+                    routes.push(RouteInfo {
+                        domain: format!("code.{}.{}", self.slug, base_domain),
+                        target_port: CODE_SERVER_PORT,
+                        auth_required: true,
+                        allowed_groups: vec![],
+                        service_type: ServiceType::CodeServer,
+                    });
+                }
+                routes
+            }
+            Environment::Production => {
+                vec![RouteInfo {
+                    domain: format!("{}.{}", self.slug, base_domain),
+                    target_port: self.frontend.target_port,
+                    auth_required: self.frontend.auth_required,
+                    allowed_groups: self.frontend.allowed_groups.clone(),
+                    service_type: ServiceType::App,
+                }]
+            }
         }
-        if self.code_server_enabled {
-            routes.push(RouteInfo {
-                domain: format!("code.{}.{}", self.slug, base_domain),
-                target_port: CODE_SERVER_PORT,
-                auth_required: true,
-                allowed_groups: vec![],
-                service_type: ServiceType::CodeServer,
-            });
-        }
-        routes
     }
 
     /// Return the wildcard domain for this application's per-app certificate.
@@ -116,18 +143,6 @@ pub struct RouteInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrontendEndpoint {
-    pub target_port: u16,
-    #[serde(default)]
-    pub auth_required: bool,
-    #[serde(default)]
-    pub allowed_groups: Vec<String>,
-    #[serde(default)]
-    pub local_only: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApiEndpoint {
-    pub slug: String,
     pub target_port: u16,
     #[serde(default)]
     pub auth_required: bool,
@@ -179,7 +194,9 @@ pub struct CreateApplicationRequest {
     pub host_id: Option<String>,
     pub frontend: FrontendEndpoint,
     #[serde(default)]
-    pub apis: Vec<ApiEndpoint>,
+    pub environment: Environment,
+    #[serde(default)]
+    pub linked_app_id: Option<String>,
     #[serde(default = "default_true")]
     pub code_server_enabled: bool,
     #[serde(default)]
@@ -200,7 +217,7 @@ pub struct UpdateApplicationRequest {
     #[serde(default)]
     pub frontend: Option<FrontendEndpoint>,
     #[serde(default)]
-    pub apis: Option<Vec<ApiEndpoint>>,
+    pub linked_app_id: Option<String>,
     #[serde(default)]
     pub code_server_enabled: Option<bool>,
     #[serde(default)]
@@ -270,12 +287,14 @@ pub struct UpdateStatusResult {
 mod tests {
     use super::*;
 
-    fn make_test_app(code_server_enabled: bool) -> Application {
+    fn make_test_app(environment: Environment, code_server_enabled: bool) -> Application {
         Application {
             id: "test".into(),
             name: "Test".into(),
             slug: "myapp".into(),
             host_id: "local".into(),
+            environment,
+            linked_app_id: None,
             enabled: true,
             container_name: "hr-myapp".into(),
             token_hash: String::new(),
@@ -290,13 +309,6 @@ mod tests {
                 allowed_groups: vec![],
                 local_only: false,
             },
-            apis: vec![ApiEndpoint {
-                slug: "api".into(),
-                target_port: 3001,
-                auth_required: true,
-                allowed_groups: vec!["admin".into()],
-                local_only: false,
-            }],
             code_server_enabled,
             services: ServiceConfig::default(),
             power_policy: PowerPolicy::default(),
@@ -307,39 +319,53 @@ mod tests {
 
     #[test]
     fn test_domains() {
-        let app = make_test_app(true);
+        // Dev with code-server
+        let app = make_test_app(Environment::Development, true);
         let domains = app.domains("example.com");
         assert_eq!(
             domains,
             vec![
-                "myapp.example.com",
-                "api.myapp.example.com",
+                "dev.myapp.example.com",
                 "code.myapp.example.com",
             ]
         );
+
+        // Prod
+        let app = make_test_app(Environment::Production, true);
+        let domains = app.domains("example.com");
+        assert_eq!(domains, vec!["myapp.example.com"]);
     }
 
     #[test]
     fn test_domains_no_code_server() {
-        let app = make_test_app(false);
+        let app = make_test_app(Environment::Development, false);
         let domains = app.domains("example.com");
-        assert_eq!(domains, vec!["myapp.example.com", "api.myapp.example.com"]);
+        assert_eq!(domains, vec!["dev.myapp.example.com"]);
     }
 
     #[test]
     fn test_routes_code_server() {
-        let app = make_test_app(true);
+        let app = make_test_app(Environment::Development, true);
         let routes = app.routes("example.com");
-        assert_eq!(routes.len(), 3);
-        let cs_route = &routes[2];
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].domain, "dev.myapp.example.com");
+        let cs_route = &routes[1];
         assert_eq!(cs_route.domain, "code.myapp.example.com");
         assert_eq!(cs_route.target_port, CODE_SERVER_PORT);
         assert!(cs_route.auth_required);
     }
 
     #[test]
+    fn test_routes_production() {
+        let app = make_test_app(Environment::Production, true);
+        let routes = app.routes("example.com");
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].domain, "myapp.example.com");
+    }
+
+    #[test]
     fn test_wildcard_domain() {
-        let app = make_test_app(true);
+        let app = make_test_app(Environment::Development, true);
         assert_eq!(app.wildcard_domain("example.com"), "*.myapp.example.com");
     }
 

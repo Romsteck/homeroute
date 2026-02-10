@@ -153,13 +153,17 @@ impl AgentProxy {
         base_domain: &str,
         slug: &str,
         frontend: Option<&hr_registry::types::FrontendEndpoint>,
-        apis: &[hr_registry::types::ApiEndpoint],
+        environment: hr_registry::types::Environment,
         code_server_enabled: bool,
     ) {
         let mut new_routes = HashMap::new();
         if let Some(fe) = frontend {
+            let frontend_domain = match environment {
+                hr_registry::types::Environment::Development => format!("dev.{}.{}", slug, base_domain),
+                hr_registry::types::Environment::Production => format!("{}.{}", slug, base_domain),
+            };
             new_routes.insert(
-                format!("{}.{}", slug, base_domain),
+                frontend_domain,
                 LocalRoute {
                     target_port: fe.target_port,
                     auth_required: fe.auth_required,
@@ -167,17 +171,7 @@ impl AgentProxy {
                 },
             );
         }
-        for api in apis {
-            new_routes.insert(
-                format!("{}.{}.{}", api.slug, slug, base_domain),
-                LocalRoute {
-                    target_port: api.target_port,
-                    auth_required: api.auth_required,
-                    allowed_groups: api.allowed_groups.clone(),
-                },
-            );
-        }
-        if code_server_enabled {
+        if code_server_enabled && environment == hr_registry::types::Environment::Development {
             new_routes.insert(
                 format!("code.{}.{}", slug, base_domain),
                 LocalRoute {

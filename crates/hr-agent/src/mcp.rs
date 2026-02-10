@@ -15,6 +15,8 @@ use hr_dataverse::query::*;
 use hr_dataverse::schema::*;
 use hr_registry::protocol::{AgentMessage, AppSchemaOverview};
 
+use hr_registry::types::Environment;
+
 use crate::dataverse::LocalDataverse;
 
 /// Shared map for pending schema query responses.
@@ -51,14 +53,26 @@ struct JsonRpcError {
     data: Option<Value>,
 }
 
+/// Context for deploy tools (only available in Development environments).
+#[derive(Clone)]
+pub struct DeployContext {
+    pub app_id: String,
+    pub api_base_url: String,
+    pub environment: Environment,
+}
+
 /// Run the MCP stdio server.
 ///
 /// When `outbound_tx` and `schema_signals` are provided, the server can
 /// send requests to the registry via the WebSocket and wait for responses
 /// (used by the `list_other_apps_schemas` tool).
+///
+/// When `deploy_ctx` is provided and environment is Development, deploy
+/// tools (deploy, deploy_status, prod_logs) are available.
 pub async fn run_mcp_server_with_registry(
     outbound_tx: Option<mpsc::Sender<AgentMessage>>,
     schema_signals: Option<SchemaQuerySignals>,
+    deploy_ctx: Option<DeployContext>,
 ) -> Result<()> {
     info!("Starting MCP stdio server");
 
@@ -110,9 +124,15 @@ pub async fn run_mcp_server_with_registry(
                 // No response needed for notifications
                 continue;
             }
-            "tools/list" => Ok(json!({
-                "tools": get_tool_definitions()
-            })),
+            "tools/list" => {
+                let mut tools = get_tool_definitions();
+                if let Some(ref ctx) = deploy_ctx {
+                    if ctx.environment == Environment::Development {
+                        tools.extend(get_deploy_tool_definitions());
+                    }
+                }
+                Ok(json!({ "tools": tools }))
+            },
             "tools/call" => {
                 let tool_name = request
                     .params
@@ -125,8 +145,12 @@ pub async fn run_mcp_server_with_registry(
                     .cloned()
                     .unwrap_or(json!({}));
 
+                // Deploy tools (async, HTTP-based)
+                if matches!(tool_name, "deploy" | "deploy_status" | "prod_logs") {
+                    handle_deploy_tool_call(deploy_ctx.as_ref(), tool_name, &arguments).await
+                }
                 // Registry-backed tools (async, no engine lock needed)
-                if tool_name == "list_other_apps_schemas" {
+                else if tool_name == "list_other_apps_schemas" {
                     handle_list_other_apps_schemas(
                         outbound_tx.as_ref(),
                         schema_signals.as_ref(),
@@ -171,7 +195,7 @@ pub async fn run_mcp_server_with_registry(
 
 /// Run the MCP stdio server without registry communication (standalone mode).
 pub async fn run_mcp_server() -> Result<()> {
-    run_mcp_server_with_registry(None, None).await
+    run_mcp_server_with_registry(None, None, None).await
 }
 
 fn get_tool_definitions() -> Vec<Value> {
@@ -729,5 +753,209 @@ async fn handle_list_other_apps_schemas(
             signals.remove(&request_id);
             Err("Timeout waiting for schemas from registry (10s)".to_string())
         }
+    }
+}
+
+// ── Deploy tools (Development environment only) ──────────────
+
+fn get_deploy_tool_definitions() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "deploy",
+            "description": "Build the application and deploy it to the linked production container. Runs the build command, creates a tarball of the build output, and pushes it to production (stop → copy → start).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "build_command": {
+                        "type": "string",
+                        "description": "Shell command to build the application (e.g. 'npm run build', 'cargo build --release')"
+                    },
+                    "build_output_dir": {
+                        "type": "string",
+                        "description": "Directory containing build output to deploy (e.g. 'dist', 'build', 'target/release'). Defaults to current directory.",
+                        "default": "."
+                    }
+                },
+                "required": ["build_command"]
+            }
+        }),
+        json!({
+            "name": "deploy_status",
+            "description": "Check the status of a deployment by its deploy ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "deploy_id": {
+                        "type": "string",
+                        "description": "The deploy ID returned by the deploy tool"
+                    }
+                },
+                "required": ["deploy_id"]
+            }
+        }),
+        json!({
+            "name": "prod_logs",
+            "description": "Get recent logs from the linked production container's app service.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "lines": {
+                        "type": "integer",
+                        "description": "Number of log lines to retrieve (default: 50)",
+                        "default": 50
+                    }
+                }
+            }
+        }),
+    ]
+}
+
+async fn handle_deploy_tool_call(
+    deploy_ctx: Option<&DeployContext>,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, String> {
+    let text_result = |text: String| -> Value {
+        json!({ "content": [{ "type": "text", "text": text }] })
+    };
+
+    let ctx = deploy_ctx
+        .ok_or_else(|| "Deploy tools not available (not a development environment or not connected)".to_string())?;
+
+    if ctx.environment != Environment::Development {
+        return Err("Deploy tools are only available in development environments".to_string());
+    }
+
+    match tool {
+        "deploy" => {
+            let build_command = args
+                .get("build_command")
+                .and_then(|v| v.as_str())
+                .ok_or("build_command required")?;
+            let build_output_dir = args
+                .get("build_output_dir")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+
+            // Run the build command
+            info!("Running build command: {}", build_command);
+            let build_output = tokio::process::Command::new("bash")
+                .args(["-c", build_command])
+                .current_dir("/root/workspace")
+                .output()
+                .await
+                .map_err(|e| format!("Failed to run build command: {e}"))?;
+
+            if !build_output.status.success() {
+                let stderr = String::from_utf8_lossy(&build_output.stderr);
+                let stdout = String::from_utf8_lossy(&build_output.stdout);
+                return Ok(text_result(format!(
+                    "Build failed (exit code: {}):\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
+                    build_output.status, stdout, stderr
+                )));
+            }
+
+            let build_stdout = String::from_utf8_lossy(&build_output.stdout);
+            info!("Build succeeded, creating tarball");
+
+            // Create tarball of the build output
+            let tar_path = "/tmp/deploy-artifact.tar.gz";
+            let tar_output = tokio::process::Command::new("tar")
+                .args(["czf", tar_path, "-C", &format!("/root/workspace/{}", build_output_dir), "."])
+                .output()
+                .await
+                .map_err(|e| format!("Failed to create tarball: {e}"))?;
+
+            if !tar_output.status.success() {
+                let stderr = String::from_utf8_lossy(&tar_output.stderr);
+                return Err(format!("Failed to create tarball: {stderr}"));
+            }
+
+            // Read the tarball
+            let artifact_data = tokio::fs::read(tar_path)
+                .await
+                .map_err(|e| format!("Failed to read tarball: {e}"))?;
+            let artifact_size = artifact_data.len();
+
+            // POST to deploy endpoint as multipart
+            let url = format!("{}/api/applications/{}/deploy", ctx.api_base_url, ctx.app_id);
+
+            let part = reqwest::multipart::Part::bytes(artifact_data)
+                .file_name("artifact.tar.gz")
+                .mime_str("application/gzip")
+                .map_err(|e| format!("Failed to create multipart part: {e}"))?;
+
+            let form = reqwest::multipart::Form::new()
+                .part("artifact", part);
+
+            let client = reqwest::Client::new();
+            let resp = client
+                .post(&url)
+                .multipart(form)
+                .send()
+                .await
+                .map_err(|e| format!("Failed to send deploy request: {e}"))?;
+
+            // Clean up temp tarball
+            let _ = tokio::fs::remove_file(tar_path).await;
+
+            let status = resp.status();
+            let body: Value = resp.json().await
+                .map_err(|e| format!("Failed to parse deploy response: {e}"))?;
+
+            if status.is_success() && body.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let deploy_id = body.get("deploy_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                Ok(text_result(format!(
+                    "Deploy started successfully!\n\nDeploy ID: {}\nArtifact size: {} bytes\nBuild output:\n{}\n\nUse deploy_status tool with this deploy_id to track progress.",
+                    deploy_id, artifact_size, build_stdout
+                )))
+            } else {
+                let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error");
+                Ok(text_result(format!("Deploy failed: {}", error)))
+            }
+        }
+
+        "deploy_status" => {
+            let deploy_id = args
+                .get("deploy_id")
+                .and_then(|v| v.as_str())
+                .ok_or("deploy_id required")?;
+
+            let url = format!("{}/api/applications/deploys/{}", ctx.api_base_url, deploy_id);
+            let client = reqwest::Client::new();
+            let resp = client.get(&url).send().await
+                .map_err(|e| format!("Failed to query deploy status: {e}"))?;
+
+            let body: Value = resp.json().await
+                .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+            Ok(text_result(serde_json::to_string_pretty(&body).unwrap()))
+        }
+
+        "prod_logs" => {
+            let lines = args
+                .get("lines")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(50);
+
+            // Read logs from the app service in the production container
+            // The prod container runs the same app service; we query via journalctl
+            let output = tokio::process::Command::new("journalctl")
+                .args(["--user", "-u", "app", "-n", &lines.to_string(), "--no-pager"])
+                .output()
+                .await
+                .map_err(|e| format!("Failed to read logs: {e}"))?;
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            if stdout.is_empty() && !stderr.is_empty() {
+                Ok(text_result(format!("No logs available (or error): {stderr}")))
+            } else {
+                Ok(text_result(stdout.to_string()))
+            }
+        }
+
+        _ => Err(format!("Unknown deploy tool: {}", tool)),
     }
 }

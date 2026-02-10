@@ -360,6 +360,9 @@ function Dataverse() {
   const [apps, setApps] = useState([]);
   const [loading, setLoading] = useState(true);
 
+  // Environment filter: 'all', 'development', 'production'
+  const [envFilter, setEnvFilter] = useState('all');
+
   // View mode: 'schema' (3-column) or 'diagram' (ER)
   const [viewMode, setViewMode] = useState('schema');
 
@@ -479,6 +482,10 @@ function Dataverse() {
     }
   }
 
+  const filteredApps = envFilter === 'all'
+    ? apps
+    : apps.filter(a => (a.environment || 'development') === envFilter);
+
   const columns = tableDetail?.columns || [];
 
   if (loading) {
@@ -510,29 +517,66 @@ function Dataverse() {
   return (
     <div className="h-full flex flex-col">
       <PageHeader icon={Database} title="Dataverse">
-        <div className="flex items-center gap-1 bg-gray-700/50 rounded-lg p-0.5">
-          <button
-            onClick={() => handleViewToggle('schema')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-              viewMode === 'schema'
-                ? 'bg-blue-600 text-white'
-                : 'text-gray-400 hover:text-gray-200'
-            }`}
-          >
-            <Table2 className="w-3.5 h-3.5" />
-            Schema
-          </button>
-          <button
-            onClick={() => handleViewToggle('diagram')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-              viewMode === 'diagram'
-                ? 'bg-blue-600 text-white'
-                : 'text-gray-400 hover:text-gray-200'
-            }`}
-          >
-            <Network className="w-3.5 h-3.5" />
-            Diagramme ER
-          </button>
+        <div className="flex items-center gap-3">
+          {/* Environment filter */}
+          <div className="flex items-center gap-1 bg-gray-700/50 rounded-lg p-0.5">
+            <button
+              onClick={() => setEnvFilter('all')}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                envFilter === 'all'
+                  ? 'bg-gray-600 text-white'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              Tous
+            </button>
+            <button
+              onClick={() => setEnvFilter('development')}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                envFilter === 'development'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              DEV
+            </button>
+            <button
+              onClick={() => setEnvFilter('production')}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                envFilter === 'production'
+                  ? 'bg-purple-600 text-white'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              PROD
+            </button>
+          </div>
+
+          {/* View mode toggle */}
+          <div className="flex items-center gap-1 bg-gray-700/50 rounded-lg p-0.5">
+            <button
+              onClick={() => handleViewToggle('schema')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                viewMode === 'schema'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              <Table2 className="w-3.5 h-3.5" />
+              Schema
+            </button>
+            <button
+              onClick={() => handleViewToggle('diagram')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                viewMode === 'diagram'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              <Network className="w-3.5 h-3.5" />
+              Diagramme ER
+            </button>
+          </div>
         </div>
       </PageHeader>
 
@@ -541,10 +585,11 @@ function Dataverse() {
         <div className="flex-1 min-h-0 flex">
           {/* App sidebar for diagram view */}
           <div className="w-64 flex-shrink-0 border-r border-gray-700 flex flex-col bg-gray-800">
-            <ColumnHeader>Applications ({apps.length})</ColumnHeader>
+            <ColumnHeader>Applications ({filteredApps.length})</ColumnHeader>
             <div className="flex-1 overflow-y-auto">
-              {apps.map(app => {
+              {filteredApps.map(app => {
                 const isSelected = selectedApp?.appId === app.appId;
+                const isDev = (app.environment || 'development') !== 'production';
                 return (
                   <div
                     key={app.appId}
@@ -561,7 +606,14 @@ function Dataverse() {
                     <div className="flex items-center gap-2 min-w-0">
                       <Database className={`w-4 h-4 flex-shrink-0 ${isSelected ? 'text-white' : 'text-blue-400'}`} />
                       <div className="min-w-0">
-                        <div className="text-sm font-medium truncate">{app.slug}</div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-sm font-medium truncate">{app.slug}</span>
+                          <span className={`text-[10px] px-1 py-0 font-medium flex-shrink-0 ${
+                            isDev ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'
+                          }`}>
+                            {isDev ? 'DEV' : 'PROD'}
+                          </span>
+                        </div>
                         <div className={`text-xs ${isSelected ? 'text-blue-100' : 'text-gray-500'}`}>
                           {app.tables?.length || 0} tables
                           {app.dbSizeBytes ? ` · ${formatBytes(app.dbSizeBytes)}` : ''}
@@ -595,10 +647,11 @@ function Dataverse() {
 
           {/* Column 1: Apps */}
           <div className="w-64 flex-shrink-0 border-r border-gray-700 flex flex-col bg-gray-800">
-            <ColumnHeader>Applications ({apps.length})</ColumnHeader>
+            <ColumnHeader>Applications ({filteredApps.length})</ColumnHeader>
             <div className="flex-1 overflow-y-auto">
-              {apps.map(app => {
+              {filteredApps.map(app => {
                 const isSelected = selectedApp?.appId === app.appId;
+                const isDev = (app.environment || 'development') !== 'production';
                 return (
                   <div
                     key={app.appId}
@@ -612,7 +665,14 @@ function Dataverse() {
                     <div className="flex items-center gap-2 min-w-0">
                       <Database className={`w-4 h-4 flex-shrink-0 ${isSelected ? 'text-white' : 'text-blue-400'}`} />
                       <div className="min-w-0">
-                        <div className="text-sm font-medium truncate">{app.slug}</div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-sm font-medium truncate">{app.slug}</span>
+                          <span className={`text-[10px] px-1 py-0 font-medium flex-shrink-0 ${
+                            isDev ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'
+                          }`}>
+                            {isDev ? 'DEV' : 'PROD'}
+                          </span>
+                        </div>
                         <div className={`text-xs ${isSelected ? 'text-blue-100' : 'text-gray-500'}`}>
                           {app.tables?.length || 0} tables
                           {app.dbSizeBytes ? ` · ${formatBytes(app.dbSizeBytes)}` : ''}
