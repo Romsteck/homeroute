@@ -171,6 +171,10 @@ export const cancelMigration = (id) => api.post(`/containers/${id}/migrate/cance
 export const getContainersConfig = () => api.get('/containers/config');
 export const updateContainersConfig = (data) => api.put('/containers/config', data);
 
+// Deploy (dev → prod)
+export const deployContainer = (devId) => api.post(`/applications/${devId}/deploy`);
+export const getDeployStatus = (deployId) => api.get(`/applications/deploys/${deployId}`);
+
 // Dataverse
 export const getDataverseOverview = () => api.get('/dataverse/overview');
 export const getDataverseSchema = (appId) => api.get(`/dataverse/apps/${appId}/schema`);

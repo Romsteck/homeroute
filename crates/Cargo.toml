@@ -29,7 +29,7 @@ edition = "2024"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP framework
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
@@ -68,7 +68,7 @@ rand = "0.9"
 hex = "0.4"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
 
 # Signal handling
 signal-hook = "0.3"

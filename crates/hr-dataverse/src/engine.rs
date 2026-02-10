@@ -570,4 +570,44 @@ impl DataverseEngine {
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
+
+    /// Export migration records applied after the given schema version.
+    /// Each record contains the migration id (used as version marker),
+    /// description, operations list, and application timestamp.
+    pub fn export_migrations_since(&self, since_version: u64) -> Result<Vec<MigrationRecord>, EngineError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, description, operations, applied_at FROM _dv_migrations WHERE id > ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![since_version as i64], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            let (id, description, ops_json, applied_at) = row?;
+            let operations: Vec<MigrationOp> = serde_json::from_str(&ops_json)
+                .unwrap_or_default();
+            records.push(MigrationRecord {
+                id: id as u64,
+                description,
+                operations,
+                applied_at,
+            });
+        }
+        Ok(records)
+    }
+}
+
+/// A recorded migration entry from the `_dv_migrations` table.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MigrationRecord {
+    pub id: u64,
+    pub description: Option<String>,
+    pub operations: Vec<MigrationOp>,
+    pub applied_at: String,
 }

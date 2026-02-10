@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::types::{ApiEndpoint, FrontendEndpoint};
+use crate::types::{Environment, FrontendEndpoint};
 
 // ── Shared Types ────────────────────────────────────────────────
 
@@ -197,6 +197,9 @@ pub enum RegistryMessage {
         success: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// The authenticated application's ID (set on success).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        app_id: Option<String>,
     },
     /// Full configuration push.
     #[serde(rename = "config")]
@@ -217,9 +220,9 @@ pub enum RegistryMessage {
         /// Frontend endpoint configuration.
         #[serde(default)]
         frontend: Option<FrontendEndpoint>,
-        /// API endpoints.
+        /// Application environment (development or production).
         #[serde(default)]
-        apis: Vec<ApiEndpoint>,
+        environment: Environment,
         /// Whether code-server is enabled.
         #[serde(default)]
         code_server_enabled: bool,
@@ -595,6 +598,7 @@ mod tests {
         let msg = RegistryMessage::AuthResult {
             success: true,
             error: None,
+            app_id: Some("test-123".into()),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: RegistryMessage = serde_json::from_str(&json).unwrap();

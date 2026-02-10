@@ -181,17 +181,24 @@ impl AgentRegistry {
         self: &Arc<Self>,
         req: CreateApplicationRequest,
     ) -> Result<(Application, String)> {
+        use crate::types::Environment;
+
         let token_clear = generate_token();
         let token_hash = hash_token(&token_clear)?;
 
         let id = uuid::Uuid::new_v4().to_string();
-        let container_name = format!("hr-v2-{}", req.slug);
+        let container_name = match req.environment {
+            Environment::Production => format!("hr-v2-{}", req.slug),
+            Environment::Development => format!("hr-v2-{}-dev", req.slug),
+        };
 
         let app = Application {
             id: id.clone(),
             name: req.name,
             slug: req.slug,
             host_id: req.host_id.unwrap_or_else(|| "local".to_string()),
+            environment: req.environment,
+            linked_app_id: req.linked_app_id.clone(),
             enabled: true,
             container_name: container_name.clone(),
             token_hash,
@@ -201,7 +208,6 @@ impl AgentRegistry {
             agent_version: None,
             created_at: Utc::now(),
             frontend: req.frontend,
-            apis: req.apis,
             code_server_enabled: req.code_server_enabled,
             services: req.services,
             power_policy: req.power_policy,
@@ -211,6 +217,12 @@ impl AgentRegistry {
 
         {
             let mut state = self.state.write().await;
+            // If linked_app_id is set, update the linked app to point back
+            if let Some(ref linked_id) = req.linked_app_id {
+                if let Some(linked_app) = state.applications.iter_mut().find(|a| a.id == *linked_id) {
+                    linked_app.linked_app_id = Some(id.clone());
+                }
+            }
             state.applications.push(app.clone());
         }
         self.persist().await?;
@@ -256,8 +268,8 @@ impl AgentRegistry {
         if let Some(frontend) = req.frontend {
             app.frontend = frontend;
         }
-        if let Some(apis) = req.apis {
-            app.apis = apis;
+        if let Some(ref linked_app_id) = req.linked_app_id {
+            app.linked_app_id = Some(linked_app_id.clone());
         }
         if let Some(code_server_enabled) = req.code_server_enabled {
             app.code_server_enabled = code_server_enabled;
@@ -283,15 +295,22 @@ impl AgentRegistry {
         Ok(Some(app))
     }
 
-    /// Remove an application: disconnect agent and clean up.
+    /// Remove an application: disconnect agent, clean up linked_app_id on partner, and remove.
     pub async fn remove_application(&self, id: &str) -> Result<bool> {
         let app = {
             let mut state = self.state.write().await;
             let idx = state.applications.iter().position(|a| a.id == id);
-            match idx {
+            let app = match idx {
                 Some(i) => state.applications.remove(i),
                 None => return Ok(false),
+            };
+            // Clean up linked_app_id on the partner container
+            if let Some(ref linked_id) = app.linked_app_id {
+                if let Some(partner) = state.applications.iter_mut().find(|a| a.id == *linked_id) {
+                    partner.linked_app_id = None;
+                }
             }
+            app
         };
 
         // Send shutdown to agent if connected
@@ -466,7 +485,7 @@ impl AgentRegistry {
                     base_domain: self.env.base_domain.clone(),
                     slug: app.slug.clone(),
                     frontend: Some(app.frontend.clone()),
-                    apis: app.apis.clone(),
+                    environment: app.environment,
                     code_server_enabled: app.code_server_enabled,
                     wake_page_enabled: app.wake_page_enabled,
                 })
@@ -1109,7 +1128,7 @@ impl AgentRegistry {
                 base_domain: self.env.base_domain.clone(),
                 slug: app.slug.clone(),
                 frontend: Some(app.frontend.clone()),
-                apis: app.apis.clone(),
+                environment: app.environment,
                 code_server_enabled: app.code_server_enabled,
                 wake_page_enabled: app.wake_page_enabled,
             })

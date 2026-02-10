@@ -24,10 +24,14 @@ import {
   Square,
   ArrowRightLeft,
   Pencil,
+  Rocket,
 } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
 import PageHeader from '../components/PageHeader';
+import AppGroupCard from '../components/AppGroupCard';
+import CreateContainerModal from '../components/CreateContainerModal';
+import DeployModal from '../components/DeployModal';
 import useWebSocket from '../hooks/useWebSocket';
 import {
   getContainers,
@@ -44,24 +48,140 @@ import {
   stopApplicationService,
 } from '../api/client';
 
-const STATUS_BADGES = {
-  connected: { color: 'text-green-400 bg-green-900/30', icon: Wifi, label: 'Connecte' },
-  deploying: { color: 'text-blue-400 bg-blue-900/30', icon: Loader2, label: 'Deploiement', spin: true },
-  pending: { color: 'text-yellow-400 bg-yellow-900/30', icon: Clock, label: 'En attente' },
-  running: { color: 'text-yellow-400 bg-yellow-900/30', icon: Clock, label: 'En attente' },
-  stopped: { color: 'text-gray-400 bg-gray-900/30', icon: Square, label: 'Arrete' },
-  disconnected: { color: 'text-red-400 bg-red-900/30', icon: WifiOff, label: 'Deconnecte' },
-  error: { color: 'text-red-400 bg-red-900/30', icon: AlertTriangle, label: 'Erreur' },
-};
+function groupByApp(containers) {
+  const groups = new Map();
+  containers.forEach(c => {
+    const slug = c.slug;
+    if (!groups.has(slug)) {
+      groups.set(slug, { slug, name: c.name, dev: null, prod: null });
+    }
+    const g = groups.get(slug);
+    if (c.environment === 'production') {
+      g.prod = c;
+    } else {
+      g.dev = c;
+    }
+    // Use the dev name as group name if available
+    if (g.dev) g.name = g.dev.name;
+  });
+  return Array.from(groups.values());
+}
 
-function StatusBadge({ status, message }) {
-  const badge = STATUS_BADGES[status] || STATUS_BADGES.disconnected;
-  const Icon = badge.icon;
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(0)) + ' ' + sizes[i];
+}
+
+// MigrationProgress inline component
+function MigrationProgress({ appId, migration, onDismiss }) {
+  if (!migration) return null;
+
+  const prevRef = useRef({ bytes: 0, time: Date.now() });
+  const speedRef = useRef(0);
+
+  useEffect(() => {
+    const now = Date.now();
+    const elapsed = (now - prevRef.current.time) / 1000;
+    const deltaBytes = migration.bytesTransferred - prevRef.current.bytes;
+    if (elapsed > 0.5 && deltaBytes > 0) {
+      const instantSpeed = deltaBytes / elapsed;
+      speedRef.current = speedRef.current > 0
+        ? speedRef.current * 0.6 + instantSpeed * 0.4
+        : instantSpeed;
+      prevRef.current = { bytes: migration.bytesTransferred, time: now };
+    }
+  }, [migration.bytesTransferred]);
+
+  const phaseLabels = {
+    stopping: 'Arret...',
+    exporting: 'Export...',
+    transferring: 'Transfert conteneur...',
+    transferring_workspace: 'Transfert workspace...',
+    importing: 'Import...',
+    importing_workspace: 'Import workspace...',
+    starting: 'Demarrage...',
+    verifying: 'Verification...',
+    complete: 'Termine',
+    failed: 'Echoue',
+  };
+
+  const isActive = migration.phase !== 'complete' && migration.phase !== 'failed';
+  const isTransfer = migration.phase === 'transferring' || migration.phase === 'transferring_workspace';
+  const speed = speedRef.current;
+  const remaining = migration.totalBytes - migration.bytesTransferred;
+  const eta = speed > 0 && remaining > 0 ? Math.ceil(remaining / speed) : 0;
+
+  const formatEta = (secs) => {
+    if (secs <= 0) return '';
+    if (secs < 60) return `${secs}s`;
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return s > 0 ? `${m}m${s}s` : `${m}m`;
+  };
+
+  const handleCancel = async () => {
+    try {
+      await cancelMigration(appId);
+    } catch (err) {
+      console.error('Cancel migration failed:', err);
+    }
+  };
+
   return (
-    <span className={`flex items-center gap-1 text-xs px-2 py-0.5 ${badge.color}`}>
-      <Icon className={`w-3 h-3 ${badge.spin ? 'animate-spin' : ''}`} />
-      {message || badge.label}
-    </span>
+    <div className="p-2 bg-gray-700/50">
+      <div className="flex items-center justify-between mb-1">
+        <span className={`text-xs ${migration.phase === 'failed' ? 'text-red-400' : migration.phase === 'complete' ? 'text-green-400' : 'text-gray-300'}`}>
+          {phaseLabels[migration.phase] || migration.phase}
+        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-400">{migration.progressPct}%</span>
+          {isActive && (
+            <button
+              onClick={handleCancel}
+              className="text-red-400 hover:text-red-300 transition-colors"
+              title="Annuler la migration"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+          {!isActive && (
+            <button
+              onClick={onDismiss}
+              className="text-gray-500 hover:text-gray-300 transition-colors"
+              title="Fermer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="w-full bg-gray-600 h-1.5">
+        <div
+          className={`h-1.5 transition-all duration-500 ${
+            migration.phase === 'failed' ? 'bg-red-500' :
+            migration.phase === 'complete' ? 'bg-green-500' : 'bg-blue-500'
+          }`}
+          style={{ width: `${migration.progressPct}%` }}
+        />
+      </div>
+      {migration.totalBytes > 0 && (
+        <div className="flex items-center justify-between text-xs text-gray-500 mt-1">
+          <span>{formatBytes(migration.bytesTransferred)} / {formatBytes(migration.totalBytes)}</span>
+          {isTransfer && speed > 0 && (
+            <span>
+              {formatBytes(speed)}/s
+              {eta > 0 && ` - ${formatEta(eta)}`}
+            </span>
+          )}
+        </div>
+      )}
+      {migration.error && (
+        <div className="text-xs text-red-400 mt-1 select-all cursor-text">{migration.error}</div>
+      )}
+    </div>
   );
 }
 
@@ -75,6 +195,7 @@ function Containers() {
 
   // Modal states
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [createModalDefaults, setCreateModalDefaults] = useState({});
   const [terminalContainer, setTerminalContainer] = useState(null);
   const [migrateModal, setMigrateModal] = useState(null);
   const [selectedHostId, setSelectedHostId] = useState('');
@@ -83,19 +204,10 @@ function Containers() {
   const [showEditModal, setShowEditModal] = useState(false);
   const [editingContainer, setEditingContainer] = useState(null);
   const [editForm, setEditForm] = useState(null);
+  const [deployModal, setDeployModal] = useState(null);
 
   // Agent metrics state
   const [appMetrics, setAppMetrics] = useState({});
-
-  // Create form
-  const [createForm, setCreateForm] = useState({
-    name: '',
-    slug: '',
-    host_id: 'local',
-    frontend: { target_port: '', auth_required: false, allowed_groups: [], local_only: false },
-    apis: [],
-    code_server_enabled: true,
-  });
 
   const fetchData = useCallback(async () => {
     try {
@@ -199,7 +311,6 @@ function Containers() {
       }));
       if (data.phase === 'complete') {
         setTimeout(() => fetchDataRef.current(), 1000);
-        // Auto-dismiss migration progress after 5 seconds
         setTimeout(() => {
           setMigrations(prev => {
             const next = { ...prev };
@@ -219,63 +330,17 @@ function Containers() {
     }
   }, [message]);
 
-  async function handleCreate() {
-    if (!createForm.name || !createForm.slug) {
+  async function handleCreate(payload) {
+    if (!payload.name || !payload.slug) {
       setMessage({ type: 'error', text: 'Nom et slug requis' });
       return;
     }
-    if (!createForm.frontend.target_port) {
-      setMessage({ type: 'error', text: 'Port frontend requis' });
-      return;
-    }
-    const port = parseInt(createForm.frontend.target_port);
-    if (isNaN(port) || port < 1 || port > 65535) {
-      setMessage({ type: 'error', text: 'Port frontend invalide (1-65535)' });
-      return;
-    }
-    for (const api of createForm.apis) {
-      if (!api.slug || !api.target_port) {
-        setMessage({ type: 'error', text: 'Slug et port requis pour chaque API' });
-        return;
-      }
-      const apiPort = parseInt(api.target_port);
-      if (isNaN(apiPort) || apiPort < 1 || apiPort > 65535) {
-        setMessage({ type: 'error', text: `Port API invalide pour "${api.slug}" (1-65535)` });
-        return;
-      }
-    }
-
     setSaving(true);
     try {
-      const payload = {
-        name: createForm.name,
-        slug: createForm.slug.toLowerCase(),
-        host_id: createForm.host_id,
-        frontend: {
-          target_port: parseInt(createForm.frontend.target_port),
-          auth_required: createForm.frontend.auth_required,
-          allowed_groups: createForm.frontend.allowed_groups,
-          local_only: createForm.frontend.local_only,
-        },
-        apis: createForm.apis.map(a => ({
-          slug: a.slug.toLowerCase(),
-          target_port: parseInt(a.target_port),
-          auth_required: a.auth_required,
-          allowed_groups: a.allowed_groups || [],
-          local_only: a.local_only || false,
-        })),
-        code_server_enabled: createForm.code_server_enabled,
-      };
-
       const res = await createContainer(payload);
       if (res.data.success) {
         setShowCreateModal(false);
-        setCreateForm({
-          name: '', slug: '', host_id: 'local',
-          frontend: { target_port: '', auth_required: false, allowed_groups: [], local_only: false },
-          apis: [],
-          code_server_enabled: true,
-        });
+        setCreateModalDefaults({});
         setMessage({ type: 'success', text: 'Conteneur cree' });
         fetchData();
       } else {
@@ -309,7 +374,6 @@ function Containers() {
       if (res.data.success) {
         setMessage({ type: 'success', text: 'Conteneur demarre' });
         fetchData();
-        // Agent takes time to boot and reconnect
         setTimeout(() => fetchData(), 5000);
         setTimeout(() => fetchData(), 15000);
       } else {
@@ -326,7 +390,6 @@ function Containers() {
       if (res.data.success) {
         setMessage({ type: 'success', text: 'Conteneur arrete' });
         fetchData();
-        // Agent takes time to disconnect
         setTimeout(() => fetchData(), 3000);
       } else {
         setMessage({ type: 'error', text: res.data.error || 'Erreur' });
@@ -336,39 +399,15 @@ function Containers() {
     }
   }
 
-  async function handleServiceStart(appId, serviceType) {
-    try {
-      const res = await startApplicationService(appId, serviceType);
-      if (!res.data.success) {
-        setMessage({ type: 'error', text: res.data.error || 'Erreur' });
-      }
-    } catch {
-      setMessage({ type: 'error', text: 'Erreur de connexion' });
-    }
-  }
-
-  async function handleServiceStop(appId, serviceType) {
-    try {
-      const res = await stopApplicationService(appId, serviceType);
-      if (!res.data.success) {
-        setMessage({ type: 'error', text: res.data.error || 'Erreur' });
-      }
-    } catch {
-      setMessage({ type: 'error', text: 'Erreur de connexion' });
-    }
-  }
-
   function openEditModal(container) {
     setEditingContainer(container);
     setEditForm({
       name: container.name,
       frontend: {
-        target_port: String(container.frontend?.target_port || ''),
         auth_required: container.frontend?.auth_required || false,
         allowed_groups: container.frontend?.allowed_groups || [],
         local_only: container.frontend?.local_only || false,
       },
-      apis: (container.apis || []).map(a => ({ ...a, target_port: String(a.target_port) })),
       code_server_enabled: container.code_server_enabled !== false,
     });
     setShowEditModal(true);
@@ -381,18 +420,11 @@ function Containers() {
       const payload = {
         name: editForm.name,
         frontend: {
-          target_port: parseInt(editForm.frontend.target_port),
+          target_port: 3000,
           auth_required: editForm.frontend.auth_required,
           allowed_groups: editForm.frontend.allowed_groups,
           local_only: editForm.frontend.local_only,
         },
-        apis: editForm.apis.map(a => ({
-          slug: a.slug.toLowerCase(),
-          target_port: parseInt(a.target_port),
-          auth_required: a.auth_required,
-          allowed_groups: a.allowed_groups || [],
-          local_only: a.local_only || false,
-        })),
         code_server_enabled: editForm.code_server_enabled,
       };
       const res = await updateContainer(editingContainer.id, payload);
@@ -441,122 +473,9 @@ function Containers() {
     }
   };
 
-  function formatBytes(bytes) {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(0)) + ' ' + sizes[i];
-  }
-
-  // MigrationProgress inline component
-  function MigrationProgress({ appId, migration, onDismiss }) {
-    if (!migration) return null;
-
-    const prevRef = useRef({ bytes: 0, time: Date.now() });
-    const speedRef = useRef(0);
-
-    useEffect(() => {
-      const now = Date.now();
-      const elapsed = (now - prevRef.current.time) / 1000;
-      const deltaBytes = migration.bytesTransferred - prevRef.current.bytes;
-      if (elapsed > 0.5 && deltaBytes > 0) {
-        const instantSpeed = deltaBytes / elapsed;
-        speedRef.current = speedRef.current > 0
-          ? speedRef.current * 0.6 + instantSpeed * 0.4
-          : instantSpeed;
-        prevRef.current = { bytes: migration.bytesTransferred, time: now };
-      }
-    }, [migration.bytesTransferred]);
-
-    const phaseLabels = {
-      stopping: 'Arret...',
-      exporting: 'Export...',
-      transferring: 'Transfert conteneur...',
-      transferring_workspace: 'Transfert workspace...',
-      importing: 'Import...',
-      importing_workspace: 'Import workspace...',
-      starting: 'Demarrage...',
-      verifying: 'Verification...',
-      complete: 'Termine',
-      failed: 'Echoue',
-    };
-
-    const isActive = migration.phase !== 'complete' && migration.phase !== 'failed';
-    const isTransfer = migration.phase === 'transferring' || migration.phase === 'transferring_workspace';
-    const speed = speedRef.current;
-    const remaining = migration.totalBytes - migration.bytesTransferred;
-    const eta = speed > 0 && remaining > 0 ? Math.ceil(remaining / speed) : 0;
-
-    const formatEta = (secs) => {
-      if (secs <= 0) return '';
-      if (secs < 60) return `${secs}s`;
-      const m = Math.floor(secs / 60);
-      const s = secs % 60;
-      return s > 0 ? `${m}m${s}s` : `${m}m`;
-    };
-
-    const handleCancel = async () => {
-      try {
-        await cancelMigration(appId);
-      } catch (err) {
-        console.error('Cancel migration failed:', err);
-      }
-    };
-
-    return (
-      <div className="p-2 bg-gray-700/50">
-        <div className="flex items-center justify-between mb-1">
-          <span className={`text-xs ${migration.phase === 'failed' ? 'text-red-400' : migration.phase === 'complete' ? 'text-green-400' : 'text-gray-300'}`}>
-            {phaseLabels[migration.phase] || migration.phase}
-          </span>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-400">{migration.progressPct}%</span>
-            {isActive && (
-              <button
-                onClick={handleCancel}
-                className="text-red-400 hover:text-red-300 transition-colors"
-                title="Annuler la migration"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-            {!isActive && (
-              <button
-                onClick={onDismiss}
-                className="text-gray-500 hover:text-gray-300 transition-colors"
-                title="Fermer"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-        </div>
-        <div className="w-full bg-gray-600 h-1.5">
-          <div
-            className={`h-1.5 transition-all duration-500 ${
-              migration.phase === 'failed' ? 'bg-red-500' :
-              migration.phase === 'complete' ? 'bg-green-500' : 'bg-blue-500'
-            }`}
-            style={{ width: `${migration.progressPct}%` }}
-          />
-        </div>
-        {migration.totalBytes > 0 && (
-          <div className="flex items-center justify-between text-xs text-gray-500 mt-1">
-            <span>{formatBytes(migration.bytesTransferred)} / {formatBytes(migration.totalBytes)}</span>
-            {isTransfer && speed > 0 && (
-              <span>
-                {formatBytes(speed)}/s
-                {eta > 0 && ` - ${formatEta(eta)}`}
-              </span>
-            )}
-          </div>
-        )}
-        {migration.error && (
-          <div className="text-xs text-red-400 mt-1 select-all cursor-text">{migration.error}</div>
-        )}
-      </div>
-    );
+  function handleCreatePaired(slug, name, environment, linkedAppId) {
+    setCreateModalDefaults({ slug, name, environment, linkedAppId });
+    setShowCreateModal(true);
   }
 
   if (loading) {
@@ -567,11 +486,9 @@ function Containers() {
     );
   }
 
-  const runningCount = containers.filter(c => (c.agent_status || c.status) === 'connected').length;
-  const stoppedCount = containers.filter(c => {
-    const s = c.agent_status || c.status;
-    return s === 'disconnected' || s === 'pending' || s === 'stopped';
-  }).length;
+  const groups = groupByApp(containers);
+  const devRunning = containers.filter(c => (c.environment || 'development') !== 'production' && (c.agent_status || c.status) === 'connected').length;
+  const prodRunning = containers.filter(c => c.environment === 'production' && (c.agent_status || c.status) === 'connected').length;
   const deployingCount = containers.filter(c => (c.agent_status || c.status) === 'deploying' || c.status === 'deploying').length;
 
   return (
@@ -581,7 +498,7 @@ function Containers() {
           <RefreshCw className="w-4 h-4" />
           Rafraichir
         </Button>
-        <Button onClick={() => setShowCreateModal(true)}>
+        <Button onClick={() => { setCreateModalDefaults({}); setShowCreateModal(true); }}>
           <Plus className="w-4 h-4" />
           Nouveau conteneur
         </Button>
@@ -602,450 +519,83 @@ function Containers() {
         <Card title="Total" icon={Container}>
           <div className="text-2xl font-bold">{containers.length}</div>
         </Card>
-        <Card title="Running" icon={Wifi}>
-          <div className="text-2xl font-bold text-green-400">{runningCount}</div>
+        <Card title="Dev Running" icon={Wifi}>
+          <div className="text-2xl font-bold text-blue-400">{devRunning}</div>
         </Card>
-        <Card title="Stopped" icon={WifiOff}>
-          <div className="text-2xl font-bold text-gray-400">{stoppedCount}</div>
+        <Card title="Prod Running" icon={Wifi}>
+          <div className="text-2xl font-bold text-purple-400">{prodRunning}</div>
         </Card>
         <Card title="Deploying" icon={Loader2}>
           <div className="text-2xl font-bold text-blue-400">{deployingCount}</div>
         </Card>
       </div>
 
-      {/* Containers Table */}
-      <Card>
-        {containers.length === 0 ? (
-          <div className="text-center py-8 text-gray-500">
-            <Container className="w-12 h-12 mx-auto mb-2 opacity-50" />
-            <p>Aucun conteneur</p>
-            <p className="text-xs mt-2">Creez un conteneur nspawn pour deployer une application</p>
-          </div>
+      {/* App Groups */}
+      <div>
+        {groups.length === 0 ? (
+          <Card>
+            <div className="text-center py-8 text-gray-500">
+              <Container className="w-12 h-12 mx-auto mb-2 opacity-50" />
+              <p>Aucun conteneur</p>
+              <p className="text-xs mt-2">Creez un conteneur nspawn pour deployer une application</p>
+            </div>
+          </Card>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="text-xs text-gray-500 border-b border-gray-700">
-                  <th className="text-left py-2 px-3 font-medium">Nom</th>
-                  <th className="text-left py-2 px-3 font-medium">Status</th>
-                  <th className="text-left py-2 px-3 font-medium">IPv4</th>
-                  <th className="text-right py-2 px-3 font-medium">CPU</th>
-                  <th className="text-right py-2 px-3 font-medium">RAM</th>
-                  <th className="text-left py-2 px-3 font-medium">Services</th>
-                  <th className="text-right py-2 px-3 font-medium">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(() => {
-                  const groups = [];
-                  const localContainers = containers.filter(c => !c.host_id || c.host_id === 'local');
-                  if (localContainers.length > 0) {
-                    groups.push({ hostId: 'local', hostName: 'HomeRoute', hostStatus: 'online', items: localContainers });
-                  }
-                  const remoteHostIds = [...new Set(containers.filter(c => c.host_id && c.host_id !== 'local').map(c => c.host_id))];
-                  for (const hid of remoteHostIds) {
-                    const host = hosts.find(h => h.id === hid);
-                    groups.push({
-                      hostId: hid,
-                      hostName: host?.name || hid,
-                      hostStatus: host?.status || 'offline',
-                      items: containers.filter(c => c.host_id === hid),
-                    });
-                  }
-                  groups.sort((a, b) => a.hostId === 'local' ? -1 : b.hostId === 'local' ? 1 : a.hostName.localeCompare(b.hostName));
-
-                  return groups.map(group => {
-                    const isHostOffline = group.hostId !== 'local' && group.hostStatus !== 'online';
-                    return [
-                      <tr key={`host-${group.hostId}`} className="bg-gray-800/60">
-                        <td colSpan={7} className="py-2 px-3">
-                          <div className="flex items-center gap-2 text-sm">
-                            <HardDrive className="w-4 h-4 text-gray-400" />
-                            <span className="font-medium text-gray-300">{group.hostName}</span>
-                            <span className={`w-2 h-2 rounded-full ${isHostOffline ? 'bg-red-500' : 'bg-green-500'}`} />
-                            {isHostOffline && <span className="text-xs text-red-400">Hors ligne</span>}
-                            <span className="text-xs text-gray-600 ml-auto">{group.items.length} conteneur{group.items.length > 1 ? 's' : ''}</span>
-                          </div>
-                        </td>
-                      </tr>,
-                      ...group.items.map(container => {
-                        const displayStatus = container.agent_status || container.status;
-                        const isDeploying = displayStatus === 'deploying' || container.status === 'deploying';
-                        const metrics = appMetrics[container.id];
-                        const isMigrating = !!migrations[container.id];
-
-                        return (
-                          <tr key={container.id} className={`border-b border-gray-800 hover:bg-gray-800/50 transition-colors ${isHostOffline ? 'opacity-60' : ''}`}>
-                            {/* Name */}
-                            <td className="py-3 px-3">
-                              <div className="flex items-center gap-2">
-                                {isDeploying ? (
-                                  <Loader2 className="w-4 h-4 text-blue-400 animate-spin flex-shrink-0" />
-                                ) : (
-                                  <Container className="w-4 h-4 text-blue-400 flex-shrink-0" />
-                                )}
-                                <div className="min-w-0 flex-1">
-                                  <span className="font-medium truncate">{container.name}</span>
-                                  {baseDomain && (
-                                    <div className="flex items-center gap-2 text-xs text-gray-500">
-                                      <a
-                                        href={`https://${container.slug}.${baseDomain}`}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="font-mono hover:text-blue-400"
-                                      >
-                                        {container.slug}.{baseDomain}
-                                      </a>
-                                      {container.frontend?.auth_required && <Key className="w-3 h-3 text-purple-400" />}
-                                      {container.frontend?.local_only && <Shield className="w-3 h-3 text-yellow-400" />}
-                                    </div>
-                                  )}
-                                </div>
-                              </div>
-                            </td>
-
-                            {/* Status */}
-                            <td className="py-3 px-3">
-                              {isMigrating ? (
-                                <MigrationProgress
-                                  appId={container.id}
-                                  migration={migrations[container.id]}
-                                  onDismiss={() => setMigrations(prev => {
-                                    const next = { ...prev };
-                                    delete next[container.id];
-                                    return next;
-                                  })}
-                                />
-                              ) : isDeploying ? (
-                                <div>
-                                  <span className="text-xs px-2 py-0.5 text-blue-400 bg-blue-900/30">Deploiement</span>
-                                  {container._deployMessage && (
-                                    <p className="text-xs text-gray-500 mt-1 truncate max-w-48">{container._deployMessage}</p>
-                                  )}
-                                </div>
-                              ) : (
-                                <StatusBadge status={displayStatus} />
-                              )}
-                            </td>
-
-                            {/* IPv4 */}
-                            <td className="py-3 px-3">
-                              <span className="text-xs font-mono text-gray-400">
-                                {container.ipv4_address || container.ipv4 || '-'}
-                              </span>
-                            </td>
-
-                            {/* CPU */}
-                            <td className="py-3 px-3 text-right">
-                              <span className={`font-mono text-sm ${
-                                !isMigrating && displayStatus === 'connected' && metrics?.cpuPercent > 80 ? 'text-red-400' :
-                                !isMigrating && displayStatus === 'connected' && metrics?.cpuPercent > 50 ? 'text-yellow-400' :
-                                !isMigrating && displayStatus === 'connected' && metrics?.cpuPercent > 0 ? 'text-green-400' : 'text-gray-600'
-                              }`}>
-                                {!isMigrating && displayStatus === 'connected' && metrics?.cpuPercent !== undefined ? `${metrics.cpuPercent.toFixed(1)}%` : '-'}
-                              </span>
-                            </td>
-
-                            {/* RAM */}
-                            <td className="py-3 px-3 text-right">
-                              <span className="font-mono text-sm text-gray-400">
-                                {!isMigrating && displayStatus === 'connected' && metrics?.memoryBytes ? formatBytes(metrics.memoryBytes) : '-'}
-                              </span>
-                            </td>
-
-                            {/* Services */}
-                            <td className="py-3 px-3">
-                              {!isMigrating && displayStatus === 'connected' && container.code_server_enabled && baseDomain ? (
-                                <a
-                                  href={`https://code.${container.slug}.${baseDomain}`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs text-cyan-400 hover:text-cyan-300 bg-cyan-900/20 hover:bg-cyan-900/40 transition-colors"
-                                  title="Ouvrir IDE"
-                                >
-                                  <Code2 className="w-3 h-3" />
-                                  IDE
-                                </a>
-                              ) : (
-                                <span className="text-xs text-gray-600">-</span>
-                              )}
-                            </td>
-
-                            {/* Actions */}
-                            <td className="py-3 px-3">
-                              <div className={`flex items-center justify-end gap-1 ${isMigrating ? 'opacity-50 pointer-events-none' : ''} ${isHostOffline ? 'opacity-50 pointer-events-none' : ''}`}>
-                                {displayStatus === 'connected' ? (
-                                  <button
-                                    onClick={() => handleStop(container.id)}
-                                    className="p-1.5 text-yellow-400 hover:text-yellow-300 hover:bg-yellow-900/30 transition-colors"
-                                    title="Arreter"
-                                  >
-                                    <Square className="w-4 h-4" />
-                                  </button>
-                                ) : displayStatus !== 'deploying' ? (
-                                  <button
-                                    onClick={() => handleStart(container.id)}
-                                    className="p-1.5 text-green-400 hover:text-green-300 hover:bg-green-900/30 transition-colors"
-                                    title="Demarrer"
-                                  >
-                                    <Play className="w-4 h-4" />
-                                  </button>
-                                ) : null}
-                                <button
-                                  onClick={() => setTerminalContainer(container)}
-                                  disabled={isMigrating}
-                                  className="p-1.5 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/30 transition-colors"
-                                  title="Terminal"
-                                >
-                                  <Terminal className="w-4 h-4" />
-                                </button>
-                                <button
-                                  onClick={() => openEditModal(container)}
-                                  disabled={isMigrating}
-                                  className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 transition-colors"
-                                  title="Modifier"
-                                >
-                                  <Pencil className="w-4 h-4" />
-                                </button>
-                                <button
-                                  onClick={() => openMigrateModal(container)}
-                                  disabled={isMigrating}
-                                  className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded transition-colors"
-                                  title="Migrer vers un autre hote"
-                                >
-                                  <ArrowRightLeft className="w-4 h-4" />
-                                </button>
-                                <button
-                                  onClick={() => handleDelete(container.id, container.name)}
-                                  disabled={isMigrating}
-                                  className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-900/30 transition-colors"
-                                  title="Supprimer"
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })
-                    ];
-                  });
-                })()}
-              </tbody>
-            </table>
-          </div>
+          groups.map(group => (
+            <AppGroupCard
+              key={group.slug}
+              group={group}
+              baseDomain={baseDomain}
+              appMetrics={appMetrics}
+              migrations={migrations}
+              hosts={hosts}
+              onStart={handleStart}
+              onStop={handleStop}
+              onTerminal={setTerminalContainer}
+              onEdit={openEditModal}
+              onMigrate={openMigrateModal}
+              onDelete={handleDelete}
+              onMigrationDismiss={(id) => setMigrations(prev => {
+                const next = { ...prev };
+                delete next[id];
+                return next;
+              })}
+              onDeploy={(dev, prod) => setDeployModal({ dev, prod })}
+              onCreatePaired={handleCreatePaired}
+              MigrationProgress={MigrationProgress}
+            />
+          ))
         )}
-      </Card>
+      </div>
 
       {/* Create Modal */}
       {showCreateModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 p-6 w-full max-w-2xl border border-gray-700 max-h-[90vh] overflow-y-auto">
-            <h2 className="text-xl font-bold mb-4">Nouveau conteneur</h2>
-            <div className="space-y-4">
-              {/* Name + Slug */}
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm text-gray-400 mb-1">Nom</label>
-                  <input
-                    type="text"
-                    placeholder="Mon App"
-                    value={createForm.name}
-                    onChange={e => {
-                      const name = e.target.value;
-                      const autoSlug = name.toLowerCase().replace(/[\s_]+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '');
-                      setCreateForm(f => ({ ...f, name, slug: f.slug === '' || f.slug === f.name.toLowerCase().replace(/[\s_]+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '') ? autoSlug : f.slug }));
-                    }}
-                    className="w-full px-3 py-2 bg-gray-900 border border-gray-600 text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-gray-400 mb-1">Slug</label>
-                  <input
-                    type="text"
-                    placeholder="mon-app"
-                    value={createForm.slug}
-                    onChange={e => setCreateForm({ ...createForm, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
-                    className="w-full px-3 py-2 bg-gray-900 border border-gray-600 text-sm font-mono"
-                  />
-                  {createForm.slug && baseDomain && (
-                    <p className="text-xs text-gray-500 mt-1 font-mono">{createForm.slug}.{baseDomain}</p>
-                  )}
-                </div>
-              </div>
+        <CreateContainerModal
+          baseDomain={baseDomain}
+          hosts={hosts}
+          containers={containers}
+          onClose={() => { setShowCreateModal(false); setCreateModalDefaults({}); }}
+          onCreate={handleCreate}
+          saving={saving}
+          initialEnvironment={createModalDefaults.environment}
+          initialSlug={createModalDefaults.slug}
+          initialName={createModalDefaults.name}
+          initialLinkedAppId={createModalDefaults.linkedAppId}
+        />
+      )}
 
-              {/* Host selector */}
-              <div>
-                <label className="block text-sm text-gray-400 mb-1">Hote</label>
-                <select
-                  value={createForm.host_id}
-                  onChange={e => setCreateForm({ ...createForm, host_id: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-900 border border-gray-600 text-sm"
-                >
-                  <option value="local">HomeRoute (local)</option>
-                  {hosts.filter(h => h.status === 'online').map(h => (
-                    <option key={h.id} value={h.id}>{h.name} ({h.host})</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Frontend */}
-              <div className="border border-gray-700 p-4">
-                <div className="text-sm font-medium mb-3 flex items-center gap-2">
-                  <Globe className="w-4 h-4 text-blue-400" />
-                  Frontend
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Port local</label>
-                    <input
-                      type="number"
-                      placeholder="3000"
-                      value={createForm.frontend.target_port}
-                      onChange={e => setCreateForm({ ...createForm, frontend: { ...createForm.frontend, target_port: e.target.value } })}
-                      className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 text-sm"
-                    />
-                  </div>
-                  <div className="flex items-end gap-4">
-                    <label className="flex items-center gap-1.5 text-xs cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={createForm.frontend.auth_required}
-                        onChange={e => setCreateForm({ ...createForm, frontend: { ...createForm.frontend, auth_required: e.target.checked } })}
-                        className="rounded"
-                      />
-                      <Key className="w-3 h-3 text-purple-400" /> Auth
-                    </label>
-                    <label className="flex items-center gap-1.5 text-xs cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={createForm.frontend.local_only}
-                        onChange={e => setCreateForm({ ...createForm, frontend: { ...createForm.frontend, local_only: e.target.checked } })}
-                        className="rounded"
-                      />
-                      <Shield className="w-3 h-3 text-yellow-400" /> Local
-                    </label>
-                  </div>
-                </div>
-              </div>
-
-              {/* code-server */}
-              <label className="flex items-center gap-2 text-sm cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={createForm.code_server_enabled}
-                  onChange={e => setCreateForm({ ...createForm, code_server_enabled: e.target.checked })}
-                  className="rounded"
-                />
-                <Code2 className="w-4 h-4 text-cyan-400" />
-                code-server IDE
-                {createForm.slug && baseDomain && createForm.code_server_enabled && (
-                  <span className="text-xs text-gray-500 font-mono ml-2">code.{createForm.slug}.{baseDomain}</span>
-                )}
-              </label>
-
-              {/* APIs */}
-              <div className="border border-gray-700 p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="text-sm font-medium flex items-center gap-2">
-                    <Server className="w-4 h-4 text-green-400" />
-                    APIs
-                  </div>
-                  <Button
-                    variant="secondary"
-                    onClick={() => setCreateForm({
-                      ...createForm,
-                      apis: [...createForm.apis, { slug: '', target_port: '', auth_required: false, allowed_groups: [], local_only: false }]
-                    })}
-                  >
-                    <Plus className="w-3 h-3" /> Ajouter API
-                  </Button>
-                </div>
-                {createForm.apis.length === 0 ? (
-                  <p className="text-xs text-gray-500">Aucune API configuree</p>
-                ) : (
-                  <div className="space-y-3">
-                    {createForm.apis.map((api, i) => (
-                      <div key={i} className="flex items-start gap-3 bg-gray-900/30 p-3 border border-gray-700">
-                        <div className="flex-1 grid grid-cols-3 gap-2">
-                          <div>
-                            <label className="block text-xs text-gray-500 mb-1">Slug</label>
-                            <input
-                              type="text"
-                              placeholder="api"
-                              value={api.slug}
-                              onChange={e => {
-                                const apis = [...createForm.apis];
-                                apis[i] = { ...apis[i], slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') };
-                                setCreateForm({ ...createForm, apis });
-                              }}
-                              className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 text-sm font-mono"
-                            />
-                            {api.slug && createForm.slug && (
-                              <p className="text-xs text-gray-500 mt-0.5 font-mono">{api.slug}.{createForm.slug}.{baseDomain}</p>
-                            )}
-                          </div>
-                          <div>
-                            <label className="block text-xs text-gray-500 mb-1">Port</label>
-                            <input
-                              type="number"
-                              placeholder="3001"
-                              value={api.target_port}
-                              onChange={e => {
-                                const apis = [...createForm.apis];
-                                apis[i] = { ...apis[i], target_port: e.target.value };
-                                setCreateForm({ ...createForm, apis });
-                              }}
-                              className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 text-sm"
-                            />
-                          </div>
-                          <div className="flex items-end gap-3">
-                            <label className="flex items-center gap-1 text-xs cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={api.auth_required}
-                                onChange={e => {
-                                  const apis = [...createForm.apis];
-                                  apis[i] = { ...apis[i], auth_required: e.target.checked };
-                                  setCreateForm({ ...createForm, apis });
-                                }}
-                                className="rounded"
-                              />
-                              <Key className="w-3 h-3 text-purple-400" />
-                            </label>
-                            <label className="flex items-center gap-1 text-xs cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={api.local_only || false}
-                                onChange={e => {
-                                  const apis = [...createForm.apis];
-                                  apis[i] = { ...apis[i], local_only: e.target.checked };
-                                  setCreateForm({ ...createForm, apis });
-                                }}
-                                className="rounded"
-                              />
-                              <Shield className="w-3 h-3 text-yellow-400" />
-                            </label>
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => setCreateForm({ ...createForm, apis: createForm.apis.filter((_, j) => j !== i) })}
-                          className="text-gray-500 hover:text-red-400 p-1 mt-5"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-            <div className="flex justify-end gap-2 mt-6">
-              <Button variant="secondary" onClick={() => setShowCreateModal(false)}>Annuler</Button>
-              <Button onClick={handleCreate} loading={saving}>Creer</Button>
-            </div>
-          </div>
-        </div>
+      {/* Deploy Modal */}
+      {deployModal && (
+        <DeployModal
+          devContainer={deployModal.dev}
+          prodContainer={deployModal.prod}
+          baseDomain={baseDomain}
+          onClose={() => setDeployModal(null)}
+          onDeployStarted={() => {
+            fetchData();
+            setDeployModal(null);
+          }}
+        />
       )}
 
       {/* Edit Modal */}
@@ -1054,7 +604,16 @@ function Containers() {
           <div className="bg-gray-800 p-6 w-full max-w-2xl border border-gray-700 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-bold">Modifier {editingContainer.name}</h2>
-              <span className="text-xs text-gray-500 bg-gray-900/50 px-2 py-1 font-mono">{editingContainer.slug}</span>
+              <div className="flex items-center gap-2">
+                <span className={`text-xs px-1.5 py-0.5 font-medium ${
+                  editingContainer.environment === 'production'
+                    ? 'bg-purple-100 text-purple-800'
+                    : 'bg-blue-100 text-blue-800'
+                }`}>
+                  {editingContainer.environment === 'production' ? 'PROD' : 'DEV'}
+                </span>
+                <span className="text-xs text-gray-500 bg-gray-900/50 px-2 py-1 font-mono">{editingContainer.slug}</span>
+              </div>
             </div>
             <div className="space-y-4">
               <div>
@@ -1068,152 +627,52 @@ function Containers() {
               </div>
 
               {/* Frontend */}
-              <div className="border border-gray-700 p-4">
+              <div>
                 <div className="text-xs text-blue-400 mb-2 font-mono flex items-center gap-1">
                   <Globe className="w-3 h-3" />
-                  {editingContainer.slug}.{baseDomain}
+                  {editingContainer.environment === 'production'
+                    ? `${editingContainer.slug}.${baseDomain}`
+                    : `dev.${editingContainer.slug}.${baseDomain}`
+                  }
                 </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Port local</label>
+                <div className="flex items-center gap-4">
+                  <label className="flex items-center gap-1.5 text-xs cursor-pointer">
                     <input
-                      type="number"
-                      value={editForm.frontend.target_port}
-                      onChange={e => setEditForm({ ...editForm, frontend: { ...editForm.frontend, target_port: e.target.value } })}
-                      className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 text-sm"
+                      type="checkbox"
+                      checked={editForm.frontend.auth_required}
+                      onChange={e => setEditForm({ ...editForm, frontend: { ...editForm.frontend, auth_required: e.target.checked } })}
+                      className="rounded"
                     />
-                  </div>
-                  <div className="flex items-end gap-4">
-                    <label className="flex items-center gap-1.5 text-xs cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={editForm.frontend.auth_required}
-                        onChange={e => setEditForm({ ...editForm, frontend: { ...editForm.frontend, auth_required: e.target.checked } })}
-                        className="rounded"
-                      />
-                      <Key className="w-3 h-3 text-purple-400" /> Auth
-                    </label>
-                    <label className="flex items-center gap-1.5 text-xs cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={editForm.frontend.local_only}
-                        onChange={e => setEditForm({ ...editForm, frontend: { ...editForm.frontend, local_only: e.target.checked } })}
-                        className="rounded"
-                      />
-                      <Shield className="w-3 h-3 text-yellow-400" /> Local
-                    </label>
-                  </div>
+                    <Key className="w-3 h-3 text-purple-400" /> Auth
+                  </label>
+                  <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editForm.frontend.local_only}
+                      onChange={e => setEditForm({ ...editForm, frontend: { ...editForm.frontend, local_only: e.target.checked } })}
+                      className="rounded"
+                    />
+                    <Shield className="w-3 h-3 text-yellow-400" /> Local
+                  </label>
                 </div>
               </div>
 
-              {/* code-server */}
-              <label className="flex items-center gap-2 text-sm cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={editForm.code_server_enabled}
-                  onChange={e => setEditForm({ ...editForm, code_server_enabled: e.target.checked })}
-                  className="rounded"
-                />
-                <Code2 className="w-4 h-4 text-cyan-400" />
-                code-server IDE
-                {baseDomain && editForm.code_server_enabled && (
-                  <span className="text-xs text-gray-500 font-mono ml-2">code.{editingContainer.slug}.{baseDomain}</span>
-                )}
-              </label>
-
-              {/* APIs */}
-              <div className="border border-gray-700 p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="text-sm font-medium flex items-center gap-2">
-                    <Server className="w-4 h-4 text-green-400" />
-                    APIs
-                  </div>
-                  <Button
-                    variant="secondary"
-                    onClick={() => setEditForm({
-                      ...editForm,
-                      apis: [...editForm.apis, { slug: '', target_port: '', auth_required: false, allowed_groups: [], local_only: false }]
-                    })}
-                  >
-                    <Plus className="w-3 h-3" /> Ajouter API
-                  </Button>
-                </div>
-                {editForm.apis.length === 0 ? (
-                  <p className="text-xs text-gray-500">Aucune API</p>
-                ) : (
-                  <div className="space-y-3">
-                    {editForm.apis.map((api, i) => (
-                      <div key={i} className="flex items-start gap-3 bg-gray-900/30 p-3 border border-gray-700">
-                        <div className="flex-1 grid grid-cols-3 gap-2">
-                          <div>
-                            <label className="block text-xs text-gray-500 mb-1">Slug</label>
-                            <input
-                              type="text"
-                              value={api.slug}
-                              onChange={e => {
-                                const apis = [...editForm.apis];
-                                apis[i] = { ...apis[i], slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') };
-                                setEditForm({ ...editForm, apis });
-                              }}
-                              className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 text-sm font-mono"
-                            />
-                            {api.slug && (
-                              <p className="text-xs text-gray-500 mt-0.5 font-mono">{api.slug}.{editingContainer.slug}.{baseDomain}</p>
-                            )}
-                          </div>
-                          <div>
-                            <label className="block text-xs text-gray-500 mb-1">Port</label>
-                            <input
-                              type="number"
-                              value={api.target_port}
-                              onChange={e => {
-                                const apis = [...editForm.apis];
-                                apis[i] = { ...apis[i], target_port: e.target.value };
-                                setEditForm({ ...editForm, apis });
-                              }}
-                              className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 text-sm"
-                            />
-                          </div>
-                          <div className="flex items-end gap-3">
-                            <label className="flex items-center gap-1 text-xs cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={api.auth_required}
-                                onChange={e => {
-                                  const apis = [...editForm.apis];
-                                  apis[i] = { ...apis[i], auth_required: e.target.checked };
-                                  setEditForm({ ...editForm, apis });
-                                }}
-                                className="rounded"
-                              />
-                              <Key className="w-3 h-3 text-purple-400" />
-                            </label>
-                            <label className="flex items-center gap-1 text-xs cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={api.local_only || false}
-                                onChange={e => {
-                                  const apis = [...editForm.apis];
-                                  apis[i] = { ...apis[i], local_only: e.target.checked };
-                                  setEditForm({ ...editForm, apis });
-                                }}
-                                className="rounded"
-                              />
-                              <Shield className="w-3 h-3 text-yellow-400" />
-                            </label>
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => setEditForm({ ...editForm, apis: editForm.apis.filter((_, j) => j !== i) })}
-                          className="text-gray-500 hover:text-red-400 p-1 mt-5"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+              {/* code-server (dev only) */}
+              {editingContainer.environment !== 'production' && (
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editForm.code_server_enabled}
+                    onChange={e => setEditForm({ ...editForm, code_server_enabled: e.target.checked })}
+                    className="rounded"
+                  />
+                  <Code2 className="w-4 h-4 text-cyan-400" />
+                  code-server IDE
+                  {baseDomain && editForm.code_server_enabled && (
+                    <span className="text-xs text-gray-500 font-mono ml-2">code.{editingContainer.slug}.{baseDomain}</span>
+                  )}
+                </label>
+              )}
             </div>
             <div className="flex justify-end gap-2 mt-6">
               <Button variant="secondary" onClick={() => { setShowEditModal(false); setEditingContainer(null); }}>Annuler</Button>
@@ -1318,7 +777,6 @@ function TerminalModal({ container, onClose }) {
       fitAddon.fit();
       termInstance.current = term;
 
-      // Connect WebSocket
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const ws = new WebSocket(`${proto}//${window.location.host}/api/containers/${container.id}/terminal`);
       ws.binaryType = 'arraybuffer';
@@ -1377,7 +835,6 @@ function TerminalModal({ container, onClose }) {
 
   return (
     <div className="fixed inset-0 bg-black/80 flex flex-col z-50">
-      {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 bg-gray-900 border-b border-gray-700">
         <div className="flex items-center gap-2 text-sm">
           <Terminal className="w-4 h-4 text-emerald-400" />
@@ -1391,7 +848,6 @@ function TerminalModal({ container, onClose }) {
           <X className="w-5 h-5" />
         </button>
       </div>
-      {/* Terminal */}
       <div ref={termRef} className="flex-1 p-2" style={{ backgroundColor: '#111827' }} />
     </div>
   );
