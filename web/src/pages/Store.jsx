@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Store as StoreIcon, Package, ArrowLeft, Download,
-  RefreshCw, Loader2, Tag, FileText
+  RefreshCw, Loader2, Tag, FileText, Smartphone
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import Section from '../components/Section';
@@ -81,64 +81,71 @@ function Store() {
           )}
         </PageHeader>
 
-        <Section title="Informations">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-            <div>
-              <span className="text-gray-500">Nom</span>
-              <p className="text-white font-medium">{selectedApp.name}</p>
+        <Section title={selectedApp.name}>
+          <div className="flex items-center gap-6 text-sm">
+            <div className="flex items-center gap-1.5">
+              <Package className="w-3.5 h-3.5 text-gray-500" />
+              <span className="text-white font-mono">{selectedApp.slug}</span>
             </div>
-            <div>
-              <span className="text-gray-500">Slug</span>
-              <p className="text-white font-mono">{selectedApp.slug}</p>
+            <div className="flex items-center gap-1.5">
+              <Tag className="w-3.5 h-3.5 text-gray-500" />
+              <span className="text-gray-300">{selectedApp.category || 'other'}</span>
             </div>
-            <div>
-              <span className="text-gray-500">Categorie</span>
-              <p className="text-white">{selectedApp.category || 'other'}</p>
-            </div>
-            <div>
-              <span className="text-gray-500">Releases</span>
-              <p className="text-white">{selectedApp.releases?.length || 0}</p>
-            </div>
+            <span className="text-gray-400">{selectedApp.releases?.length || 0} release{(selectedApp.releases?.length || 0) !== 1 ? 's' : ''}</span>
+            {selectedApp.description && (
+              <span className="text-gray-500">{selectedApp.description}</span>
+            )}
           </div>
-          {selectedApp.description && (
-            <p className="text-sm text-gray-400 mt-3">{selectedApp.description}</p>
-          )}
         </Section>
 
-        <Section title="Releases">
+        <Section title={`Releases (${releases.length})`}>
           {releases.length === 0 ? (
             <p className="text-sm text-gray-500">Aucune release.</p>
           ) : (
-            <div className="space-y-2">
-              {releases.map((rel) => (
-                <div key={rel.version} className="bg-gray-800 border border-gray-700 rounded-lg p-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-3">
-                      <span className="flex items-center gap-1.5 text-sm font-semibold text-blue-400">
-                        <Tag className="w-3.5 h-3.5" />
-                        v{rel.version}
-                      </span>
-                      <span className="text-xs text-gray-500">
+            <div className="-mx-6 -my-3 overflow-x-auto">
+              <table className="w-full text-left">
+                <thead className="bg-gray-800/60 border-b border-gray-700">
+                  <tr>
+                    <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Version</th>
+                    <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Date</th>
+                    <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Taille</th>
+                    <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Changelog</th>
+                    <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">SHA-256</th>
+                    <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase"></th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-700/50">
+                  {releases.map((rel) => (
+                    <tr key={rel.version} className="bg-gray-800 hover:bg-gray-700/50">
+                      <td className="px-3 py-2 text-sm font-semibold text-blue-400">
+                        <div className="flex items-center gap-1.5">
+                          <Tag className="w-3.5 h-3.5" />
+                          v{rel.version}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 text-xs text-gray-400">
                         {new Date(rel.created_at).toLocaleDateString('fr-FR')}
-                      </span>
-                      <span className="text-xs text-gray-500">{formatSize(rel.size_bytes)}</span>
-                    </div>
-                    <button
-                      onClick={() => downloadStoreRelease(selectedApp.slug, rel.version)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs text-gray-300 hover:text-white hover:bg-gray-700 transition-colors"
-                    >
-                      <Download className="w-3.5 h-3.5" /> Download
-                    </button>
-                  </div>
-                  {rel.changelog && (
-                    <p className="text-sm text-gray-400 flex items-start gap-2">
-                      <FileText className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-gray-500" />
-                      {rel.changelog}
-                    </p>
-                  )}
-                  <p className="text-xs text-gray-600 mt-2 font-mono truncate">SHA-256: {rel.sha256}</p>
-                </div>
-              ))}
+                      </td>
+                      <td className="px-3 py-2 text-sm text-gray-400">{formatSize(rel.size_bytes)}</td>
+                      <td className="px-3 py-2 text-sm text-gray-400 max-w-xs truncate">
+                        {rel.changelog || '--'}
+                      </td>
+                      <td className="px-3 py-2 text-xs text-gray-600 font-mono max-w-[120px] truncate">
+                        {rel.sha256}
+                      </td>
+                      <td className="px-3 py-2">
+                        <button
+                          onClick={() => downloadStoreRelease(selectedApp.slug, rel.version)}
+                          className="p-1.5 text-gray-400 hover:bg-gray-600/20 hover:text-white transition-colors"
+                          title="Download"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </Section>
@@ -166,56 +173,75 @@ function Store() {
       )}
 
       <Section>
-        <div className="flex items-center gap-6 text-sm">
-          <div className="flex items-center gap-2">
-            <Package className="w-4 h-4 text-blue-400" />
-            <span className="text-gray-400">{apps.length} application{apps.length !== 1 ? 's' : ''}</span>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-6 text-sm">
+            <div className="flex items-center gap-2">
+              <Package className="w-4 h-4 text-blue-400" />
+              <span className="text-gray-400">{apps.length} application{apps.length !== 1 ? 's' : ''}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Tag className="w-4 h-4 text-green-400" />
+              <span className="text-gray-400">{totalReleases} release{totalReleases !== 1 ? 's' : ''}</span>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <Tag className="w-4 h-4 text-green-400" />
-            <span className="text-gray-400">{totalReleases} release{totalReleases !== 1 ? 's' : ''}</span>
-          </div>
+          <a
+            href="/api/store/client/apk"
+            download
+            className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-500 rounded transition-colors"
+          >
+            <Smartphone className="w-4 h-4" />
+            Installer l'app Android
+          </a>
         </div>
       </Section>
 
-      <div className="flex-1 px-6 py-4">
+      <Section title={`Applications (${apps.length})`}>
         {apps.length === 0 ? (
-          <div className="flex items-center justify-center h-full">
-            <div className="text-center">
-              <StoreIcon className="w-12 h-12 text-gray-600 mx-auto mb-3" />
-              <p className="text-gray-400">Aucune application.</p>
-              <p className="text-sm text-gray-500 mt-1">Les publications sont gerees via MCP.</p>
-            </div>
+          <div className="text-center py-4 text-gray-400 text-sm">
+            Aucune application. Les publications sont gerees via MCP.
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {apps.map((app) => (
-              <div
-                key={app.slug}
-                onClick={() => selectApp(app.slug)}
-                className="bg-gray-800 border border-gray-700 rounded-lg p-4 hover:border-blue-500/50 hover:bg-gray-800/80 transition-colors cursor-pointer"
-              >
-                <div className="flex items-start gap-3">
-                  <div className="w-10 h-10 rounded-lg bg-blue-600/20 flex items-center justify-center flex-shrink-0">
-                    <Package className="w-5 h-5 text-blue-400" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <h3 className="text-sm font-semibold text-white truncate">{app.name}</h3>
-                    <p className="text-xs text-gray-500">{app.category || 'other'}</p>
-                  </div>
-                </div>
-                <div className="mt-3 flex items-center justify-between text-xs text-gray-400">
-                  <span>
-                    {app.latest_version ? `v${app.latest_version}` : 'N/A'}
-                    {app.latest_size_bytes ? ` · ${formatSize(app.latest_size_bytes)}` : ''}
-                  </span>
-                  <span>{app.release_count} release{app.release_count !== 1 ? 's' : ''}</span>
-                </div>
-              </div>
-            ))}
+          <div className="-mx-6 -my-3 overflow-x-auto">
+            <table className="w-full text-left">
+              <thead className="bg-gray-800/60 border-b border-gray-700">
+                <tr>
+                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Nom</th>
+                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Categorie</th>
+                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Version</th>
+                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Taille</th>
+                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Releases</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-700/50">
+                {apps.map((app) => (
+                  <tr
+                    key={app.slug}
+                    onClick={() => selectApp(app.slug)}
+                    className="bg-gray-800 hover:bg-gray-700/50 cursor-pointer transition-colors"
+                  >
+                    <td className="px-3 py-2 text-sm font-medium text-white">
+                      <div className="flex items-center gap-2">
+                        <Package className="w-4 h-4 flex-shrink-0 text-blue-400" />
+                        {app.name}
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 text-sm text-gray-300">{app.category || 'other'}</td>
+                    <td className="px-3 py-2 text-sm font-mono text-gray-300">
+                      {app.latest_version ? `v${app.latest_version}` : '--'}
+                    </td>
+                    <td className="px-3 py-2 text-sm text-gray-400">
+                      {app.latest_size_bytes ? formatSize(app.latest_size_bytes) : '--'}
+                    </td>
+                    <td className="px-3 py-2 text-sm text-gray-400">
+                      {app.release_count}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
-      </div>
+      </Section>
 
       {loadingDetail && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40">

@@ -12,3 +12,16 @@ data/
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Flutter
+store_flutter/.dart_tool/
+store_flutter/.packages
+store_flutter/build/
+store_flutter/.flutter-plugins
+store_flutter/.flutter-plugins-dependencies
+store_flutter/android/.gradle/
+store_flutter/android/app/build/
+store_flutter/android/build/
+store_flutter/android/local.properties
+store_flutter/.idea/
+*.iml

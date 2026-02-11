@@ -62,9 +62,13 @@ async fn run_connection(config: &Config) -> Result<(), String> {
     let url = config.ws_url();
     info!(url, "Connecting to HomeRoute");
 
-    let (ws_stream, _) = connect_async(&url)
-        .await
-        .map_err(|e| format!("WebSocket connect failed: {}", e))?;
+    let (ws_stream, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        connect_async(&url),
+    )
+    .await
+    .map_err(|_| "WebSocket connect timeout (10s)".to_string())?
+    .map_err(|e| format!("WebSocket connect failed: {}", e))?;
 
     let (mut write, mut read) = ws_stream.split();
 
@@ -77,10 +81,13 @@ async fn run_connection(config: &Config) -> Result<(), String> {
         container_storage_path: config.container_storage_path.clone(),
     };
     let auth_json = serde_json::to_string(&auth).map_err(|e| e.to_string())?;
-    write
-        .send(Message::Text(auth_json.into()))
-        .await
-        .map_err(|e| e.to_string())?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        write.send(Message::Text(auth_json.into())),
+    )
+    .await
+    .map_err(|_| "Auth send timeout (5s)".to_string())?
+    .map_err(|e| e.to_string())?;
 
     // Wait for AuthResult
     let auth_response = tokio::time::timeout(std::time::Duration::from_secs(5), read.next())
@@ -222,9 +229,25 @@ async fn run_connection(config: &Config) -> Result<(), String> {
         }
     });
 
+    // WebSocket Ping interval: sends Ping every 15s so the server responds with Pong,
+    // which resets the read deadline below and proves the connection is alive.
+    let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+    ping_interval.tick().await; // skip first immediate tick
+
+    // Read deadline: if no message from server in 30s, assume connection is dead.
+    // The server responds to our Pings with Pongs, so this only fires on truly dead connections.
+    let read_deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
+    tokio::pin!(read_deadline);
+
     // Message loop
     loop {
         tokio::select! {
+            // WebSocket Ping keepalive
+            _ = ping_interval.tick() => {
+                if write.send(Message::Ping(vec![].into())).await.is_err() {
+                    break;
+                }
+            }
             // Outgoing messages
             Some(msg) = rx.recv() => {
                 match msg {
@@ -244,8 +267,14 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                     }
                 }
             }
+            // Read deadline: no message from server in 30s → reconnect
+            _ = &mut read_deadline => {
+                warn!("No message from server in 30s, reconnecting");
+                break;
+            }
             // Incoming messages
             msg = read.next() => {
+                read_deadline.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_secs(30));
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<HostRegistryMessage>(&text) {
