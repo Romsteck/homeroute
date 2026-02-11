@@ -36,3 +36,65 @@ Ce workspace utilise Dataverse comme base de donnees. Le serveur MCP `dataverse`
 4. Pour les operations de donnees, utiliser les outils CRUD
 5. Pour le code applicatif runtime, connecter une librairie SQLite a `/root/workspace/.dataverse/app.db`
 <!-- DATAVERSE:END -->
+
+<!-- DEPLOY:START -->
+# Deploiement API Rust (Production)
+
+Ce workspace est un environnement de developpement lie a un conteneur de production. Le serveur MCP `deploy` permet de deployer et gerer l'application sur la production.
+
+## Regles
+- **JAMAIS deployer en production sauf si l'utilisateur l'a explicitement demande**
+- Le service Rust doit inclure le frontend: builder le binaire (`cargo build --release`) ET le front (si applicable) — le tout est servi par le meme service systemd `app.service`
+- TOUJOURS builder le binaire Rust AVANT de deployer (`cargo build --release`)
+- TOUJOURS utiliser l'outil `deploy` du serveur MCP pour pousser le binaire — JAMAIS copier manuellement
+- Verifier le statut de production avec `prod_status` apres chaque deploiement
+- Consulter les logs avec `prod_logs` en cas de probleme
+- Le binaire est deploye a `/opt/app/app` sur le conteneur de production
+- Le service systemd `app.service` est cree/redemarre automatiquement par l'outil deploy
+
+## Outils disponibles
+
+### Deploiement
+- `deploy` — Deployer un binaire Rust compile vers la production (necessite `binary_path`)
+- `prod_status` — Verifier le statut du service en production (actif, uptime, metadata binaire)
+- `prod_logs` — Consulter les logs journalctl du service en production (defaut: 50 lignes)
+
+### Gestion production
+- `prod_exec` — Executer une commande shell sur le conteneur de production (ex: creer des dossiers, inspecter l'environnement)
+- `prod_push` — Copier un fichier ou dossier local vers la production (ex: fichiers .env, assets statiques, config)
+
+## Procedure de deploiement
+1. Developper et tester localement
+2. Builder le binaire: `cargo build --release`
+3. Deployer avec l'outil MCP `deploy` (binary_path = `/root/workspace/target/release/<nom>`)
+4. Verifier avec `prod_status` que le service est actif
+5. Consulter `prod_logs` pour confirmer le bon demarrage
+6. En cas d'erreur, utiliser `prod_logs` et `prod_exec` pour diagnostiquer
+<!-- DEPLOY:END -->
+
+<!-- STORE:START -->
+# HomeRoute Store (Publication d'apps)
+
+Le serveur MCP `store` permet de publier et gerer des applications Android (APK) sur le HomeRoute Store.
+
+## Regles
+- **JAMAIS publier sur le Store sauf si l'utilisateur l'a explicitement demande**
+- En developpement, les applications mobiles tournent sur Expo en mode DEV (`npx expo start`) — ne pas builder d'APK sauf pour publication
+- TOUJOURS builder l'APK AVANT de publier (`eas build` ou build Gradle local)
+- Utiliser `list_store_apps` pour verifier les apps existantes avant de publier
+- Lors de la premiere publication, fournir obligatoirement: `name`, `slug`, `version`
+- Incrementer la version a chaque nouvelle release
+
+## Outils disponibles
+- `list_store_apps` — Lister toutes les apps disponibles dans le Store (noms, slugs, categories, versions)
+- `get_app_info` — Details d'une app specifique (versions, changelogs)
+- `check_updates` — Verifier les mises a jour disponibles pour des apps installees
+- `publish_release` — Publier une nouvelle release APK sur le Store
+
+## Procedure de publication
+1. Builder l'APK (ex: `eas build --platform android --profile preview --local`)
+2. Verifier avec `list_store_apps` si l'app existe deja
+3. Publier avec `publish_release` en fournissant: `apk_path`, `slug`, `version`
+4. Pour une premiere publication, ajouter aussi: `name`, `description`, `category`
+5. Verifier avec `get_app_info` que la release apparait dans le Store
+<!-- STORE:END -->
