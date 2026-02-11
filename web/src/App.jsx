@@ -15,6 +15,7 @@ import Dataverse from './pages/Dataverse';
 import DataBrowser from './pages/DataBrowser';
 import Containers from './pages/Containers';
 import CloudRelay from './pages/CloudRelay';
+import Store from './pages/Store';
 import Login from './pages/Login';
 import Profile from './pages/Profile';
 
@@ -105,6 +106,7 @@ function AppRoutes() {
               <Route path="/data-browser" element={<DataBrowser />} />
               <Route path="/certificates" element={<Certificates />} />
               <Route path="/cloud-relay" element={<CloudRelay />} />
+              <Route path="/store" element={<Store />} />
             </Routes>
           </Layout>
         </ProtectedRoute>

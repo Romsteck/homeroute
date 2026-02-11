@@ -19,3 +19,4 @@ pub mod applications;
 pub mod containers;
 pub mod dataverse;
 pub mod cloud_relay;
+pub mod store;

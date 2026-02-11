@@ -758,6 +758,13 @@ WantedBy=multi-user.target
       "autoApprove": [
         "deploy_status","prod_logs"
       ]
+    },
+    "store": {
+      "command": "/usr/local/bin/hr-agent",
+      "args": ["mcp-store"],
+      "autoApprove": [
+        "list_store_apps","get_app_info","check_updates","publish_release"
+      ]
     }
   }
 }

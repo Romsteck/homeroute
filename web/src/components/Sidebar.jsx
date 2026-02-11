@@ -2,7 +2,8 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Server, Shield, Globe, Settings,
   ArrowLeftRight, RefreshCw, Zap, Users, LogOut,
-  User, HardDrive, Lock, Database, Cloud, Container, Table2
+  User, HardDrive, Lock, Database, Cloud, Container, Table2,
+  Store as StoreIcon
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -34,6 +35,7 @@ const navGroups = [
       { to: '/containers', icon: Container, label: 'Containers' },
       { to: '/dataverse', icon: Database, label: 'Dataverse' },
       { to: '/data-browser', icon: Table2, label: 'Data Browser' },
+      { to: '/store', icon: StoreIcon, label: 'Store' },
     ],
   },
   {

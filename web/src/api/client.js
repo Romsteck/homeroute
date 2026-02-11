@@ -199,3 +199,19 @@ export const downloadDataverseBackup = (appId) => {
   a.click();
   document.body.removeChild(a);
 };
+
+// Store
+export const getStoreApps = () => api.get('/store/apps');
+export const getStoreApp = (slug) => api.get(`/store/apps/${slug}`);
+export const checkStoreUpdates = (installed) => {
+  const param = installed.map(i => `${i.slug}:${i.version}`).join(',');
+  return api.get(`/store/updates?installed=${param}`);
+};
+export const downloadStoreRelease = (slug, version) => {
+  const a = document.createElement('a');
+  a.href = `/api/store/releases/${slug}/${version}/download`;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+};
