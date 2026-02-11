@@ -74,7 +74,7 @@ function Sidebar() {
                   <NavLink
                     to={to}
                     className={({ isActive }) =>
-                      `flex items-center gap-3 px-4 py-2 transition-colors text-sm ${
+                      `flex items-center gap-3 px-4 py-2 transition-[background-color,color] duration-300 ease-out hover:duration-0 text-sm ${
                         isActive
                           ? 'border-l-3 border-blue-400 bg-gray-700/50 text-white'
                           : 'border-l-3 border-transparent text-gray-300 hover:bg-gray-700/30'
@@ -107,7 +107,7 @@ function Sidebar() {
             </div>
             <button
               onClick={logout}
-              className="p-2 text-gray-400 hover:text-red-400 hover:bg-gray-700 transition-colors"
+              className="p-2 text-gray-400 hover:text-red-400 hover:bg-gray-700 transition-[background-color,color] duration-300 ease-out hover:duration-0"
               title="Deconnexion"
             >
               <LogOut className="w-4 h-4" />

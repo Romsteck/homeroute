@@ -339,19 +339,19 @@ export default function Hosts() {
       </PageHeader>
 
       {message && (
-        <div className={`p-4 flex items-center gap-2 ${
+        <div className={`px-6 py-2 flex items-center gap-2 text-sm ${
           message.type === 'success' ? 'bg-green-900/50 text-green-400' : 'bg-red-900/50 text-red-400'
         }`}>
-          {message.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <XCircle className="w-5 h-5" />}
+          {message.type === 'success' ? <CheckCircle className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
           {message.text}
         </div>
       )}
 
       <Section title="Liste des hotes">
         {loading ? (
-          <div className="text-center py-12 text-gray-400">Chargement...</div>
+          <div className="text-center py-4 text-gray-400 text-sm">Chargement...</div>
         ) : hosts.length === 0 ? (
-          <div className="bg-gray-800 border border-gray-700 p-8 text-center text-gray-400">
+          <div className="text-center py-4 text-gray-400 text-sm">
             Aucun hote configure. Cliquez sur "Ajouter" pour commencer.
           </div>
         ) : (
@@ -495,22 +495,22 @@ export default function Hosts() {
       {/* Add Host Modal */}
       {showAddModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 p-6 w-full max-w-md">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-bold text-white">Ajouter un hote</h2>
+          <div className="bg-gray-800 p-4 w-full max-w-md">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-bold text-white">Ajouter un hote</h2>
               <button onClick={() => { setShowAddModal(false); resetForm(); }} className="text-gray-400 hover:text-white">
-                <X className="w-5 h-5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
 
-            <form onSubmit={handleAddHost} className="space-y-4">
+            <form onSubmit={handleAddHost} className="space-y-2">
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Nom *</label>
+                <label className="block text-xs text-gray-400 mb-0.5">Nom *</label>
                 <input
                   type="text"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-none focus:border-blue-500"
                   placeholder="Mon serveur"
                   required
                 />
@@ -518,78 +518,77 @@ export default function Hosts() {
 
               <div className="grid grid-cols-3 gap-2">
                 <div className="col-span-2">
-                  <label className="block text-sm font-medium text-gray-300 mb-1">Adresse IP *</label>
+                  <label className="block text-xs text-gray-400 mb-0.5">Adresse IP *</label>
                   <input
                     type="text"
                     value={formData.host}
                     onChange={(e) => setFormData({ ...formData, host: e.target.value })}
-                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-none focus:border-blue-500"
                     placeholder="10.0.0.10"
                     required
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-1">Port</label>
+                  <label className="block text-xs text-gray-400 mb-0.5">Port</label>
                   <input
                     type="number"
                     value={formData.port}
                     onChange={(e) => setFormData({ ...formData, port: e.target.value })}
-                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-none focus:border-blue-500"
                     placeholder="22"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Utilisateur SSH *</label>
+                <label className="block text-xs text-gray-400 mb-0.5">Utilisateur SSH *</label>
                 <input
                   type="text"
                   value={formData.username}
                   onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-none focus:border-blue-500"
                   placeholder="root"
                   required
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Mot de passe SSH *</label>
+                <label className="block text-xs text-gray-400 mb-0.5">Mot de passe SSH *</label>
                 <input
                   type="password"
                   value={formData.password}
                   onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-none focus:border-blue-500"
                   placeholder="••••••••"
                   required
                 />
-                <p className="text-xs text-gray-400 mt-1">Utilise une seule fois pour configurer l'authentification par cle SSH</p>
+                <p className="text-xs text-gray-500 mt-0.5">Utilise une seule fois pour configurer l'auth par cle SSH</p>
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Chemin de stockage conteneurs</label>
+                <label className="block text-xs text-gray-400 mb-0.5">Chemin stockage conteneurs</label>
                 <input
                   type="text"
                   value={formData.container_storage_path}
                   onChange={(e) => setFormData({ ...formData, container_storage_path: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-none focus:border-blue-500"
                   placeholder="/var/lib/machines"
                 />
-                <p className="text-xs text-gray-400 mt-1">Repertoire de stockage des conteneurs nspawn sur cet hote</p>
               </div>
 
               {addError && (
-                <div className="p-3 bg-red-900/20 border border-red-600 text-red-400 text-sm">{addError}</div>
+                <div className="px-3 py-2 bg-red-900/20 border border-red-600 text-red-400 text-sm">{addError}</div>
               )}
 
-              <div className="flex gap-2 pt-2">
-                <Button type="button" variant="secondary" onClick={() => { setShowAddModal(false); resetForm(); }} className="flex-1">
+              <div className="flex gap-2 pt-1">
+                <Button type="button" variant="secondary" size="sm" onClick={() => { setShowAddModal(false); resetForm(); }} className="flex-1">
                   Annuler
                 </Button>
-                <Button type="submit" disabled={addingHost} className="flex-1">
+                <Button type="submit" size="sm" disabled={addingHost} className="flex-1">
                   {addingHost ? (
-                    <><RefreshCw className="w-4 h-4 mr-2 animate-spin" />Ajout...</>
+                    <><RefreshCw className="w-3.5 h-3.5 mr-1.5 animate-spin" />Ajout...</>
                   ) : (
-                    <><Check className="w-4 h-4 mr-2" />Ajouter</>
+                    <><Check className="w-3.5 h-3.5 mr-1.5" />Ajouter</>
                   )}
                 </Button>
               </div>
@@ -601,26 +600,26 @@ export default function Hosts() {
       {/* Host Settings Modal */}
       {settingsHost && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 p-6 w-full max-w-md">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-bold text-white">
+          <div className="bg-gray-800 p-4 w-full max-w-md">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-bold text-white">
                 {settingsHost.is_local ? 'HomeRoute' : settingsHost.name} — Parametres
               </h2>
               <button onClick={() => setSettingsHost(null)} className="text-gray-400 hover:text-white">
-                <X className="w-5 h-5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="space-y-4">
+            <div className="space-y-2">
               {/* Remote-only fields */}
               {!settingsHost.is_local && (
                 <>
                   {/* MAC WOL */}
                   <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-1">MAC WOL</label>
+                    <label className="block text-xs text-gray-400 mb-0.5">MAC WOL</label>
                     {settingsHost.interfaces && settingsHost.interfaces.length > 0 ? (
                       <select
-                        className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white"
+                        className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white"
                         value={settingsForm.wol_mac}
                         onChange={(e) => setSettingsForm({ ...settingsForm, wol_mac: e.target.value })}
                       >
@@ -634,7 +633,7 @@ export default function Hosts() {
                     ) : (
                       <input
                         type="text"
-                        className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white"
+                        className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white"
                         value={settingsForm.wol_mac}
                         onChange={(e) => setSettingsForm({ ...settingsForm, wol_mac: e.target.value })}
                         placeholder="AA:BB:CC:DD:EE:FF"
@@ -644,10 +643,10 @@ export default function Hosts() {
 
                   {/* Auto-off */}
                   <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-1">Auto-arret</label>
+                    <label className="block text-xs text-gray-400 mb-0.5">Auto-arret</label>
                     <div className="flex gap-2">
                       <select
-                        className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 text-white"
+                        className="flex-1 px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white"
                         value={settingsForm.auto_off_mode}
                         onChange={(e) => setSettingsForm({ ...settingsForm, auto_off_mode: e.target.value })}
                       >
@@ -657,7 +656,7 @@ export default function Hosts() {
                       </select>
                       {settingsForm.auto_off_mode !== 'off' && (
                         <select
-                          className="px-3 py-2 bg-gray-700 border border-gray-600 text-white"
+                          className="px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white"
                           value={settingsForm.auto_off_minutes}
                           onChange={(e) => setSettingsForm({ ...settingsForm, auto_off_minutes: parseInt(e.target.value) })}
                         >
@@ -673,12 +672,12 @@ export default function Hosts() {
                 </>
               )}
 
-              {/* Macvlan interface — both local and remote */}
+              {/* Macvlan interface */}
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Interface Macvlan</label>
+                <label className="block text-xs text-gray-400 mb-0.5">Interface Macvlan</label>
                 {settingsHost.is_local ? (
                   <select
-                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white"
+                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white"
                     value={settingsForm.lan_interface}
                     onChange={(e) => setSettingsForm({ ...settingsForm, lan_interface: e.target.value })}
                   >
@@ -691,7 +690,7 @@ export default function Hosts() {
                   </select>
                 ) : (
                   <select
-                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white"
+                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white"
                     value={settingsForm.lan_interface}
                     onChange={(e) => setSettingsForm({ ...settingsForm, lan_interface: e.target.value })}
                   >
@@ -705,27 +704,27 @@ export default function Hosts() {
                 )}
               </div>
 
-              {/* Container storage path — both local and remote */}
+              {/* Container storage path */}
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Chemin de stockage</label>
+                <label className="block text-xs text-gray-400 mb-0.5">Chemin de stockage</label>
                 <input
                   type="text"
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white"
                   value={settingsForm.container_storage_path}
                   onChange={(e) => setSettingsForm({ ...settingsForm, container_storage_path: e.target.value })}
                   placeholder="/var/lib/machines"
                 />
               </div>
 
-              <div className="flex gap-2 pt-2">
-                <Button type="button" variant="secondary" onClick={() => setSettingsHost(null)} className="flex-1">
+              <div className="flex gap-2 pt-1">
+                <Button type="button" variant="secondary" size="sm" onClick={() => setSettingsHost(null)} className="flex-1">
                   Fermer
                 </Button>
-                <Button onClick={handleSaveSettings} disabled={savingSettings} className="flex-1">
+                <Button onClick={handleSaveSettings} size="sm" disabled={savingSettings} className="flex-1">
                   {savingSettings ? (
-                    <><RefreshCw className="w-4 h-4 mr-2 animate-spin" />Sauvegarde...</>
+                    <><RefreshCw className="w-3.5 h-3.5 mr-1.5 animate-spin" />Sauvegarde...</>
                   ) : (
-                    <><Check className="w-4 h-4 mr-2" />Sauvegarder</>
+                    <><Check className="w-3.5 h-3.5 mr-1.5" />Sauvegarder</>
                   )}
                 </Button>
               </div>
