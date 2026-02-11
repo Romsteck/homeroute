@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
 import { Zap, Thermometer, Cpu, Clock, Moon, Rocket, Play, Square, Activity } from 'lucide-react';
-import Card from '../components/Card';
 import Button from '../components/Button';
 import PageHeader from '../components/PageHeader';
 import Section from '../components/Section';
@@ -288,364 +287,281 @@ function Energy() {
     <div>
       <PageHeader title="Énergie" icon={Zap} />
 
-      <Section title="CPU / Mode">
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-px">
-        {/* CPU Info Card */}
-        <Card title={`Infos CPU (${cpuModel})`} icon={Cpu}>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-px">
-          {/* Temperature */}
-          <div className="bg-gray-900 p-4">
-            <div className="flex items-center gap-2 text-gray-400 mb-2">
-              <Thermometer size={16} />
-              <span className="text-sm">Température</span>
-            </div>
-            <div className={`text-3xl font-bold ${getTempColor(cpuInfo.temperature || 0)}`}>
+      <Section title={`CPU — ${cpuModel}`}>
+        <div className="flex items-center gap-6 text-sm">
+          <div className="flex items-center gap-1.5">
+            <Thermometer className="w-3.5 h-3.5 text-gray-500" />
+            <span className={`font-semibold ${getTempColor(cpuInfo.temperature || 0)}`}>
               {cpuInfo.temperature !== null ? `${cpuInfo.temperature.toFixed(0)}°C` : '--'}
-            </div>
-            <div className="mt-2 h-2 bg-gray-700 overflow-hidden">
+            </span>
+            <div className="w-16 bg-gray-700 h-1.5 overflow-hidden">
               <div
                 className={`h-full ${getTempBarColor(cpuInfo.temperature || 0)} transition-all`}
                 style={{ width: `${Math.min(100, ((cpuInfo.temperature || 0) / 95) * 100)}%` }}
               />
             </div>
-            <div className="text-xs text-gray-500 mt-1">max 95°C</div>
           </div>
-
-          {/* Frequency */}
-          <div className="bg-gray-900 p-4">
-            <div className="flex items-center gap-2 text-gray-400 mb-2">
-              <Zap size={16} />
-              <span className="text-sm">Fréquence</span>
-            </div>
-            <div className="text-3xl font-bold text-blue-400">
-              {cpuInfo.frequency?.current != null
-                ? `${cpuInfo.frequency.current.toFixed(1)} GHz`
-                : '--'}
-            </div>
-            <div className="text-sm text-gray-500 mt-2">
+          <div className="flex items-center gap-1.5">
+            <Zap className="w-3.5 h-3.5 text-gray-500" />
+            <span className="font-semibold text-blue-400">
+              {cpuInfo.frequency?.current != null ? `${cpuInfo.frequency.current.toFixed(1)} GHz` : '--'}
+            </span>
+            <span className="text-xs text-gray-500">
               {cpuInfo.frequency?.min && cpuInfo.frequency?.max
-                ? `${cpuInfo.frequency.min.toFixed(1)} - ${cpuInfo.frequency.max.toFixed(1)} GHz`
-                : '--'}
-            </div>
+                ? `(${cpuInfo.frequency.min.toFixed(1)}-${cpuInfo.frequency.max.toFixed(1)})`
+                : ''}
+            </span>
           </div>
-
-          {/* Usage */}
-          <div className="bg-gray-900 p-4">
-            <div className="flex items-center gap-2 text-gray-400 mb-2">
-              <Cpu size={16} />
-              <span className="text-sm">Usage CPU</span>
-            </div>
-            <div className="text-3xl font-bold text-purple-400">
+          <div className="flex items-center gap-1.5">
+            <Cpu className="w-3.5 h-3.5 text-gray-500" />
+            <span className="font-semibold text-purple-400">
               {cpuInfo.usage !== null ? `${cpuInfo.usage.toFixed(0)}%` : '--'}
-            </div>
-            <div className="mt-2 h-2 bg-gray-700 overflow-hidden">
-              <div
-                className="h-full bg-purple-500 transition-all"
-                style={{ width: `${cpuInfo.usage || 0}%` }}
-              />
+            </span>
+            <div className="w-16 bg-gray-700 h-1.5 overflow-hidden">
+              <div className="h-full bg-purple-500 transition-all" style={{ width: `${cpuInfo.usage || 0}%` }} />
             </div>
           </div>
-        </div>
-
-        {/* Benchmark button */}
-        <div className="mt-4 pt-4 border-t border-gray-700 flex items-center justify-between">
-          <div className="text-sm text-gray-400">
-            {benchmark.running
-              ? `Benchmark en cours... ${benchmark.elapsed}s / 60s`
-              : 'Stress test CPU (1 min max)'}
-          </div>
-          {benchmark.running ? (
-            <button
-              onClick={handleStopBenchmark}
-              className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-medium transition-colors"
-            >
-              <Square size={16} />
-              Arrêter
-            </button>
-          ) : (
-            <button
-              onClick={handleStartBenchmark}
-              className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white font-medium transition-colors"
-            >
-              <Play size={16} />
-              Benchmark
-            </button>
-          )}
-        </div>
-      </Card>
-
-        {/* Mode Card */}
-        <Card title="Mode" icon={Zap}>
-        <div className="flex flex-col md:flex-row gap-px">
-          {/* Mode buttons */}
-          <div className="flex flex-wrap gap-px justify-center md:justify-start">
-            {['economy', 'auto', 'performance'].map(mode => {
-              const Icon = MODE_ICONS[mode];
-              const isActive = currentMode === mode;
-              const colors = MODE_COLORS[mode];
-              const isDisabled = changingMode || autoSelect.enabled;
-
-              return (
-                <button
-                  key={mode}
-                  onClick={() => handleModeChange(mode)}
-                  disabled={isDisabled}
-                  className={`flex flex-col items-center justify-center w-28 h-28 transition-all ${
-                    isActive
-                      ? `${colors.bg} text-white ring-2 ${colors.ring} shadow-lg`
-                      : `bg-gray-800 text-gray-300 ${isDisabled ? '' : colors.hover}`
-                  } ${isDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-                >
-                  <Icon size={32} className={isActive ? 'text-white' : 'text-gray-400'} />
-                  <span className="mt-2 font-medium">{MODE_LABELS[mode]}</span>
-                  {isActive && (
-                    <span className="text-xs opacity-75 mt-1">
-                      {autoSelect.enabled ? 'auto' : 'actif'}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Mode details */}
-          <div className="flex-1 bg-gray-900 p-4 flex items-center">
-            <p className="text-gray-300 font-medium">{MODE_DESCRIPTIONS[currentMode]}</p>
+          <div className="flex items-center gap-2 ml-auto">
+            <span className="text-xs text-gray-500">
+              {benchmark.running ? `Benchmark ${benchmark.elapsed}s/60s` : ''}
+            </span>
+            {benchmark.running ? (
+              <Button onClick={handleStopBenchmark} variant="danger" size="sm">
+                <Square className="w-3.5 h-3.5" /> Stop
+              </Button>
+            ) : (
+              <Button onClick={handleStartBenchmark} variant="success" size="sm">
+                <Play className="w-3.5 h-3.5" /> Bench
+              </Button>
+            )}
           </div>
         </div>
-      </Card>
-      </div>
       </Section>
 
-      <Section title="Programmation / Auto-select" contrast>
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-px">
-        {/* Programmation Card */}
-        <Card title="Programmation" icon={Clock}>
-          <div className="space-y-px">
-          {/* Schedule */}
-          <div className="space-y-px">
-            <div className="flex items-center gap-3">
+      <Section title="Mode" contrast>
+        <div className="flex items-center gap-px">
+          {['economy', 'auto', 'performance'].map(mode => {
+            const Icon = MODE_ICONS[mode];
+            const isActive = currentMode === mode;
+            const colors = MODE_COLORS[mode];
+            const isDisabled = changingMode || autoSelect.enabled;
+
+            return (
               <button
-                onClick={async () => {
-                  const newSchedule = { ...schedule, enabled: !schedule.enabled };
-                  setSchedule(newSchedule);
-                  // Auto-save when toggling
-                  try {
-                    await saveEnergySchedule(newSchedule);
-                  } catch (error) {
-                    console.error('Error saving schedule:', error);
-                  }
-                }}
-                className={`relative w-12 h-6 transition-colors ${
-                  schedule.enabled ? 'bg-blue-600' : 'bg-gray-600'
-                }`}
+                key={mode}
+                onClick={() => handleModeChange(mode)}
+                disabled={isDisabled}
+                className={`flex items-center gap-2 px-4 py-2 text-sm transition-all ${
+                  isActive
+                    ? `${colors.bg} text-white ring-1 ${colors.ring}`
+                    : `bg-gray-800 text-gray-300 ${isDisabled ? '' : colors.hover}`
+                } ${isDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
-                <span
-                  className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white transition-transform ${
-                    schedule.enabled ? 'translate-x-6' : ''
-                  }`}
-                />
+                <Icon size={16} className={isActive ? 'text-white' : 'text-gray-400'} />
+                <span className="font-medium">{MODE_LABELS[mode]}</span>
+                {isActive && (
+                  <span className="text-xs opacity-75">({autoSelect.enabled ? 'auto' : 'actif'})</span>
+                )}
               </button>
-              <span className="text-gray-300 font-medium">Programmation horaire</span>
+            );
+          })}
+          <span className="ml-3 text-sm text-gray-400">{MODE_DESCRIPTIONS[currentMode]}</span>
+        </div>
+      </Section>
+
+      <Section title="Programmation">
+        <div className="space-y-2">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={async () => {
+                const newSchedule = { ...schedule, enabled: !schedule.enabled };
+                setSchedule(newSchedule);
+                try {
+                  await saveEnergySchedule(newSchedule);
+                } catch (error) {
+                  console.error('Error saving schedule:', error);
+                }
+              }}
+              className={`relative w-10 h-5 transition-colors ${
+                schedule.enabled ? 'bg-blue-600' : 'bg-gray-600'
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white transition-transform ${
+                  schedule.enabled ? 'translate-x-5' : ''
+                }`}
+              />
+            </button>
+            <span className="text-sm text-gray-300 font-medium">Programmation horaire</span>
+          </div>
+
+          {schedule.enabled && (
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="text-gray-400">Forcer économie de</span>
+              <input
+                type="time"
+                value={schedule.nightStart}
+                onChange={e => setSchedule(prev => ({ ...prev, nightStart: e.target.value }))}
+                className="bg-gray-800 border border-gray-700 px-2 py-1 text-sm text-white"
+              />
+              <span className="text-gray-400">à</span>
+              <input
+                type="time"
+                value={schedule.nightEnd}
+                onChange={e => setSchedule(prev => ({ ...prev, nightEnd: e.target.value }))}
+                className="bg-gray-800 border border-gray-700 px-2 py-1 text-sm text-white"
+              />
+              <Button onClick={handleSaveSchedule} loading={savingSchedule} size="sm">
+                Enregistrer
+              </Button>
+              {scheduleMessage && (
+                <span className={`text-sm ${scheduleMessage.type === 'success' ? 'text-green-400' : 'text-red-400'}`}>
+                  {scheduleMessage.text}
+                </span>
+              )}
             </div>
+          )}
+        </div>
+      </Section>
 
-            {schedule.enabled && (
-              <div className="bg-gray-900 p-4 space-y-3">
-                <div className="flex flex-wrap items-center gap-3">
-                  <span className="text-gray-400">Forcer économie de</span>
-                  <input
-                    type="time"
-                    value={schedule.nightStart}
-                    onChange={e => setSchedule(prev => ({ ...prev, nightStart: e.target.value }))}
-                    className="bg-gray-800 border border-gray-700 px-3 py-2 text-white"
-                  />
-                  <span className="text-gray-400">à</span>
-                  <input
-                    type="time"
-                    value={schedule.nightEnd}
-                    onChange={e => setSchedule(prev => ({ ...prev, nightEnd: e.target.value }))}
-                    className="bg-gray-800 border border-gray-700 px-3 py-2 text-white"
-                  />
-                </div>
-
-                <div className="flex items-center gap-3">
-                  <Button onClick={handleSaveSchedule} loading={savingSchedule}>
-                    Enregistrer
-                  </Button>
-                  {scheduleMessage && (
-                    <span className={scheduleMessage.type === 'success' ? 'text-green-400' : 'text-red-400'}>
-                      {scheduleMessage.text}
-                    </span>
-                  )}
-                </div>
-              </div>
+      <Section title="Auto-select" contrast>
+        <div className="space-y-2">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={async () => {
+                if (!autoSelect.enabled && !autoSelect.networkInterface) {
+                  setAutoSelectMessage({ type: 'error', text: 'Sélectionnez d\'abord une interface' });
+                  setTimeout(() => setAutoSelectMessage(null), 3000);
+                  return;
+                }
+                const newAutoSelect = { ...autoSelect, enabled: !autoSelect.enabled };
+                setAutoSelect(newAutoSelect);
+                try {
+                  const res = await saveAutoSelectConfig(newAutoSelect);
+                  if (!res.data.success) {
+                    setAutoSelect(autoSelect);
+                    setAutoSelectMessage({ type: 'error', text: res.data.error });
+                    setTimeout(() => setAutoSelectMessage(null), 3000);
+                  }
+                } catch (error) {
+                  setAutoSelect(autoSelect);
+                  console.error('Error saving auto-select config:', error);
+                }
+              }}
+              className={`relative w-10 h-5 transition-colors ${
+                autoSelect.enabled ? 'bg-green-600' : 'bg-gray-600'
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white transition-transform ${
+                  autoSelect.enabled ? 'translate-x-5' : ''
+                }`}
+              />
+            </button>
+            <span className="text-sm text-gray-300 font-medium">Sélection automatique</span>
+            {autoSelectMessage && !autoSelect.enabled && (
+              <span className={`text-xs ${autoSelectMessage.type === 'success' ? 'text-green-400' : 'text-red-400'}`}>
+                {autoSelectMessage.text}
+              </span>
             )}
           </div>
 
-          {/* Auto-select */}
-          <div className="space-y-px">
-            <div className="flex items-center gap-3">
-              <button
-                onClick={async () => {
-                  // Prevent enabling without interface
-                  if (!autoSelect.enabled && !autoSelect.networkInterface) {
-                    setAutoSelectMessage({ type: 'error', text: 'Sélectionnez d\'abord une interface' });
-                    setTimeout(() => setAutoSelectMessage(null), 3000);
-                    return;
-                  }
-                  const newAutoSelect = { ...autoSelect, enabled: !autoSelect.enabled };
-                  setAutoSelect(newAutoSelect);
-                  // Auto-save when toggling
-                  try {
-                    const res = await saveAutoSelectConfig(newAutoSelect);
-                    if (!res.data.success) {
-                      setAutoSelect(autoSelect); // Revert
-                      setAutoSelectMessage({ type: 'error', text: res.data.error });
-                      setTimeout(() => setAutoSelectMessage(null), 3000);
-                    }
-                  } catch (error) {
-                    setAutoSelect(autoSelect); // Revert
-                    console.error('Error saving auto-select config:', error);
-                  }
-                }}
-                className={`relative w-12 h-6 transition-colors ${
-                  autoSelect.enabled ? 'bg-green-600' : 'bg-gray-600'
-                }`}
+          <div className="flex items-center gap-3 text-sm">
+            <Activity className="w-3.5 h-3.5 text-gray-500" />
+            {interfaces.length === 0 ? (
+              <span className="text-gray-500">Aucune interface réseau détectée</span>
+            ) : (
+              <select
+                value={autoSelect.networkInterface || ''}
+                onChange={e => setAutoSelect(prev => ({
+                  ...prev,
+                  networkInterface: e.target.value || null
+                }))}
+                className="bg-gray-800 border border-gray-700 px-2 py-1 text-sm text-white"
               >
-                <span
-                  className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white transition-transform ${
-                    autoSelect.enabled ? 'translate-x-6' : ''
-                  }`}
+                <option value="">Sélectionner une interface...</option>
+                {interfaces.map(iface => (
+                  <option key={iface.name} value={iface.name}>
+                    {iface.name} ({iface.primaryIp}){iface.state !== 'UP' ? ' - DOWN' : ''}
+                  </option>
+                ))}
+              </select>
+            )}
+            {interfaceError === 'not_configured' && (
+              <span className="text-yellow-400 text-xs">Sélectionnez une interface</span>
+            )}
+            {interfaceError === 'not_found' && (
+              <span className="text-red-400 text-xs">Interface introuvable</span>
+            )}
+            {autoSelect.networkInterface && !interfaceError && (
+              <>
+                <span className="text-gray-400">Charge:</span>
+                <span className="text-white font-mono font-semibold">{networkRps.averaged.toLocaleString()} req/s</span>
+                {autoSelect.enabled && currentMode && (
+                  <span className={`font-medium ${
+                    currentMode === 'economy' ? 'text-indigo-400' :
+                    currentMode === 'performance' ? 'text-orange-400' : 'text-blue-400'
+                  }`}>
+                    → {MODE_LABELS[currentMode]}
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+
+          {autoSelect.enabled && (
+            <div className="flex items-center gap-2 text-sm">
+              <div>
+                <label className="block text-xs text-gray-500 mb-0.5">Seuil bas</label>
+                <input
+                  type="number"
+                  value={autoSelect.thresholds.low}
+                  onChange={e => setAutoSelect(prev => ({
+                    ...prev,
+                    thresholds: { ...prev.thresholds, low: parseInt(e.target.value) || 0 }
+                  }))}
+                  className="w-24 bg-gray-800 border border-gray-700 px-2 py-1 text-sm text-white"
                 />
-              </button>
-              <span className="text-gray-300 font-medium">Sélection automatique</span>
-              {autoSelectMessage && !autoSelect.enabled && (
-                <span className={autoSelectMessage.type === 'success' ? 'text-green-400 text-sm' : 'text-red-400 text-sm'}>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-0.5">Seuil haut</label>
+                <input
+                  type="number"
+                  value={autoSelect.thresholds.high}
+                  onChange={e => setAutoSelect(prev => ({
+                    ...prev,
+                    thresholds: { ...prev.thresholds, high: parseInt(e.target.value) || 0 }
+                  }))}
+                  className="w-24 bg-gray-800 border border-gray-700 px-2 py-1 text-sm text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-0.5">Moyenne (s)</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="30"
+                  value={autoSelect.averagingTime}
+                  onChange={e => setAutoSelect(prev => ({
+                    ...prev,
+                    averagingTime: Math.max(1, Math.min(30, parseInt(e.target.value) || 3))
+                  }))}
+                  className="w-16 bg-gray-800 border border-gray-700 px-2 py-1 text-sm text-white"
+                />
+              </div>
+              <div className="self-end">
+                <Button onClick={handleSaveAutoSelect} loading={savingAutoSelect} size="sm">
+                  Enregistrer
+                </Button>
+              </div>
+              {autoSelectMessage && (
+                <span className={`self-end text-xs ${autoSelectMessage.type === 'success' ? 'text-green-400' : 'text-red-400'}`}>
                   {autoSelectMessage.text}
                 </span>
               )}
             </div>
-
-            {/* Interface selector and RPS indicator */}
-            <div className="bg-gray-900 p-3 space-y-3">
-              <div>
-                <div className="flex items-center gap-2 text-sm text-gray-400 mb-2">
-                  <Activity size={14} />
-                  <span>Interface réseau</span>
-                </div>
-                {interfaces.length === 0 ? (
-                  <p className="text-gray-500 text-sm">Aucune interface réseau détectée</p>
-                ) : (
-                  <select
-                    value={autoSelect.networkInterface || ''}
-                    onChange={e => setAutoSelect(prev => ({
-                      ...prev,
-                      networkInterface: e.target.value || null
-                    }))}
-                    className="w-full bg-gray-800 border border-gray-700 px-3 py-2 text-white text-sm"
-                  >
-                    <option value="">Sélectionner une interface...</option>
-                    {interfaces.map(iface => (
-                      <option key={iface.name} value={iface.name}>
-                        {iface.name} ({iface.primaryIp}){iface.state !== 'UP' ? ' - DOWN' : ''}
-                      </option>
-                    ))}
-                  </select>
-                )}
-                {interfaceError === 'not_configured' && (
-                  <p className="text-yellow-400 text-xs mt-1">
-                    Sélectionnez une interface pour activer l'auto-select
-                  </p>
-                )}
-                {interfaceError === 'not_found' && (
-                  <p className="text-red-400 text-xs mt-1">
-                    L'interface configurée n'existe plus
-                  </p>
-                )}
-              </div>
-
-              {autoSelect.networkInterface && !interfaceError && (
-                <>
-                  <div className="flex items-center justify-between">
-                    <span className="text-gray-400 text-sm">Charge (moy. {autoSelect.averagingTime}s):</span>
-                    <span className="text-white font-mono font-bold text-lg">{networkRps.averaged.toLocaleString()} req/s</span>
-                  </div>
-                  {autoSelect.enabled && currentMode && (
-                    <div className="flex items-center justify-between">
-                      <span className="text-gray-400 text-sm">Mode appliqué:</span>
-                      <span className={`font-medium ${
-                        currentMode === 'economy' ? 'text-indigo-400' :
-                        currentMode === 'performance' ? 'text-orange-400' : 'text-blue-400'
-                      }`}>
-                        {MODE_LABELS[currentMode]}
-                      </span>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-
-            {autoSelect.enabled && (
-              <div className="bg-gray-900 p-4 space-y-px">
-                <div className="grid grid-cols-3 gap-px">
-                  <div>
-                    <label className="block text-xs text-gray-400 mb-1">Seuil bas (req/s)</label>
-                    <input
-                      type="number"
-                      value={autoSelect.thresholds.low}
-                      onChange={e => setAutoSelect(prev => ({
-                        ...prev,
-                        thresholds: { ...prev.thresholds, low: parseInt(e.target.value) || 0 }
-                      }))}
-                      className="w-full bg-gray-800 border border-gray-700 px-3 py-2 text-white text-sm"
-                    />
-                    <span className="text-xs text-indigo-400">→ Économie</span>
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-400 mb-1">Seuil haut (req/s)</label>
-                    <input
-                      type="number"
-                      value={autoSelect.thresholds.high}
-                      onChange={e => setAutoSelect(prev => ({
-                        ...prev,
-                        thresholds: { ...prev.thresholds, high: parseInt(e.target.value) || 0 }
-                      }))}
-                      className="w-full bg-gray-800 border border-gray-700 px-3 py-2 text-white text-sm"
-                    />
-                    <span className="text-xs text-orange-400">→ Performance</span>
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-400 mb-1">Temps moyenne (s)</label>
-                    <input
-                      type="number"
-                      min="1"
-                      max="30"
-                      value={autoSelect.averagingTime}
-                      onChange={e => setAutoSelect(prev => ({
-                        ...prev,
-                        averagingTime: Math.max(1, Math.min(30, parseInt(e.target.value) || 3))
-                      }))}
-                      className="w-full bg-gray-800 border border-gray-700 px-3 py-2 text-white text-sm"
-                    />
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-3">
-                  <Button onClick={handleSaveAutoSelect} loading={savingAutoSelect}>
-                    Enregistrer
-                  </Button>
-                  {autoSelectMessage && (
-                    <span className={autoSelectMessage.type === 'success' ? 'text-green-400' : 'text-red-400'}>
-                      {autoSelectMessage.text}
-                    </span>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
+          )}
         </div>
-      </Card>
-      </div>
       </Section>
     </div>
   );

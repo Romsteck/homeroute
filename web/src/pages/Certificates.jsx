@@ -4,12 +4,10 @@ import {
   RefreshCw,
   CheckCircle,
   AlertTriangle,
-  Calendar,
   Globe,
   ExternalLink,
   Shield
 } from 'lucide-react';
-import Card from '../components/Card';
 import Button from '../components/Button';
 import PageHeader from '../components/PageHeader';
 import Section from '../components/Section';
@@ -73,9 +71,9 @@ const Certificates = () => {
 
   function formatDate(dateString) {
     return new Date(dateString).toLocaleDateString('fr-FR', {
-      year: 'numeric',
-      month: 'long',
       day: 'numeric',
+      month: 'short',
+      year: 'numeric',
     });
   }
 
@@ -115,7 +113,7 @@ const Certificates = () => {
 
       {message && (
         <div
-          className={`p-3 ${
+          className={`px-6 py-2 text-sm ${
             message.type === 'error'
               ? 'bg-red-500/20 text-red-400'
               : 'bg-green-500/20 text-green-400'
@@ -126,135 +124,132 @@ const Certificates = () => {
       )}
 
       <Section title="Fournisseur">
-        <Card title="Let's Encrypt" icon={Shield}>
-          <div className="space-y-px">
-            <div className="flex items-center gap-3">
-              <div className="flex items-center gap-2">
-                <CheckCircle className="w-5 h-5 text-green-400" />
-                <span className="font-medium text-green-400">Actif</span>
-              </div>
-              <span className="px-2 py-1 bg-blue-900/30 text-blue-300 text-sm rounded">
-                Certificats wildcards
-              </span>
-            </div>
-
-            <p className="text-sm text-gray-400">
-              Les certificats sont emis par Let's Encrypt et renouveles automatiquement 30 jours avant expiration.
-              Ils sont reconnus par tous les navigateurs sans configuration.
-            </p>
-
-            <div className="flex items-center gap-4 pt-2">
-              <Button
-                onClick={handleRenewAll}
-                disabled={renewing}
-                variant="outline"
-              >
-                <RefreshCw className={`w-4 h-4 mr-2 ${renewing ? 'animate-spin' : ''}`} />
-                {renewing ? 'Renouvellement...' : 'Forcer le renouvellement'}
-              </Button>
-
-              <a
-                href="https://letsencrypt.org/"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1 text-sm text-blue-400 hover:text-blue-300"
-              >
-                <ExternalLink className="w-4 h-4" />
-                letsencrypt.org
-              </a>
-            </div>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Shield className="w-4 h-4 text-blue-400" />
+            <span className="text-sm font-medium">Let's Encrypt</span>
+            <CheckCircle className="w-4 h-4 text-green-400" />
+            <span className="text-sm text-green-400">Actif</span>
+            <span className="px-1.5 py-0.5 bg-blue-900/30 text-blue-300 text-xs rounded">
+              Wildcards
+            </span>
+            <span className="text-xs text-gray-500">Renouvellement auto 30j avant expiration</span>
           </div>
-        </Card>
+          <div className="flex items-center gap-3">
+            <Button
+              onClick={handleRenewAll}
+              disabled={renewing}
+              variant="outline"
+              size="sm"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${renewing ? 'animate-spin' : ''}`} />
+              {renewing ? 'Renouvellement...' : 'Forcer le renouvellement'}
+            </Button>
+            <a
+              href="https://letsencrypt.org/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-300"
+            >
+              <ExternalLink className="w-3 h-3" />
+              letsencrypt.org
+            </a>
+          </div>
+        </div>
       </Section>
 
       <Section title={`Certificats (${certificates.length})`}>
-        <div className="flex items-center justify-end mb-4">
-          <Button
-            onClick={fetchData}
-            variant="outline"
-            size="sm"
-          >
-            <RefreshCw className="w-4 h-4" />
-          </Button>
-        </div>
-
         {certificates.length === 0 ? (
-          <div className="text-center py-8 text-gray-400">
-            Aucun certificat disponible. Les certificats seront emis automatiquement.
+          <div className="text-center py-4 text-gray-400 text-sm">
+            Aucun certificat. Les certificats seront emis automatiquement.
           </div>
         ) : (
-          <div className="space-y-px">
-            {certificates.map((cert) => {
-              const daysUntilExpiry = getDaysUntilExpiry(cert.expires_at);
-              const needsRenewal = daysUntilExpiry < 30;
-              const expired = daysUntilExpiry < 0;
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-gray-500 uppercase tracking-wider border-b border-gray-700/50">
+                <th className="text-left py-1.5 font-medium">Domaine</th>
+                <th className="text-left py-1.5 font-medium">Type</th>
+                <th className="text-left py-1.5 font-medium">Emission</th>
+                <th className="text-left py-1.5 font-medium">Expiration</th>
+                <th className="text-left py-1.5 font-medium">Statut</th>
+                <th className="text-right py-1.5">
+                  <button
+                    onClick={fetchData}
+                    className="text-gray-500 hover:text-gray-300 p-0.5"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                  </button>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {certificates.map((cert) => {
+                const daysUntilExpiry = getDaysUntilExpiry(cert.expires_at);
+                const needsRenewal = daysUntilExpiry < 30;
+                const expired = daysUntilExpiry < 0;
 
-              return (
-                <div
-                  key={cert.id}
-                  className={`border border-gray-700 p-4 ${
-                    expired
-                      ? 'bg-red-900/10 border-red-800'
-                      : needsRenewal
-                      ? 'bg-orange-900/10 border-orange-800'
-                      : ''
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex-1 space-y-3">
-                      <div className="flex items-center gap-3">
-                        <div className="flex items-center gap-2">
-                          <Globe className="w-5 h-5 text-blue-400" />
-                          <span className="font-medium text-lg">
-                            {cert.domains && cert.domains.length > 0
-                              ? cert.domains[0]
-                              : cert.id || 'Certificat'}
-                          </span>
-                        </div>
-                        <span className={`px-2 py-0.5 text-xs rounded ${
-                          cert.type === 'app'
-                            ? 'bg-purple-900/30 text-purple-300'
-                            : cert.type === 'global'
-                            ? 'bg-blue-900/30 text-blue-300'
-                            : 'bg-gray-700 text-gray-300'
-                        }`}>
-                          {getTypeLabel(cert)}
+                return (
+                  <tr
+                    key={cert.id}
+                    className={`border-b border-gray-800 hover:bg-gray-800/30 ${
+                      expired
+                        ? 'bg-red-900/5'
+                        : needsRenewal
+                        ? 'bg-orange-900/5'
+                        : ''
+                    }`}
+                  >
+                    <td className="py-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <Globe className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                        <span className="font-medium">
+                          {cert.domains && cert.domains.length > 0
+                            ? cert.domains[0]
+                            : cert.id || 'Certificat'}
                         </span>
                       </div>
-
-                      <div className="flex items-center gap-6 text-sm text-gray-400">
-                        <span className="flex items-center gap-1">
-                          <Calendar className="w-4 h-4" />
-                          Emis : {formatDate(cert.issued_at)}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Calendar className="w-4 h-4" />
-                          Expire : {formatDate(cert.expires_at)}
-                        </span>
-                      </div>
-
+                    </td>
+                    <td className="py-1.5">
+                      <span className={`px-1.5 py-0.5 text-xs rounded ${
+                        cert.type === 'app'
+                          ? 'bg-purple-900/30 text-purple-300'
+                          : cert.type === 'global'
+                          ? 'bg-blue-900/30 text-blue-300'
+                          : 'bg-gray-700/50 text-gray-400'
+                      }`}>
+                        {getTypeLabel(cert)}
+                      </span>
+                    </td>
+                    <td className="py-1.5 text-gray-400">
+                      {formatDate(cert.issued_at)}
+                    </td>
+                    <td className="py-1.5 text-gray-400">
+                      {formatDate(cert.expires_at)}
+                    </td>
+                    <td className="py-1.5">
                       {expired ? (
-                        <div className="flex items-center gap-2 text-red-400 text-sm font-medium">
-                          <AlertTriangle className="w-4 h-4" />
-                          Expire depuis {Math.abs(daysUntilExpiry)} jour(s)
-                        </div>
+                        <span className="flex items-center gap-1 text-red-400">
+                          <AlertTriangle className="w-3.5 h-3.5" />
+                          Expire ({Math.abs(daysUntilExpiry)}j)
+                        </span>
                       ) : needsRenewal ? (
-                        <div className="flex items-center gap-2 text-orange-400 text-sm font-medium">
-                          <AlertTriangle className="w-4 h-4" />
-                          Renouvellement prevu dans {daysUntilExpiry} jour(s)
-                        </div>
+                        <span className="flex items-center gap-1 text-orange-400">
+                          <AlertTriangle className="w-3.5 h-3.5" />
+                          Renouvellement ({daysUntilExpiry}j)
+                        </span>
                       ) : (
-                        <div className="flex items-center gap-2 text-green-400 text-sm">
-                          <CheckCircle className="w-4 h-4" />
-                          Valide ({daysUntilExpiry} jours restants)
-                        </div>
+                        <span className="flex items-center gap-1 text-green-400">
+                          <CheckCircle className="w-3.5 h-3.5" />
+                          Valide ({daysUntilExpiry}j)
+                        </span>
                       )}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+                    </td>
+                    <td></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         )}
       </Section>
     </div>
