@@ -61,20 +61,16 @@ pub struct DeployContext {
     pub environment: Environment,
 }
 
-/// Run the MCP stdio server.
+/// Run the MCP stdio server for Dataverse tools.
 ///
 /// When `outbound_tx` and `schema_signals` are provided, the server can
 /// send requests to the registry via the WebSocket and wait for responses
 /// (used by the `list_other_apps_schemas` tool).
-///
-/// When `deploy_ctx` is provided and environment is Development, deploy
-/// tools (deploy, deploy_status, prod_logs) are available.
 pub async fn run_mcp_server_with_registry(
     outbound_tx: Option<mpsc::Sender<AgentMessage>>,
     schema_signals: Option<SchemaQuerySignals>,
-    deploy_ctx: Option<DeployContext>,
 ) -> Result<()> {
-    info!("Starting MCP stdio server");
+    info!("Starting MCP Dataverse server");
 
     let dataverse = LocalDataverse::open()?;
     let engine = dataverse.engine().clone();
@@ -125,12 +121,7 @@ pub async fn run_mcp_server_with_registry(
                 continue;
             }
             "tools/list" => {
-                let mut tools = get_tool_definitions();
-                if let Some(ref ctx) = deploy_ctx {
-                    if ctx.environment == Environment::Development {
-                        tools.extend(get_deploy_tool_definitions());
-                    }
-                }
+                let tools = get_tool_definitions();
                 Ok(json!({ "tools": tools }))
             },
             "tools/call" => {
@@ -145,12 +136,8 @@ pub async fn run_mcp_server_with_registry(
                     .cloned()
                     .unwrap_or(json!({}));
 
-                // Deploy tools (async, HTTP-based)
-                if matches!(tool_name, "deploy" | "deploy_status" | "prod_logs") {
-                    handle_deploy_tool_call(deploy_ctx.as_ref(), tool_name, &arguments).await
-                }
                 // Registry-backed tools (async, no engine lock needed)
-                else if tool_name == "list_other_apps_schemas" {
+                if tool_name == "list_other_apps_schemas" {
                     handle_list_other_apps_schemas(
                         outbound_tx.as_ref(),
                         schema_signals.as_ref(),
@@ -195,7 +182,102 @@ pub async fn run_mcp_server_with_registry(
 
 /// Run the MCP stdio server without registry communication (standalone mode).
 pub async fn run_mcp_server() -> Result<()> {
-    run_mcp_server_with_registry(None, None, None).await
+    run_mcp_server_with_registry(None, None).await
+}
+
+/// Run the Deploy MCP stdio server (separate from Dataverse).
+/// Only exposes deploy, deploy_status, and prod_logs tools.
+pub async fn run_deploy_mcp_server(ctx: DeployContext) -> Result<()> {
+    info!("Starting MCP Deploy server");
+
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let request: JsonRpcRequest = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(e) => {
+                let resp = JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: Value::Null,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32700,
+                        message: format!("Parse error: {}", e),
+                        data: None,
+                    }),
+                };
+                writeln!(&stdout, "{}", serde_json::to_string(&resp)?)?;
+                continue;
+            }
+        };
+
+        let id = request.id.clone().unwrap_or(Value::Null);
+
+        let result = match request.method.as_str() {
+            "initialize" => Ok(json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "hr-deploy",
+                    "version": "0.1.0"
+                },
+                "instructions": "Deploy tools for pushing builds from development to production containers."
+            })),
+            "notifications/initialized" => {
+                continue;
+            }
+            "tools/list" => {
+                let tools = get_deploy_tool_definitions();
+                Ok(json!({ "tools": tools }))
+            },
+            "tools/call" => {
+                let tool_name = request
+                    .params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let arguments = request
+                    .params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or(json!({}));
+                handle_deploy_tool_call(Some(&ctx), tool_name, &arguments).await
+            }
+            _ => Err(format!("Method not found: {}", request.method)),
+        };
+
+        let resp = match result {
+            Ok(value) => JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: Some(value),
+                error: None,
+            },
+            Err(e) => JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32603,
+                    message: e,
+                    data: None,
+                }),
+            },
+        };
+
+        writeln!(&stdout, "{}", serde_json::to_string(&resp)?)?;
+        stdout.lock().flush()?;
+    }
+
+    Ok(())
 }
 
 fn get_tool_definitions() -> Vec<Value> {
@@ -762,40 +844,26 @@ fn get_deploy_tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "deploy",
-            "description": "Build the application and deploy it to the linked production container. Runs the build command, creates a tarball of the build output, and pushes it to production (stop → copy → start).",
+            "description": "Deploy a compiled Rust binary to the linked production container. Copies the binary to /opt/app/app on prod, creates the app.service systemd unit if needed, and (re)starts the service. This tool does NOT build — run `cargo build --release` first, then pass the binary path. The binary manages its own configuration (e.g. read from /opt/app/config.toml or environment variables). The deploy is synchronous and blocks until the service is restarted.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "build_command": {
+                    "binary_path": {
                         "type": "string",
-                        "description": "Shell command to build the application (e.g. 'npm run build', 'cargo build --release')"
-                    },
-                    "build_output_dir": {
-                        "type": "string",
-                        "description": "Directory containing build output to deploy (e.g. 'dist', 'build', 'target/release'). Defaults to current directory.",
-                        "default": "."
+                        "description": "Absolute path to the compiled Rust binary (e.g. /root/workspace/target/release/my-app)"
                     }
                 },
-                "required": ["build_command"]
+                "required": ["binary_path"]
             }
         }),
         json!({
-            "name": "deploy_status",
-            "description": "Check the status of a deployment by its deploy ID.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "deploy_id": {
-                        "type": "string",
-                        "description": "The deploy ID returned by the deploy tool"
-                    }
-                },
-                "required": ["deploy_id"]
-            }
+            "name": "prod_status",
+            "description": "Check the status of the linked production container's app.service and deployed binary. Returns whether the service is active, its uptime, and metadata about the binary at /opt/app/app (size, modification date).",
+            "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
             "name": "prod_logs",
-            "description": "Get recent logs from the linked production container's app service.",
+            "description": "Get recent logs from the linked production container's app.service (journalctl output).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -805,6 +873,38 @@ fn get_deploy_tool_definitions() -> Vec<Value> {
                         "default": 50
                     }
                 }
+            }
+        }),
+        json!({
+            "name": "prod_exec",
+            "description": "Execute a shell command on the linked production container. Useful for creating directories, checking files, installing packages, inspecting the prod environment, etc. The command runs as root inside the prod container.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command to execute (e.g. 'ls -la /opt/app/', 'mkdir -p /opt/app/data')"
+                    }
+                },
+                "required": ["command"]
+            }
+        }),
+        json!({
+            "name": "prod_push",
+            "description": "Copy a local file or directory to the linked production container. For directories, the contents are archived and extracted at the destination. Use this to push config files (.env), static assets, database files, or any other files needed on prod.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "local_path": {
+                        "type": "string",
+                        "description": "Absolute path to the local file or directory to copy (e.g. /root/workspace/.env, /root/workspace/frontend/dist)"
+                    },
+                    "remote_path": {
+                        "type": "string",
+                        "description": "Absolute destination path on the prod container (e.g. /opt/app/.env, /opt/app/dist)"
+                    }
+                },
+                "required": ["local_path", "remote_path"]
             }
         }),
     ]
@@ -828,86 +928,51 @@ async fn handle_deploy_tool_call(
 
     match tool {
         "deploy" => {
-            let build_command = args
-                .get("build_command")
+            let binary_path = args
+                .get("binary_path")
                 .and_then(|v| v.as_str())
-                .ok_or("build_command required")?;
-            let build_output_dir = args
-                .get("build_output_dir")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
+                .ok_or("binary_path required")?;
 
-            // Run the build command
-            info!("Running build command: {}", build_command);
-            let build_output = tokio::process::Command::new("bash")
-                .args(["-c", build_command])
-                .current_dir("/root/workspace")
-                .output()
+            // Validate binary exists
+            let metadata = tokio::fs::metadata(binary_path)
                 .await
-                .map_err(|e| format!("Failed to run build command: {e}"))?;
-
-            if !build_output.status.success() {
-                let stderr = String::from_utf8_lossy(&build_output.stderr);
-                let stdout = String::from_utf8_lossy(&build_output.stdout);
-                return Ok(text_result(format!(
-                    "Build failed (exit code: {}):\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
-                    build_output.status, stdout, stderr
-                )));
+                .map_err(|e| format!("Cannot access binary at '{}': {}", binary_path, e))?;
+            let binary_size = metadata.len();
+            if binary_size == 0 {
+                return Err("Binary file is empty".to_string());
             }
 
-            let build_stdout = String::from_utf8_lossy(&build_output.stdout);
-            info!("Build succeeded, creating tarball");
+            info!("Deploying binary: {} ({} bytes)", binary_path, binary_size);
 
-            // Create tarball of the build output
-            let tar_path = "/tmp/deploy-artifact.tar.gz";
-            let tar_output = tokio::process::Command::new("tar")
-                .args(["czf", tar_path, "-C", &format!("/root/workspace/{}", build_output_dir), "."])
-                .output()
+            // Read the binary
+            let binary_data = tokio::fs::read(binary_path)
                 .await
-                .map_err(|e| format!("Failed to create tarball: {e}"))?;
+                .map_err(|e| format!("Failed to read binary: {e}"))?;
 
-            if !tar_output.status.success() {
-                let stderr = String::from_utf8_lossy(&tar_output.stderr);
-                return Err(format!("Failed to create tarball: {stderr}"));
-            }
-
-            // Read the tarball
-            let artifact_data = tokio::fs::read(tar_path)
-                .await
-                .map_err(|e| format!("Failed to read tarball: {e}"))?;
-            let artifact_size = artifact_data.len();
-
-            // POST to deploy endpoint as multipart
+            // POST to deploy endpoint as raw binary
             let url = format!("{}/api/applications/{}/deploy", ctx.api_base_url, ctx.app_id);
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
-            let part = reqwest::multipart::Part::bytes(artifact_data)
-                .file_name("artifact.tar.gz")
-                .mime_str("application/gzip")
-                .map_err(|e| format!("Failed to create multipart part: {e}"))?;
-
-            let form = reqwest::multipart::Form::new()
-                .part("artifact", part);
-
-            let client = reqwest::Client::new();
             let resp = client
                 .post(&url)
-                .multipart(form)
+                .header("Content-Type", "application/octet-stream")
+                .body(binary_data)
                 .send()
                 .await
                 .map_err(|e| format!("Failed to send deploy request: {e}"))?;
-
-            // Clean up temp tarball
-            let _ = tokio::fs::remove_file(tar_path).await;
 
             let status = resp.status();
             let body: Value = resp.json().await
                 .map_err(|e| format!("Failed to parse deploy response: {e}"))?;
 
             if status.is_success() && body.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
-                let deploy_id = body.get("deploy_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("Deploy completed");
                 Ok(text_result(format!(
-                    "Deploy started successfully!\n\nDeploy ID: {}\nArtifact size: {} bytes\nBuild output:\n{}\n\nUse deploy_status tool with this deploy_id to track progress.",
-                    deploy_id, artifact_size, build_stdout
+                    "Deploy successful!\n\nBinary: {} ({} bytes)\n{}",
+                    binary_path, binary_size, message
                 )))
             } else {
                 let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error");
@@ -915,16 +980,11 @@ async fn handle_deploy_tool_call(
             }
         }
 
-        "deploy_status" => {
-            let deploy_id = args
-                .get("deploy_id")
-                .and_then(|v| v.as_str())
-                .ok_or("deploy_id required")?;
-
-            let url = format!("{}/api/applications/deploys/{}", ctx.api_base_url, deploy_id);
+        "prod_status" => {
+            let url = format!("{}/api/applications/{}/prod/status", ctx.api_base_url, ctx.app_id);
             let client = reqwest::Client::new();
             let resp = client.get(&url).send().await
-                .map_err(|e| format!("Failed to query deploy status: {e}"))?;
+                .map_err(|e| format!("Failed to query prod status: {e}"))?;
 
             let body: Value = resp.json().await
                 .map_err(|e| format!("Failed to parse response: {e}"))?;
@@ -938,21 +998,147 @@ async fn handle_deploy_tool_call(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(50);
 
-            // Read logs from the app service in the production container
-            // The prod container runs the same app service; we query via journalctl
-            let output = tokio::process::Command::new("journalctl")
-                .args(["--user", "-u", "app", "-n", &lines.to_string(), "--no-pager"])
+            let url = format!(
+                "{}/api/applications/{}/prod/logs?lines={}",
+                ctx.api_base_url, ctx.app_id, lines
+            );
+            let client = reqwest::Client::new();
+            let resp = client.get(&url).send().await
+                .map_err(|e| format!("Failed to query prod logs: {e}"))?;
+
+            let body: Value = resp.json().await
+                .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+            if let Some(logs) = body.get("logs").and_then(|v| v.as_str()) {
+                Ok(text_result(logs.to_string()))
+            } else {
+                Ok(text_result(serde_json::to_string_pretty(&body).unwrap()))
+            }
+        }
+
+        "prod_exec" => {
+            let command = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .ok_or("command required")?;
+
+            let url = format!("{}/api/applications/{}/prod/exec", ctx.api_base_url, ctx.app_id);
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+
+            let resp = client.post(&url)
+                .json(&json!({"command": command}))
+                .send()
+                .await
+                .map_err(|e| format!("Failed to send exec request: {e}"))?;
+
+            let body: Value = resp.json().await
+                .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+            if let Some(stdout) = body.get("stdout").and_then(|v| v.as_str()) {
+                let stderr = body.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+                let success = body.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+                let mut output = String::new();
+                if !success {
+                    output.push_str("Command failed!\n\n");
+                }
+                if !stdout.is_empty() {
+                    output.push_str(&format!("STDOUT:\n{}\n", stdout));
+                }
+                if !stderr.is_empty() {
+                    output.push_str(&format!("STDERR:\n{}\n", stderr));
+                }
+                if output.is_empty() {
+                    output = "Command completed (no output)".to_string();
+                }
+                Ok(text_result(output))
+            } else {
+                Ok(text_result(serde_json::to_string_pretty(&body).unwrap()))
+            }
+        }
+
+        "prod_push" => {
+            let local_path = args
+                .get("local_path")
+                .and_then(|v| v.as_str())
+                .ok_or("local_path required")?;
+            let remote_path = args
+                .get("remote_path")
+                .and_then(|v| v.as_str())
+                .ok_or("remote_path required")?;
+
+            let metadata = tokio::fs::metadata(local_path)
+                .await
+                .map_err(|e| format!("Cannot access '{}': {}", local_path, e))?;
+
+            let is_dir = metadata.is_dir();
+
+            // Create a tarball of the file/directory
+            let tar_path = "/tmp/prod-push-artifact.tar.gz";
+            let tar_args = if is_dir {
+                vec!["czf", tar_path, "-C", local_path, "."]
+            } else {
+                // For a single file, tar it from its parent dir with just the filename
+                let parent = std::path::Path::new(local_path)
+                    .parent()
+                    .map(|p| p.to_str().unwrap_or("/"))
+                    .unwrap_or("/");
+                let filename = std::path::Path::new(local_path)
+                    .file_name()
+                    .map(|f| f.to_str().unwrap_or("file"))
+                    .unwrap_or("file");
+                vec!["czf", tar_path, "-C", parent, filename]
+            };
+
+            let tar_output = tokio::process::Command::new("tar")
+                .args(&tar_args)
                 .output()
                 .await
-                .map_err(|e| format!("Failed to read logs: {e}"))?;
+                .map_err(|e| format!("Failed to create tarball: {e}"))?;
 
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !tar_output.status.success() {
+                let stderr = String::from_utf8_lossy(&tar_output.stderr);
+                return Err(format!("Failed to create tarball: {stderr}"));
+            }
 
-            if stdout.is_empty() && !stderr.is_empty() {
-                Ok(text_result(format!("No logs available (or error): {stderr}")))
+            let archive_data = tokio::fs::read(tar_path)
+                .await
+                .map_err(|e| format!("Failed to read tarball: {e}"))?;
+            let archive_size = archive_data.len();
+            let _ = tokio::fs::remove_file(tar_path).await;
+
+            info!("Pushing {} to prod:{} ({} bytes archive, is_dir={})",
+                local_path, remote_path, archive_size, is_dir);
+
+            let url = format!("{}/api/applications/{}/prod/push", ctx.api_base_url, ctx.app_id);
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+
+            let resp = client.post(&url)
+                .header("Content-Type", "application/octet-stream")
+                .header("X-Remote-Path", remote_path)
+                .header("X-Is-Directory", if is_dir { "true" } else { "false" })
+                .body(archive_data)
+                .send()
+                .await
+                .map_err(|e| format!("Failed to send push request: {e}"))?;
+
+            let body: Value = resp.json().await
+                .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+            if body.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+                Ok(text_result(format!(
+                    "Pushed {} → prod:{}\nArchive size: {} bytes\nType: {}",
+                    local_path, remote_path, archive_size,
+                    if is_dir { "directory" } else { "file" }
+                )))
             } else {
-                Ok(text_result(stdout.to_string()))
+                let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error");
+                Ok(text_result(format!("Push failed: {}", error)))
             }
         }
 

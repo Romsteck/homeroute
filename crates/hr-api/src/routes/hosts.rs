@@ -1521,19 +1521,16 @@ async fn handle_local_nspawn_import(
                 let _ = tokio::fs::create_dir_all(&ws_dir).await;
             }
         }
-    } else {
-        // Ensure workspace dir exists
-        let _ = tokio::fs::create_dir_all(&ws_dir).await;
     }
 
     let sp = std::path::Path::new(&storage_path);
 
-    // Write .nspawn unit
-    if let Err(e) = hr_container::NspawnClient::write_nspawn_unit(&container_name, sp, &network_mode).await {
+    // Write .nspawn unit (dev containers get workspace bind, prod don't)
+    if let Err(e) = hr_container::NspawnClient::write_nspawn_unit(&container_name, sp, &network_mode, has_workspace).await {
         tracing::error!(transfer_id = %transfer_id, %e, "Failed to write nspawn unit");
         registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Failed to write nspawn unit: {e}")).await;
         let _ = tokio::fs::remove_dir_all(&rootfs_dir).await;
-        let _ = tokio::fs::remove_dir_all(&ws_dir).await;
+        if has_workspace { let _ = tokio::fs::remove_dir_all(&ws_dir).await; }
         let _ = tokio::fs::remove_file(&import_path).await;
         let _ = tokio::fs::remove_file(&ws_import_path).await;
         return;
@@ -1544,7 +1541,7 @@ async fn handle_local_nspawn_import(
         tracing::error!(transfer_id = %transfer_id, %e, "Failed to write network config");
         registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Failed to write network config: {e}")).await;
         let _ = tokio::fs::remove_dir_all(&rootfs_dir).await;
-        let _ = tokio::fs::remove_dir_all(&ws_dir).await;
+        if has_workspace { let _ = tokio::fs::remove_dir_all(&ws_dir).await; }
         let _ = tokio::fs::remove_file(&import_path).await;
         let _ = tokio::fs::remove_file(&ws_import_path).await;
         return;

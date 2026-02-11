@@ -572,7 +572,7 @@ function Containers() {
           >
             <span>Env</span>
             <span>Status</span>
-            <span>URL</span>
+            <span className="col-span-4">URL</span>
             <span className="text-right">CPU</span>
             <span className="text-right">RAM</span>
             <span>Hote</span>
