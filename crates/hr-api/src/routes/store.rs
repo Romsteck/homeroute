@@ -28,6 +28,8 @@ pub struct StoreApp {
     pub description: String,
     pub category: String,
     pub icon: Option<String>,
+    #[serde(default)]
+    pub android_package: Option<String>,
     pub publisher_app_id: String,
     pub releases: Vec<StoreRelease>,
     pub created_at: DateTime<Utc>,
@@ -105,6 +107,8 @@ pub fn router() -> Router<ApiState> {
         )
         .route("/releases/{slug}/{version}/download", get(download_release))
         .route("/updates", get(check_updates))
+        .route("/client/apk", get(download_client_apk))
+        .route("/client/version", get(client_version))
 }
 
 // ── Handlers ─────────────────────────────────────────────────
@@ -123,6 +127,7 @@ async fn list_apps() -> impl IntoResponse {
                 "description": app.description,
                 "category": app.category,
                 "icon": app.icon,
+                "android_package": app.android_package,
                 "publisher_app_id": app.publisher_app_id,
                 "latest_version": latest.map(|r| r.version.as_str()),
                 "latest_size_bytes": latest.map(|r| r.size_bytes),
@@ -213,6 +218,10 @@ async fn publish_release(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+    let android_package = headers
+        .get("X-Android-Package")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
 
     // Compute SHA-256
     let mut hasher = Sha256::new();
@@ -271,6 +280,22 @@ async fn publish_release(
             .into_response();
     }
 
+    // Auto-detect android_package from APK if not provided via header
+    let android_package = android_package.or_else(|| {
+        let output = std::process::Command::new("/opt/android-sdk/build-tools/36.0.0/aapt2")
+            .args(["dump", "packagename", &apk_path])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let pkg = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !pkg.is_empty() {
+                info!(slug, %pkg, "Auto-detected android_package from APK");
+                return Some(pkg);
+            }
+        }
+        None
+    });
+
     // Upsert into catalog
     let now = Utc::now();
     let release = StoreRelease {
@@ -287,6 +312,9 @@ async fn publish_release(
         // Update metadata if provided
         if let Some(name) = &app_name {
             app.name = name.clone();
+        }
+        if android_package.is_some() && app.android_package.is_none() {
+            app.android_package = android_package.clone();
         }
         if !app_description.is_empty() {
             app.description = app_description;
@@ -318,6 +346,7 @@ async fn publish_release(
             description: app_description,
             category: app_category,
             icon: None,
+            android_package,
             publisher_app_id,
             releases: vec![release],
             created_at: now,
@@ -441,6 +470,56 @@ async fn check_updates(Query(query): Query<UpdateQuery>) -> impl IntoResponse {
         "updates": updates,
     }))
     .into_response()
+}
+
+// ── Client APK download ─────────────────────────────────────
+
+const CLIENT_APK_PATH: &str = "/opt/homeroute/data/store/client/homeroute-store.apk";
+
+async fn download_client_apk() -> impl IntoResponse {
+    let path = std::path::Path::new(CLIENT_APK_PATH);
+    if !path.exists() {
+        return (StatusCode::NOT_FOUND, "Client APK not available").into_response();
+    }
+
+    match tokio::fs::read(path).await {
+        Ok(data) => {
+            let headers = [
+                (header::CONTENT_TYPE, "application/vnd.android.package-archive"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"homeroute-store.apk\"",
+                ),
+            ];
+            (headers, data).into_response()
+        }
+        Err(e) => {
+            error!("Failed to read client APK: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read APK").into_response()
+        }
+    }
+}
+
+// ── Client version check ────────────────────────────────────
+
+const CLIENT_VERSION_PATH: &str = "/opt/homeroute/data/store/client/version.json";
+
+async fn client_version() -> impl IntoResponse {
+    let path = std::path::Path::new(CLIENT_VERSION_PATH);
+    if !path.exists() {
+        return (StatusCode::NOT_FOUND, "Version info not available").into_response();
+    }
+
+    match tokio::fs::read(path).await {
+        Ok(data) => {
+            let headers = [(header::CONTENT_TYPE, "application/json")];
+            (headers, data).into_response()
+        }
+        Err(e) => {
+            error!("Failed to read client version.json: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read version info").into_response()
+        }
+    }
 }
 
 #[cfg(test)]
