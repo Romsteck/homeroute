@@ -607,6 +607,9 @@ async fn main() -> anyhow::Result<()> {
         registry.clone(),
     ));
 
+    // ── Restore local containers that were running before reboot ──────
+    container_manager.restore_local_containers().await;
+
     // ── Management API (Important) ────────────────────────────────────
 
     let api_state = hr_api::state::ApiState {

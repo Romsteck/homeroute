@@ -183,6 +183,63 @@ impl ContainerManager {
         }
     }
 
+    /// Restart local containers that were Running before a reboot.
+    pub async fn restore_local_containers(&self) {
+        let containers: Vec<ContainerV2Record> = {
+            let state = self.state.read().await;
+            state
+                .containers
+                .iter()
+                .filter(|c| c.host_id == "local" && c.status == ContainerV2Status::Running)
+                .cloned()
+                .collect()
+        };
+
+        if containers.is_empty() {
+            info!("No local containers to restore");
+            return;
+        }
+
+        info!(count = containers.len(), "Restoring local containers after boot");
+        for c in &containers {
+            match NspawnClient::start_container(&c.container_name).await {
+                Ok(_) => info!(container = %c.container_name, "Restored container"),
+                Err(e) => error!(container = %c.container_name, "Failed to restore container: {e}"),
+            }
+        }
+    }
+
+    /// Restart containers on a remote host that were Running before it disconnected.
+    pub async fn restore_host_containers(&self, host_id: &str) {
+        let containers: Vec<ContainerV2Record> = {
+            let state = self.state.read().await;
+            state
+                .containers
+                .iter()
+                .filter(|c| c.host_id == host_id && c.status == ContainerV2Status::Running)
+                .cloned()
+                .collect()
+        };
+
+        if containers.is_empty() {
+            return;
+        }
+
+        info!(host_id, count = containers.len(), "Restoring containers on reconnected host");
+        for c in &containers {
+            if let Err(e) = self.registry.send_host_command(
+                host_id,
+                HostRegistryMessage::StartContainer {
+                    container_name: c.container_name.clone(),
+                },
+            ).await {
+                error!(container = %c.container_name, host_id, "Failed to restore container on host: {e}");
+            } else {
+                info!(container = %c.container_name, host_id, "Sent start command to host");
+            }
+        }
+    }
+
     /// Persist state to disk (atomic write).
     async fn save_state(&self) -> Result<(), String> {
         let state = self.state.read().await;
