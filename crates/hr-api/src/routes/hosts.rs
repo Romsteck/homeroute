@@ -1051,6 +1051,11 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
         }
     }
 
+    // Restore containers that should be running on this host
+    if let Some(cm) = &state.container_manager {
+        cm.restore_host_containers(&host_id).await;
+    }
+
     // Track which transfer_ids are being relayed (remote→remote)
     let mut relay_transfers: std::collections::HashSet<String> = std::collections::HashSet::new();
 
