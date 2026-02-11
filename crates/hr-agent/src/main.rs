@@ -55,6 +55,15 @@ async fn main() -> Result<()> {
         return start_deploy_mcp().await;
     }
 
+    if args.len() > 1 && args[1] == "mcp-store" {
+        tracing_subscriber::fmt()
+            .with_env_filter("warn")
+            .with_writer(std::io::stderr)
+            .init();
+
+        return start_store_mcp().await;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -432,6 +441,60 @@ async fn start_deploy_mcp() -> Result<()> {
     drop(ws_sink);
 
     mcp::run_deploy_mcp_server(deploy_ctx).await
+}
+
+/// Start the Store MCP server — connects to registry to get app_id.
+async fn start_store_mcp() -> Result<()> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let cfg = config::AgentConfig::load(CONFIG_PATH)?;
+    let url = cfg.ws_url();
+
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await?;
+    let (mut ws_sink, mut ws_stream) = ws_stream.split();
+
+    // Authenticate
+    let auth_msg = AgentMessage::Auth {
+        token: cfg.token.clone(),
+        service_name: cfg.service_name.clone(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        ipv4_address: None,
+    };
+    ws_sink
+        .send(Message::Text(serde_json::to_string(&auth_msg)?.into()))
+        .await?;
+
+    // Wait for auth result
+    let first_msg = ws_stream
+        .next()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Connection closed before auth response"))??;
+    let auth_result: RegistryMessage = match first_msg {
+        Message::Text(text) => serde_json::from_str(&text)?,
+        other => anyhow::bail!("Unexpected message type during auth: {other:?}"),
+    };
+    let app_id = match auth_result {
+        RegistryMessage::AuthResult { success: true, app_id, .. } => {
+            app_id.unwrap_or_default()
+        }
+        RegistryMessage::AuthResult { success: false, error, .. } => {
+            anyhow::bail!("Authentication failed: {}", error.unwrap_or_default());
+        }
+        _ => anyhow::bail!("Unexpected message during auth handshake"),
+    };
+
+    // Build store context
+    let api_base_url = format!("http://{}:{}", cfg.homeroute_address, cfg.homeroute_port);
+    let ctx = mcp::StoreContext {
+        app_id,
+        api_base_url,
+    };
+
+    // Close the WebSocket (store MCP doesn't need ongoing WS connection)
+    drop(ws_sink);
+
+    mcp::run_store_mcp_server(ctx).await
 }
 
 async fn handle_registry_message(

@@ -61,6 +61,13 @@ pub struct DeployContext {
     pub environment: Environment,
 }
 
+/// Context for store tools (available in all environments).
+#[derive(Clone)]
+pub struct StoreContext {
+    pub app_id: String,
+    pub api_base_url: String,
+}
+
 /// Run the MCP stdio server for Dataverse tools.
 ///
 /// When `outbound_tx` and `schema_signals` are provided, the server can
@@ -250,6 +257,101 @@ pub async fn run_deploy_mcp_server(ctx: DeployContext) -> Result<()> {
                     .cloned()
                     .unwrap_or(json!({}));
                 handle_deploy_tool_call(Some(&ctx), tool_name, &arguments).await
+            }
+            _ => Err(format!("Method not found: {}", request.method)),
+        };
+
+        let resp = match result {
+            Ok(value) => JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: Some(value),
+                error: None,
+            },
+            Err(e) => JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32603,
+                    message: e,
+                    data: None,
+                }),
+            },
+        };
+
+        writeln!(&stdout, "{}", serde_json::to_string(&resp)?)?;
+        stdout.lock().flush()?;
+    }
+
+    Ok(())
+}
+
+/// Run the Store MCP stdio server (separate from Dataverse and Deploy).
+/// Exposes tools for browsing, publishing, and updating store applications.
+pub async fn run_store_mcp_server(ctx: StoreContext) -> Result<()> {
+    info!("Starting MCP Store server");
+
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let request: JsonRpcRequest = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(e) => {
+                let resp = JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: Value::Null,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32700,
+                        message: format!("Parse error: {}", e),
+                        data: None,
+                    }),
+                };
+                writeln!(&stdout, "{}", serde_json::to_string(&resp)?)?;
+                continue;
+            }
+        };
+
+        let id = request.id.clone().unwrap_or(Value::Null);
+
+        let result = match request.method.as_str() {
+            "initialize" => Ok(json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "hr-store",
+                    "version": "0.1.0"
+                },
+                "instructions": "Store tools for browsing, publishing, and updating HomeRoute applications."
+            })),
+            "notifications/initialized" => {
+                continue;
+            }
+            "tools/list" => {
+                let tools = get_store_tool_definitions();
+                Ok(json!({ "tools": tools }))
+            },
+            "tools/call" => {
+                let tool_name = request
+                    .params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let arguments = request
+                    .params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or(json!({}));
+                handle_store_tool_call(Some(&ctx), tool_name, &arguments).await
             }
             _ => Err(format!("Method not found: {}", request.method)),
         };
@@ -910,6 +1012,217 @@ fn get_deploy_tool_definitions() -> Vec<Value> {
     ]
 }
 
+// ── Store tools (all environments) ──────────────
+
+fn get_store_tool_definitions() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "list_store_apps",
+            "description": "List all applications available in the HomeRoute Store. Returns app names, slugs, categories, and latest version info.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "get_app_info",
+            "description": "Get detailed information about a specific app in the HomeRoute Store, including all available versions and changelogs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string", "description": "App slug identifier" }
+                },
+                "required": ["slug"]
+            }
+        }),
+        json!({
+            "name": "check_updates",
+            "description": "Check for available updates for installed apps. Pass a list of currently installed app versions to see which have newer releases available.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "installed": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "slug": { "type": "string" },
+                                "version": { "type": "string" }
+                            },
+                            "required": ["slug", "version"]
+                        }
+                    }
+                },
+                "required": ["installed"]
+            }
+        }),
+        json!({
+            "name": "publish_release",
+            "description": "Publish a new release (APK) to the HomeRoute Store. The APK file must be built first (e.g. via `eas build` or local Gradle build). Pass the path to the APK file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "apk_path": { "type": "string", "description": "Absolute path to the APK file" },
+                    "slug": { "type": "string", "description": "App slug for the store" },
+                    "version": { "type": "string", "description": "Version string (e.g. 1.0.0)" },
+                    "name": { "type": "string", "description": "App display name (required for first publish)" },
+                    "description": { "type": "string" },
+                    "changelog": { "type": "string" },
+                    "category": { "type": "string" }
+                },
+                "required": ["apk_path", "slug", "version"]
+            }
+        }),
+    ]
+}
+
+async fn handle_store_tool_call(
+    store_ctx: Option<&StoreContext>,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, String> {
+    let text_result = |text: String| -> Value {
+        json!({ "content": [{ "type": "text", "text": text }] })
+    };
+
+    let ctx = store_ctx
+        .ok_or_else(|| "Store tools not available (not connected)".to_string())?;
+
+    match tool {
+        "list_store_apps" => {
+            let url = format!("{}/api/store/apps", ctx.api_base_url);
+            let client = reqwest::Client::new();
+            let resp = client.get(&url).send().await
+                .map_err(|e| format!("Failed to query store apps: {e}"))?;
+
+            let body: Value = resp.json().await
+                .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+            Ok(text_result(serde_json::to_string_pretty(&body).unwrap()))
+        }
+
+        "get_app_info" => {
+            let slug = args
+                .get("slug")
+                .and_then(|v| v.as_str())
+                .ok_or("slug required")?;
+
+            let url = format!("{}/api/store/apps/{}", ctx.api_base_url, slug);
+            let client = reqwest::Client::new();
+            let resp = client.get(&url).send().await
+                .map_err(|e| format!("Failed to query app info: {e}"))?;
+
+            let body: Value = resp.json().await
+                .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+            Ok(text_result(serde_json::to_string_pretty(&body).unwrap()))
+        }
+
+        "check_updates" => {
+            let installed = args
+                .get("installed")
+                .and_then(|v| v.as_array())
+                .ok_or("installed required (array)")?;
+
+            let installed_param: Vec<String> = installed.iter().filter_map(|item| {
+                let slug = item.get("slug").and_then(|v| v.as_str())?;
+                let version = item.get("version").and_then(|v| v.as_str())?;
+                Some(format!("{}:{}", slug, version))
+            }).collect();
+
+            let url = format!(
+                "{}/api/store/updates?installed={}",
+                ctx.api_base_url,
+                installed_param.join(",")
+            );
+            let client = reqwest::Client::new();
+            let resp = client.get(&url).send().await
+                .map_err(|e| format!("Failed to check updates: {e}"))?;
+
+            let body: Value = resp.json().await
+                .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+            Ok(text_result(serde_json::to_string_pretty(&body).unwrap()))
+        }
+
+        "publish_release" => {
+            let apk_path = args
+                .get("apk_path")
+                .and_then(|v| v.as_str())
+                .ok_or("apk_path required")?;
+            let slug = args
+                .get("slug")
+                .and_then(|v| v.as_str())
+                .ok_or("slug required")?;
+            let version = args
+                .get("version")
+                .and_then(|v| v.as_str())
+                .ok_or("version required")?;
+
+            // Validate APK exists
+            let metadata = tokio::fs::metadata(apk_path)
+                .await
+                .map_err(|e| format!("Cannot access APK at '{}': {}", apk_path, e))?;
+            let apk_size = metadata.len();
+            if apk_size == 0 {
+                return Err("APK file is empty".to_string());
+            }
+
+            info!("Publishing APK: {} ({} bytes) as {}@{}", apk_path, apk_size, slug, version);
+
+            // Read the APK
+            let apk_data = tokio::fs::read(apk_path)
+                .await
+                .map_err(|e| format!("Failed to read APK: {e}"))?;
+
+            let url = format!("{}/api/store/apps/{}/releases", ctx.api_base_url, slug);
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+
+            let mut req = client
+                .post(&url)
+                .header("Content-Type", "application/octet-stream")
+                .header("X-Version", version)
+                .header("X-Publisher-App-Id", &ctx.app_id);
+
+            if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
+                req = req.header("X-App-Name", name);
+            }
+            if let Some(description) = args.get("description").and_then(|v| v.as_str()) {
+                req = req.header("X-App-Description", description);
+            }
+            if let Some(changelog) = args.get("changelog").and_then(|v| v.as_str()) {
+                req = req.header("X-Changelog", changelog);
+            }
+            if let Some(category) = args.get("category").and_then(|v| v.as_str()) {
+                req = req.header("X-Category", category);
+            }
+
+            let resp = req
+                .body(apk_data)
+                .send()
+                .await
+                .map_err(|e| format!("Failed to send publish request: {e}"))?;
+
+            let status = resp.status();
+            let body: Value = resp.json().await
+                .map_err(|e| format!("Failed to parse publish response: {e}"))?;
+
+            if status.is_success() && body.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("Release published");
+                Ok(text_result(format!(
+                    "Published successfully!\n\nAPK: {} ({} bytes)\nSlug: {}\nVersion: {}\n{}",
+                    apk_path, apk_size, slug, version, message
+                )))
+            } else {
+                let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error");
+                Ok(text_result(format!("Publish failed: {}", error)))
+            }
+        }
+
+        _ => Err(format!("Unknown store tool: {}", tool)),
+    }
+}
+
 /// Generate the `.mcp.json` content with all tools listed in `autoApprove`.
 /// When `is_dev` is true, includes the deploy MCP server.
 pub fn generate_mcp_json(is_dev: bool) -> String {
@@ -942,6 +1255,19 @@ pub fn generate_mcp_json(is_dev: bool) -> String {
             }),
         );
     }
+
+    let store_tools: Vec<String> = get_store_tool_definitions()
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect();
+    servers.insert(
+        "store".to_string(),
+        json!({
+            "command": "/usr/local/bin/hr-agent",
+            "args": ["mcp-store"],
+            "autoApprove": store_tools
+        }),
+    );
 
     serde_json::to_string_pretty(&json!({ "mcpServers": servers })).unwrap()
 }
