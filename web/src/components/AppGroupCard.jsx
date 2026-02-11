@@ -1,6 +1,5 @@
-import { Container, Rocket, Plus } from 'lucide-react';
-import ContainerCard from './ContainerCard';
-import Button from './Button';
+import { Container, Plus, Pencil } from 'lucide-react';
+import ContainerCard, { CONTAINER_GRID } from './ContainerCard';
 
 function AppGroupCard({
   group,
@@ -11,17 +10,15 @@ function AppGroupCard({
   onStart,
   onStop,
   onTerminal,
-  onEdit,
+  onEditApp,
+  onToggleSecurity,
   onMigrate,
   onDelete,
   onMigrationDismiss,
-  onDeploy,
   onCreatePaired,
   MigrationProgress,
 }) {
   const { slug, name, dev, prod } = group;
-  const devStatus = dev ? (dev.agent_status || dev.status) : null;
-  const canDeploy = dev && prod && devStatus === 'connected';
 
   return (
     <div className="bg-gray-800 border-b border-gray-700">
@@ -31,18 +28,13 @@ function AppGroupCard({
           <Container className="w-4 h-4 text-blue-400" />
           <span className="font-semibold text-sm">{name || slug}</span>
           <span className="text-xs text-gray-500 font-mono">{slug}</span>
-        </div>
-        <div className="flex items-center gap-2">
-          {canDeploy && (
-            <Button
-              onClick={() => onDeploy(dev, prod)}
-              variant="primary"
-              className="!px-3 !py-1 text-xs"
-            >
-              <Rocket className="w-3.5 h-3.5" />
-              Deploy
-            </Button>
-          )}
+          <button
+            onClick={() => onEditApp(group)}
+            className="p-1 text-gray-500 hover:text-blue-400 hover:bg-gray-700 transition-colors"
+            title="Modifier l'application"
+          >
+            <Pencil className="w-3.5 h-3.5" />
+          </button>
         </div>
       </div>
 
@@ -58,18 +50,21 @@ function AppGroupCard({
           onStart={onStart}
           onStop={onStop}
           onTerminal={onTerminal}
-          onEdit={onEdit}
+          onToggleSecurity={onToggleSecurity}
           onMigrate={onMigrate}
           onDelete={onDelete}
           onMigrationDismiss={() => onMigrationDismiss(dev.id)}
           MigrationProgress={MigrationProgress}
         />
       ) : (
-        <div className="flex items-center gap-2 px-4 py-1.5 border-b border-gray-700/30">
-          <span className="text-xs px-1.5 py-0.5 font-medium bg-blue-100 text-blue-800">DEV</span>
+        <div
+          className="grid items-center gap-x-3 px-4 py-1.5 border-b border-gray-700/30 hover:bg-gray-700/20 transition-colors"
+          style={{ gridTemplateColumns: CONTAINER_GRID }}
+        >
+          <span className="text-xs px-1.5 py-0.5 font-medium text-center bg-blue-100 text-blue-800">DEV</span>
           <button
             onClick={() => onCreatePaired(slug, name, 'development', prod?.id)}
-            className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-400 transition-colors"
+            className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-400 transition-colors col-span-6"
           >
             <Plus className="w-3.5 h-3.5" />
             Creer conteneur DEV
@@ -88,18 +83,21 @@ function AppGroupCard({
           onStart={onStart}
           onStop={onStop}
           onTerminal={onTerminal}
-          onEdit={onEdit}
+          onToggleSecurity={onToggleSecurity}
           onMigrate={onMigrate}
           onDelete={onDelete}
           onMigrationDismiss={() => onMigrationDismiss(prod.id)}
           MigrationProgress={MigrationProgress}
         />
       ) : (
-        <div className="flex items-center gap-2 px-4 py-1.5 border-b border-gray-700/30">
-          <span className="text-xs px-1.5 py-0.5 font-medium bg-purple-100 text-purple-800">PROD</span>
+        <div
+          className="grid items-center gap-x-3 px-4 py-1.5 border-b border-gray-700/30 hover:bg-gray-700/20 transition-colors"
+          style={{ gridTemplateColumns: CONTAINER_GRID }}
+        >
+          <span className="text-xs px-1.5 py-0.5 font-medium text-center bg-purple-100 text-purple-800">PROD</span>
           <button
             onClick={() => onCreatePaired(slug, name, 'production', dev?.id)}
-            className="flex items-center gap-1 text-xs text-gray-500 hover:text-purple-400 transition-colors"
+            className="flex items-center gap-1 text-xs text-gray-500 hover:text-purple-400 transition-colors col-span-6"
           >
             <Plus className="w-3.5 h-3.5" />
             Creer conteneur PROD

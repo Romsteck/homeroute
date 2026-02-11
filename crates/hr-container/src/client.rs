@@ -21,17 +21,20 @@ pub struct NspawnClient;
 impl NspawnClient {
     /// Create and start a container: debootstrap rootfs, write .nspawn unit,
     /// write network config, machinectl start, wait for readiness.
-    pub async fn create_container(name: &str, storage_path: &Path, network_mode: &str) -> Result<()> {
-        info!(container = name, storage = %storage_path.display(), network_mode, "Creating nspawn container");
+    /// If `with_workspace` is true, a bind-mounted workspace directory is created.
+    pub async fn create_container(name: &str, storage_path: &Path, network_mode: &str, with_workspace: bool) -> Result<()> {
+        info!(container = name, storage = %storage_path.display(), network_mode, with_workspace, "Creating nspawn container");
 
         // Bootstrap Ubuntu rootfs
         crate::rootfs::bootstrap_ubuntu(name, storage_path).await?;
 
         // Create workspace directory (must exist before start due to Bind= in .nspawn unit)
-        Self::create_workspace(name, storage_path).await?;
+        if with_workspace {
+            Self::create_workspace(name, storage_path).await?;
+        }
 
         // Write .nspawn unit
-        Self::write_nspawn_unit(name, storage_path, network_mode).await?;
+        Self::write_nspawn_unit(name, storage_path, network_mode, with_workspace).await?;
 
         // Write network config inside rootfs
         Self::write_network_config(name, storage_path).await?;
@@ -275,11 +278,11 @@ impl NspawnClient {
 
     /// Write the .nspawn unit file for a container.
     /// `network_mode` is either "bridge:br-lan" or "macvlan:enp7s0f0".
-    pub async fn write_nspawn_unit(name: &str, storage_path: &Path, network_mode: &str) -> Result<()> {
+    /// If `with_workspace` is true, a bind-mount for `/root/workspace` is added.
+    pub async fn write_nspawn_unit(name: &str, storage_path: &Path, network_mode: &str, with_workspace: bool) -> Result<()> {
         tokio::fs::create_dir_all(NSPAWN_UNIT_DIR).await
             .context("failed to create nspawn unit directory")?;
 
-        let ws_path = storage_path.join(format!("{name}-workspace"));
         let network_line = if let Some(iface) = network_mode.strip_prefix("macvlan:") {
             format!("MACVLAN={iface}")
         } else if let Some(bridge) = network_mode.strip_prefix("bridge:") {
@@ -312,6 +315,13 @@ impl NspawnClient {
             String::new()
         };
 
+        let files_section = if with_workspace {
+            let ws_path = storage_path.join(format!("{name}-workspace"));
+            format!("[Files]\nBind={}:/root/workspace\n", ws_path.display())
+        } else {
+            String::new()
+        };
+
         let content = format!(
             "[Exec]\n\
              Boot=yes\n\
@@ -320,9 +330,7 @@ impl NspawnClient {
              [Network]\n\
              {network_line}\n\
              \n\
-             [Files]\n\
-             Bind={}:/root/workspace\n",
-            ws_path.display()
+             {files_section}",
         );
 
         let unit_path = format!("{NSPAWN_UNIT_DIR}/{name}.nspawn");

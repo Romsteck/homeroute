@@ -170,9 +170,10 @@ export const getMigrationStatus = (id) => api.get(`/containers/${id}/migrate/sta
 export const cancelMigration = (id) => api.post(`/containers/${id}/migrate/cancel`);
 export const getContainersConfig = () => api.get('/containers/config');
 export const updateContainersConfig = (data) => api.put('/containers/config', data);
+export const renameContainer = (id, data) => api.post(`/containers/${id}/rename`, data);
+export const getRenameStatus = (id) => api.get(`/containers/${id}/rename/status`);
 
-// Deploy (dev → prod)
-export const deployContainer = (devId) => api.post(`/applications/${devId}/deploy`);
+// Deploy status (deploys are triggered via MCP tools from dev containers)
 export const getDeployStatus = (deployId) => api.get(`/applications/deploys/${deployId}`);
 
 // Dataverse

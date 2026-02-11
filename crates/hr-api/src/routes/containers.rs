@@ -15,7 +15,8 @@ use tracing::{error, info};
 use hr_common::events::MigrationPhase;
 
 use crate::container_manager::{
-    ContainerV2Config, CreateContainerRequest, MigrateContainerRequest, UpdateContainerRequest,
+    ContainerV2Config, CreateContainerRequest, MigrateContainerRequest, RenameContainerRequest,
+    UpdateContainerRequest,
 };
 use crate::state::ApiState;
 
@@ -29,6 +30,8 @@ pub fn router() -> Router<ApiState> {
         .route("/{id}/migrate", post(migrate_container))
         .route("/{id}/migrate/status", get(migration_status))
         .route("/{id}/migrate/cancel", post(cancel_migration))
+        .route("/{id}/rename", post(rename_container))
+        .route("/{id}/rename/status", get(rename_status))
         .route("/config", get(get_config).put(update_config))
 }
 
@@ -337,6 +340,66 @@ async fn cancel_migration(
                     .into_response()
             }
         }
+    }
+}
+
+// ── Rename handlers ─────────────────────────────────────────────
+
+async fn rename_container(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(req): Json<RenameContainerRequest>,
+) -> impl IntoResponse {
+    let Some(ref mgr) = state.container_manager else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"success": false, "error": "Container manager not available"})),
+        )
+            .into_response();
+    };
+
+    match mgr.rename_container(&id, req, &state.renames).await {
+        Ok(rename_id) => Json(serde_json::json!({
+            "success": true,
+            "rename_id": rename_id,
+            "status": "in_progress"
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"success": false, "error": e})),
+        )
+            .into_response(),
+    }
+}
+
+async fn rename_status(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let renames = state.renames.read().await;
+
+    // Find a rename that involves this app_id
+    let rename = renames
+        .values()
+        .filter(|r| r.app_ids.contains(&id))
+        .max_by_key(|r| r.started_at);
+
+    match rename {
+        Some(r) => Json(serde_json::json!({
+            "rename_id": r.rename_id,
+            "old_slug": r.old_slug,
+            "new_slug": r.new_slug,
+            "phase": r.phase,
+            "started_at": r.started_at,
+            "error": r.error,
+        }))
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "No rename found"})),
+        )
+            .into_response(),
     }
 }
 

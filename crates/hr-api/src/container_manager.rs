@@ -1,5 +1,6 @@
 //! Container V2 manager: lifecycle orchestration for systemd-nspawn containers.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +15,7 @@ use hr_common::config::EnvConfig;
 use hr_common::events::{AgentStatusEvent, EventBus, MigrationPhase};
 use hr_container::NspawnClient;
 use hr_registry::protocol::{HostRegistryMessage, ServiceAction, ServiceType};
-use hr_registry::types::{AgentStatus, CreateApplicationRequest, UpdateApplicationRequest};
+use hr_registry::types::{AgentStatus, CreateApplicationRequest, Environment, UpdateApplicationRequest};
 use hr_registry::AgentRegistry;
 
 use crate::state::MigrationState;
@@ -90,6 +91,42 @@ pub struct CreateContainerRequest {
 
 fn default_true() -> bool {
     true
+}
+
+#[derive(Deserialize)]
+pub struct RenameContainerRequest {
+    pub new_slug: String,
+    #[serde(default)]
+    pub new_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameState {
+    pub rename_id: String,
+    pub app_ids: Vec<String>,
+    pub old_slug: String,
+    pub new_slug: String,
+    pub phase: RenamePhase,
+    pub started_at: DateTime<Utc>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RenamePhase {
+    Validating,
+    RequestingCert,
+    CreatingDns,
+    StoppingContainers,
+    RenamingFilesystem,
+    UpdatingAgentConfig,
+    UpdatingRegistry,
+    StartingContainers,
+    WaitingForAgent,
+    CleaningUp,
+    Complete,
+    Failed,
+    RollingBack,
 }
 
 #[derive(Deserialize)]
@@ -169,10 +206,6 @@ impl ContainerManager {
         req: CreateContainerRequest,
     ) -> Result<(ContainerV2Record, String), String> {
         let host_id = req.host_id.clone().unwrap_or_else(|| "local".to_string());
-        let container_name = match req.environment {
-            hr_registry::types::Environment::Production => format!("hr-v2-{}", req.slug),
-            hr_registry::types::Environment::Development => format!("hr-v2-{}-dev", req.slug),
-        };
 
         // Create application in registry (headless — container deploy is managed separately)
         let create_req = CreateApplicationRequest {
@@ -193,6 +226,9 @@ impl ContainerManager {
             .create_application_headless(create_req)
             .await
             .map_err(|e| format!("Failed to create application record: {e}"))?;
+
+        // Use the container_name from the registry (single source of truth)
+        let container_name = app.container_name.clone();
 
         let record = ContainerV2Record {
             id: app.id.clone(),
@@ -553,9 +589,9 @@ impl ContainerManager {
             }
         };
 
-        // Phase 1: Create the nspawn container
+        // Phase 1: Create the nspawn container (dev → with workspace)
         emit("Creation du conteneur nspawn...");
-        if let Err(e) = NspawnClient::create_container(container_name, storage, &network_mode).await {
+        if let Err(e) = NspawnClient::create_container(container_name, storage, &network_mode, true).await {
             error!(container = container_name, "Nspawn creation failed: {e}");
             emit(&format!("Erreur: {e}"));
             self.set_container_status(app_id, ContainerV2Status::Error)
@@ -704,7 +740,7 @@ WantedBy=multi-user.target
         let _ = NspawnClient::create_workspace(container_name, storage).await;
 
         // Phase 10: Deploy MCP config
-        emit("Configuration MCP Dataverse...");
+        emit("Configuration MCP...");
         let mcp_config = r#"{
   "mcpServers": {
     "dataverse": {
@@ -714,6 +750,13 @@ WantedBy=multi-user.target
         "list_tables","describe_table","create_table","add_column","remove_column",
         "drop_table","create_relation","query_data","insert_data","update_data",
         "delete_data","count_rows","get_schema","get_db_info"
+      ]
+    },
+    "deploy": {
+      "command": "/usr/local/bin/hr-agent",
+      "args": ["mcp-deploy"],
+      "autoApprove": [
+        "deploy_status","prod_logs"
       ]
     }
   }
@@ -923,9 +966,9 @@ WantedBy=multi-user.target
             }
         };
 
-        // Phase 1: Create the nspawn container
+        // Phase 1: Create the nspawn container (prod → no workspace)
         emit("Creation du conteneur nspawn...");
-        if let Err(e) = NspawnClient::create_container(container_name, storage, &network_mode).await {
+        if let Err(e) = NspawnClient::create_container(container_name, storage, &network_mode, false).await {
             error!(container = container_name, "Nspawn creation failed: {e}");
             emit(&format!("Erreur: {e}"));
             self.set_container_status(app_id, ContainerV2Status::Error)
@@ -1043,11 +1086,7 @@ WantedBy=multi-user.target
         )
         .await;
 
-        // Phase 8: Create workspace
-        emit("Creation du volume workspace...");
-        let _ = NspawnClient::create_workspace(container_name, storage).await;
-
-        // Update status
+        // Update status (no workspace for prod containers)
         self.set_container_status(app_id, ContainerV2Status::Running)
             .await;
 
@@ -1732,5 +1771,500 @@ WantedBy=multi-user.target
             transfer_id, "Nspawn migration complete: {} → {}", source_host_id, target_host_id
         );
         Ok(())
+    }
+
+    // ── Slug rename ─────────────────────────────────────────────
+
+    /// Rename a container's slug (and all its linked containers).
+    /// Returns a rename_id for tracking progress. The actual rename runs in a background task.
+    pub async fn rename_container(
+        self: &Arc<Self>,
+        id: &str,
+        req: RenameContainerRequest,
+        renames: &Arc<RwLock<HashMap<String, RenameState>>>,
+    ) -> Result<String, String> {
+        let new_slug = req.new_slug.trim().to_lowercase();
+
+        // ── Phase 0: Validation ──────────────────────────────────
+        // Slug format: lowercase alphanumeric + hyphens, 3-32 chars, no leading/trailing hyphen
+        let valid_slug = new_slug.len() >= 3
+            && new_slug.len() <= 32
+            && new_slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            && !new_slug.starts_with('-')
+            && !new_slug.ends_with('-');
+        if !valid_slug {
+            return Err("Invalid slug: must be 3-32 chars, lowercase alphanumeric and hyphens, cannot start/end with hyphen".to_string());
+        }
+
+        // Get the primary container record
+        let record = {
+            let state = self.state.read().await;
+            state.containers.iter().find(|c| c.id == id).cloned()
+        };
+        let record = record.ok_or("Container not found")?;
+        let old_slug = record.slug.clone();
+
+        if old_slug == new_slug {
+            return Err("New slug is the same as the current slug".to_string());
+        }
+
+        // Must be local
+        if record.host_id != "local" {
+            return Err("Rename is only supported for local containers".to_string());
+        }
+
+        // Check no duplicate slug in registry
+        let apps = self.registry.list_applications().await;
+        if apps.iter().any(|a| a.slug == new_slug) {
+            return Err(format!("Slug '{}' is already in use", new_slug));
+        }
+
+        // Find all app IDs with this slug (dev + prod pair)
+        let app_ids: Vec<String> = apps
+            .iter()
+            .filter(|a| a.slug == old_slug)
+            .map(|a| a.id.clone())
+            .collect();
+        if app_ids.is_empty() {
+            return Err("No applications found with this slug".to_string());
+        }
+
+        // Check no active migration for any of these apps
+        {
+            let migrations = renames.read().await;
+            for rs in migrations.values() {
+                if rs.app_ids.iter().any(|aid| app_ids.contains(aid))
+                    && rs.phase != RenamePhase::Complete
+                    && rs.phase != RenamePhase::Failed
+                {
+                    return Err("A rename is already in progress for this application".to_string());
+                }
+            }
+        }
+
+        let rename_id = uuid::Uuid::new_v4().to_string();
+        let rename_state = RenameState {
+            rename_id: rename_id.clone(),
+            app_ids: app_ids.clone(),
+            old_slug: old_slug.clone(),
+            new_slug: new_slug.clone(),
+            phase: RenamePhase::Validating,
+            started_at: Utc::now(),
+            error: None,
+        };
+
+        {
+            let mut renames_map = renames.write().await;
+            renames_map.insert(rename_id.clone(), rename_state);
+        }
+
+        // Spawn background task
+        let mgr = Arc::clone(self);
+        let renames = renames.clone();
+        let rid = rename_id.clone();
+        let new_name = req.new_name;
+
+        tokio::spawn(async move {
+            mgr.run_rename(&rid, &old_slug, &new_slug, &app_ids, new_name, &renames)
+                .await;
+        });
+
+        Ok(rename_id)
+    }
+
+    /// Background rename execution with rollback journal.
+    async fn run_rename(
+        &self,
+        rename_id: &str,
+        old_slug: &str,
+        new_slug: &str,
+        app_ids: &[String],
+        new_name: Option<String>,
+        renames: &Arc<RwLock<HashMap<String, RenameState>>>,
+    ) {
+        let result = self
+            .run_rename_inner(rename_id, old_slug, new_slug, app_ids, new_name, renames)
+            .await;
+
+        if let Err(error_msg) = result {
+            error!(
+                rename_id,
+                old_slug,
+                new_slug,
+                error = %error_msg,
+                "Rename failed"
+            );
+            Self::set_rename_phase(renames, rename_id, RenamePhase::Failed, Some(error_msg))
+                .await;
+        }
+    }
+
+    async fn run_rename_inner(
+        &self,
+        rename_id: &str,
+        old_slug: &str,
+        new_slug: &str,
+        app_ids: &[String],
+        new_name: Option<String>,
+        renames: &Arc<RwLock<HashMap<String, RenameState>>>,
+    ) -> Result<(), String> {
+        let storage_path = self.resolve_storage_path("local").await;
+        let storage = Path::new(&storage_path);
+
+        // Gather per-app info: (app_id, old_container_name, new_container_name, environment)
+        let apps = self.registry.list_applications().await;
+        let mut app_infos: Vec<(String, String, String, Environment)> = Vec::new();
+        for aid in app_ids {
+            let app = apps.iter().find(|a| a.id == *aid).ok_or_else(|| {
+                format!("Application {} not found in registry", aid)
+            })?;
+            let new_container_name = match app.environment {
+                Environment::Production => format!("hr-v2-{}-prod", new_slug),
+                Environment::Development => format!("hr-v2-{}-dev", new_slug),
+            };
+            app_infos.push((
+                aid.clone(),
+                app.container_name.clone(),
+                new_container_name,
+                app.environment,
+            ));
+        }
+
+        // Determine the network mode for .nspawn unit rewrite
+        let network_mode = self.resolve_network_mode("local").await
+            .map_err(|e| format!("Cannot resolve network mode: {e}"))?;
+
+        // ── Phase 1: Request new certificate ─────────────────────
+        Self::set_rename_phase(renames, rename_id, RenamePhase::RequestingCert, None).await;
+        {
+            let acme_guard = self.registry.acme.read().await;
+            if let Some(ref acme) = *acme_guard {
+                let acme = acme.clone();
+                drop(acme_guard);
+                acme.request_app_wildcard(new_slug)
+                    .await
+                    .map_err(|e| format!("Failed to request certificate for new slug: {e}"))?;
+            }
+        }
+
+        // ── Phase 2: Create new DNS records ──────────────────────
+        Self::set_rename_phase(renames, rename_id, RenamePhase::CreatingDns, None).await;
+        let dns_created = if let (Some(token), Some(zone_id)) =
+            (&self.env.cf_api_token, &self.env.cf_zone_id)
+        {
+            // Get public IPv6 for the AAAA record
+            let ipv6 = Self::get_public_ipv6(&self.env.cf_interface)?;
+            if let Err(e) = hr_registry::cloudflare::upsert_app_wildcard_dns(
+                token,
+                zone_id,
+                new_slug,
+                &self.env.base_domain,
+                &ipv6,
+                true,
+                "AAAA",
+            )
+            .await
+            {
+                // Rollback: delete new cert
+                self.rollback_cert(new_slug).await;
+                return Err(format!("Failed to create DNS for new slug: {e}"));
+            }
+            true
+        } else {
+            false
+        };
+
+        // ── Phase 3: Stop containers ─────────────────────────────
+        Self::set_rename_phase(renames, rename_id, RenamePhase::StoppingContainers, None).await;
+        let mut stopped_containers: Vec<String> = Vec::new();
+        for (_, old_name, _, _) in &app_infos {
+            if let Err(e) = NspawnClient::stop_container(old_name).await {
+                warn!(container = old_name.as_str(), "Stop failed (may already be stopped): {e}");
+            }
+            stopped_containers.push(old_name.clone());
+        }
+        // Wait for containers to fully stop
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // ── Phase 4: Rename filesystem ───────────────────────────
+        Self::set_rename_phase(renames, rename_id, RenamePhase::RenamingFilesystem, None).await;
+        let mut renamed_rootfs: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let mut renamed_workspaces: Vec<(PathBuf, PathBuf)> = Vec::new();
+
+        for (_, old_name, new_name, _) in &app_infos {
+            // Rename rootfs
+            let old_rootfs = storage.join(old_name);
+            let new_rootfs = storage.join(new_name);
+            if old_rootfs.exists() {
+                if let Err(e) = tokio::fs::rename(&old_rootfs, &new_rootfs).await {
+                    // Rollback already-renamed rootfs
+                    self.rollback_renames(&renamed_rootfs).await;
+                    self.rollback_renames(&renamed_workspaces).await;
+                    self.rollback_start(&stopped_containers).await;
+                    if dns_created {
+                        self.rollback_dns(new_slug).await;
+                    }
+                    self.rollback_cert(new_slug).await;
+                    return Err(format!(
+                        "Failed to rename rootfs {} -> {}: {e}",
+                        old_rootfs.display(),
+                        new_rootfs.display()
+                    ));
+                }
+                renamed_rootfs.push((new_rootfs, old_rootfs));
+            }
+
+            // Rename workspace
+            let old_ws = storage.join(format!("{}-workspace", old_name));
+            let new_ws = storage.join(format!("{}-workspace", new_name));
+            if old_ws.exists() {
+                if let Err(e) = tokio::fs::rename(&old_ws, &new_ws).await {
+                    // Rollback workspace and rootfs renames
+                    self.rollback_renames(&renamed_workspaces).await;
+                    self.rollback_renames(&renamed_rootfs).await;
+                    self.rollback_start(&stopped_containers).await;
+                    if dns_created {
+                        self.rollback_dns(new_slug).await;
+                    }
+                    self.rollback_cert(new_slug).await;
+                    return Err(format!(
+                        "Failed to rename workspace {} -> {}: {e}",
+                        old_ws.display(),
+                        new_ws.display()
+                    ));
+                }
+                renamed_workspaces.push((new_ws, old_ws));
+            }
+
+            // Delete old .nspawn unit, write new one
+            let old_unit = format!("/etc/systemd/nspawn/{}.nspawn", old_name);
+            let _ = tokio::fs::remove_file(&old_unit).await;
+
+            // Determine if workspace exists for .nspawn unit
+            let has_workspace = storage
+                .join(format!("{}-workspace", new_name))
+                .exists();
+
+            // Remove old symlink from /var/lib/machines/ if exists
+            let old_machine_link = Path::new("/var/lib/machines").join(old_name);
+            if old_machine_link.is_symlink() {
+                let _ = tokio::fs::remove_file(&old_machine_link).await;
+            }
+
+            if let Err(e) =
+                NspawnClient::write_nspawn_unit(new_name, storage, &network_mode, has_workspace)
+                    .await
+            {
+                warn!(
+                    old = old_name.as_str(),
+                    new = new_name.as_str(),
+                    "Failed to write new .nspawn unit: {e}"
+                );
+            }
+        }
+
+        // ── Phase 5: Update agent config ─────────────────────────
+        Self::set_rename_phase(renames, rename_id, RenamePhase::UpdatingAgentConfig, None).await;
+        for (_, _, new_name, _) in &app_infos {
+            let config_path = storage.join(new_name).join("etc/hr-agent.toml");
+            if config_path.exists() {
+                match tokio::fs::read_to_string(&config_path).await {
+                    Ok(content) => {
+                        let updated = content.replace(
+                            &format!("service_name = \"{}\"", old_slug),
+                            &format!("service_name = \"{}\"", new_slug),
+                        );
+                        if let Err(e) = tokio::fs::write(&config_path, &updated).await {
+                            warn!(
+                                config = %config_path.display(),
+                                "Failed to update agent config: {e}"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            config = %config_path.display(),
+                            "Failed to read agent config: {e}"
+                        );
+                    }
+                }
+            }
+        }
+
+        // ── Phase 6: Update registry + V2 state ─────────────────
+        Self::set_rename_phase(renames, rename_id, RenamePhase::UpdatingRegistry, None).await;
+        for (aid, _, new_name, _) in &app_infos {
+            if let Err(e) = self
+                .registry
+                .rename_application(aid, new_slug, new_name)
+                .await
+            {
+                error!(app_id = aid.as_str(), "Failed to update registry: {e}");
+            }
+        }
+
+        // Update V2 state
+        {
+            let mut state = self.state.write().await;
+            for (aid, _, new_container_name, _) in &app_infos {
+                if let Some(c) = state.containers.iter_mut().find(|c| c.id == *aid) {
+                    c.slug = new_slug.to_string();
+                    c.container_name = new_container_name.clone();
+                    if let Some(ref display_name) = new_name {
+                        c.name = display_name.clone();
+                    }
+                }
+            }
+        }
+        let _ = self.save_state().await;
+
+        // ── Phase 7: Start containers ────────────────────────────
+        Self::set_rename_phase(renames, rename_id, RenamePhase::StartingContainers, None).await;
+        for (_, _, new_name, _) in &app_infos {
+            if let Err(e) = NspawnClient::start_container(new_name).await {
+                error!(container = new_name.as_str(), "Failed to start renamed container: {e}");
+            }
+        }
+
+        // Wait for agent reconnection
+        Self::set_rename_phase(renames, rename_id, RenamePhase::WaitingForAgent, None).await;
+        for (aid, _, _, _) in &app_infos {
+            let mut reconnected = false;
+            for _ in 0..30 {
+                if self.registry.is_agent_connected(aid).await {
+                    reconnected = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            if !reconnected {
+                warn!(app_id = aid.as_str(), "Agent did not reconnect within 60s after rename");
+            }
+        }
+
+        // ── Phase 8: Cleanup old resources ───────────────────────
+        Self::set_rename_phase(renames, rename_id, RenamePhase::CleaningUp, None).await;
+
+        // Delete old certificate (best-effort)
+        {
+            let acme_guard = self.registry.acme.read().await;
+            if let Some(ref acme) = *acme_guard {
+                if let Err(e) = acme.delete_app_certificate(old_slug) {
+                    warn!(slug = old_slug, error = %e, "Failed to delete old certificate");
+                }
+            }
+        }
+
+        // Delete old DNS records (best-effort)
+        if let (Some(token), Some(zone_id)) = (&self.env.cf_api_token, &self.env.cf_zone_id) {
+            if let Err(e) = hr_registry::cloudflare::delete_app_wildcard_dns(
+                token,
+                zone_id,
+                old_slug,
+                &self.env.base_domain,
+            )
+            .await
+            {
+                warn!(slug = old_slug, error = %e, "Failed to delete old DNS records");
+            }
+        }
+
+        // ── Phase 9: Complete ────────────────────────────────────
+        Self::set_rename_phase(renames, rename_id, RenamePhase::Complete, None).await;
+
+        info!(
+            rename_id,
+            old_slug,
+            new_slug,
+            app_count = app_ids.len(),
+            "Slug rename complete"
+        );
+        Ok(())
+    }
+
+    // ── Rename helpers ──────────────────────────────────────────
+
+    async fn set_rename_phase(
+        renames: &Arc<RwLock<HashMap<String, RenameState>>>,
+        rename_id: &str,
+        phase: RenamePhase,
+        error: Option<String>,
+    ) {
+        let mut map = renames.write().await;
+        if let Some(state) = map.get_mut(rename_id) {
+            state.phase = phase;
+            state.error = error;
+        }
+    }
+
+    /// Get the public IPv6 address of a network interface.
+    fn get_public_ipv6(interface: &str) -> Result<String, String> {
+        let output = std::process::Command::new("ip")
+            .args(["-6", "addr", "show", interface, "scope", "global"])
+            .output()
+            .map_err(|e| format!("Failed to get IPv6: {e}"))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.starts_with("inet6") && !line.contains("deprecated") {
+                if let Some(addr) = line.split_whitespace().nth(1) {
+                    if let Some(ip) = addr.split('/').next() {
+                        return Ok(ip.to_string());
+                    }
+                }
+            }
+        }
+        Err(format!("No public IPv6 found on interface {interface}"))
+    }
+
+    /// Rollback: reverse filesystem renames. Each tuple is (current_path, original_path).
+    async fn rollback_renames(&self, renames: &[(PathBuf, PathBuf)]) {
+        for (current, original) in renames.iter().rev() {
+            if current.exists() {
+                if let Err(e) = tokio::fs::rename(current, original).await {
+                    error!(
+                        from = %current.display(),
+                        to = %original.display(),
+                        "Rollback rename failed: {e}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Rollback: restart stopped containers.
+    async fn rollback_start(&self, containers: &[String]) {
+        for name in containers {
+            if let Err(e) = NspawnClient::start_container(name).await {
+                error!(container = name.as_str(), "Rollback start failed: {e}");
+            }
+        }
+    }
+
+    /// Rollback: delete certificate for a slug.
+    async fn rollback_cert(&self, slug: &str) {
+        let acme_guard = self.registry.acme.read().await;
+        if let Some(ref acme) = *acme_guard {
+            if let Err(e) = acme.delete_app_certificate(slug) {
+                warn!(slug, error = %e, "Rollback: failed to delete certificate");
+            }
+        }
+    }
+
+    /// Rollback: delete DNS records for a slug.
+    async fn rollback_dns(&self, slug: &str) {
+        if let (Some(token), Some(zone_id)) = (&self.env.cf_api_token, &self.env.cf_zone_id) {
+            if let Err(e) = hr_registry::cloudflare::delete_app_wildcard_dns(
+                token,
+                zone_id,
+                slug,
+                &self.env.base_domain,
+            )
+            .await
+            {
+                warn!(slug, error = %e, "Rollback: failed to delete DNS");
+            }
+        }
     }
 }

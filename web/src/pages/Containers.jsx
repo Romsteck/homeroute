@@ -3,13 +3,8 @@ import {
   Container,
   Plus,
   Trash2,
-  Power,
   CheckCircle,
   XCircle,
-  Server,
-  Globe,
-  Shield,
-  Key,
   Wifi,
   WifiOff,
   Clock,
@@ -18,20 +13,17 @@ import {
   AlertTriangle,
   X,
   Terminal,
-  Code2,
   Loader2,
   Play,
   Square,
   ArrowRightLeft,
-  Pencil,
-  Rocket,
 } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
 import PageHeader from '../components/PageHeader';
 import AppGroupCard from '../components/AppGroupCard';
+import { CONTAINER_GRID } from '../components/ContainerCard';
 import CreateContainerModal from '../components/CreateContainerModal';
-import DeployModal from '../components/DeployModal';
 import useWebSocket from '../hooks/useWebSocket';
 import {
   getContainers,
@@ -46,6 +38,8 @@ import {
   getHosts,
   startApplicationService,
   stopApplicationService,
+  renameContainer,
+  getRenameStatus,
 } from '../api/client';
 
 function groupByApp(containers) {
@@ -201,10 +195,9 @@ function Containers() {
   const [selectedHostId, setSelectedHostId] = useState('');
   const [migrating, setMigrating] = useState(false);
   const [migrations, setMigrations] = useState({});
-  const [showEditModal, setShowEditModal] = useState(false);
-  const [editingContainer, setEditingContainer] = useState(null);
-  const [editForm, setEditForm] = useState(null);
-  const [deployModal, setDeployModal] = useState(null);
+  const [editingApp, setEditingApp] = useState(null);
+  const [appEditForm, setAppEditForm] = useState({ name: '', slug: '' });
+  const [renameProgress, setRenameProgress] = useState(null);
 
   // Agent metrics state
   const [appMetrics, setAppMetrics] = useState({});
@@ -399,48 +392,82 @@ function Containers() {
     }
   }
 
-  function openEditModal(container) {
-    setEditingContainer(container);
-    setEditForm({
-      name: container.name,
-      frontend: {
-        auth_required: container.frontend?.auth_required || false,
-        allowed_groups: container.frontend?.allowed_groups || [],
-        local_only: container.frontend?.local_only || false,
-      },
-      code_server_enabled: container.code_server_enabled !== false,
-    });
-    setShowEditModal(true);
+  function openAppEditModal(group) {
+    setEditingApp(group);
+    setAppEditForm({ name: group.name || group.slug, slug: group.slug });
+    setRenameProgress(null);
   }
 
-  async function handleEdit() {
-    if (!editForm || !editingContainer) return;
+  async function handleAppEdit() {
+    if (!editingApp) return;
+    const firstContainer = editingApp.dev || editingApp.prod;
+    if (!firstContainer) return;
+    const slugChanged = appEditForm.slug !== editingApp.slug;
+
     setSaving(true);
     try {
-      const payload = {
-        name: editForm.name,
-        frontend: {
-          target_port: 3000,
-          auth_required: editForm.frontend.auth_required,
-          allowed_groups: editForm.frontend.allowed_groups,
-          local_only: editForm.frontend.local_only,
-        },
-        code_server_enabled: editForm.code_server_enabled,
-      };
-      const res = await updateContainer(editingContainer.id, payload);
+      if (slugChanged) {
+        const res = await renameContainer(firstContainer.id, {
+          new_slug: appEditForm.slug,
+          new_name: appEditForm.name,
+        });
+        if (res.data.success) {
+          setRenameProgress({ phase: 'started' });
+          // Poll rename status
+          const pollInterval = setInterval(async () => {
+            try {
+              const statusRes = await getRenameStatus(firstContainer.id);
+              const status = statusRes.data;
+              setRenameProgress(status);
+              if (status.phase === 'complete' || status.phase === 'failed') {
+                clearInterval(pollInterval);
+                if (status.phase === 'complete') {
+                  setEditingApp(null);
+                  setMessage({ type: 'success', text: 'Application renommee' });
+                  fetchData();
+                } else {
+                  setMessage({ type: 'error', text: status.error || 'Echec du renommage' });
+                }
+                setSaving(false);
+              }
+            } catch {
+              clearInterval(pollInterval);
+              setSaving(false);
+            }
+          }, 2000);
+        } else {
+          setMessage({ type: 'error', text: res.data.error || 'Erreur' });
+          setSaving(false);
+        }
+      } else {
+        const res = await updateContainer(firstContainer.id, { name: appEditForm.name });
+        if (res.data.success) {
+          setEditingApp(null);
+          setMessage({ type: 'success', text: 'Application modifiee' });
+          fetchData();
+        } else {
+          setMessage({ type: 'error', text: res.data.error || 'Erreur' });
+        }
+        setSaving(false);
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: error.response?.data?.error || 'Erreur' });
+      setSaving(false);
+    }
+  }
+
+  async function handleToggleSecurity(containerId, field, newValue) {
+    try {
+      const res = await updateContainer(containerId, {
+        frontend: { target_port: 3000, [field]: newValue },
+      });
       if (res.data.success) {
-        setShowEditModal(false);
-        setEditingContainer(null);
-        setEditForm(null);
-        setMessage({ type: 'success', text: 'Conteneur modifie' });
         fetchData();
       } else {
         setMessage({ type: 'error', text: res.data.error || 'Erreur' });
       }
     } catch (error) {
       setMessage({ type: 'error', text: error.response?.data?.error || 'Erreur' });
-    } finally {
-      setSaving(false);
     }
   }
 
@@ -489,7 +516,6 @@ function Containers() {
   const groups = groupByApp(containers);
   const devRunning = containers.filter(c => (c.environment || 'development') !== 'production' && (c.agent_status || c.status) === 'connected').length;
   const prodRunning = containers.filter(c => c.environment === 'production' && (c.agent_status || c.status) === 'connected').length;
-  const deployingCount = containers.filter(c => (c.agent_status || c.status) === 'deploying' || c.status === 'deploying').length;
 
   return (
     <div>
@@ -515,7 +541,7 @@ function Containers() {
       )}
 
       {/* Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-px">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-px">
         <Card title="Total" icon={Container}>
           <div className="text-2xl font-bold">{containers.length}</div>
         </Card>
@@ -524,9 +550,6 @@ function Containers() {
         </Card>
         <Card title="Prod Running" icon={Wifi}>
           <div className="text-2xl font-bold text-purple-400">{prodRunning}</div>
-        </Card>
-        <Card title="Deploying" icon={Loader2}>
-          <div className="text-2xl font-bold text-blue-400">{deployingCount}</div>
         </Card>
       </div>
 
@@ -541,7 +564,21 @@ function Containers() {
             </div>
           </Card>
         ) : (
-          groups.map(group => (
+          <div>
+          {/* Column headers */}
+          <div
+            className="grid items-center gap-x-3 px-4 py-1.5 text-[11px] text-gray-500 uppercase tracking-wider border-b border-gray-600 bg-gray-900/80 sticky top-0 z-10"
+            style={{ gridTemplateColumns: CONTAINER_GRID }}
+          >
+            <span>Env</span>
+            <span>Status</span>
+            <span>URL</span>
+            <span className="text-right">CPU</span>
+            <span className="text-right">RAM</span>
+            <span>Hote</span>
+            <span className="text-right">Actions</span>
+          </div>
+          {groups.map(group => (
             <AppGroupCard
               key={group.slug}
               group={group}
@@ -552,7 +589,8 @@ function Containers() {
               onStart={handleStart}
               onStop={handleStop}
               onTerminal={setTerminalContainer}
-              onEdit={openEditModal}
+              onEditApp={openAppEditModal}
+              onToggleSecurity={handleToggleSecurity}
               onMigrate={openMigrateModal}
               onDelete={handleDelete}
               onMigrationDismiss={(id) => setMigrations(prev => {
@@ -560,11 +598,12 @@ function Containers() {
                 delete next[id];
                 return next;
               })}
-              onDeploy={(dev, prod) => setDeployModal({ dev, prod })}
               onCreatePaired={handleCreatePaired}
               MigrationProgress={MigrationProgress}
             />
           ))
+          }
+          </div>
         )}
       </div>
 
@@ -584,99 +623,60 @@ function Containers() {
         />
       )}
 
-      {/* Deploy Modal */}
-      {deployModal && (
-        <DeployModal
-          devContainer={deployModal.dev}
-          prodContainer={deployModal.prod}
-          baseDomain={baseDomain}
-          onClose={() => setDeployModal(null)}
-          onDeployStarted={() => {
-            fetchData();
-            setDeployModal(null);
-          }}
-        />
-      )}
-
-      {/* Edit Modal */}
-      {showEditModal && editingContainer && editForm && (
+      {/* App Edit Modal */}
+      {editingApp && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 p-6 w-full max-w-2xl border border-gray-700 max-h-[90vh] overflow-y-auto">
+          <div className="bg-gray-800 p-6 w-full max-w-md border border-gray-700">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-bold">Modifier {editingContainer.name}</h2>
-              <div className="flex items-center gap-2">
-                <span className={`text-xs px-1.5 py-0.5 font-medium ${
-                  editingContainer.environment === 'production'
-                    ? 'bg-purple-100 text-purple-800'
-                    : 'bg-blue-100 text-blue-800'
-                }`}>
-                  {editingContainer.environment === 'production' ? 'PROD' : 'DEV'}
-                </span>
-                <span className="text-xs text-gray-500 bg-gray-900/50 px-2 py-1 font-mono">{editingContainer.slug}</span>
-              </div>
+              <h2 className="text-xl font-bold">Modifier {editingApp.name || editingApp.slug}</h2>
+              <button onClick={() => setEditingApp(null)} className="p-1 text-gray-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
             </div>
             <div className="space-y-4">
               <div>
                 <label className="block text-sm text-gray-400 mb-1">Nom d&apos;affichage</label>
                 <input
                   type="text"
-                  value={editForm.name}
-                  onChange={e => setEditForm({ ...editForm, name: e.target.value })}
+                  value={appEditForm.name}
+                  onChange={e => setAppEditForm({ ...appEditForm, name: e.target.value })}
                   className="w-full px-3 py-2 bg-gray-900 border border-gray-600 text-sm"
                 />
               </div>
-
-              {/* Frontend */}
               <div>
-                <div className="text-xs text-blue-400 mb-2 font-mono flex items-center gap-1">
-                  <Globe className="w-3 h-3" />
-                  {editingContainer.environment === 'production'
-                    ? `${editingContainer.slug}.${baseDomain}`
-                    : `dev.${editingContainer.slug}.${baseDomain}`
-                  }
-                </div>
-                <div className="flex items-center gap-4">
-                  <label className="flex items-center gap-1.5 text-xs cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={editForm.frontend.auth_required}
-                      onChange={e => setEditForm({ ...editForm, frontend: { ...editForm.frontend, auth_required: e.target.checked } })}
-                      className="rounded"
-                    />
-                    <Key className="w-3 h-3 text-purple-400" /> Auth
-                  </label>
-                  <label className="flex items-center gap-1.5 text-xs cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={editForm.frontend.local_only}
-                      onChange={e => setEditForm({ ...editForm, frontend: { ...editForm.frontend, local_only: e.target.checked } })}
-                      className="rounded"
-                    />
-                    <Shield className="w-3 h-3 text-yellow-400" /> Local
-                  </label>
-                </div>
+                <label className="block text-sm text-gray-400 mb-1">Slug</label>
+                <input
+                  type="text"
+                  value={appEditForm.slug}
+                  onChange={e => setAppEditForm({ ...appEditForm, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
+                  className="w-full px-3 py-2 bg-gray-900 border border-gray-600 text-sm font-mono"
+                />
+                {(appEditForm.slug.length < 3 || appEditForm.slug.length > 32) && appEditForm.slug.length > 0 && (
+                  <p className="text-xs text-red-400 mt-1">Le slug doit contenir entre 3 et 32 caracteres</p>
+                )}
               </div>
-
-              {/* code-server (dev only) */}
-              {editingContainer.environment !== 'production' && (
-                <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={editForm.code_server_enabled}
-                    onChange={e => setEditForm({ ...editForm, code_server_enabled: e.target.checked })}
-                    className="rounded"
-                  />
-                  <Code2 className="w-4 h-4 text-cyan-400" />
-                  code-server IDE
-                  {baseDomain && editForm.code_server_enabled && (
-                    <span className="text-xs text-gray-500 font-mono ml-2">code.{editingContainer.slug}.{baseDomain}</span>
-                  )}
-                </label>
+              {appEditForm.slug !== editingApp.slug && appEditForm.slug.length >= 3 && (
+                <div className="p-3 bg-yellow-900/30 border border-yellow-700/50 text-yellow-400 text-xs">
+                  <AlertTriangle className="w-3.5 h-3.5 inline mr-1" />
+                  Le renommage entrainera un bref downtime (~2min)
+                </div>
+              )}
+              {renameProgress && renameProgress.phase && renameProgress.phase !== 'complete' && renameProgress.phase !== 'failed' && (
+                <div className="p-3 bg-blue-900/30 border border-blue-700/50 text-blue-400 text-xs flex items-center gap-2">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  {renameProgress.phase}...
+                </div>
               )}
             </div>
             <div className="flex justify-end gap-2 mt-6">
-              <Button variant="secondary" onClick={() => { setShowEditModal(false); setEditingContainer(null); }}>Annuler</Button>
-              <Button onClick={handleEdit} loading={saving}>Sauvegarder</Button>
+              <Button variant="secondary" onClick={() => setEditingApp(null)} disabled={saving}>Annuler</Button>
+              <Button
+                onClick={handleAppEdit}
+                loading={saving}
+                disabled={saving || appEditForm.slug.length < 3 || appEditForm.slug.length > 32}
+              >
+                Sauvegarder
+              </Button>
             </div>
           </div>
         </div>
