@@ -6,7 +6,6 @@ import {
   Play,
   Square,
   Terminal,
-  Pencil,
   ArrowRightLeft,
   Trash2,
   Code2,
@@ -16,6 +15,10 @@ import {
   HardDrive,
   ExternalLink,
 } from 'lucide-react';
+
+// Shared grid template — used by ContainerCard rows and column header in Containers.jsx
+// Uses fr units for middle columns to spread evenly across the full width
+export const CONTAINER_GRID = '50px 1.2fr 3fr 0.6fr 0.7fr 1.5fr 140px';
 
 const STATUS_BADGES = {
   connected: { color: 'text-green-400 bg-green-900/30', icon: Wifi, label: 'Connecte' },
@@ -56,7 +59,7 @@ function ContainerCard({
   onStart,
   onStop,
   onTerminal,
-  onEdit,
+  onToggleSecurity,
   onMigrate,
   onDelete,
   onMigrationDismiss,
@@ -77,15 +80,20 @@ function ContainerCard({
     : null;
 
   const ideUrl = baseDomain && isDev && container.code_server_enabled
-    ? `code.${container.slug}.${baseDomain}`
+    ? `code.${container.slug}.${baseDomain}/?folder=/root/workspace`
     : null;
+
+  const isConnected = displayStatus === 'connected';
 
   return (
     <div className={isHostOffline ? 'opacity-60' : ''}>
-      {/* Main row */}
-      <div className="flex items-center gap-3 px-4 py-1.5 border-b border-gray-700/30">
-        {/* Environment badge */}
-        <span className={`text-xs px-1.5 py-0.5 font-medium shrink-0 ${
+      {/* Main row — grid aligned with column headers */}
+      <div
+        className="grid items-center gap-x-3 px-4 py-1.5 border-b border-gray-700/30 hover:bg-gray-700/20 transition-colors"
+        style={{ gridTemplateColumns: CONTAINER_GRID }}
+      >
+        {/* Env */}
+        <span className={`text-xs px-1.5 py-0.5 font-medium text-center ${
           isDev ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'
         }`}>
           {isDev ? 'DEV' : 'PROD'}
@@ -95,7 +103,7 @@ function ContainerCard({
         <StatusBadge status={displayStatus} />
 
         {/* URL + links */}
-        <div className="flex items-center gap-2 min-w-0 flex-1">
+        <div className="flex items-center gap-2 min-w-0 overflow-hidden">
           {appUrl && (
             <a
               href={`https://${appUrl}`}
@@ -107,8 +115,20 @@ function ContainerCard({
               <ExternalLink className="w-3 h-3 shrink-0" />
             </a>
           )}
-          {container.frontend?.auth_required && <Key className="w-3 h-3 text-purple-400 shrink-0" />}
-          {container.frontend?.local_only && <Shield className="w-3 h-3 text-yellow-400 shrink-0" />}
+          <button
+            onClick={() => onToggleSecurity(container.id, 'auth_required', !container.frontend?.auth_required)}
+            className={`p-0.5 shrink-0 transition-colors ${container.frontend?.auth_required ? 'text-purple-400 hover:text-purple-300' : 'text-purple-400 opacity-30 hover:opacity-60'}`}
+            title={container.frontend?.auth_required ? 'Auth requis (cliquer pour desactiver)' : 'Auth non requis (cliquer pour activer)'}
+          >
+            <Key className="w-3 h-3" />
+          </button>
+          <button
+            onClick={() => onToggleSecurity(container.id, 'local_only', !container.frontend?.local_only)}
+            className={`p-0.5 shrink-0 transition-colors ${container.frontend?.local_only ? 'text-yellow-400 hover:text-yellow-300' : 'text-yellow-400 opacity-30 hover:opacity-60'}`}
+            title={container.frontend?.local_only ? 'Local uniquement (cliquer pour desactiver)' : 'Acces externe (cliquer pour restreindre au local)'}
+          >
+            <Shield className="w-3 h-3" />
+          </button>
           {ideUrl && (
             <a
               href={`https://${ideUrl}`}
@@ -120,47 +140,38 @@ function ContainerCard({
               IDE
             </a>
           )}
+          {isDeploying && container._deployMessage && (
+            <span className="text-xs text-gray-500 truncate">{container._deployMessage}</span>
+          )}
         </div>
 
-        {/* Deploying message */}
-        {isDeploying && container._deployMessage && (
-          <span className="text-xs text-gray-500 truncate shrink-0 max-w-[150px]">{container._deployMessage}</span>
-        )}
+        {/* CPU */}
+        <span className={`font-mono text-xs text-right ${
+          isConnected && metrics?.cpuPercent > 80 ? 'text-red-400' :
+          isConnected && metrics?.cpuPercent > 50 ? 'text-yellow-400' :
+          isConnected && metrics?.cpuPercent > 0 ? 'text-green-400' : 'text-gray-600'
+        }`}>
+          {isConnected && metrics?.cpuPercent !== undefined
+            ? `${metrics.cpuPercent.toFixed(1)}%`
+            : '—'}
+        </span>
 
-        {/* Metrics */}
-        {!isMigrating && displayStatus === 'connected' && metrics && (
-          <div className="flex items-center gap-3 text-xs shrink-0">
-            <span className={`font-mono ${
-              metrics.cpuPercent > 80 ? 'text-red-400' :
-              metrics.cpuPercent > 50 ? 'text-yellow-400' :
-              metrics.cpuPercent > 0 ? 'text-green-400' : 'text-gray-600'
-            }`}>
-              CPU {metrics.cpuPercent !== undefined ? `${metrics.cpuPercent.toFixed(1)}%` : '-'}
-            </span>
-            <span className="font-mono text-gray-400">
-              RAM {metrics.memoryBytes ? formatBytes(metrics.memoryBytes) : '-'}
-            </span>
-          </div>
-        )}
+        {/* RAM */}
+        <span className="font-mono text-xs text-gray-400 text-right">
+          {isConnected && metrics?.memoryBytes
+            ? formatBytes(metrics.memoryBytes)
+            : '—'}
+        </span>
 
-        {/* Host badge */}
-        <div className="shrink-0">
-          {host ? (
-            <span className="flex items-center gap-1 text-xs bg-gray-100 text-gray-700 px-1.5 py-0.5">
-              <HardDrive className="w-3 h-3" />
-              {host.name}
-            </span>
-          ) : container.host_id === 'local' ? (
-            <span className="flex items-center gap-1 text-xs bg-gray-100 text-gray-700 px-1.5 py-0.5">
-              <HardDrive className="w-3 h-3" />
-              Local
-            </span>
-          ) : null}
-        </div>
+        {/* Host */}
+        <span className="flex items-center gap-1 text-xs text-gray-400 truncate">
+          <HardDrive className="w-3 h-3 shrink-0" />
+          {host ? host.name : 'Local'}
+        </span>
 
         {/* Actions */}
-        <div className={`flex items-center gap-0.5 shrink-0 ${isMigrating || isHostOffline ? 'opacity-50 pointer-events-none' : ''}`}>
-          {displayStatus === 'connected' ? (
+        <div className={`flex items-center gap-0.5 justify-end ${isMigrating || isHostOffline ? 'opacity-50 pointer-events-none' : ''}`}>
+          {isConnected ? (
             <button
               onClick={() => onStop(container.id)}
               className="p-1 text-yellow-400 hover:text-yellow-300 hover:bg-yellow-900/30 transition-colors"
@@ -184,14 +195,6 @@ function ContainerCard({
             title="Terminal"
           >
             <Terminal className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={() => onEdit(container)}
-            disabled={isMigrating}
-            className="p-1 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 transition-colors"
-            title="Modifier"
-          >
-            <Pencil className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={() => onMigrate(container)}

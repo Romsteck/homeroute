@@ -99,7 +99,7 @@ pub struct AgentRegistry {
     /// Host power state machine for WOL dedup, conflict detection, and progress tracking.
     host_power_states: Arc<RwLock<HashMap<String, HostPowerInfo>>>,
     /// ACME manager for per-app wildcard certificate lifecycle.
-    acme: RwLock<Option<Arc<AcmeManager>>>,
+    pub acme: RwLock<Option<Arc<AcmeManager>>>,
     /// Terminal sessions: maps session_id → sender for data from host-agent to API WS handler.
     terminal_sessions: Arc<RwLock<HashMap<String, mpsc::Sender<Vec<u8>>>>>,
     /// Dataverse query signals: maps request_id → oneshot sender for query results.
@@ -188,7 +188,7 @@ impl AgentRegistry {
 
         let id = uuid::Uuid::new_v4().to_string();
         let container_name = match req.environment {
-            Environment::Production => format!("hr-v2-{}", req.slug),
+            Environment::Production => format!("hr-v2-{}-prod", req.slug),
             Environment::Development => format!("hr-v2-{}-dev", req.slug),
         };
 
@@ -346,6 +346,20 @@ impl AgentRegistry {
         self.persist().await?;
         info!(app = app.slug, "Application removed");
         Ok(true)
+    }
+
+    /// Rename an application's slug and container_name. Persists to disk.
+    pub async fn rename_application(&self, id: &str, new_slug: &str, new_container_name: &str) -> Result<Option<Application>> {
+        let mut state = self.state.write().await;
+        let Some(app) = state.applications.iter_mut().find(|a| a.id == id) else {
+            return Ok(None);
+        };
+        app.slug = new_slug.to_string();
+        app.container_name = new_container_name.to_string();
+        let app = app.clone();
+        drop(state);
+        self.persist().await?;
+        Ok(Some(app))
     }
 
     pub async fn list_applications(&self) -> Vec<Application> {

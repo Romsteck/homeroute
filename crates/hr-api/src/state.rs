@@ -10,7 +10,7 @@ use hr_dhcp::SharedDhcpState;
 use hr_proxy::{ProxyState, TlsManager};
 use hr_registry::AgentRegistry;
 use hr_registry::types::Environment;
-use crate::container_manager::ContainerManager;
+use crate::container_manager::{ContainerManager, RenameState};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -124,6 +124,9 @@ pub struct ApiState {
 
     /// Active migrations keyed by transfer_id.
     pub migrations: Arc<RwLock<HashMap<String, MigrationState>>>,
+
+    /// Active slug renames keyed by rename_id.
+    pub renames: Arc<RwLock<HashMap<String, RenameState>>>,
 
     /// Active deployments keyed by deploy_id (dev→prod push).
     pub deploys: Arc<RwLock<HashMap<String, DeployState>>>,
