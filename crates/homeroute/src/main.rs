@@ -628,7 +628,6 @@ async fn main() -> anyhow::Result<()> {
         container_manager: Some(container_manager.clone()),
         migrations: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         renames: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        deploys: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         dataverse_schemas: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         cloud_relay_status: cloud_relay_status.clone(),
         cloud_relay_enabled: cloud_relay_enabled_tx,

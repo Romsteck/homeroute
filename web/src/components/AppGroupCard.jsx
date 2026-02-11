@@ -21,7 +21,7 @@ function AppGroupCard({
   const { slug, name, dev, prod } = group;
 
   return (
-    <div className="bg-gray-800 border-b border-gray-700">
+    <div className="bg-gray-800 border-b border-gray-700 transition-[background-color] duration-700 ease-out hover:bg-gray-750 hover:bg-[#2a2f3a] hover:duration-0">
       {/* Group header */}
       <div className="px-4 py-2 border-b border-gray-700 bg-gray-800/60 flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -64,7 +64,7 @@ function AppGroupCard({
           <span className="text-xs px-1.5 py-0.5 font-medium text-center bg-blue-100 text-blue-800">DEV</span>
           <button
             onClick={() => onCreatePaired(slug, name, 'development', prod?.id)}
-            className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-400 transition-colors col-span-6"
+            className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-400 transition-colors col-span-9"
           >
             <Plus className="w-3.5 h-3.5" />
             Creer conteneur DEV
@@ -97,7 +97,7 @@ function AppGroupCard({
           <span className="text-xs px-1.5 py-0.5 font-medium text-center bg-purple-100 text-purple-800">PROD</span>
           <button
             onClick={() => onCreatePaired(slug, name, 'production', dev?.id)}
-            className="flex items-center gap-1 text-xs text-gray-500 hover:text-purple-400 transition-colors col-span-6"
+            className="flex items-center gap-1 text-xs text-gray-500 hover:text-purple-400 transition-colors col-span-9"
           >
             <Plus className="w-3.5 h-3.5" />
             Creer conteneur PROD

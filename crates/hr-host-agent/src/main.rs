@@ -337,7 +337,9 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                     let storage_path = import.storage_path.clone();
                                     let network_mode = import.network_mode.clone();
 
-                                    if import.phase == ImportPhase::ReceivingWorkspace {
+                                    let has_workspace = import.phase == ImportPhase::ReceivingWorkspace;
+
+                                    if has_workspace {
                                         // Close workspace tar
                                         if let Some(mut ws_stdin) = import.ws_tar_stdin.take() {
                                             let _ = ws_stdin.shutdown().await;
@@ -360,7 +362,7 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                             }
                                         }
                                     } else {
-                                        // No workspace phase -- close container tar
+                                        // No workspace phase (prod container) -- close container tar
                                         let _ = import.tar_stdin.shutdown().await;
                                         match import.tar_child.wait().await {
                                             Ok(s) if s.success() => {
@@ -381,9 +383,6 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                                 continue;
                                             }
                                         }
-                                        // Create empty workspace
-                                        let ws_dir = format!("{}/{}-workspace", storage_path, container_name);
-                                        let _ = tokio::fs::create_dir_all(&ws_dir).await;
                                     }
 
                                     // Finalize nspawn import: write .nspawn unit, network config, start
@@ -392,8 +391,8 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                     tokio::spawn(async move {
                                         let sp = std::path::Path::new(&storage_path);
 
-                                        // Write .nspawn unit
-                                        if let Err(e) = hr_container::NspawnClient::write_nspawn_unit(&container_name, sp, &network_mode).await {
+                                        // Write .nspawn unit (dev containers get workspace bind, prod don't)
+                                        if let Err(e) = hr_container::NspawnClient::write_nspawn_unit(&container_name, sp, &network_mode, has_workspace).await {
                                             let _ = tx_finalize.send(OutgoingWsMessage::Text(HostAgentMessage::ImportFailed {
                                                 transfer_id: tid,
                                                 error: format!("Failed to write nspawn unit: {}", e),
@@ -587,7 +586,7 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                 info!(container = %container_name, storage = %storage_path, network_mode = %network_mode, "Creating nspawn container");
                                 tokio::spawn(async move {
                                     let sp = std::path::Path::new(&storage_path);
-                                    match hr_container::NspawnClient::create_container(&container_name, sp, &network_mode).await {
+                                    match hr_container::NspawnClient::create_container(&container_name, sp, &network_mode, true).await {
                                         Ok(()) => {
                                             info!(container = %container_name, "Nspawn container created successfully");
                                         }

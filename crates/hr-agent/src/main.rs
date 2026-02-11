@@ -27,7 +27,7 @@ const INITIAL_BACKOFF_SECS: u64 = 5;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Check for MCP subcommand
+    // Check for MCP subcommands
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 && args[1] == "mcp" {
         tracing_subscriber::fmt()
@@ -44,6 +44,15 @@ async fn main() -> Result<()> {
                 return mcp::run_mcp_server().await;
             }
         }
+    }
+
+    if args.len() > 1 && args[1] == "mcp-deploy" {
+        tracing_subscriber::fmt()
+            .with_env_filter("warn")
+            .with_writer(std::io::stderr)
+            .init();
+
+        return start_deploy_mcp().await;
     }
 
     tracing_subscriber::fmt()
@@ -295,47 +304,15 @@ async fn start_mcp_with_registry() -> Result<()> {
         Message::Text(text) => serde_json::from_str(&text)?,
         other => anyhow::bail!("Unexpected message type during auth: {other:?}"),
     };
-    let app_id = match auth_result {
-        RegistryMessage::AuthResult { success: true, app_id, .. } => {
-            app_id.unwrap_or_default()
-        }
-        RegistryMessage::AuthResult {
-            success: false,
-            error,
-            ..
-        } => {
+    match auth_result {
+        RegistryMessage::AuthResult { success: true, .. } => {}
+        RegistryMessage::AuthResult { success: false, error, .. } => {
             anyhow::bail!(
                 "Authentication failed: {}",
                 error.unwrap_or_default()
             );
         }
         _ => anyhow::bail!("Unexpected message during auth handshake"),
-    };
-
-    // Read the Config message to get the environment
-    let mut environment = hr_registry::types::Environment::Development;
-    // Try to get the Config message with a short timeout
-    if let Ok(Some(Ok(msg))) = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        ws_stream.next(),
-    ).await {
-        if let Message::Text(text) = msg {
-            if let Ok(RegistryMessage::Config { environment: env, .. }) = serde_json::from_str::<RegistryMessage>(&text) {
-                environment = env;
-            }
-        }
-    }
-
-    // Build deploy context
-    let api_base_url = format!("http://{}:{}", cfg.homeroute_address, cfg.homeroute_port);
-    let deploy_ctx = if !app_id.is_empty() {
-        Some(mcp::DeployContext {
-            app_id,
-            api_base_url,
-            environment,
-        })
-    } else {
-        None
     };
 
     // Set up the channels
@@ -379,14 +356,82 @@ async fn start_mcp_with_registry() -> Result<()> {
         }
     });
 
-    // Run the MCP stdio server with registry access and deploy context
-    let result = mcp::run_mcp_server_with_registry(Some(outbound_tx), Some(schema_signals), deploy_ctx).await;
+    // Run the MCP stdio server with registry access (Dataverse only)
+    let result = mcp::run_mcp_server_with_registry(Some(outbound_tx), Some(schema_signals)).await;
 
     // Clean up background tasks
     ws_write_handle.abort();
     ws_read_handle.abort();
 
     result
+}
+
+/// Start the Deploy MCP server — connects to registry to get app_id and environment.
+async fn start_deploy_mcp() -> Result<()> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let cfg = config::AgentConfig::load(CONFIG_PATH)?;
+    let url = cfg.ws_url();
+
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await?;
+    let (mut ws_sink, mut ws_stream) = ws_stream.split();
+
+    // Authenticate
+    let auth_msg = AgentMessage::Auth {
+        token: cfg.token.clone(),
+        service_name: cfg.service_name.clone(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        ipv4_address: None,
+    };
+    ws_sink
+        .send(Message::Text(serde_json::to_string(&auth_msg)?.into()))
+        .await?;
+
+    // Wait for auth result
+    let first_msg = ws_stream
+        .next()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Connection closed before auth response"))??;
+    let auth_result: RegistryMessage = match first_msg {
+        Message::Text(text) => serde_json::from_str(&text)?,
+        other => anyhow::bail!("Unexpected message type during auth: {other:?}"),
+    };
+    let app_id = match auth_result {
+        RegistryMessage::AuthResult { success: true, app_id, .. } => {
+            app_id.unwrap_or_default()
+        }
+        RegistryMessage::AuthResult { success: false, error, .. } => {
+            anyhow::bail!("Authentication failed: {}", error.unwrap_or_default());
+        }
+        _ => anyhow::bail!("Unexpected message during auth handshake"),
+    };
+
+    // Read the Config message to get the environment
+    let mut environment = hr_registry::types::Environment::Development;
+    if let Ok(Some(Ok(msg))) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        ws_stream.next(),
+    ).await {
+        if let Message::Text(text) = msg {
+            if let Ok(RegistryMessage::Config { environment: env, .. }) = serde_json::from_str::<RegistryMessage>(&text) {
+                environment = env;
+            }
+        }
+    }
+
+    // Build deploy context
+    let api_base_url = format!("http://{}:{}", cfg.homeroute_address, cfg.homeroute_port);
+    let deploy_ctx = mcp::DeployContext {
+        app_id,
+        api_base_url,
+        environment,
+    };
+
+    // Close the WebSocket (deploy MCP doesn't need ongoing WS connection)
+    drop(ws_sink);
+
+    mcp::run_deploy_mcp_server(deploy_ctx).await
 }
 
 async fn handle_registry_message(

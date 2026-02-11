@@ -173,8 +173,9 @@ export const updateContainersConfig = (data) => api.put('/containers/config', da
 export const renameContainer = (id, data) => api.post(`/containers/${id}/rename`, data);
 export const getRenameStatus = (id) => api.get(`/containers/${id}/rename/status`);
 
-// Deploy status (deploys are triggered via MCP tools from dev containers)
-export const getDeployStatus = (deployId) => api.get(`/applications/deploys/${deployId}`);
+// Prod status/logs (queried via dev container's linked prod)
+export const getProdStatus = (devAppId) => api.get(`/applications/${devAppId}/prod/status`);
+export const getProdLogs = (devAppId, lines = 50) => api.get(`/applications/${devAppId}/prod/logs`, { params: { lines } });
 
 // Dataverse
 export const getDataverseOverview = () => api.get('/dataverse/overview');

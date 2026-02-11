@@ -17,8 +17,8 @@ import {
 } from 'lucide-react';
 
 // Shared grid template — used by ContainerCard rows and column header in Containers.jsx
-// Uses fr units for middle columns to spread evenly across the full width
-export const CONTAINER_GRID = '50px 1.2fr 3fr 0.6fr 0.7fr 1.5fr 140px';
+// 10 columns: Env | Status | URL | Auth | Local | IDE | CPU | RAM | Host | Actions
+export const CONTAINER_GRID = '50px 1.2fr 1fr 26px 26px 48px 0.6fr 0.7fr 1fr 140px';
 
 const STATUS_BADGES = {
   connected: { color: 'text-green-400 bg-green-900/30', icon: Wifi, label: 'Connecte' },
@@ -89,7 +89,7 @@ function ContainerCard({
     <div className={isHostOffline ? 'opacity-60' : ''}>
       {/* Main row — grid aligned with column headers */}
       <div
-        className="grid items-center gap-x-3 px-4 py-1.5 border-b border-gray-700/30 hover:bg-gray-700/20 transition-colors"
+        className="grid items-center gap-x-3 px-4 py-1.5 border-b border-gray-700/30 transition-[background-color] duration-500 ease-out hover:bg-gray-600/30 hover:duration-0"
         style={{ gridTemplateColumns: CONTAINER_GRID }}
       >
         {/* Env */}
@@ -102,8 +102,8 @@ function ContainerCard({
         {/* Status */}
         <StatusBadge status={displayStatus} />
 
-        {/* URL + links */}
-        <div className="flex items-center gap-2 min-w-0 overflow-hidden">
+        {/* URL */}
+        <div className="flex items-center gap-1 min-w-0 overflow-hidden">
           {appUrl && (
             <a
               href={`https://${appUrl}`}
@@ -115,34 +115,42 @@ function ContainerCard({
               <ExternalLink className="w-3 h-3 shrink-0" />
             </a>
           )}
-          <button
-            onClick={() => onToggleSecurity(container.id, 'auth_required', !container.frontend?.auth_required)}
-            className={`p-0.5 shrink-0 transition-colors ${container.frontend?.auth_required ? 'text-purple-400 hover:text-purple-300' : 'text-purple-400 opacity-30 hover:opacity-60'}`}
-            title={container.frontend?.auth_required ? 'Auth requis (cliquer pour desactiver)' : 'Auth non requis (cliquer pour activer)'}
-          >
-            <Key className="w-3 h-3" />
-          </button>
-          <button
-            onClick={() => onToggleSecurity(container.id, 'local_only', !container.frontend?.local_only)}
-            className={`p-0.5 shrink-0 transition-colors ${container.frontend?.local_only ? 'text-yellow-400 hover:text-yellow-300' : 'text-yellow-400 opacity-30 hover:opacity-60'}`}
-            title={container.frontend?.local_only ? 'Local uniquement (cliquer pour desactiver)' : 'Acces externe (cliquer pour restreindre au local)'}
-          >
-            <Shield className="w-3 h-3" />
-          </button>
-          {ideUrl && (
+          {isDeploying && container._deployMessage && (
+            <span className="text-xs text-gray-500 truncate">{container._deployMessage}</span>
+          )}
+        </div>
+
+        {/* Auth toggle */}
+        <button
+          onClick={() => onToggleSecurity(container.id, 'auth_required', !container.frontend?.auth_required)}
+          className={`p-0.5 justify-self-center transition-colors ${container.frontend?.auth_required ? 'text-purple-400 hover:text-purple-300' : 'text-purple-400 opacity-30 hover:opacity-60'}`}
+          title={container.frontend?.auth_required ? 'Auth requis (cliquer pour desactiver)' : 'Auth non requis (cliquer pour activer)'}
+        >
+          <Key className="w-3 h-3" />
+        </button>
+
+        {/* Local-only toggle */}
+        <button
+          onClick={() => onToggleSecurity(container.id, 'local_only', !container.frontend?.local_only)}
+          className={`p-0.5 justify-self-center transition-colors ${container.frontend?.local_only ? 'text-yellow-400 hover:text-yellow-300' : 'text-yellow-400 opacity-30 hover:opacity-60'}`}
+          title={container.frontend?.local_only ? 'Local uniquement (cliquer pour desactiver)' : 'Acces externe (cliquer pour restreindre au local)'}
+        >
+          <Shield className="w-3 h-3" />
+        </button>
+
+        {/* IDE link */}
+        <div className="justify-self-center">
+          {ideUrl ? (
             <a
               href={`https://${ideUrl}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs text-cyan-400 hover:text-cyan-300 bg-cyan-900/20 shrink-0"
+              className="inline-flex items-center gap-1 px-1 py-0.5 text-xs text-cyan-400 hover:text-cyan-300 bg-cyan-900/20"
             >
               <Code2 className="w-3 h-3" />
               IDE
             </a>
-          )}
-          {isDeploying && container._deployMessage && (
-            <span className="text-xs text-gray-500 truncate">{container._deployMessage}</span>
-          )}
+          ) : null}
         </div>
 
         {/* CPU */}

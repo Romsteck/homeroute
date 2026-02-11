@@ -74,7 +74,17 @@ async fn get_config(State(state): State<ApiState>) -> Json<Value> {
     let config_path = &state.dns_dhcp_config_path;
     match tokio::fs::read_to_string(config_path).await {
         Ok(content) => match serde_json::from_str::<Value>(&content) {
-            Ok(config) => Json(json!({"success": true, "config": config})),
+            Ok(mut config) => {
+                // Merge in-memory DNS static records (added at runtime by agent connections)
+                let dns_state = state.dns.read().await;
+                if let Some(dns_obj) = config.get_mut("dns").and_then(|d| d.as_object_mut()) {
+                    dns_obj.insert(
+                        "static_records".to_string(),
+                        serde_json::to_value(&dns_state.config.static_records).unwrap_or_default(),
+                    );
+                }
+                Json(json!({"success": true, "config": config}))
+            }
             Err(e) => Json(json!({"success": false, "error": format!("Invalid config: {}", e)})),
         },
         Err(e) => Json(json!({"success": false, "error": format!("Failed to read config: {}", e)})),

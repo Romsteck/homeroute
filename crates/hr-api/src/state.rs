@@ -17,28 +17,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::RwLock;
 
-/// Phase of a dev→prod deployment.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeployPhase {
-    Stopping,
-    Uploading,
-    Starting,
-    Complete,
-    Failed,
-}
-
-/// In-memory state of an active deployment (dev→prod push).
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct DeployState {
-    pub deploy_id: String,
-    pub dev_id: String,
-    pub prod_id: String,
-    pub phase: DeployPhase,
-    pub error: Option<String>,
-    pub started_at: chrono::DateTime<chrono::Utc>,
-}
-
 /// In-memory state of an active migration.
 #[derive(Debug, serde::Serialize)]
 pub struct MigrationState {
@@ -127,9 +105,6 @@ pub struct ApiState {
 
     /// Active slug renames keyed by rename_id.
     pub renames: Arc<RwLock<HashMap<String, RenameState>>>,
-
-    /// Active deployments keyed by deploy_id (dev→prod push).
-    pub deploys: Arc<RwLock<HashMap<String, DeployState>>>,
 
     /// Cached Dataverse schemas keyed by app_id.
     pub dataverse_schemas: Arc<RwLock<HashMap<String, CachedDataverseSchema>>>,
