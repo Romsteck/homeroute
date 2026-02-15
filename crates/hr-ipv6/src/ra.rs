@@ -1,7 +1,7 @@
 //! Router Advertisement sender via raw ICMPv6 socket.
 //!
-//! Sends the GUA prefix from DHCPv6-PD with SLAAC enabled (A=1, M=1).
-//! Android uses SLAAC; Windows/Linux can use DHCPv6 stateful.
+//! Sends the GUA prefix from DHCPv6-PD with SLAAC (A=1, M=0, O=1).
+//! All clients use SLAAC for address configuration; DNS via RDNSS option.
 
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::time::Duration;
@@ -71,7 +71,7 @@ struct PrefixOption {
 }
 
 /// Build an ICMPv6 Router Advertisement packet with multiple prefixes.
-/// SLAAC is disabled (A=0), clients must use DHCPv6 stateful (M=1).
+/// SLAAC mode: A=1, M=0 (no DHCPv6 stateful), O=1 (DHCPv6 for DNS options).
 fn build_ra_packet(config: &Ipv6Config, prefixes: &[PrefixOption]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(128);
 
@@ -82,8 +82,8 @@ fn build_ra_packet(config: &Ipv6Config, prefixes: &[PrefixOption]) -> Vec<u8> {
 
     // RA fields
     buf.push(64);  // Cur Hop Limit
-    // M=1 (Managed - use DHCPv6 for addresses), O=1 (Other - use DHCPv6 for DNS)
-    let flags: u8 = 0x80 | 0x40; // M=1, O=1
+    // M=0 (no DHCPv6 for addresses, use SLAAC), O=1 (use DHCPv6 for DNS options)
+    let flags: u8 = 0x40; // M=0, O=1
     buf.push(flags);
     buf.extend_from_slice(&config.ra_lifetime_secs.to_be_bytes()[2..4]); // Router Lifetime (16-bit)
     buf.extend_from_slice(&0u32.to_be_bytes()); // Reachable Time
@@ -94,7 +94,7 @@ fn build_ra_packet(config: &Ipv6Config, prefixes: &[PrefixOption]) -> Vec<u8> {
         buf.push(3);   // Type: Prefix Information
         buf.push(4);   // Length: 4 (in units of 8 bytes = 32 bytes)
         buf.push(pfx.len);
-        buf.push(0xC0); // Flags: L=1 (on-link), A=1 (autonomous/SLAAC enabled for Android)
+        buf.push(0xC0); // Flags: L=1 (on-link), A=1 (autonomous/SLAAC)
         buf.extend_from_slice(&pfx.valid_lifetime.to_be_bytes());
         buf.extend_from_slice(&pfx.preferred_lifetime.to_be_bytes());
         buf.extend_from_slice(&0u32.to_be_bytes()); // Reserved
@@ -121,7 +121,7 @@ fn build_ra_packet(config: &Ipv6Config, prefixes: &[PrefixOption]) -> Vec<u8> {
 fn collect_prefixes(_config: &Ipv6Config, gua: &Option<PrefixInfo>) -> Vec<PrefixOption> {
     let mut prefixes = Vec::with_capacity(1);
 
-    // Only GUA prefix from PD - no ULA, DHCPv6 stateful handles addressing
+    // Only GUA prefix from PD - no ULA, SLAAC handles addressing
     if let Some(pd) = gua {
         prefixes.push(PrefixOption {
             addr: pd.prefix,
@@ -158,7 +158,7 @@ pub async fn run_ra_sender(
         return Ok(());
     }
 
-    info!("Starting Router Advertisement sender (SLAAC+DHCPv6 mode, M=1, A=1)");
+    info!("Starting Router Advertisement sender (SLAAC mode, M=0, O=1, A=1)");
 
     let socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))?;
     socket.set_multicast_hops_v6(255)?;
