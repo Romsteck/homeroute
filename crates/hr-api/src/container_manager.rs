@@ -267,8 +267,13 @@ impl ContainerManager {
 
     async fn create_container_inner(
         self: &Arc<Self>,
-        req: CreateContainerRequest,
+        mut req: CreateContainerRequest,
     ) -> Result<(ContainerV2Record, String), String> {
+        // DEV containers: force auth_required (code-server must always require auth)
+        if req.environment == hr_registry::types::Environment::Development {
+            req.frontend.auth_required = true;
+        }
+
         let host_id = req.host_id.clone().unwrap_or_else(|| "local".to_string());
 
         // Clone fields needed for auto-PROD creation (before req is partially moved)
@@ -479,14 +484,21 @@ impl ContainerManager {
     }
 
     /// Update a V2 container's configuration (endpoints, name, code-server).
-    pub async fn update_container(&self, id: &str, req: UpdateContainerRequest) -> Result<bool, String> {
-        // Check container exists
-        let exists = {
+    pub async fn update_container(&self, id: &str, mut req: UpdateContainerRequest) -> Result<bool, String> {
+        // Check container exists and get its environment
+        let env = {
             let state = self.state.read().await;
-            state.containers.iter().any(|c| c.id == id)
+            state.containers.iter().find(|c| c.id == id).map(|c| c.environment)
         };
-        if !exists {
+        if env.is_none() {
             return Ok(false);
+        }
+
+        // DEV containers: force auth_required (code-server must always require auth)
+        if env == Some(hr_registry::types::Environment::Development) {
+            if let Some(ref mut fe) = req.frontend {
+                fe.auth_required = true;
+            }
         }
 
         // Build UpdateApplicationRequest

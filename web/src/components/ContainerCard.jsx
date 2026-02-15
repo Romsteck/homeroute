@@ -120,9 +120,16 @@ function ContainerCard({
 
         {/* Auth toggle */}
         <button
-          onClick={() => onToggleSecurity(container.id, 'auth_required', !container.frontend?.auth_required)}
-          className={`p-0.5 justify-self-center transition-colors ${container.frontend?.auth_required ? 'text-purple-400 hover:text-purple-300' : 'text-purple-400 opacity-30 hover:opacity-60'}`}
-          title={container.frontend?.auth_required ? 'Auth requis (cliquer pour desactiver)' : 'Auth non requis (cliquer pour activer)'}
+          onClick={isDev ? undefined : () => onToggleSecurity(container.id, 'auth_required', !container.frontend?.auth_required)}
+          disabled={isDev}
+          className={`p-0.5 justify-self-center transition-colors ${
+            isDev
+              ? 'text-purple-400 cursor-not-allowed'
+              : container.frontend?.auth_required
+                ? 'text-purple-400 hover:text-purple-300'
+                : 'text-purple-400 opacity-30 hover:opacity-60'
+          }`}
+          title={isDev ? 'Auth obligatoire (non modifiable)' : container.frontend?.auth_required ? 'Auth requis (cliquer pour desactiver)' : 'Auth non requis (cliquer pour activer)'}
         >
           <Key className="w-3 h-3" />
         </button>
