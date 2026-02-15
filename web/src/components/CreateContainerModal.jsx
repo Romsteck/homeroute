@@ -21,7 +21,7 @@ function CreateContainerModal({
     slug: initialSlug || '',
     host_id: 'local',
     environment: isPaired ? (initialEnvironment || 'development') : 'development',
-    frontend: { auth_required: false, allowed_groups: [], local_only: false },
+    frontend: { auth_required: true, allowed_groups: [], local_only: false },
     code_server_enabled: isPaired ? (initialEnvironment !== 'production') : true,
     linked_app_id: initialLinkedAppId || '',
   });
@@ -144,14 +144,18 @@ function CreateContainerModal({
 
           {/* Auth options */}
           <div className="flex items-center gap-4">
-            <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+            <label className={`flex items-center gap-1.5 text-xs ${isDev ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'}`}
+              title={isDev ? 'Obligatoire pour les containers DEV' : undefined}
+            >
               <input
                 type="checkbox"
-                checked={form.frontend.auth_required}
-                onChange={e => setForm({ ...form, frontend: { ...form.frontend, auth_required: e.target.checked } })}
+                checked={isDev ? true : form.frontend.auth_required}
+                onChange={isDev ? undefined : e => setForm({ ...form, frontend: { ...form.frontend, auth_required: e.target.checked } })}
+                disabled={isDev}
                 className="rounded"
               />
               <Key className="w-3 h-3 text-purple-400" /> Auth requise
+              {isDev && <span className="text-gray-500 ml-1">(obligatoire)</span>}
             </label>
             <label className="flex items-center gap-1.5 text-xs cursor-pointer">
               <input
