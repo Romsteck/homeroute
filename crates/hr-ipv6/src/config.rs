@@ -7,13 +7,13 @@ pub struct Ipv6Config {
     #[serde(default)]
     pub ra_enabled: bool,
     #[serde(default)]
-    pub ra_prefix: String,  // Deprecated: ULA prefix no longer used
+    pub ra_prefix: String,  // Deprecated: unused, kept for config compat
     #[serde(default = "default_ra_lifetime")]
     pub ra_lifetime_secs: u32,
     #[serde(default)]
-    pub ra_managed_flag: bool,  // Deprecated: always true now
+    pub ra_managed_flag: bool,  // Deprecated: ignored, M=0 hardcoded
     #[serde(default)]
-    pub ra_other_flag: bool,    // Deprecated: always true now
+    pub ra_other_flag: bool,    // Deprecated: ignored, O=1 hardcoded
     #[serde(default)]
     pub dhcpv6_enabled: bool,
     #[serde(default)]

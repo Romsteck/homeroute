@@ -4,7 +4,7 @@ use serde::Deserialize;
 /// Agent configuration loaded from /etc/hr-agent.toml
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentConfig {
-    /// HomeRoute ULA address (e.g. "fd00:cafe::1")
+    /// HomeRoute address (e.g. "10.0.0.254")
     pub homeroute_address: String,
     /// HomeRoute API port (e.g. 3017)
     pub homeroute_port: u16,
