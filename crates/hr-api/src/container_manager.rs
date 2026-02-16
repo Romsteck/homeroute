@@ -877,10 +877,25 @@ WantedBy=multi-user.target
         let ws_dir = storage.join(format!("{container_name}-workspace"));
         let _ = tokio::fs::write(ws_dir.join(".mcp.json"), mcp_config).await;
 
-        // Phase 11: Deploy CLAUDE.md
-        emit("Deploiement CLAUDE.md Dataverse...");
-        let claude_md_content = include_str!("../../hr-registry/src/dataverse_claude_md.txt");
-        let _ = tokio::fs::write(ws_dir.join("CLAUDE.md"), claude_md_content).await;
+        // Phase 11: Deploy .claude/rules/ (modular instructions)
+        emit("Deploiement .claude/rules/...");
+        let rules_dir = ws_dir.join(".claude/rules");
+        let _ = tokio::fs::create_dir_all(&rules_dir).await;
+        let _ = tokio::fs::write(
+            rules_dir.join("homeroute-dataverse.md"),
+            include_str!("../../hr-registry/src/rules/homeroute-dataverse.md"),
+        )
+        .await;
+        let _ = tokio::fs::write(
+            rules_dir.join("homeroute-deploy.md"),
+            include_str!("../../hr-registry/src/rules/homeroute-deploy.md"),
+        )
+        .await;
+        let _ = tokio::fs::write(
+            rules_dir.join("homeroute-store.md"),
+            include_str!("../../hr-registry/src/rules/homeroute-store.md"),
+        )
+        .await;
 
         // Phase 12: Configure code-server
         emit("Configuration de code-server...");
