@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 
-use crate::protocol::{AgentMetrics, PowerPolicy, ServiceConfig, ServiceType};
+use crate::protocol::{AgentMetrics, ServiceConfig, ServiceType};
 
 /// Port that code-server listens on inside each container.
 pub const CODE_SERVER_PORT: u16 = 13337;
@@ -58,9 +58,6 @@ pub struct Application {
     /// Systemd services to manage for powersave.
     #[serde(default)]
     pub services: ServiceConfig,
-    /// Power-saving policy.
-    #[serde(default)]
-    pub power_policy: PowerPolicy,
     /// Whether to show a wake page when service is starting (vs transparent wait).
     #[serde(default = "default_true")]
     pub wake_page_enabled: bool,
@@ -80,6 +77,8 @@ impl Application {
                 if self.code_server_enabled {
                     domains.push(format!("code.{}.{}", self.slug, base_domain));
                 }
+                domains.push(format!("dev.{}.{}", self.slug, base_domain));
+                domains.push(format!("devapi.{}.{}", self.slug, base_domain));
                 domains
             }
             Environment::Production => {
@@ -104,6 +103,20 @@ impl Application {
                         service_type: ServiceType::CodeServer,
                     });
                 }
+                routes.push(RouteInfo {
+                    domain: format!("dev.{}.{}", self.slug, base_domain),
+                    target_port: 5173,
+                    auth_required: false,
+                    allowed_groups: vec![],
+                    service_type: ServiceType::ViteDev,
+                });
+                routes.push(RouteInfo {
+                    domain: format!("devapi.{}.{}", self.slug, base_domain),
+                    target_port: 3000,
+                    auth_required: false,
+                    allowed_groups: vec![],
+                    service_type: ServiceType::CargoDev,
+                });
                 routes
             }
             Environment::Production => {
@@ -195,8 +208,6 @@ pub struct CreateApplicationRequest {
     pub code_server_enabled: bool,
     #[serde(default)]
     pub services: ServiceConfig,
-    #[serde(default)]
-    pub power_policy: PowerPolicy,
     #[serde(default = "default_true")]
     pub wake_page_enabled: bool,
 }
@@ -216,8 +227,6 @@ pub struct UpdateApplicationRequest {
     pub code_server_enabled: Option<bool>,
     #[serde(default)]
     pub services: Option<ServiceConfig>,
-    #[serde(default)]
-    pub power_policy: Option<PowerPolicy>,
     #[serde(default)]
     pub wake_page_enabled: Option<bool>,
 }
@@ -305,7 +314,6 @@ mod tests {
             },
             code_server_enabled,
             services: ServiceConfig::default(),
-            power_policy: PowerPolicy::default(),
             wake_page_enabled: true,
             metrics: None,
         }
@@ -316,7 +324,7 @@ mod tests {
         // Dev with code-server
         let app = make_test_app(Environment::Development, true);
         let domains = app.domains("example.com");
-        assert_eq!(domains, vec!["code.myapp.example.com"]);
+        assert_eq!(domains, vec!["code.myapp.example.com", "dev.myapp.example.com", "devapi.myapp.example.com"]);
 
         // Prod
         let app = make_test_app(Environment::Production, true);
@@ -328,17 +336,19 @@ mod tests {
     fn test_domains_no_code_server() {
         let app = make_test_app(Environment::Development, false);
         let domains = app.domains("example.com");
-        assert!(domains.is_empty());
+        assert_eq!(domains, vec!["dev.myapp.example.com", "devapi.myapp.example.com"]);
     }
 
     #[test]
     fn test_routes_code_server() {
         let app = make_test_app(Environment::Development, true);
         let routes = app.routes("example.com");
-        assert_eq!(routes.len(), 1);
+        assert_eq!(routes.len(), 3);
         assert_eq!(routes[0].domain, "code.myapp.example.com");
         assert_eq!(routes[0].target_port, CODE_SERVER_PORT);
         assert!(routes[0].auth_required);
+        assert_eq!(routes[1].domain, "dev.myapp.example.com");
+        assert_eq!(routes[2].domain, "devapi.myapp.example.com");
     }
 
     #[test]

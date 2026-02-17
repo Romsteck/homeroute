@@ -293,7 +293,6 @@ impl ContainerManager {
             linked_app_id: req.linked_app_id.clone(),
             code_server_enabled: req.code_server_enabled,
             services: Default::default(),
-            power_policy: Default::default(),
             wake_page_enabled: true,
         };
 
@@ -838,6 +837,24 @@ WantedBy=multi-user.target
         )
         .await;
 
+        // Phase 8c: Install Rust toolchain + cargo-watch
+        emit("Installation Rust toolchain + cargo-watch...");
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["curl -4 --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source /root/.cargo/env && cargo install cargo-watch"],
+            3,
+        )
+        .await;
+
+        // Phase 8d: Install Node.js 22
+        emit("Installation Node.js 22...");
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["curl -4 -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y -qq nodejs"],
+            3,
+        )
+        .await;
+
         // Phase 9: Create workspace
         emit("Creation du volume workspace...");
         let _ = NspawnClient::create_workspace(container_name, storage).await;
@@ -877,23 +894,29 @@ WantedBy=multi-user.target
         let ws_dir = storage.join(format!("{container_name}-workspace"));
         let _ = tokio::fs::write(ws_dir.join(".mcp.json"), mcp_config).await;
 
-        // Phase 11: Deploy .claude/rules/ (modular instructions)
+        // Phase 11: Deploy .claude/rules/ (modular instructions with template variables)
         emit("Deploiement .claude/rules/...");
         let rules_dir = ws_dir.join(".claude/rules");
         let _ = tokio::fs::create_dir_all(&rules_dir).await;
+        let base_domain = &self.env.base_domain;
+        let render_rules = |template: &str| -> String {
+            template
+                .replace("{{slug}}", slug)
+                .replace("{{domain}}", base_domain)
+        };
         let _ = tokio::fs::write(
             rules_dir.join("homeroute-dataverse.md"),
-            include_str!("../../hr-registry/src/rules/homeroute-dataverse.md"),
+            render_rules(include_str!("../../hr-registry/src/rules/homeroute-dataverse.md")),
         )
         .await;
         let _ = tokio::fs::write(
             rules_dir.join("homeroute-deploy.md"),
-            include_str!("../../hr-registry/src/rules/homeroute-deploy.md"),
+            render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy.md")),
         )
         .await;
         let _ = tokio::fs::write(
             rules_dir.join("homeroute-store.md"),
-            include_str!("../../hr-registry/src/rules/homeroute-store.md"),
+            render_rules(include_str!("../../hr-registry/src/rules/homeroute-store.md")),
         )
         .await;
 
@@ -1039,6 +1062,67 @@ WantedBy=multi-user.target
             &["systemctl", "enable", "code-server-setup"],
         )
         .await;
+
+        // Phase 13: Vite dev server systemd unit (not enabled — started when frontend project exists)
+        emit("Configuration vite-dev.service...");
+        let vite_unit = r#"[Unit]
+Description=Vite Dev Server (HMR)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/workspace/frontend
+ExecStart=/usr/bin/npx vite --host 0.0.0.0 --port 5173
+Restart=always
+RestartSec=3
+Environment=HOME=/root
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/root/.cargo/bin
+
+[Install]
+WantedBy=multi-user.target
+"#;
+        let tmp_vite_unit = PathBuf::from(format!("/tmp/vite-unit-v2-{slug}.service"));
+        let _ = tokio::fs::write(&tmp_vite_unit, vite_unit).await;
+        let _ = NspawnClient::push_file(
+            container_name,
+            &tmp_vite_unit,
+            "etc/systemd/system/vite-dev.service",
+            storage,
+        )
+        .await;
+        let _ = tokio::fs::remove_file(&tmp_vite_unit).await;
+
+        // Phase 14: Cargo watch dev server systemd unit (not enabled — started when Rust project exists)
+        emit("Configuration cargo-dev.service...");
+        let cargo_unit = r#"[Unit]
+Description=Cargo Watch Dev Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/workspace
+ExecStart=/root/.cargo/bin/cargo-watch -x run
+Restart=always
+RestartSec=3
+Environment=HOME=/root
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/root/.cargo/bin
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
+"#;
+        let tmp_cargo_unit = PathBuf::from(format!("/tmp/cargo-unit-v2-{slug}.service"));
+        let _ = tokio::fs::write(&tmp_cargo_unit, cargo_unit).await;
+        let _ = NspawnClient::push_file(
+            container_name,
+            &tmp_cargo_unit,
+            "etc/systemd/system/cargo-dev.service",
+            storage,
+        )
+        .await;
+        let _ = tokio::fs::remove_file(&tmp_cargo_unit).await;
+
+        let _ = NspawnClient::exec(container_name, &["systemctl", "daemon-reload"]).await;
 
         // Update status to Pending (agent not yet connected)
         self.set_container_status(app_id, ContainerV2Status::Running)

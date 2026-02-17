@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 use hr_acme::AcmeManager;
 use hr_common::config::EnvConfig;
 use hr_common::events::{AgentMetricsEvent, AgentStatusEvent, AgentUpdateEvent, AgentUpdateStatus, EventBus, HostPowerEvent, HostPowerState, PowerAction, WakeResult};
-use crate::protocol::{AgentMetrics, ContainerInfo, HostMetrics, HostRegistryMessage, NetworkInterfaceInfo, PowerPolicy, RegistryMessage, ServiceAction, ServiceState, ServiceType};
+use crate::protocol::{AgentMetrics, ContainerInfo, HostMetrics, HostRegistryMessage, NetworkInterfaceInfo, RegistryMessage, ServiceAction, ServiceState, ServiceType};
 use crate::types::{
     AgentNotifyResult, AgentSkipResult, AgentStatus, AgentUpdateStatusInfo,
     Application, CreateApplicationRequest, RegistryState, UpdateApplicationRequest,
@@ -80,6 +80,8 @@ fn service_type_str(t: ServiceType) -> &'static str {
         ServiceType::CodeServer => "code_server",
         ServiceType::App => "app",
         ServiceType::Db => "db",
+        ServiceType::ViteDev => "vite_dev",
+        ServiceType::CargoDev => "cargo_dev",
     }
 }
 
@@ -210,7 +212,6 @@ impl AgentRegistry {
             frontend: req.frontend,
             code_server_enabled: req.code_server_enabled,
             services: req.services,
-            power_policy: req.power_policy,
             wake_page_enabled: req.wake_page_enabled,
             metrics: None,
         };
@@ -276,9 +277,6 @@ impl AgentRegistry {
         }
         if let Some(services) = req.services {
             app.services = services;
-        }
-        if let Some(power_policy) = req.power_policy {
-            app.power_policy = power_policy;
         }
         if let Some(wake_page_enabled) = req.wake_page_enabled {
             app.wake_page_enabled = wake_page_enabled;
@@ -421,7 +419,7 @@ impl AgentRegistry {
     }
 
     /// Called when an agent successfully connects and authenticates.
-    /// Pushes simplified config (services + power_policy).
+    /// Pushes simplified config (services, endpoints, etc.).
     pub async fn on_agent_connected(
         &self,
         app_id: &str,
@@ -490,12 +488,11 @@ impl AgentRegistry {
         }
 
         // Push config with endpoint info for agent route publishing
-        if let Some(app) = app {
+        if let Some(ref app) = app {
             let _ = tx
                 .send(RegistryMessage::Config {
                     config_version: 1,
                     services: app.services.clone(),
-                    power_policy: app.power_policy.clone(),
                     base_domain: self.env.base_domain.clone(),
                     slug: app.slug.clone(),
                     frontend: Some(app.frontend.clone()),
@@ -504,6 +501,11 @@ impl AgentRegistry {
                     wake_page_enabled: app.wake_page_enabled,
                 })
                 .await;
+        }
+
+        // Push rendered .claude/rules/ to the agent
+        if let Some(ref app) = app {
+            self.push_rules_to_agent(app).await;
         }
 
         if let Err(e) = self.persist().await {
@@ -1126,7 +1128,7 @@ impl AgentRegistry {
 
     // ── Internal helpers ────────────────────────────────────────
 
-    /// Push simplified config to a connected agent (services + power_policy).
+    /// Push simplified config to a connected agent (services, endpoints, etc.).
     async fn push_config_to_agent(&self, app: &Application) {
         let conns = self.connections.read().await;
         let Some(conn) = conns.get(&app.id) else {
@@ -1138,7 +1140,6 @@ impl AgentRegistry {
             .send(RegistryMessage::Config {
                 config_version: 1,
                 services: app.services.clone(),
-                power_policy: app.power_policy.clone(),
                 base_domain: self.env.base_domain.clone(),
                 slug: app.slug.clone(),
                 frontend: Some(app.frontend.clone()),
@@ -1147,6 +1148,29 @@ impl AgentRegistry {
                 wake_page_enabled: app.wake_page_enabled,
             })
             .await;
+    }
+
+    /// Push rendered .claude/rules/ files to a connected agent.
+    async fn push_rules_to_agent(&self, app: &Application) {
+        let conns = self.connections.read().await;
+        let Some(conn) = conns.get(&app.id) else {
+            return;
+        };
+
+        let base_domain = &self.env.base_domain;
+        let render = |template: &str| -> String {
+            template
+                .replace("{{slug}}", &app.slug)
+                .replace("{{domain}}", base_domain)
+        };
+
+        let rules = vec![
+            ("homeroute-deploy.md".to_string(), render(include_str!("rules/homeroute-deploy.md"))),
+            ("homeroute-dataverse.md".to_string(), render(include_str!("rules/homeroute-dataverse.md"))),
+            ("homeroute-store.md".to_string(), render(include_str!("rules/homeroute-store.md"))),
+        ];
+
+        let _ = conn.tx.send(RegistryMessage::UpdateRules { rules }).await;
     }
 
     // ── Service control & metrics ──────────────────────────────────
@@ -1180,37 +1204,14 @@ impl AgentRegistry {
         Ok(true)
     }
 
-    /// Update power policy for an application and push to connected agent.
-    pub async fn update_power_policy(&self, app_id: &str, policy: PowerPolicy) -> Result<bool> {
-        // Update in state
-        {
-            let mut state = self.state.write().await;
-            let Some(app) = state.applications.iter_mut().find(|a| a.id == app_id) else {
-                return Ok(false);
-            };
-            app.power_policy = policy.clone();
-        }
-        self.persist().await?;
-
-        // Push to connected agent
-        let conns = self.connections.read().await;
-        if let Some(conn) = conns.get(app_id) {
-            let _ = conn
-                .tx
-                .send(RegistryMessage::PowerPolicyUpdate(policy))
-                .await;
-            info!(app_id, "Power policy update sent to agent");
-        }
-
-        Ok(true)
-    }
-
     /// Handle metrics received from an agent: update in-memory state and broadcast to WebSocket.
     pub async fn handle_metrics(&self, app_id: &str, metrics: AgentMetrics) {
         // Convert ServiceState to string for broadcast
         let code_server_status = service_state_str(metrics.code_server_status);
         let app_status = service_state_str(metrics.app_status);
         let db_status = service_state_str(metrics.db_status);
+        let vite_dev_status = service_state_str(metrics.vite_dev_status);
+        let cargo_dev_status = service_state_str(metrics.cargo_dev_status);
 
         // Update in-memory metrics (not persisted)
         {
@@ -1226,9 +1227,10 @@ impl AgentRegistry {
             code_server_status,
             app_status,
             db_status,
+            vite_dev_status,
+            cargo_dev_status,
             memory_bytes: metrics.memory_bytes,
             cpu_percent: metrics.cpu_percent,
-            code_server_idle_secs: metrics.code_server_idle_secs,
         });
     }
 
@@ -1379,14 +1381,6 @@ impl AgentRegistry {
             action: action.to_string(),
             success: true,
         });
-    }
-
-    /// Send an activity ping to a connected agent to keep powersave alive.
-    pub async fn send_activity_ping(&self, app_id: &str, service_type: ServiceType) {
-        let connections = self.connections.read().await;
-        if let Some(conn) = connections.get(app_id) {
-            let _ = conn.tx.send(RegistryMessage::ActivityPing { service_type }).await;
-        }
     }
 
     // ── Agent Update ────────────────────────────────────────────────

@@ -85,7 +85,7 @@ pub async fn bootstrap_ubuntu(container_name: &str, storage_path: &Path) -> Resu
     // (dbus is needed for machinectl shell, curl for runtime installs)
     let setup_script = r#"
         apt-get update -qq 2>/dev/null
-        apt-get install -y -qq dbus systemd-sysv iproute2 curl ca-certificates e2fsprogs 2>/dev/null
+        apt-get install -y -qq dbus systemd-sysv iproute2 curl ca-certificates e2fsprogs sqlite3 2>/dev/null
         systemctl enable systemd-networkd 2>/dev/null || true
         systemctl mask systemd-resolved 2>/dev/null || true
         chattr +i /etc/resolv.conf 2>/dev/null || true

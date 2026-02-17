@@ -3,7 +3,6 @@ mod connection;
 mod dataverse;
 mod mcp;
 mod metrics;
-mod powersave;
 mod proxy;
 mod services;
 mod update;
@@ -14,11 +13,10 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
-use hr_registry::protocol::{AgentMessage, AgentMetrics, AgentRoute, RegistryMessage, ServiceConfig, ServiceState, ServiceType};
+use hr_registry::protocol::{AgentMessage, AgentMetrics, AgentRoute, RegistryMessage, ServiceAction, ServiceConfig, ServiceState, ServiceType};
 
 use crate::mcp::SchemaQuerySignals;
 use crate::metrics::MetricsCollector;
-use crate::powersave::{PowersaveManager, ServiceStateChange};
 use crate::services::ServiceManager;
 
 const CONFIG_PATH: &str = "/etc/hr-agent.toml";
@@ -86,9 +84,6 @@ async fn main() -> Result<()> {
     // Create service manager with empty config (will be updated from registry)
     let service_manager = Arc::new(RwLock::new(ServiceManager::new(&ServiceConfig::default())));
 
-    // Create powersave manager
-    let powersave_manager = Arc::new(PowersaveManager::new(Arc::clone(&service_manager)));
-
     // Open Dataverse database (shared across reconnections)
     let local_dataverse = match crate::dataverse::LocalDataverse::open() {
         Ok(dv) => {
@@ -116,9 +111,6 @@ async fn main() -> Result<()> {
         let (registry_tx, mut registry_rx) = mpsc::channel::<RegistryMessage>(32);
         let (outbound_tx, outbound_rx) = mpsc::channel::<AgentMessage>(64);
 
-        // Channel for service state changes (powersave -> main for potential logging)
-        let (state_change_tx, mut state_change_rx) = mpsc::channel::<ServiceStateChange>(16);
-
         info!(backoff_secs = backoff, "Connecting to HomeRoute...");
 
         // Spawn the WebSocket connection in a task so we can process messages concurrently
@@ -130,7 +122,7 @@ async fn main() -> Result<()> {
         // Spawn metrics sender task (1 second interval)
         let metrics_tx = outbound_tx.clone();
         let metrics_coll = Arc::clone(&metrics_collector);
-        let powersave_mgr = Arc::clone(&powersave_manager);
+        let svc_mgr_clone = Arc::clone(&service_manager);
         let metrics_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
@@ -140,18 +132,22 @@ async fn main() -> Result<()> {
                 let memory_bytes = metrics_coll.memory_bytes().await;
                 let cpu_percent = metrics_coll.cpu_percent().await;
 
-                // Get service states from powersave manager
-                let code_server_status = powersave_mgr.get_state(hr_registry::protocol::ServiceType::CodeServer);
-                let app_status = powersave_mgr.get_state(hr_registry::protocol::ServiceType::App);
-                let db_status = powersave_mgr.get_state(hr_registry::protocol::ServiceType::Db);
+                // Get service states from service manager
+                let svc_mgr = svc_mgr_clone.read().unwrap().clone();
+                let code_server_status = svc_mgr.get_state(ServiceType::CodeServer).await;
+                let app_status = svc_mgr.get_state(ServiceType::App).await;
+                let db_status = svc_mgr.get_state(ServiceType::Db).await;
+                let vite_dev_status = svc_mgr.get_state(ServiceType::ViteDev).await;
+                let cargo_dev_status = svc_mgr.get_state(ServiceType::CargoDev).await;
 
                 let metrics = AgentMetrics {
                     code_server_status,
                     app_status,
                     db_status,
+                    vite_dev_status,
+                    cargo_dev_status,
                     memory_bytes,
                     cpu_percent,
-                    code_server_idle_secs: 0,
                 };
 
                 if metrics_tx.send(AgentMessage::Metrics(metrics)).await.is_err() {
@@ -226,8 +222,6 @@ async fn main() -> Result<()> {
                             }
                             handle_registry_message(
                                 &service_manager,
-                                &powersave_manager,
-                                &state_change_tx,
                                 &outbound_tx,
                                 &local_dataverse,
                                 &schema_signals,
@@ -242,14 +236,6 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                // Service state changes from powersave
-                Some(change) = state_change_rx.recv() => {
-                    info!(
-                        service_type = ?change.service_type,
-                        new_state = ?change.new_state,
-                        "Service state changed"
-                    );
-                }
             }
         }
 
@@ -261,8 +247,6 @@ async fn main() -> Result<()> {
         while let Ok(msg) = registry_rx.try_recv() {
             handle_registry_message(
                 &service_manager,
-                &powersave_manager,
-                &state_change_tx,
                 &outbound_tx,
                 &local_dataverse,
                 &schema_signals,
@@ -499,8 +483,6 @@ async fn start_store_mcp() -> Result<()> {
 
 async fn handle_registry_message(
     service_manager: &Arc<RwLock<ServiceManager>>,
-    powersave_manager: &Arc<PowersaveManager>,
-    state_change_tx: &mpsc::Sender<ServiceStateChange>,
     outbound_tx: &mpsc::Sender<AgentMessage>,
     local_dataverse: &Option<Arc<crate::dataverse::LocalDataverse>>,
     schema_signals: &SchemaQuerySignals,
@@ -568,6 +550,22 @@ async fn handle_registry_message(
                             allowed_groups: vec![],
                         });
                     }
+                    // Vite dev server (HMR)
+                    routes.push(AgentRoute {
+                        domain: format!("dev.{}.{}", slug, base_domain),
+                        target_port: 443,
+                        service_type: ServiceType::ViteDev,
+                        auth_required: false,
+                        allowed_groups: vec![],
+                    });
+                    // Cargo dev API (hot reload)
+                    routes.push(AgentRoute {
+                        domain: format!("devapi.{}.{}", slug, base_domain),
+                        target_port: 443,
+                        service_type: ServiceType::CargoDev,
+                        auth_required: false,
+                        allowed_groups: vec![],
+                    });
                 }
                 hr_registry::types::Environment::Production => {
                     if frontend.is_some() {
@@ -613,8 +611,8 @@ async fn handle_registry_message(
 
             // Immediately send transitional state (Starting/Stopping) for instant UI feedback
             let transitional_state = match action {
-                hr_registry::protocol::ServiceAction::Start => ServiceState::Starting,
-                hr_registry::protocol::ServiceAction::Stop => ServiceState::Stopping,
+                ServiceAction::Start | ServiceAction::Restart => ServiceState::Starting,
+                ServiceAction::Stop => ServiceState::Stopping,
             };
             let _ = outbound_tx
                 .send(AgentMessage::ServiceStateChanged {
@@ -623,11 +621,19 @@ async fn handle_registry_message(
                 })
                 .await;
 
-            // Execute the command
-            powersave_manager.handle_command(service_type, action, state_change_tx).await;
+            // Execute via ServiceManager directly
+            let mgr = service_manager.read().unwrap().clone();
+            let result = match action {
+                ServiceAction::Start => mgr.start(service_type).await,
+                ServiceAction::Stop => mgr.stop(service_type).await,
+                ServiceAction::Restart => mgr.restart(service_type).await,
+            };
+            if let Err(e) = result {
+                error!(service_type = ?service_type, error = %e, "Service command failed");
+            }
 
             // Send final state after command completes
-            let final_state = powersave_manager.get_state(service_type);
+            let final_state = mgr.get_state(service_type).await;
             let _ = outbound_tx
                 .send(AgentMessage::ServiceStateChanged {
                     service_type,
@@ -672,6 +678,21 @@ async fn handle_registry_message(
                     error!("Failed to update certs after renewal: {e}");
                 }
             });
+        }
+
+        RegistryMessage::UpdateRules { rules } => {
+            info!("Received UpdateRules ({} files)", rules.len());
+            let rules_dir = std::path::Path::new("/root/workspace/.claude/rules");
+            if let Err(e) = std::fs::create_dir_all(rules_dir) {
+                error!("Failed to create rules directory: {e}");
+                return;
+            }
+            for (filename, content) in rules {
+                match std::fs::write(rules_dir.join(&filename), &content) {
+                    Ok(()) => info!(filename = %filename, "Updated rule file"),
+                    Err(e) => error!(filename = %filename, error = %e, "Failed to write rule file"),
+                }
+            }
         }
 
         _ => {}
