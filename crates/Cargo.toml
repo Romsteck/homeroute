@@ -68,7 +68,7 @@ rand = "0.9"
 hex = "0.4"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream"] }
 
 # Signal handling
 signal-hook = "0.3"

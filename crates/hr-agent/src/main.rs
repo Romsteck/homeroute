@@ -550,19 +550,11 @@ async fn handle_registry_message(
                             allowed_groups: vec![],
                         });
                     }
-                    // Vite dev server (HMR)
+                    // Vite dev server (HMR) — API is proxied through Vite, no separate devapi route
                     routes.push(AgentRoute {
                         domain: format!("dev.{}.{}", slug, base_domain),
                         target_port: 443,
                         service_type: ServiceType::ViteDev,
-                        auth_required: false,
-                        allowed_groups: vec![],
-                    });
-                    // Cargo dev API (hot reload)
-                    routes.push(AgentRoute {
-                        domain: format!("devapi.{}.{}", slug, base_domain),
-                        target_port: 443,
-                        service_type: ServiceType::CargoDev,
                         auth_required: false,
                         allowed_groups: vec![],
                     });

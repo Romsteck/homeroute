@@ -4,6 +4,7 @@ use axum::{
     http::{HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
+use futures_util::TryStreamExt;
 use hr_auth::forward_auth::{check_forward_auth, ForwardAuthResult};
 use hr_auth::AuthService;
 use hyper_util::client::legacy::Client;
@@ -716,9 +717,11 @@ async fn proxy_via_reqwest(
         }
     }
 
-    let body_bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    // Stream the response body instead of buffering it entirely
+    // This is critical for SSE (Server-Sent Events) and long-lived streaming responses
+    let body_stream = resp.bytes_stream().map_err(|e| std::io::Error::other(e.to_string()));
     response_builder
-        .body(Body::from(body_bytes))
+        .body(Body::from_stream(body_stream))
         .map_err(|e| e.to_string())
 }
 
