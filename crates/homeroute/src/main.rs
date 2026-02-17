@@ -470,29 +470,6 @@ async fn main() -> anyhow::Result<()> {
         drop(reg);
     }
 
-    // 3) DHCPv6 stateful server (assigns addresses from GUA prefix)
-    if dns_dhcp_config.ipv6.enabled && dns_dhcp_config.ipv6.dhcpv6_enabled {
-        let ipv6_config = dns_dhcp_config.ipv6.clone();
-        let rx = prefix_rx.clone();
-        let reg = service_registry.clone();
-        spawn_supervised("dhcpv6", ServicePriority::Important, reg, move || {
-            let config = ipv6_config.clone();
-            let prefix_rx = rx.clone();
-            async move { hr_ipv6::dhcpv6::run_dhcpv6_server(config, prefix_rx).await }
-        });
-    } else {
-        let mut reg = service_registry.write().await;
-        reg.insert("dhcpv6".into(), ServiceStatus {
-            name: "dhcpv6".into(),
-            state: ServiceState::Disabled,
-            priority: ServicePriorityLevel::Important,
-            restart_count: 0,
-            last_state_change: now_millis(),
-            error: None,
-        });
-        drop(reg);
-    }
-
     // ── Agent Registry ──────────────────────────────────────────────
 
     let registry_state_path =
@@ -655,6 +632,57 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // ── Background tasks ───────────────────────────────────────────────
+
+    // Local host metrics broadcast (every 2s)
+    {
+        let events = events.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            // Track previous CPU idle/total for delta calculation
+            let mut prev: Option<(u64, u64)> = None;
+            loop {
+                interval.tick().await;
+                let read_cpu = || -> Option<(u64, u64)> {
+                    let content = std::fs::read_to_string("/proc/stat").ok()?;
+                    let line = content.lines().next()?;
+                    let vals: Vec<u64> = line.split_whitespace().skip(1).filter_map(|v| v.parse().ok()).collect();
+                    if vals.len() < 4 { return None; }
+                    let idle = vals[3];
+                    let total: u64 = vals.iter().sum();
+                    Some((idle, total))
+                };
+                let cur = read_cpu();
+                let cpu_percent = match (prev, cur) {
+                    (Some((idle1, total1)), Some((idle2, total2))) => {
+                        let di = idle2.saturating_sub(idle1) as f64;
+                        let dt = total2.saturating_sub(total1) as f64;
+                        if dt > 0.0 { ((1.0 - di / dt) * 1000.0).round() / 10.0 } else { 0.0 }
+                    }
+                    _ => 0.0,
+                };
+                prev = cur;
+                // Memory
+                let mem = (|| -> Option<(u64, u64)> {
+                    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+                    let parse_kb = |key: &str| -> Option<u64> {
+                        info.lines().find(|l| l.starts_with(key))
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .and_then(|v| v.parse::<u64>().ok())
+                    };
+                    let total_kb = parse_kb("MemTotal:")?;
+                    let avail_kb = parse_kb("MemAvailable:")?;
+                    Some(((total_kb - avail_kb) * 1024, total_kb * 1024))
+                })();
+                let (mem_used, mem_total) = mem.unwrap_or((0, 0));
+                let _ = events.host_metrics.send(hr_common::events::HostMetricsEvent {
+                    host_id: "local".to_string(),
+                    cpu_percent: cpu_percent as f32,
+                    memory_used_bytes: mem_used,
+                    memory_total_bytes: mem_total,
+                });
+            }
+        });
+    }
 
     // Lease persistence + expired lease purge (every 60s)
     {

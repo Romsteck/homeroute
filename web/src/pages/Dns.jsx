@@ -37,8 +37,6 @@ function Dns() {
             } : null,
             ipv6: {
               raEnabled: raw.ipv6?.ra_enabled,
-              dhcpRange: raw.ipv6?.ra_prefix,
-              options: raw.ipv6?.dhcpv6_dns_servers?.map(s => `DNS: ${s}`)
             }
           });
         }
@@ -56,8 +54,7 @@ function Dns() {
   const filteredLeases = leases.filter(lease =>
     lease.hostname?.toLowerCase().includes(search.toLowerCase()) ||
     lease.ip.includes(search) ||
-    lease.mac.toLowerCase().includes(search.toLowerCase()) ||
-    lease.ipv6_addresses?.some(addr => addr.includes(search))
+    lease.mac.toLowerCase().includes(search.toLowerCase())
   );
 
   function renderDnsTab() {
@@ -171,35 +168,18 @@ function Dns() {
           </Section>
 
           <Section title="Configuration IPv6" contrast className="!mb-0 col-span-3">
-            <div className="grid grid-cols-3 gap-px">
-              <dl className="space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <dt className="text-gray-400">Router Advertisement</dt>
-                  <dd className="font-mono">
-                    {config?.ipv6?.raEnabled ? (
-                      <span className="text-green-400">Activé</span>
-                    ) : (
-                      <span className="text-gray-500">Désactivé</span>
-                    )}
-                  </dd>
-                </div>
-              </dl>
-              <div>
-                {config?.ipv6?.dhcpRange && (
-                  <div className="text-sm">
-                    <span className="text-gray-400">Plage DHCPv6</span>
-                    <div className="font-mono text-xs text-purple-400 mt-1">{config.ipv6.dhcpRange}</div>
-                  </div>
-                )}
+            <dl className="space-y-2 text-sm">
+              <div className="flex justify-between">
+                <dt className="text-gray-400">Router Advertisement</dt>
+                <dd className="font-mono">
+                  {config?.ipv6?.raEnabled ? (
+                    <span className="text-green-400">Activé</span>
+                  ) : (
+                    <span className="text-gray-500">Désactivé</span>
+                  )}
+                </dd>
               </div>
-              <div className="space-y-1">
-                {config?.ipv6?.options?.map((opt, i) => (
-                  <div key={i} className="font-mono text-xs bg-gray-900 px-2 py-1">
-                    {opt}
-                  </div>
-                ))}
-              </div>
-            </div>
+            </dl>
           </Section>
         </div>
 
@@ -222,7 +202,6 @@ function Dns() {
                 <tr className="text-left text-gray-400 border-b border-gray-700">
                   <th className="pb-2">Hostname</th>
                   <th className="pb-2">Adresse IPv4</th>
-                  <th className="pb-2">Adresses IPv6</th>
                   <th className="pb-2">Adresse MAC</th>
                   <th className="pb-2">Expiration</th>
                 </tr>
@@ -234,17 +213,6 @@ function Dns() {
                       {lease.hostname || <span className="text-gray-500">-</span>}
                     </td>
                     <td className="py-2 font-mono text-blue-400">{lease.ip}</td>
-                    <td className="py-2 font-mono text-xs">
-                      {lease.ipv6_addresses?.length > 0 ? (
-                        <div className="space-y-0.5">
-                          {lease.ipv6_addresses.map(addr => (
-                            <div key={addr} className="text-purple-400">{addr}</div>
-                          ))}
-                        </div>
-                      ) : (
-                        <span className="text-gray-500">-</span>
-                      )}
-                    </td>
                     <td className="py-2 font-mono text-gray-400 text-xs">{lease.mac}</td>
                     <td className="py-2 text-gray-400 text-xs">
                       {new Date(lease.expiry * 1000).toLocaleString('fr-FR')}

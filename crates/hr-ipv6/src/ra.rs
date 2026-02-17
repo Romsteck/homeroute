@@ -102,7 +102,7 @@ fn build_ra_packet(config: &Ipv6Config, prefixes: &[PrefixOption]) -> Vec<u8> {
     }
 
     // RDNSS Option (type=25) — Recursive DNS Server
-    for dns_str in &config.dhcpv6_dns_servers {
+    for dns_str in &config.dns_servers {
         if let Ok(dns_ip) = dns_str.parse::<Ipv6Addr>() {
             buf.push(25);  // Type: RDNSS
             buf.push(3);   // Length: 3 (= 24 bytes: 8 header + 16 address)

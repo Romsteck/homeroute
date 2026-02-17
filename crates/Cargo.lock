@@ -881,7 +881,6 @@ name = "hr-ipv6"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "hex",
  "rand",
  "serde",
  "serde_json",

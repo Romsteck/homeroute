@@ -6,18 +6,10 @@ pub struct Ipv6Config {
     pub enabled: bool,
     #[serde(default)]
     pub ra_enabled: bool,
-    #[serde(default)]
-    pub ra_prefix: String,  // Deprecated: unused, kept for config compat
     #[serde(default = "default_ra_lifetime")]
     pub ra_lifetime_secs: u32,
-    #[serde(default)]
-    pub ra_managed_flag: bool,  // Deprecated: ignored, M=0 hardcoded
-    #[serde(default)]
-    pub ra_other_flag: bool,    // Deprecated: ignored, O=1 hardcoded
-    #[serde(default)]
-    pub dhcpv6_enabled: bool,
-    #[serde(default)]
-    pub dhcpv6_dns_servers: Vec<String>,
+    #[serde(default, alias = "dhcpv6_dns_servers")]
+    pub dns_servers: Vec<String>,
     #[serde(default)]
     pub interface: String,
 
@@ -30,21 +22,10 @@ pub struct Ipv6Config {
     pub pd_prefix_hint_len: u8,
     #[serde(default)]
     pub pd_subnet_id: u16,
-
-    // DHCPv6 stateful server (LAN side) - address range within PD prefix
-    #[serde(default = "default_dhcpv6_range_start")]
-    pub dhcpv6_range_start: u64,  // e.g., 0x10 → prefix::10
-    #[serde(default = "default_dhcpv6_range_end")]
-    pub dhcpv6_range_end: u64,    // e.g., 0xFFFF → prefix::ffff
-    #[serde(default = "default_dhcpv6_lease_time")]
-    pub dhcpv6_lease_time: u32,   // Lease time in seconds
 }
 
 fn default_ra_lifetime() -> u32 { 1800 }
 fn default_pd_prefix_hint_len() -> u8 { 56 }
-fn default_dhcpv6_range_start() -> u64 { 0x10 }      // ::10
-fn default_dhcpv6_range_end() -> u64 { 0xFFFF }      // ::ffff
-fn default_dhcpv6_lease_time() -> u32 { 86400 }      // 24 hours
 
 impl Default for Ipv6Config {
     fn default() -> Self {
