@@ -6,8 +6,7 @@ Vous developpez et buildez ici, puis deployez sur la production via les outils M
 ## Environnement
 - **App** : {{slug}}
 - **IDE** : https://code.{{slug}}.{{domain}}
-- **Frontend DEV** : https://dev.{{slug}}.{{domain}}
-- **API DEV** : https://devapi.{{slug}}.{{domain}}
+- **DEV** : https://dev.{{slug}}.{{domain}}
 - **PROD** : https://{{slug}}.{{domain}}
 
 ## Architecture

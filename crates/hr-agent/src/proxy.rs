@@ -182,20 +182,11 @@ impl AgentProxy {
             );
         }
         if environment == hr_registry::types::Environment::Development {
-            // Vite dev server (port 5173)
+            // Vite dev server (port 5173) — API is proxied through Vite config
             new_routes.insert(
                 format!("dev.{}.{}", slug, base_domain),
                 LocalRoute {
                     target_port: 5173,
-                    auth_required: false,
-                    allowed_groups: vec![],
-                },
-            );
-            // Cargo dev API (port 3000)
-            new_routes.insert(
-                format!("devapi.{}.{}", slug, base_domain),
-                LocalRoute {
-                    target_port: 3000,
                     auth_required: false,
                     allowed_groups: vec![],
                 },
