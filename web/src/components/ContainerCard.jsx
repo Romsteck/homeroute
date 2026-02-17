@@ -18,7 +18,7 @@ import {
 
 // Shared grid template — used by ContainerCard rows and column header in Containers.jsx
 // 9 columns: Env | Status | Auth | Local | Acces | CPU | RAM | Host | Actions
-export const CONTAINER_GRID = '50px 1.2fr 26px 26px 160px 0.6fr 0.7fr 1fr 140px';
+export const CONTAINER_GRID = '50px 1.2fr 26px 26px 160px 55px 65px 1fr 140px';
 
 const STATUS_BADGES = {
   connected: { color: 'text-green-400 bg-green-900/30', icon: Wifi, label: 'Connecte' },
