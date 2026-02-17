@@ -192,10 +192,10 @@ async fn run_connection(config: &Config) -> Result<(), String> {
         }
     });
 
-    // Metrics task (every 5 seconds)
+    // Metrics task (every 2 seconds)
     let tx_metrics = tx.clone();
     let metrics_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
         loop {
             interval.tick().await;
             let metrics = collect_metrics();

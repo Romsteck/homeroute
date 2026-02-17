@@ -139,47 +139,15 @@ async fn get_leases(State(state): State<ApiState>) -> Json<Value> {
             .collect()
     };
 
-    // Load DHCPv6 leases from file
-    let dhcpv6_leases: std::collections::HashMap<String, (String, u64)> = {
-        let path = "/var/lib/server-dashboard/dhcpv6-leases.json";
-        match tokio::fs::read_to_string(path).await {
-            Ok(data) => {
-                if let Ok(store) = serde_json::from_str::<serde_json::Value>(&data) {
-                    store.get("leases")
-                        .and_then(|l| l.as_object())
-                        .map(|leases| {
-                            leases.iter().filter_map(|(_, lease)| {
-                                let addr = lease.get("address")?.as_str()?;
-                                let valid = lease.get("valid_until")?.as_u64()?;
-                                // Use MAC directly from lease (extracted from link-local)
-                                let mac = lease.get("mac")?.as_str()?;
-                                Some((mac.to_lowercase(), (addr.to_string(), valid)))
-                            }).collect()
-                        })
-                        .unwrap_or_default()
-                } else {
-                    std::collections::HashMap::new()
-                }
-            }
-            Err(_) => std::collections::HashMap::new(),
-        }
-    };
-
-    // Build result: DHCPv4 leases enriched with DHCPv6 addresses
     let result: Vec<serde_json::Value> = dhcpv4_leases
         .iter()
         .map(|(expiry, mac, ip, hostname, client_id)| {
-            let ipv6 = dhcpv6_leases.get(&mac.to_lowercase())
-                .filter(|(_, valid)| *valid > now)
-                .map(|(addr, _)| vec![addr.clone()])
-                .unwrap_or_default();
             json!({
                 "expiry": expiry,
                 "mac": mac,
                 "ip": ip,
                 "hostname": hostname,
                 "client_id": client_id,
-                "ipv6_addresses": ipv6
             })
         })
         .collect();
