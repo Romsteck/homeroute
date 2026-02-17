@@ -23,28 +23,19 @@ Trois services gèrent les processus de développement :
 
 ### Etat des services
 
-- `code-server` est **demarre automatiquement** au boot du conteneur
-- `vite-dev` et `cargo-dev` sont **arretes par defaut** — les demarrer quand necessaire
+- `code-server`, `vite-dev` et `cargo-dev` sont **demarres automatiquement** au boot du conteneur
+- Les trois services doivent **toujours etre actifs** — ne jamais les arreter
 - Utiliser `dev_health_check` (outil MCP) pour voir l'etat de tous les services et ports
 
-### Demarrer le mode dev
+### Redemarrer un service
 
 ```bash
-# Frontend (React/Vue/Svelte via Vite)
-systemctl start vite-dev
-
-# Backend Rust (recompilation automatique)
-systemctl start cargo-dev
+# Si un service a un probleme, le redemarrer :
+systemctl restart vite-dev
+systemctl restart cargo-dev
 
 # Verifier l'etat
 dev_health_check
-```
-
-### Arreter les services
-
-```bash
-systemctl stop vite-dev
-systemctl stop cargo-dev
 ```
 
 ## Structure du workspace
@@ -122,8 +113,7 @@ dev_test_browser url="http://localhost:5173" width=1280 height=720
 
 ## Workflow de developpement standard
 
-1. **Demarrer les services** : `systemctl start vite-dev cargo-dev`
-2. **Verifier** : `dev_health_check` — tous les services doivent etre `ACTIVE`
+1. **Verifier les services** : `dev_health_check` — tous les services doivent etre `ACTIVE`
 3. **Coder** : modifier les fichiers dans `/root/workspace/`
 4. **Tester** : `dev_test_endpoint` sur les endpoints modifies
 5. **Verifier visuellement** : `dev_test_browser` pour le rendu frontend
@@ -134,8 +124,8 @@ dev_test_browser url="http://localhost:5173" width=1280 height=720
 
 | Probleme | Solution |
 |----------|----------|
-| Port 5173 CLOSED | `systemctl start vite-dev` puis `systemctl status vite-dev` |
-| Port 3000 CLOSED | `systemctl start cargo-dev` puis `systemctl status cargo-dev` |
+| Port 5173 CLOSED | `systemctl restart vite-dev` puis `systemctl status vite-dev` |
+| Port 3000 CLOSED | `systemctl restart cargo-dev` puis `systemctl status cargo-dev` |
 | Hot-reload ne fonctionne pas | `systemctl restart vite-dev` ou `systemctl restart cargo-dev` |
 | Erreur de compilation Rust | Verifier les logs : `journalctl -u cargo-dev -n 50` |
 | Erreur npm/Vite | Verifier les logs : `journalctl -u vite-dev -n 50` |

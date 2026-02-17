@@ -1077,7 +1077,7 @@ WantedBy=multi-user.target
         )
         .await;
 
-        // Phase 13: Vite dev server systemd unit (not enabled — started when frontend project exists)
+        // Phase 13: Vite dev server systemd unit (enabled — always running in DEV)
         emit("Configuration vite-dev.service...");
         let vite_unit = r#"[Unit]
 Description=Vite Dev Server (HMR)
@@ -1106,7 +1106,7 @@ WantedBy=multi-user.target
         .await;
         let _ = tokio::fs::remove_file(&tmp_vite_unit).await;
 
-        // Phase 14: Cargo watch dev server systemd unit (not enabled — started when Rust project exists)
+        // Phase 14: Cargo watch dev server systemd unit (enabled — always running in DEV)
         emit("Configuration cargo-dev.service...");
         let cargo_unit = r#"[Unit]
 Description=Cargo Watch Dev Server
@@ -1137,6 +1137,13 @@ WantedBy=multi-user.target
         let _ = tokio::fs::remove_file(&tmp_cargo_unit).await;
 
         let _ = NspawnClient::exec(container_name, &["systemctl", "daemon-reload"]).await;
+
+        // Enable and start dev services (always running in DEV containers)
+        let _ = NspawnClient::exec(
+            container_name,
+            &["systemctl", "enable", "--now", "vite-dev", "cargo-dev"],
+        )
+        .await;
 
         // Update status to Pending (agent not yet connected)
         self.set_container_status(app_id, ContainerV2Status::Running)
