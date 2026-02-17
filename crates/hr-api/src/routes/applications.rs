@@ -678,7 +678,7 @@ async fn prod_push(
 
 // ── Rules update handlers ────────────────────────────────────
 
-/// Render the 3 rule templates with the given slug and domain.
+/// Render the 4 rule templates with the given slug and domain.
 fn render_rules(slug: &str, domain: &str) -> Vec<(String, String)> {
     let render = |template: &str| -> String {
         template
@@ -693,6 +693,10 @@ fn render_rules(slug: &str, domain: &str) -> Vec<(String, String)> {
         (
             "homeroute-deploy.md".to_string(),
             render(include_str!("../../../hr-registry/src/rules/homeroute-deploy.md")),
+        ),
+        (
+            "homeroute-dev.md".to_string(),
+            render(include_str!("../../../hr-registry/src/rules/homeroute-dev.md")),
         ),
         (
             "homeroute-store.md".to_string(),

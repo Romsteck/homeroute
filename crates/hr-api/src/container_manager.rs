@@ -915,6 +915,11 @@ WantedBy=multi-user.target
         )
         .await;
         let _ = tokio::fs::write(
+            rules_dir.join("homeroute-dev.md"),
+            render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev.md")),
+        )
+        .await;
+        let _ = tokio::fs::write(
             rules_dir.join("homeroute-store.md"),
             render_rules(include_str!("../../hr-registry/src/rules/homeroute-store.md")),
         )
