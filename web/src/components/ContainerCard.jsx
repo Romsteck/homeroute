@@ -149,7 +149,7 @@ function ContainerCard({
         </button>
 
         {/* Access buttons */}
-        <div className="flex items-center gap-1 justify-self-center">
+        <div className="flex items-center gap-1 justify-self-start">
           {devUrl && (
             <a
               href={`https://${devUrl}`}
@@ -158,7 +158,6 @@ function ContainerCard({
               className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-xs text-orange-400 hover:text-orange-300 bg-orange-900/20 rounded"
               title={`Vite Dev Server (HMR) — ${metrics?.viteDevStatus || 'unknown'}`}
             >
-              <span className={`w-1.5 h-1.5 rounded-full ${metrics?.viteDevStatus === 'running' ? 'bg-green-400' : 'bg-gray-600'}`} />
               <Monitor className="w-3 h-3" />
               DEV
             </a>
@@ -171,7 +170,6 @@ function ContainerCard({
               className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-xs text-purple-400 hover:text-purple-300 bg-purple-900/20 rounded"
               title={`Cargo Watch API — ${metrics?.cargoDevStatus || 'unknown'}`}
             >
-              <span className={`w-1.5 h-1.5 rounded-full ${metrics?.cargoDevStatus === 'running' ? 'bg-green-400' : 'bg-gray-600'}`} />
               <Braces className="w-3 h-3" />
               API
             </a>
