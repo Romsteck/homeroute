@@ -17,8 +17,8 @@ import {
 } from 'lucide-react';
 
 // Shared grid template — used by ContainerCard rows and column header in Containers.jsx
-// 10 columns: Env | Status | URL | Auth | Local | IDE | CPU | RAM | Host | Actions
-export const CONTAINER_GRID = '50px 1.2fr 1fr 26px 26px 160px 0.6fr 0.7fr 1fr 140px';
+// 9 columns: Env | Status | Auth | Local | Acces | CPU | RAM | Host | Actions
+export const CONTAINER_GRID = '50px 1.2fr 26px 26px 160px 0.6fr 0.7fr 1fr 140px';
 
 const STATUS_BADGES = {
   connected: { color: 'text-green-400 bg-green-900/30', icon: Wifi, label: 'Connecte' },
@@ -65,17 +65,10 @@ function ContainerCard({
   MigrationProgress,
 }) {
   const displayStatus = container.agent_status || container.status;
-  const isDeploying = displayStatus === 'deploying' || container.status === 'deploying';
   const isMigrating = !!migration;
   const isDev = container.environment !== 'production';
   const host = container.host_id && container.host_id !== 'local'
     ? hosts?.find(h => h.id === container.host_id)
-    : null;
-
-  const appUrl = baseDomain
-    ? isDev
-      ? `code.${container.slug}.${baseDomain}`
-      : `${container.slug}.${baseDomain}`
     : null;
 
   const ideUrl = baseDomain && isDev && container.code_server_enabled
@@ -102,24 +95,6 @@ function ContainerCard({
 
         {/* Status */}
         <StatusBadge status={displayStatus} />
-
-        {/* URL */}
-        <div className="flex items-center gap-1 min-w-0 overflow-hidden">
-          {appUrl && (
-            <a
-              href={`https://${appUrl}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-mono text-xs text-gray-400 hover:text-blue-400 truncate flex items-center gap-1"
-            >
-              {appUrl}
-              <ExternalLink className="w-3 h-3 shrink-0" />
-            </a>
-          )}
-          {isDeploying && container._deployMessage && (
-            <span className="text-xs text-gray-500 truncate">{container._deployMessage}</span>
-          )}
-        </div>
 
         {/* Auth toggle */}
         <button

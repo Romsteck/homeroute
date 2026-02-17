@@ -575,7 +575,6 @@ function Containers() {
           >
             <span>Env</span>
             <span>Status</span>
-            <span>URL</span>
             <span></span>
             <span></span>
             <span className="text-center">Acces</span>
