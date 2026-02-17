@@ -433,13 +433,13 @@ async fn proxy_http(
     req.headers_mut().remove("connection");
     req.headers_mut().remove("upgrade");
 
-    // Build target URI
+    // Build target URI (origin-form only — absolute-form breaks some dev servers like Vite)
     let path = req
         .uri()
         .path_and_query()
         .map(|pq| pq.to_string())
         .unwrap_or_else(|| "/".to_string());
-    let target_uri: hyper::Uri = format!("http://127.0.0.1:{}{}", target_port, path)
+    let target_uri: hyper::Uri = path
         .parse()
         .unwrap_or_else(|_| "/".parse().unwrap());
     *req.uri_mut() = target_uri;
