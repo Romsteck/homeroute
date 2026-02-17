@@ -162,7 +162,7 @@ function ContainerCard({
         </div>
 
         {/* CPU */}
-        <span className={`font-mono text-xs text-right ${
+        <span className={`font-mono text-xs ${
           isConnected && metrics?.cpuPercent > 80 ? 'text-red-400' :
           isConnected && metrics?.cpuPercent > 50 ? 'text-yellow-400' :
           isConnected && metrics?.cpuPercent > 0 ? 'text-green-400' : 'text-gray-600'
@@ -173,7 +173,7 @@ function ContainerCard({
         </span>
 
         {/* RAM */}
-        <span className="font-mono text-xs text-gray-400 text-right">
+        <span className="font-mono text-xs text-gray-400">
           {isConnected && metrics?.memoryBytes
             ? formatBytes(metrics.memoryBytes)
             : '—'}

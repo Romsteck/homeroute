@@ -577,9 +577,9 @@ function Containers() {
             <span>Status</span>
             <span></span>
             <span></span>
-            <span className="text-center">Acces</span>
-            <span className="text-right">CPU</span>
-            <span className="text-right">RAM</span>
+            <span>Acces</span>
+            <span>CPU</span>
+            <span>RAM</span>
             <span>Hote</span>
             <span className="text-right">Actions</span>
           </div>
