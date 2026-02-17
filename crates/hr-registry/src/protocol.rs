@@ -33,6 +33,8 @@ pub enum ServiceType {
     CodeServer,
     App,
     Db,
+    ViteDev,
+    CargoDev,
 }
 
 /// Action to perform on a service.
@@ -41,6 +43,7 @@ pub enum ServiceType {
 pub enum ServiceAction {
     Start,
     Stop,
+    Restart,
 }
 
 /// Configuration of which systemd services to manage.
@@ -54,14 +57,6 @@ pub struct ServiceConfig {
     pub db: Vec<String>,
 }
 
-/// Power-saving policy configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PowerPolicy {
-    /// Idle timeout for code-server in seconds (None = never auto-stop).
-    #[serde(default)]
-    pub code_server_idle_timeout_secs: Option<u64>,
-}
-
 /// Metrics reported by the agent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentMetrics {
@@ -71,12 +66,14 @@ pub struct AgentMetrics {
     pub app_status: ServiceState,
     /// Database services combined state.
     pub db_status: ServiceState,
+    /// Vite dev server state.
+    pub vite_dev_status: ServiceState,
+    /// Cargo dev (cargo-watch) state.
+    pub cargo_dev_status: ServiceState,
     /// RAM used in bytes.
     pub memory_bytes: u64,
     /// CPU usage percentage (0.0 - 100.0).
     pub cpu_percent: f32,
-    /// Seconds since last code-server activity.
-    pub code_server_idle_secs: u64,
 }
 
 // ── Messages from Agent → Registry ──────────────────────────────
@@ -205,12 +202,9 @@ pub enum RegistryMessage {
     #[serde(rename = "config")]
     Config {
         config_version: u64,
-        /// Services to manage for powersave.
+        /// Services to manage.
         #[serde(default)]
         services: ServiceConfig,
-        /// Power-saving policy.
-        #[serde(default)]
-        power_policy: PowerPolicy,
         /// Base domain for route construction (e.g., "mynetwk.biz").
         #[serde(default)]
         base_domain: String,
@@ -240,18 +234,12 @@ pub enum RegistryMessage {
     /// Graceful shutdown request.
     #[serde(rename = "shutdown")]
     Shutdown,
-    /// Update power policy (partial update).
-    #[serde(rename = "power_policy_update")]
-    PowerPolicyUpdate(PowerPolicy),
     /// Command to start/stop a specific service type.
     #[serde(rename = "service_command")]
     ServiceCommand {
         service_type: ServiceType,
         action: ServiceAction,
     },
-    /// Activity ping to keep powersave timer alive.
-    #[serde(rename = "activity_ping")]
-    ActivityPing { service_type: ServiceType },
     /// Certificate has been renewed; agent should re-pull certs.
     #[serde(rename = "cert_renewal")]
     CertRenewal { slug: String },
@@ -266,6 +254,12 @@ pub enum RegistryMessage {
     DataverseSchemas {
         request_id: String,
         schemas: Vec<AppSchemaOverview>,
+    },
+    /// Push updated .claude/rules/ files to the agent.
+    #[serde(rename = "update_rules")]
+    UpdateRules {
+        /// Vec of (filename, content) pairs, e.g. [("homeroute-deploy.md", "# Deploy...")]
+        rules: Vec<(String, String)>,
     },
 }
 

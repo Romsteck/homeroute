@@ -13,11 +13,13 @@ import {
   AlertTriangle,
   HardDrive,
   ExternalLink,
+  Monitor,
+  Braces,
 } from 'lucide-react';
 
 // Shared grid template — used by ContainerCard rows and column header in Containers.jsx
 // 10 columns: Env | Status | URL | Auth | Local | IDE | CPU | RAM | Host | Actions
-export const CONTAINER_GRID = '50px 1.2fr 1fr 26px 26px 48px 0.6fr 0.7fr 1fr 140px';
+export const CONTAINER_GRID = '50px 1.2fr 1fr 26px 26px 160px 0.6fr 0.7fr 1fr 140px';
 
 const STATUS_BADGES = {
   connected: { color: 'text-green-400 bg-green-900/30', icon: Wifi, label: 'Connecte' },
@@ -80,6 +82,9 @@ function ContainerCard({
   const ideUrl = baseDomain && isDev && container.code_server_enabled
     ? `code.${container.slug}.${baseDomain}/?folder=/root/workspace`
     : null;
+  const devUrl = baseDomain && isDev ? `dev.${container.slug}.${baseDomain}` : null;
+  const devApiUrl = baseDomain && isDev ? `devapi.${container.slug}.${baseDomain}` : null;
+  const prodAppUrl = baseDomain && !isDev ? `${container.slug}.${baseDomain}` : null;
 
   const isConnected = displayStatus === 'connected';
 
@@ -143,19 +148,58 @@ function ContainerCard({
           <Shield className="w-3 h-3" />
         </button>
 
-        {/* IDE link */}
-        <div className="justify-self-center">
-          {ideUrl ? (
+        {/* Access buttons */}
+        <div className="flex items-center gap-1 justify-self-center">
+          {devUrl && (
+            <a
+              href={`https://${devUrl}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-xs text-orange-400 hover:text-orange-300 bg-orange-900/20 rounded"
+              title={`Vite Dev Server (HMR) — ${metrics?.viteDevStatus || 'unknown'}`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${metrics?.viteDevStatus === 'running' ? 'bg-green-400' : 'bg-gray-600'}`} />
+              <Monitor className="w-3 h-3" />
+              DEV
+            </a>
+          )}
+          {devApiUrl && (
+            <a
+              href={`https://${devApiUrl}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-xs text-purple-400 hover:text-purple-300 bg-purple-900/20 rounded"
+              title={`Cargo Watch API — ${metrics?.cargoDevStatus || 'unknown'}`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${metrics?.cargoDevStatus === 'running' ? 'bg-green-400' : 'bg-gray-600'}`} />
+              <Braces className="w-3 h-3" />
+              API
+            </a>
+          )}
+          {ideUrl && (
             <a
               href={`https://${ideUrl}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 px-1 py-0.5 text-xs text-cyan-400 hover:text-cyan-300 bg-cyan-900/20"
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-xs text-cyan-400 hover:text-cyan-300 bg-cyan-900/20 rounded"
+              title="code-server IDE"
             >
               <Code2 className="w-3 h-3" />
               IDE
             </a>
-          ) : null}
+          )}
+          {prodAppUrl && (
+            <a
+              href={`https://${prodAppUrl}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-xs text-green-400 hover:text-green-300 bg-green-900/20 rounded"
+              title="Application"
+            >
+              <ExternalLink className="w-3 h-3" />
+              APP
+            </a>
+          )}
         </div>
 
         {/* CPU */}

@@ -429,14 +429,6 @@ async fn proxy_handler_inner(
 
             match proxy_result {
                 Ok(resp) => {
-                    // ActivityPing: notify agent of activity for powersave tracking
-                    if let Some(registry) = state.get_registry() {
-                        let app_id = app_route.app_id.clone();
-                        let svc = app_route.service_type;
-                        tokio::spawn(async move {
-                            registry.send_activity_ping(&app_id, svc).await;
-                        });
-                    }
                     return Ok(resp);
                 }
                 Err(err_str) => {

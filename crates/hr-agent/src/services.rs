@@ -45,6 +45,8 @@ impl ServiceManager {
             ServiceType::CodeServer => true, // Always configured
             ServiceType::App => !self.app_units.is_empty(),
             ServiceType::Db => !self.db_units.is_empty(),
+            ServiceType::ViteDev => true,  // Always configured in DEV containers
+            ServiceType::CargoDev => true, // Always configured in DEV containers
         }
     }
 
@@ -54,6 +56,8 @@ impl ServiceManager {
             ServiceType::CodeServer => vec!["code-server.service"],
             ServiceType::App => self.app_units.iter().map(|s| s.as_str()).collect(),
             ServiceType::Db => self.db_units.iter().map(|s| s.as_str()).collect(),
+            ServiceType::ViteDev => vec!["vite-dev.service"],
+            ServiceType::CargoDev => vec!["cargo-dev.service"],
         }
     }
 
@@ -169,6 +173,50 @@ impl ServiceManager {
             }
             Ok(Err(e)) => Err(anyhow!("Failed to execute systemctl: {}", e)),
             Err(_) => Err(anyhow!("Timeout starting {}", unit)),
+        }
+    }
+
+    /// Restart all units for a service type.
+    /// Uses `systemctl restart` which atomically stops and starts, and works
+    /// even if the service is currently stopped.
+    pub async fn restart(&self, service_type: ServiceType) -> Result<()> {
+        let units = self.units_for(service_type);
+        if units.is_empty() {
+            return Ok(());
+        }
+
+        info!(service_type = ?service_type, units = ?units, "Restarting services");
+
+        for unit in units {
+            self.restart_unit(unit).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Restart a single systemd unit.
+    async fn restart_unit(&self, unit: &str) -> Result<()> {
+        let result = timeout(
+            SYSTEMCTL_TIMEOUT,
+            Command::new("systemctl")
+                .args(["restart", unit])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output(),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(output)) if output.status.success() => {
+                debug!(unit, "Service restarted");
+                Ok(())
+            }
+            Ok(Ok(output)) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                Err(anyhow!("Failed to restart {}: {}", unit, stderr))
+            }
+            Ok(Err(e)) => Err(anyhow!("Failed to execute systemctl: {}", e)),
+            Err(_) => Err(anyhow!("Timeout restarting {}", unit)),
         }
     }
 

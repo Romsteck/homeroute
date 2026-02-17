@@ -206,9 +206,10 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                                 "codeServerStatus": event.code_server_status,
                                 "appStatus": event.app_status,
                                 "dbStatus": event.db_status,
+                                "viteDevStatus": event.vite_dev_status,
+                                "cargoDevStatus": event.cargo_dev_status,
                                 "memoryBytes": event.memory_bytes,
                                 "cpuPercent": event.cpu_percent,
-                                "codeServerIdleSecs": event.code_server_idle_secs,
                             }
                         });
                         if socket.send(Message::Text(msg.to_string().into())).await.is_err() {

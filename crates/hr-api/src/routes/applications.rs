@@ -7,14 +7,14 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::http::header;
 use axum::response::IntoResponse;
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 use axum::extract::DefaultBodyLimit;
 use axum::{Json, Router};
 use tokio::io::AsyncReadExt;
 use tracing::{error, info, warn};
 
 use hr_proxy::AppRoute;
-use hr_registry::protocol::{AgentMessage, HostRegistryMessage, PowerPolicy, ServiceAction, ServiceConfig, ServiceType};
+use hr_registry::protocol::{AgentMessage, HostRegistryMessage, RegistryMessage, ServiceAction, ServiceConfig, ServiceType};
 use hr_registry::types::{TriggerUpdateRequest, UpdateApplicationRequest};
 use hr_common::events::{MigrationPhase, MigrationProgressEvent};
 use hr_acme::types::WildcardType;
@@ -26,14 +26,15 @@ pub fn router() -> Router<ApiState> {
     Router::new()
         .route("/{id}/services/{service_type}/start", post(start_service))
         .route("/{id}/services/{service_type}/stop", post(stop_service))
-        .route("/{id}/power-policy", put(update_power_policy))
         .route("/{id}/update/fix", post(fix_agent_update))
         .route("/{id}/exec", post(exec_in_container))
+        .route("/{id}/update-rules", post(update_rules_single))
         .route("/{id}/deploy", post(deploy_to_production).layer(DefaultBodyLimit::max(200 * 1024 * 1024)))
         .route("/{id}/prod/status", get(get_prod_status))
         .route("/{id}/prod/logs", get(get_prod_logs))
         .route("/{id}/prod/exec", post(prod_exec))
         .route("/{id}/prod/push", post(prod_push).layer(DefaultBodyLimit::max(200 * 1024 * 1024)))
+        .route("/update-rules", post(update_rules_all))
         .route("/deploys/{deploy_id}/artifact", get(get_deploy_artifact))
         .route("/agents/version", get(agent_version))
         .route("/agents/binary", get(agent_binary))
@@ -57,6 +58,8 @@ async fn start_service(
         "code-server" => ServiceType::CodeServer,
         "app" => ServiceType::App,
         "db" => ServiceType::Db,
+        "vite-dev" | "vite_dev" => ServiceType::ViteDev,
+        "cargo-dev" | "cargo_dev" => ServiceType::CargoDev,
         _ => {
             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": "Invalid service type"}))).into_response();
         }
@@ -87,6 +90,8 @@ async fn stop_service(
         "code-server" => ServiceType::CodeServer,
         "app" => ServiceType::App,
         "db" => ServiceType::Db,
+        "vite-dev" | "vite_dev" => ServiceType::ViteDev,
+        "cargo-dev" | "cargo_dev" => ServiceType::CargoDev,
         _ => {
             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": "Invalid service type"}))).into_response();
         }
@@ -100,28 +105,6 @@ async fn stop_service(
         Ok(false) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": "Application not found or not connected"}))).into_response(),
         Err(e) => {
             error!("Failed to send stop command: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": e.to_string()}))).into_response()
-        }
-    }
-}
-
-async fn update_power_policy(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-    Json(policy): Json<PowerPolicy>,
-) -> impl IntoResponse {
-    let Some(registry) = &state.registry else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"success": false, "error": "Registry not available"}))).into_response();
-    };
-
-    match registry.update_power_policy(&id, policy).await {
-        Ok(true) => {
-            info!(app_id = id, "Power policy updated");
-            Json(serde_json::json!({"success": true})).into_response()
-        }
-        Ok(false) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": "Application not found"}))).into_response(),
-        Err(e) => {
-            error!("Failed to update power policy: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": e.to_string()}))).into_response()
         }
     }
@@ -257,16 +240,7 @@ fi"#;
     }
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // Phase 1: Stop prod app service
-    info!(deploy_id, "Deploy: stopping prod app service");
-    match registry.send_service_command(prod_id, ServiceType::App, ServiceAction::Stop).await {
-        Ok(true) => {}
-        Ok(false) => warn!(deploy_id, "Prod agent not connected, skipping service stop"),
-        Err(e) => warn!(deploy_id, "Failed to stop prod service (continuing): {e}"),
-    }
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-    // Phase 2: Copy binary to /opt/app/app in prod container
+    // Phase 1: Copy binary to /opt/app/app in prod container
     info!(deploy_id, binary_bytes = binary_data.len(), "Deploy: copying binary to prod container");
 
     let tmp_path = format!("/tmp/deploy-{}.bin", deploy_id);
@@ -334,12 +308,12 @@ fi"#;
 
     let _ = tokio::fs::remove_file(&tmp_path).await;
 
-    // Phase 3: Start prod app service
-    info!(deploy_id, "Deploy: starting prod app service");
-    match registry.send_service_command(prod_id, ServiceType::App, ServiceAction::Start).await {
+    // Phase 2: Restart prod app service (atomically stops + starts with new binary)
+    info!(deploy_id, "Deploy: restarting prod app service");
+    match registry.send_service_command(prod_id, ServiceType::App, ServiceAction::Restart).await {
         Ok(true) => {}
-        Ok(false) => warn!(deploy_id, "Prod agent not connected, could not start service"),
-        Err(e) => warn!(deploy_id, "Failed to start prod service: {e}"),
+        Ok(false) => warn!(deploy_id, "Prod agent not connected, could not restart service"),
+        Err(e) => warn!(deploy_id, "Failed to restart prod service: {e}"),
     }
 
     info!(deploy_id, "Deploy to production completed successfully");
@@ -700,6 +674,87 @@ async fn prod_push(
             }))).into_response()
         }
     }
+}
+
+// ── Rules update handlers ────────────────────────────────────
+
+/// Render the 3 rule templates with the given slug and domain.
+fn render_rules(slug: &str, domain: &str) -> Vec<(String, String)> {
+    let render = |template: &str| -> String {
+        template
+            .replace("{{slug}}", slug)
+            .replace("{{domain}}", domain)
+    };
+    vec![
+        (
+            "homeroute-dataverse.md".to_string(),
+            render(include_str!("../../../hr-registry/src/rules/homeroute-dataverse.md")),
+        ),
+        (
+            "homeroute-deploy.md".to_string(),
+            render(include_str!("../../../hr-registry/src/rules/homeroute-deploy.md")),
+        ),
+        (
+            "homeroute-store.md".to_string(),
+            render(include_str!("../../../hr-registry/src/rules/homeroute-store.md")),
+        ),
+    ]
+}
+
+/// POST /api/applications/{id}/update-rules
+/// Push updated .claude/rules/ to a specific agent.
+async fn update_rules_single(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let Some(registry) = &state.registry else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"success": false, "error": "Registry not available"}))).into_response();
+    };
+
+    let Some(app) = registry.get_application(&id).await else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": "Application not found"}))).into_response();
+    };
+
+    let rules = render_rules(&app.slug, &state.env.base_domain);
+    match registry.send_to_agent(&id, RegistryMessage::UpdateRules { rules }).await {
+        Ok(()) => {
+            info!(app_id = id, slug = app.slug, "Rules update sent to agent");
+            Json(serde_json::json!({"success": true, "message": "Rules update sent"})).into_response()
+        }
+        Err(e) => {
+            warn!(app_id = id, "Failed to send rules update: {e}");
+            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"success": false, "error": format!("Agent not connected: {e}")}))).into_response()
+        }
+    }
+}
+
+/// POST /api/applications/update-rules
+/// Push updated .claude/rules/ to ALL connected agents.
+async fn update_rules_all(
+    State(state): State<ApiState>,
+) -> impl IntoResponse {
+    let Some(registry) = &state.registry else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"success": false, "error": "Registry not available"}))).into_response();
+    };
+
+    let apps = registry.list_applications().await;
+    let mut sent = 0u32;
+    let mut failed = 0u32;
+    for app in &apps {
+        let rules = render_rules(&app.slug, &state.env.base_domain);
+        match registry.send_to_agent(&app.id, RegistryMessage::UpdateRules { rules }).await {
+            Ok(()) => sent += 1,
+            Err(_) => failed += 1,
+        }
+    }
+
+    info!(sent, failed, total = apps.len(), "Bulk rules update complete");
+    Json(serde_json::json!({
+        "success": true,
+        "sent": sent,
+        "failed": failed,
+        "total": apps.len(),
+    })).into_response()
 }
 
 // ── Agent update handlers ────────────────────────────────────

@@ -1,43 +1,82 @@
-# Déploiement vers Production
+# Deploiement vers Production
 
-Ce workspace est un **environnement de build** lié à un conteneur de production.
-Vous développez et buildez ici, puis déployez sur la production via les outils MCP `deploy`.
+Ce workspace est un **environnement de build** lie a un conteneur de production.
+Vous developpez et buildez ici, puis deployez sur la production via les outils MCP `deploy`.
+
+## Environnement
+- **App** : {{slug}}
+- **IDE** : https://code.{{slug}}.{{domain}}
+- **Frontend DEV** : https://dev.{{slug}}.{{domain}}
+- **API DEV** : https://devapi.{{slug}}.{{domain}}
+- **PROD** : https://{{slug}}.{{domain}}
 
 ## Architecture
 - **Ici (DEV)**: code source, build tools, code-server IDE
-- **Production (PROD)**: binaire déployé + assets statiques + base de données
-- Pas d'endpoint public pour ce conteneur de dev — il sert uniquement à builder
-- L'IDE code-server est accessible via `code.{slug}.{domaine}`
+- **Production (PROD)**: binaire deploye + assets statiques + base de donnees
+- Pas d'endpoint public pour ce conteneur de dev — il sert uniquement a builder
+- L'IDE code-server est accessible via `code.{{slug}}.{{domain}}`
 
-## Règles
-- **JAMAIS déployer en production sauf si l'utilisateur l'a explicitement demandé**
-- TOUJOURS builder le binaire AVANT de déployer (`cargo build --release`)
-- TOUJOURS utiliser l'outil `deploy` du serveur MCP — JAMAIS copier manuellement
-- Le binaire est déployé à `/opt/app/app` sur le conteneur de production
-- Le service systemd `app.service` est créé/redémarré automatiquement
+## Regles
+- **JAMAIS deployer en production sauf si l'utilisateur l'a explicitement demande**
+- TOUJOURS utiliser l'outil `deploy_app` pour un deploiement complet en une commande
+- Le binaire est deploye a `/opt/app/app` sur le conteneur de production
+- Le service systemd `app.service` est cree/redemarre automatiquement
 
 ## Outils disponibles
-- `deploy` — Déployer un binaire compilé vers la production (nécessite `binary_path`)
-- `prod_status` — Vérifier le statut du service en production
+- `deploy_app` — **Deploiement complet** en une commande (build + migration + push + deploy + health check)
+- `deploy` — Deployer un binaire compile vers la production (necessite `binary_path`)
+- `prod_status` — Verifier le statut du service en production
 - `prod_logs` — Consulter les logs du service en production
-- `prod_exec` — Exécuter une commande shell sur la production
+- `prod_exec` — Executer une commande shell sur la production
 - `prod_push` — Copier un fichier ou dossier vers la production
+- `prod_schema` — Afficher le schema de la base de donnees PROD (lecture seule)
+- `schema_diff` — Comparer le schema DEV vs PROD
+- `migrate_schema` — Appliquer les modifications de schema sur PROD (sans toucher aux donnees)
+- `dev_health_check` — Verifier l'etat de tous les services DEV
+- `dev_test_endpoint` — Tester un endpoint HTTP local
 
-## Procédure de déploiement
-1. Builder le binaire: `cargo build --release`
-2. Builder le frontend si applicable (dans le workspace)
-3. Pousser les assets statiques **AVANT** le binaire: `prod_push` de `frontend/dist` vers `/opt/app/frontend/dist`
-4. Pousser la base de données si le schéma a changé: `prod_push` avec le dossier `.dataverse/`
-5. Déployer le binaire avec l'outil MCP `deploy` (restart automatique du service)
-6. Vérifier avec `prod_status` et `prod_logs`
+## Procedure de deploiement
+1. Utiliser `deploy_app` — il orchestre tout automatiquement :
+   - Build release du binaire
+   - Build frontend (si frontend/ existe)
+   - Migration de schema (si .dataverse/ existe)
+   - Push des assets frontend
+   - Deploy du binaire
+   - Health check
+2. Verifier avec `prod_status` et `prod_logs`
 
 ### Chemin frontend sur PROD
-- Le backend lit les assets statiques depuis **`/opt/app/frontend/dist`** (via `WorkingDirectory=/opt/app`)
-- TOUJOURS pousser vers `/opt/app/frontend/dist` — JAMAIS vers `/opt/app/dist`
-- Le `index.html` est chargé au démarrage du service — un `prod_push` seul ne suffit pas, il faut redémarrer le service après (d'où l'intérêt de pusher les assets AVANT le `deploy`)
+- Le backend lit les assets statiques depuis **`/opt/app/frontend/dist`**
+- `deploy_app` gere automatiquement le push vers le bon chemin
+
+## Mode Developpement (Hot Reload)
+
+En mode DEV, deux serveurs de developpement sont disponibles:
+- **Vite HMR** sur `dev.{{slug}}.{{domain}}` — hot reload frontend instantane (port 5173)
+- **cargo-watch** sur `devapi.{{slug}}.{{domain}}` — recompilation Rust automatique (port 3000)
+
+### Regles DEV
+- NE JAMAIS lancer `cargo build --release` en mode dev — utiliser le hot reload
+- Modifier le code source directement, le hot reload s'en charge automatiquement
+- Tester sur les URLs dev (`dev.*` et `devapi.*`) avant de deployer en production
+- Deployer vers PROD uniquement quand l'utilisateur le demande explicitement
+- Pour demarrer les serveurs dev: `systemctl start vite-dev` ou `systemctl start cargo-dev`
+- Les services ne sont PAS demarres automatiquement — les activer quand un projet est initialise
+- Utiliser `dev_health_check` pour verifier l'etat des services
+- Utiliser `dev_test_endpoint` pour tester les endpoints apres modification
+
+## Workflow Autopilot
+
+Pour les modifications completes (feature, bug fix, etc.), suivre ce workflow :
+1. `dev_health_check` — Verifier que les services DEV sont actifs
+2. Modifier le code (frontend + backend)
+3. Les serveurs dev recompilent automatiquement
+4. `dev_test_endpoint` — Verifier que les endpoints repondent correctement
+5. Presenter le resultat a l'utilisateur
+6. Si l'utilisateur approuve : `deploy_app` — Deploiement complet en une commande
 
 ## Applications mobiles (Flutter/Expo)
 Pour les apps avec frontend mobile:
 - Le backend tourne localement dans ce conteneur pendant le dev
-- Le mobile se connecte via l'IP locale du conteneur (ex: `http://10.0.x.y:3000`)
-- Pour la prod, déployer le backend sur PROD comme ci-dessus
+- Le mobile se connecte via l'IP locale du conteneur
+- Pour la prod, deployer le backend sur PROD comme ci-dessus

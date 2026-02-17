@@ -110,9 +110,10 @@ pub struct AgentMetricsEvent {
     pub code_server_status: String,
     pub app_status: String,
     pub db_status: String,
+    pub vite_dev_status: String,
+    pub cargo_dev_status: String,
     pub memory_bytes: u64,
     pub cpu_percent: f32,
-    pub code_server_idle_secs: u64,
 }
 
 /// Service command completion event (registry → websocket).
