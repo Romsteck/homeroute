@@ -49,34 +49,10 @@ Vous developpez et buildez ici, puis deployez sur la production via les outils M
 - Le backend lit les assets statiques depuis **`/opt/app/frontend/dist`**
 - `deploy_app` gere automatiquement le push vers le bon chemin
 
-## Mode Developpement (Hot Reload)
-
-En mode DEV, deux serveurs de developpement sont disponibles:
-- **Vite HMR** sur `dev.{{slug}}.{{domain}}` — hot reload frontend instantane (port 5173)
-- **cargo-watch** sur `devapi.{{slug}}.{{domain}}` — recompilation Rust automatique (port 3000)
-
-### Regles DEV
-- NE JAMAIS lancer `cargo build --release` en mode dev — utiliser le hot reload
-- Modifier le code source directement, le hot reload s'en charge automatiquement
-- Tester sur les URLs dev (`dev.*` et `devapi.*`) avant de deployer en production
-- Deployer vers PROD uniquement quand l'utilisateur le demande explicitement
-- Pour demarrer les serveurs dev: `systemctl start vite-dev` ou `systemctl start cargo-dev`
-- Les services ne sont PAS demarres automatiquement — les activer quand un projet est initialise
-- Utiliser `dev_health_check` pour verifier l'etat des services
-- Utiliser `dev_test_endpoint` pour tester les endpoints apres modification
-
-## Workflow Autopilot
-
-Pour les modifications completes (feature, bug fix, etc.), suivre ce workflow :
-1. `dev_health_check` — Verifier que les services DEV sont actifs
-2. Modifier le code (frontend + backend)
-3. Les serveurs dev recompilent automatiquement
-4. `dev_test_endpoint` — Verifier que les endpoints repondent correctement
-5. Presenter le resultat a l'utilisateur
-6. Si l'utilisateur approuve : `deploy_app` — Deploiement complet en une commande
-
 ## Applications mobiles (Flutter/Expo)
 Pour les apps avec frontend mobile:
 - Le backend tourne localement dans ce conteneur pendant le dev
 - Le mobile se connecte via l'IP locale du conteneur
 - Pour la prod, deployer le backend sur PROD comme ci-dessus
+
+> **Note** : Pour le workflow de developpement (services systemd, hot-reload, outils de verification), voir `homeroute-dev.md`.
