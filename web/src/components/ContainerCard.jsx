@@ -14,7 +14,6 @@ import {
   HardDrive,
   ExternalLink,
   Monitor,
-  Braces,
 } from 'lucide-react';
 
 // Shared grid template — used by ContainerCard rows and column header in Containers.jsx
@@ -83,7 +82,6 @@ function ContainerCard({
     ? `code.${container.slug}.${baseDomain}/?folder=/root/workspace`
     : null;
   const devUrl = baseDomain && isDev ? `dev.${container.slug}.${baseDomain}` : null;
-  const devApiUrl = baseDomain && isDev ? `devapi.${container.slug}.${baseDomain}` : null;
   const prodAppUrl = baseDomain && !isDev ? `${container.slug}.${baseDomain}` : null;
 
   const isConnected = displayStatus === 'connected';
@@ -160,18 +158,6 @@ function ContainerCard({
             >
               <Monitor className="w-3 h-3" />
               DEV
-            </a>
-          )}
-          {devApiUrl && (
-            <a
-              href={`https://${devApiUrl}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-xs text-purple-400 hover:text-purple-300 bg-purple-900/20 rounded"
-              title={`Cargo Watch API — ${metrics?.cargoDevStatus || 'unknown'}`}
-            >
-              <Braces className="w-3 h-3" />
-              API
             </a>
           )}
           {ideUrl && (
