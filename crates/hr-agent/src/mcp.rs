@@ -2403,44 +2403,50 @@ async fn handle_deploy_tool_call(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(2000);
 
-            // Check if chromium is installed, install if not
-            let chromium_check = tokio::process::Command::new("which")
-                .arg("chromium-browser")
-                .output()
-                .await;
-
-            let chromium_bin = if chromium_check.map(|o| o.status.success()).unwrap_or(false) {
-                "chromium-browser".to_string()
-            } else {
-                // Try 'chromium' as alternative name
-                let alt_check = tokio::process::Command::new("which")
-                    .arg("chromium")
+            // Find chromium/chrome binary, install if not present
+            let candidates = ["chromium-browser", "chromium", "google-chrome-stable"];
+            let mut chromium_bin = String::new();
+            for candidate in &candidates {
+                let check = tokio::process::Command::new("which")
+                    .arg(candidate)
                     .output()
                     .await;
-                if alt_check.map(|o| o.status.success()).unwrap_or(false) {
-                    "chromium".to_string()
-                } else {
-                    // Install chromium
-                    let install = tokio::process::Command::new("bash")
-                        .args(["-c", "apt-get update -qq 2>/dev/null && apt-get install -y -qq chromium-browser 2>/dev/null || apt-get install -y -qq chromium 2>/dev/null"])
-                        .output()
-                        .await
-                        .map_err(|e| format!("Failed to install chromium: {e}"))?;
-                    if !install.status.success() {
-                        return Ok(text_result("ERROR: Failed to install Chromium. Please install manually: apt-get install chromium-browser".to_string()));
-                    }
-                    // Determine which binary was installed
-                    let check_again = tokio::process::Command::new("which")
-                        .arg("chromium-browser")
-                        .output()
-                        .await;
-                    if check_again.map(|o| o.status.success()).unwrap_or(false) {
-                        "chromium-browser".to_string()
-                    } else {
-                        "chromium".to_string()
-                    }
+                if check.map(|o| o.status.success()).unwrap_or(false) {
+                    chromium_bin = candidate.to_string();
+                    break;
                 }
-            };
+            }
+
+            if chromium_bin.is_empty() {
+                // Install Google Chrome (works on Ubuntu 24.04 without snap)
+                let install_script = r#"
+                    apt-get update -qq 2>/dev/null
+                    apt-get install -y -qq wget gnupg 2>/dev/null
+                    wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+                    apt-get install -y -qq /tmp/chrome.deb 2>/dev/null || (apt-get -f install -y -qq 2>/dev/null && apt-get install -y -qq /tmp/chrome.deb 2>/dev/null)
+                    rm -f /tmp/chrome.deb
+                "#;
+                let install = tokio::process::Command::new("bash")
+                    .args(["-c", install_script])
+                    .output()
+                    .await
+                    .map_err(|e| format!("Failed to install Chrome: {e}"))?;
+
+                // Verify installation
+                let check = tokio::process::Command::new("which")
+                    .arg("google-chrome-stable")
+                    .output()
+                    .await;
+                if check.map(|o| o.status.success()).unwrap_or(false) {
+                    chromium_bin = "google-chrome-stable".to_string();
+                } else {
+                    let stderr = String::from_utf8_lossy(&install.stderr);
+                    return Ok(text_result(format!(
+                        "ERROR: Failed to install Chrome.\n{}",
+                        stderr.chars().take(500).collect::<String>()
+                    )));
+                }
+            }
 
             let screenshot_path = "/tmp/screenshot.png";
             let window_size = format!("--window-size={},{}", width, height);

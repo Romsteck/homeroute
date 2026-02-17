@@ -855,6 +855,15 @@ WantedBy=multi-user.target
         )
         .await;
 
+        // Phase 8e: Install Google Chrome (headless browser for dev_test_browser)
+        emit("Installation Google Chrome (headless)...");
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["apt-get install -y -qq wget gnupg 2>/dev/null && wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && apt-get install -y -qq /tmp/chrome.deb 2>/dev/null || (apt-get -f install -y -qq 2>/dev/null && apt-get install -y -qq /tmp/chrome.deb 2>/dev/null) && rm -f /tmp/chrome.deb"],
+            3,
+        )
+        .await;
+
         // Phase 9: Create workspace
         emit("Creation du volume workspace...");
         let _ = NspawnClient::create_workspace(container_name, storage).await;
