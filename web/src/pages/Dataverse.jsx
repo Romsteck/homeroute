@@ -360,6 +360,9 @@ function Dataverse() {
   const [apps, setApps] = useState([]);
   const [loading, setLoading] = useState(true);
 
+  // Environment filter
+  const [envFilter, setEnvFilter] = useState('production');
+
   // View mode: 'schema' (3-column) or 'diagram' (ER)
   const [viewMode, setViewMode] = useState('schema');
 
@@ -397,12 +400,27 @@ function Dataverse() {
 
   useEffect(() => { fetchOverview(); }, [fetchOverview]);
 
-  // Auto-select first app
+  // Auto-select first app matching environment
   useEffect(() => {
     if (apps.length > 0 && !selectedApp) {
-      selectApp(apps[0]);
+      const filtered = apps.filter(a => a.environment === envFilter);
+      if (filtered.length > 0) selectApp(filtered[0]);
     }
   }, [apps]);
+
+  // Reset selection when environment changes
+  useEffect(() => {
+    const filtered = apps.filter(a => a.environment === envFilter);
+    if (filtered.length > 0) {
+      selectApp(filtered[0]);
+    } else {
+      setSelectedApp(null);
+      setTables([]);
+      setSelectedTableName(null);
+      setTableDetail(null);
+      setErSchema(null);
+    }
+  }, [envFilter]);
 
   async function selectApp(app) {
     setSelectedApp(app);
@@ -479,7 +497,7 @@ function Dataverse() {
     }
   }
 
-  const filteredApps = apps;
+  const filteredApps = apps.filter(app => app.environment === envFilter);
 
   const columns = tableDetail?.columns || [];
 
@@ -513,6 +531,29 @@ function Dataverse() {
     <div className="h-full flex flex-col">
       <PageHeader icon={Database} title="Dataverse">
         <div className="flex items-center gap-3">
+          {/* Environment toggle */}
+          <div className="flex items-center gap-1 bg-gray-700/50 rounded-lg p-0.5">
+            <button
+              onClick={() => setEnvFilter('production')}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                envFilter === 'production'
+                  ? 'bg-purple-600 text-white'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              PROD
+            </button>
+            <button
+              onClick={() => setEnvFilter('development')}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                envFilter === 'development'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              DEV
+            </button>
+          </div>
           {/* View mode toggle */}
           <div className="flex items-center gap-1 bg-gray-700/50 rounded-lg p-0.5">
             <button

@@ -61,6 +61,7 @@ async fn overview(
             json!({
                 "appId": s.app_id,
                 "slug": s.slug,
+                "environment": s.environment,
                 "tables": s.tables.iter().map(|t| json!({
                     "name": t.name,
                     "slug": t.slug,

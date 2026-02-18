@@ -11,7 +11,8 @@ use hr_dataverse::engine::DataverseEngine;
 use hr_dataverse::schema::DatabaseSchema;
 use hr_registry::protocol::{SchemaColumnInfo, SchemaRelationInfo, SchemaTableInfo};
 
-const DATAVERSE_DIR: &str = "/root/workspace/.dataverse";
+const DATAVERSE_DIR_PROD: &str = "/opt/app/.dataverse";
+const DATAVERSE_DIR_DEV: &str = "/root/workspace/.dataverse";
 const DB_FILENAME: &str = "app.db";
 
 /// Manages the local Dataverse SQLite database.
@@ -22,9 +23,16 @@ pub struct LocalDataverse {
 
 impl LocalDataverse {
     /// Open or create the local Dataverse database.
+    /// Production containers store data at /opt/app/.dataverse,
+    /// development containers at /root/workspace/.dataverse.
     pub fn open() -> Result<Self> {
-        let dir = Path::new(DATAVERSE_DIR);
-        std::fs::create_dir_all(dir)?;
+        let dir = if Path::new(DATAVERSE_DIR_PROD).is_dir() {
+            Path::new(DATAVERSE_DIR_PROD)
+        } else {
+            let dev = Path::new(DATAVERSE_DIR_DEV);
+            std::fs::create_dir_all(dev)?;
+            dev
+        };
         let db_path = dir.join(DB_FILENAME);
         let engine = DataverseEngine::open(&db_path)?;
         info!(path = %db_path.display(), "Dataverse database opened");
