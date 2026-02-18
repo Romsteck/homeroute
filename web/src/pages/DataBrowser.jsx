@@ -185,6 +185,9 @@ function DataBrowser() {
   const [apps, setApps] = useState([]);
   const [loading, setLoading] = useState(true);
 
+  // Environment filter
+  const [envFilter, setEnvFilter] = useState('production');
+
   // Navigation state
   const [selectedAppId, setSelectedAppId] = useState(null);
   const [selectedTableName, setSelectedTableName] = useState(null);
@@ -227,12 +230,27 @@ function DataBrowser() {
 
   useEffect(() => { fetchApps(); }, [fetchApps]);
 
-  // Auto-select first app
+  // Auto-select first app matching environment
   useEffect(() => {
     if (apps.length > 0 && !selectedAppId) {
-      setSelectedAppId(apps[0].appId);
+      const filtered = apps.filter(a => a.environment === envFilter);
+      if (filtered.length > 0) setSelectedAppId(filtered[0].appId);
     }
   }, [apps, selectedAppId]);
+
+  // Reset selection when environment changes
+  useEffect(() => {
+    const filtered = apps.filter(a => a.environment === envFilter);
+    if (filtered.length > 0) {
+      selectApp(filtered[0].appId);
+    } else {
+      setSelectedAppId(null);
+      setSelectedTableName(null);
+      setTableInfo(null);
+      setRows([]);
+      setTotal(0);
+    }
+  }, [envFilter]);
 
   // Fetch table schema when table is selected
   useEffect(() => {
@@ -430,6 +448,28 @@ function DataBrowser() {
   return (
     <div className="h-full flex flex-col">
       <PageHeader icon={Table2} title="Data Browser">
+        <div className="flex items-center gap-1 bg-gray-700/50 rounded-lg p-0.5">
+          <button
+            onClick={() => setEnvFilter('production')}
+            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+              envFilter === 'production'
+                ? 'bg-purple-600 text-white'
+                : 'text-gray-400 hover:text-gray-200'
+            }`}
+          >
+            PROD
+          </button>
+          <button
+            onClick={() => setEnvFilter('development')}
+            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+              envFilter === 'development'
+                ? 'bg-blue-600 text-white'
+                : 'text-gray-400 hover:text-gray-200'
+            }`}
+          >
+            DEV
+          </button>
+        </div>
         {selectedApp && (
           <button
             onClick={() => downloadDataverseBackup(selectedAppId)}
@@ -449,7 +489,7 @@ function DataBrowser() {
 
         {/* Left panel: Apps + Tables navigation */}
         <div className="w-60 flex-shrink-0 border-r border-gray-700 flex flex-col bg-gray-800 overflow-y-auto">
-          {apps.map(app => {
+          {apps.filter(app => app.environment === envFilter).map(app => {
             const isExpanded = app.appId === selectedAppId;
             const appTables = app.tables || [];
             return (
