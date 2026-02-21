@@ -23,8 +23,8 @@ android {
         applicationId = "com.homeroute.home"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
-        versionCode = 9
-        versionName = "2.1.9"
+        versionCode = 11
+        versionName = "2.1.11"
     }
 
     buildTypes {

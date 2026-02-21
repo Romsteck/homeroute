@@ -4,7 +4,6 @@ import '../theme.dart';
 import '../services/api_client.dart';
 import '../services/install_tracker.dart';
 import '../services/package_checker.dart';
-import '../utils/format_size.dart';
 import '../widgets/progress_card.dart';
 
 bool _versionNewer(String a, String b) {
@@ -119,14 +118,26 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
       if (!mounted) return;
       setState(() => _dlState = _dlState?.copyWith(phase: 'install', progress: 1.0));
 
-      final installed = await PackageChecker.installApk(savePath);
+      final androidPkg = _app?['android_package'] as String?;
+
+      final installed = await PackageChecker.installApk(
+        savePath,
+        androidPackage: androidPkg,
+      );
       if (!mounted) return;
 
-      // Verify the app is actually on the device
-      final androidPkg = _app?['android_package'] as String?;
-      final onDevice = androidPkg != null && androidPkg.isNotEmpty
-          ? await PackageChecker.isPackageInstalled(androidPkg)
-          : installed;
+      // Verify the app is actually on the device.
+      // Retry up to 3 times with 1s delays to handle PackageManager
+      // registration delays on some devices.
+      bool onDevice = installed;
+      if (!onDevice && androidPkg != null && androidPkg.isNotEmpty) {
+        for (int attempt = 0; attempt < 3; attempt++) {
+          await Future.delayed(const Duration(seconds: 1));
+          if (!mounted) return;
+          onDevice = await PackageChecker.isPackageInstalled(androidPkg);
+          if (onDevice) break;
+        }
+      }
 
       if (onDevice) {
         await InstallTracker.markInstalled(widget.slug, version);
@@ -152,21 +163,18 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
     }
   }
 
+  Future<void> _handleOpenApp() async {
+    final androidPkg = _app?['android_package'] as String?;
+    if (androidPkg == null || androidPkg.isEmpty) return;
+    await PackageChecker.launchApp(androidPkg);
+  }
+
   Future<void> _handleUninstall() async {
     try {
       await PackageChecker.openAppSettings();
     } catch (_) {}
     await InstallTracker.markUninstalled(widget.slug);
     if (mounted) setState(() => _installed = false);
-  }
-
-  String _formatDate(String dateStr) {
-    try {
-      final dt = DateTime.parse(dateStr).toLocal();
-      return '${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')}/${dt.year}';
-    } catch (_) {
-      return dateStr;
-    }
   }
 
   @override
@@ -256,34 +264,6 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
             ),
             const Divider(height: 1),
           ],
-
-          // Releases header
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Text(
-              'RELEASES (${releases.length})',
-              style: const TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: AppColors.textTertiary,
-                letterSpacing: 0.5,
-              ),
-            ),
-          ),
-          const Divider(height: 1),
-
-          if (releases.isEmpty)
-            const Padding(
-              padding: EdgeInsets.only(top: 20),
-              child: Center(
-                child: Text(
-                  'Aucune release.',
-                  style: TextStyle(color: AppColors.textTertiary, fontSize: 14),
-                ),
-              ),
-            )
-          else
-            ...releases.map((rel) => _buildReleaseRow(rel)),
 
           const SizedBox(height: 40),
         ],
@@ -431,26 +411,24 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
           if (isInstalled) ...[
             if (!isUpToDate) const SizedBox(width: 10),
             Expanded(
-              flex: isUpToDate ? 1 : 0,
               child: SizedBox(
                 height: 44,
-                child: OutlinedButton(
-                  onPressed: _handleUninstall,
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: const Color(0xFFF87171),
-                    side: const BorderSide(color: Color(0xFF7F1D1D)),
+                child: ElevatedButton(
+                  onPressed: _handleOpenApp,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF059669),
+                    foregroundColor: Colors.white,
                     shape: const RoundedRectangleBorder(
                       borderRadius: BorderRadius.zero,
                     ),
                   ),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
-                    mainAxisSize: isUpToDate ? MainAxisSize.max : MainAxisSize.min,
                     children: const [
-                      Icon(Icons.delete_outline, size: 18),
+                      Icon(Icons.open_in_new, size: 18),
                       SizedBox(width: 8),
                       Text(
-                        'D\u00e9sinstaller',
+                        'Ouvrir',
                         style: TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.w600,
@@ -461,99 +439,24 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
                 ),
               ),
             ),
+            const SizedBox(width: 10),
+            SizedBox(
+              height: 44,
+              child: OutlinedButton(
+                onPressed: _handleUninstall,
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFFF87171),
+                  side: const BorderSide(color: Color(0xFF7F1D1D)),
+                  shape: const RoundedRectangleBorder(
+                    borderRadius: BorderRadius.zero,
+                  ),
+                ),
+                child: const Icon(Icons.delete_outline, size: 18),
+              ),
+            ),
           ],
         ],
       ),
-    );
-  }
-
-  Widget _buildReleaseRow(Map<String, dynamic> rel) {
-    final version = rel['version'] as String;
-    final createdAt = rel['created_at'] as String? ?? '';
-    final sizeBytes = rel['size_bytes'] as int? ?? 0;
-    final changelog = rel['changelog'] as String?;
-    final sha256 = rel['sha256'] as String?;
-
-    return Column(
-      children: [
-        InkWell(
-          onTap: _dlState != null ? null : () => _handleDownload(version),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Row(
-                        children: [
-                          const Icon(Icons.local_offer_outlined,
-                              size: 14, color: AppColors.primary),
-                          const SizedBox(width: 6),
-                          Text(
-                            'v$version',
-                            style: const TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: AppColors.primary,
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Text(
-                            '${_formatDate(createdAt)} \u00b7 ${formatSize(sizeBytes)}',
-                            style: const TextStyle(
-                              fontSize: 12,
-                              color: AppColors.textTertiary,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    if (_dlState?.version == version && _dlState?.phase != 'error')
-                      const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: AppColors.primary,
-                        ),
-                      )
-                    else
-                      const Icon(Icons.download_outlined,
-                          size: 18, color: AppColors.textTertiary),
-                  ],
-                ),
-                if (changelog != null && changelog.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  Text(
-                    changelog,
-                    style: const TextStyle(
-                      fontSize: 13,
-                      color: AppColors.textSecondary,
-                      height: 1.4,
-                    ),
-                  ),
-                ],
-                if (sha256 != null) ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    'SHA-256: $sha256',
-                    style: const TextStyle(
-                      fontSize: 10,
-                      color: AppColors.textTertiary,
-                      fontFamily: 'monospace',
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ),
-        const Divider(height: 1),
-      ],
     );
   }
 }
