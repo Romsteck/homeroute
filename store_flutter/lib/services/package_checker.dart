@@ -15,11 +15,26 @@ class PackageChecker {
     }
   }
 
-  static Future<bool> installApk(String filePath) async {
+  static Future<bool> installApk(String filePath, {String? androidPackage}) async {
     try {
       final result = await _channel.invokeMethod<bool>(
         'installApk',
-        {'filePath': filePath},
+        {
+          'filePath': filePath,
+          if (androidPackage != null) 'androidPackage': androidPackage,
+        },
+      );
+      return result ?? false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
+  static Future<bool> launchApp(String packageName) async {
+    try {
+      final result = await _channel.invokeMethod<bool>(
+        'launchApp',
+        {'packageName': packageName},
       );
       return result ?? false;
     } on PlatformException {

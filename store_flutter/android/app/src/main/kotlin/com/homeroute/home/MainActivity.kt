@@ -17,6 +17,7 @@ class MainActivity : FlutterActivity() {
     }
 
     private var pendingInstallResult: MethodChannel.Result? = null
+    private var pendingInstallPackage: String? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -43,7 +44,22 @@ class MainActivity : FlutterActivity() {
                             result.error("INVALID_ARG", "filePath is required", null)
                             return@setMethodCallHandler
                         }
+                        pendingInstallPackage = call.argument<String>("androidPackage")
                         installApk(filePath, result)
+                    }
+                    "launchApp" -> {
+                        val pkg = call.argument<String>("packageName")
+                        if (pkg == null) {
+                            result.error("INVALID_ARG", "packageName is required", null)
+                            return@setMethodCallHandler
+                        }
+                        val launchIntent = packageManager.getLaunchIntentForPackage(pkg)
+                        if (launchIntent != null) {
+                            startActivity(launchIntent)
+                            result.success(true)
+                        } else {
+                            result.success(false)
+                        }
                     }
                     "openAppSettings" -> {
                         try {
@@ -89,11 +105,26 @@ class MainActivity : FlutterActivity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == INSTALL_REQUEST_CODE) {
             val result = pendingInstallResult
+            val pkg = pendingInstallPackage
             pendingInstallResult = null
+            pendingInstallPackage = null
+
             if (resultCode == RESULT_OK) {
                 result?.success(true)
             } else {
-                result?.success(false)
+                // Many devices return RESULT_CANCELED even on successful install.
+                // Double-check via PackageManager if we know the package name.
+                val actuallyInstalled = if (pkg != null) {
+                    try {
+                        packageManager.getPackageInfo(pkg, 0)
+                        true
+                    } catch (e: PackageManager.NameNotFoundException) {
+                        false
+                    }
+                } else {
+                    false
+                }
+                result?.success(actuallyInstalled)
             }
         }
     }
