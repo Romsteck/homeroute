@@ -58,6 +58,7 @@ fn api_routes() -> Router<ApiState> {
         .nest("/dataverse", routes::dataverse::router())
         .nest("/cloud-relay", routes::cloud_relay::router())
         .nest("/store", routes::store::router())
+        .nest("/git", routes::git::router())
         .merge(routes::ws::router())
         .merge(routes::health::router())
 }

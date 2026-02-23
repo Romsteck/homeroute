@@ -4,20 +4,18 @@ mod dataverse;
 mod mcp;
 mod metrics;
 mod proxy;
-mod services;
 mod update;
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
-use hr_registry::protocol::{AgentMessage, AgentMetrics, AgentRoute, RegistryMessage, ServiceAction, ServiceConfig, ServiceState, ServiceType};
+use hr_registry::protocol::{AgentMessage, AgentMetrics, AgentRoute, RegistryMessage};
 
 use crate::mcp::SchemaQuerySignals;
 use crate::metrics::MetricsCollector;
-use crate::services::ServiceManager;
 
 const CONFIG_PATH: &str = "/etc/hr-agent.toml";
 const MAX_BACKOFF_SECS: u64 = 60;
@@ -81,9 +79,6 @@ async fn main() -> Result<()> {
     // Create metrics collector
     let metrics_collector = Arc::new(MetricsCollector::new());
 
-    // Create service manager with empty config (will be updated from registry)
-    let service_manager = Arc::new(RwLock::new(ServiceManager::new(&ServiceConfig::default())));
-
     // Open Dataverse database (shared across reconnections)
     let local_dataverse = match crate::dataverse::LocalDataverse::open() {
         Ok(dv) => {
@@ -122,36 +117,20 @@ async fn main() -> Result<()> {
         // Spawn metrics sender task (1 second interval)
         let metrics_tx = outbound_tx.clone();
         let metrics_coll = Arc::clone(&metrics_collector);
-        let svc_mgr_clone = Arc::clone(&service_manager);
         let metrics_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 interval.tick().await;
 
-                // Collect metrics
                 let memory_bytes = metrics_coll.memory_bytes().await;
                 let cpu_percent = metrics_coll.cpu_percent().await;
 
-                // Get service states from service manager
-                let svc_mgr = svc_mgr_clone.read().unwrap().clone();
-                let code_server_status = svc_mgr.get_state(ServiceType::CodeServer).await;
-                let app_status = svc_mgr.get_state(ServiceType::App).await;
-                let db_status = svc_mgr.get_state(ServiceType::Db).await;
-                let vite_dev_status = svc_mgr.get_state(ServiceType::ViteDev).await;
-                let cargo_dev_status = svc_mgr.get_state(ServiceType::CargoDev).await;
-
                 let metrics = AgentMetrics {
-                    code_server_status,
-                    app_status,
-                    db_status,
-                    vite_dev_status,
-                    cargo_dev_status,
                     memory_bytes,
                     cpu_percent,
                 };
 
                 if metrics_tx.send(AgentMessage::Metrics(metrics)).await.is_err() {
-                    // Channel closed, connection ended
                     break;
                 }
             }
@@ -221,7 +200,6 @@ async fn main() -> Result<()> {
                                 backoff = INITIAL_BACKOFF_SECS;
                             }
                             handle_registry_message(
-                                &service_manager,
                                 &outbound_tx,
                                 &local_dataverse,
                                 &schema_signals,
@@ -246,7 +224,6 @@ async fn main() -> Result<()> {
         // Drain any remaining messages
         while let Ok(msg) = registry_rx.try_recv() {
             handle_registry_message(
-                &service_manager,
                 &outbound_tx,
                 &local_dataverse,
                 &schema_signals,
@@ -482,7 +459,6 @@ async fn start_store_mcp() -> Result<()> {
 }
 
 async fn handle_registry_message(
-    service_manager: &Arc<RwLock<ServiceManager>>,
     outbound_tx: &mpsc::Sender<AgentMessage>,
     local_dataverse: &Option<Arc<crate::dataverse::LocalDataverse>>,
     schema_signals: &SchemaQuerySignals,
@@ -491,14 +467,8 @@ async fn handle_registry_message(
     msg: RegistryMessage,
 ) {
     match msg {
-        RegistryMessage::Config { services, base_domain, slug, frontend, environment, code_server_enabled, .. } => {
+        RegistryMessage::Config { base_domain, slug, frontend, environment, code_server_enabled, .. } => {
             info!("Received config from HomeRoute");
-
-            // Update service manager config
-            {
-                let mut mgr = service_manager.write().unwrap();
-                mgr.update_config(&services);
-            }
 
             // Write/update .mcp.json for MCP tool discovery
             let is_dev = matches!(environment, hr_registry::types::Environment::Development);
@@ -545,7 +515,6 @@ async fn handle_registry_message(
                         routes.push(AgentRoute {
                             domain: format!("code.{}.{}", slug, base_domain),
                             target_port: 443,
-                            service_type: ServiceType::CodeServer,
                             auth_required: false,
                             allowed_groups: vec![],
                         });
@@ -554,7 +523,6 @@ async fn handle_registry_message(
                     routes.push(AgentRoute {
                         domain: format!("dev.{}.{}", slug, base_domain),
                         target_port: 443,
-                        service_type: ServiceType::ViteDev,
                         auth_required: false,
                         allowed_groups: vec![],
                     });
@@ -564,7 +532,6 @@ async fn handle_registry_message(
                         routes.push(AgentRoute {
                             domain: format!("{}.{}", slug, base_domain),
                             target_port: 443,
-                            service_type: ServiceType::App,
                             auth_required: false,
                             allowed_groups: vec![],
                         });
@@ -592,46 +559,6 @@ async fn handle_registry_message(
             if let Err(e) = update::apply_update(&download_url, &sha256, &version).await {
                 error!("Auto-update failed: {e}");
             }
-        }
-
-        RegistryMessage::ServiceCommand { service_type, action } => {
-            info!(
-                service_type = ?service_type,
-                action = ?action,
-                "Service command received"
-            );
-
-            // Immediately send transitional state (Starting/Stopping) for instant UI feedback
-            let transitional_state = match action {
-                ServiceAction::Start | ServiceAction::Restart => ServiceState::Starting,
-                ServiceAction::Stop => ServiceState::Stopping,
-            };
-            let _ = outbound_tx
-                .send(AgentMessage::ServiceStateChanged {
-                    service_type,
-                    new_state: transitional_state,
-                })
-                .await;
-
-            // Execute via ServiceManager directly
-            let mgr = service_manager.read().unwrap().clone();
-            let result = match action {
-                ServiceAction::Start => mgr.start(service_type).await,
-                ServiceAction::Stop => mgr.stop(service_type).await,
-                ServiceAction::Restart => mgr.restart(service_type).await,
-            };
-            if let Err(e) = result {
-                error!(service_type = ?service_type, error = %e, "Service command failed");
-            }
-
-            // Send final state after command completes
-            let final_state = mgr.get_state(service_type).await;
-            let _ = outbound_tx
-                .send(AgentMessage::ServiceStateChanged {
-                    service_type,
-                    new_state: final_state,
-                })
-                .await;
         }
 
         RegistryMessage::DataverseQuery { request_id, query } => {
@@ -687,7 +614,6 @@ async fn handle_registry_message(
             }
         }
 
-        _ => {}
     }
 }
 

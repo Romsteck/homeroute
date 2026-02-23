@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { LayoutDashboard, Shield, Globe, Wifi, ArrowRight } from 'lucide-react';
-import Card from '../components/Card';
 import ServiceStatusPanel from '../components/ServiceStatusPanel';
 import PageHeader from '../components/PageHeader';
 import Section from '../components/Section';
@@ -56,97 +55,55 @@ function Dashboard() {
     <div>
       <PageHeader title="Dashboard" icon={LayoutDashboard} />
 
-      <Section title="Vue d'ensemble">
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-px">
-            {/* DHCP Leases Card */}
-            <Card
-              title="Baux DHCP"
-              icon={Wifi}
-              actions={
-                <Link to="/dns" className="text-blue-400 hover:text-blue-300">
-                  <ArrowRight className="w-4 h-4" />
-                </Link>
-              }
-            >
-              <div className="text-3xl font-bold text-blue-400">
-                {data.leases?.length || 0}
-              </div>
-              <p className="text-sm text-gray-400">appareils connectés</p>
-              <div className="mt-3 text-xs text-gray-500">
-                {data.leases?.slice(0, 3).map(lease => (
-                  <div key={lease.mac} className="truncate">
-                    {lease.hostname || lease.ip}
-                  </div>
-                ))}
-              </div>
-            </Card>
-
-            {/* AdBlock Card */}
-            <Card
-              title="AdBlock"
-              icon={Shield}
-              actions={
-                <Link to="/adblock" className="text-blue-400 hover:text-blue-300">
-                  <ArrowRight className="w-4 h-4" />
-                </Link>
-              }
-            >
-              <div className="text-3xl font-bold text-green-400">
-                {data.adblock?.domainCount?.toLocaleString() || 0}
-              </div>
-              <p className="text-sm text-gray-400">domaines bloqués</p>
-              <p className="text-xs text-gray-500 mt-3">
-                {data.adblock?.sources?.length || 0} sources actives
-              </p>
-            </Card>
-
-            {/* DDNS Card */}
-            <Card
-              title="Dynamic DNS"
-              icon={Globe}
-              actions={
-                <Link to="/ddns" className="text-blue-400 hover:text-blue-300">
-                  <ArrowRight className="w-4 h-4" />
-                </Link>
-              }
-            >
-              <div className="text-sm font-mono text-blue-400 break-all">
-                {data.ddns?.config?.recordName || '-'}
-              </div>
-              <p className="text-xs text-gray-500 mt-2 font-mono break-all">
-                {data.ddns?.currentIpv6 || 'Pas d\'IPv6'}
-              </p>
-              <p className="text-xs text-gray-500 mt-2">
-                {data.ddns?.lastUpdate ? `MAJ: ${data.ddns.lastUpdate}` : '-'}
-              </p>
-            </Card>
-          </div>
+      <Section title="Vue d'ensemble" flush>
+        <div className="flex items-stretch divide-x divide-gray-700">
+          <Link to="/dns" className="flex items-center gap-3 px-4 py-3 flex-1 hover:bg-gray-800/50">
+            <Wifi className="w-4 h-4 text-blue-400 shrink-0" />
+            <span className="text-xs text-gray-500 uppercase">DHCP</span>
+            <span className="text-lg font-bold text-blue-400">{data.leases?.length || 0}</span>
+            <span className="text-xs text-gray-500">appareils</span>
+            <ArrowRight className="w-3.5 h-3.5 text-gray-600 ml-auto shrink-0" />
+          </Link>
+          <Link to="/adblock" className="flex items-center gap-3 px-4 py-3 flex-1 hover:bg-gray-800/50">
+            <Shield className="w-4 h-4 text-green-400 shrink-0" />
+            <span className="text-xs text-gray-500 uppercase">AdBlock</span>
+            <span className="text-lg font-bold text-green-400">{data.adblock?.domainCount?.toLocaleString() || 0}</span>
+            <span className="text-xs text-gray-500">bloqués</span>
+            <ArrowRight className="w-3.5 h-3.5 text-gray-600 ml-auto shrink-0" />
+          </Link>
+          <Link to="/ddns" className="flex items-center gap-3 px-4 py-3 flex-1 hover:bg-gray-800/50">
+            <Globe className="w-4 h-4 text-blue-400 shrink-0" />
+            <span className="text-xs text-gray-500 uppercase">DDNS</span>
+            <span className="text-sm font-mono text-blue-400 truncate">{data.ddns?.config?.recordName || '-'}</span>
+            <ArrowRight className="w-3.5 h-3.5 text-gray-600 ml-auto shrink-0" />
+          </Link>
+        </div>
       </Section>
 
-      <Section title="Services" contrast>
+      <Section title="Services" contrast flush>
         <ServiceStatusPanel services={data.services} />
       </Section>
 
-      <Section title="Baux DHCP Récents">
+      <Section title="Baux DHCP Récents" flush>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-gray-400 border-b border-gray-700">
-                <th className="pb-2">Hostname</th>
-                <th className="pb-2">IP</th>
-                <th className="pb-2">MAC</th>
-                <th className="pb-2">Expiration</th>
+                <th className="px-4 pb-1">Hostname</th>
+                <th className="px-4 pb-1">IP</th>
+                <th className="px-4 pb-1">MAC</th>
+                <th className="px-4 pb-1">Expiration</th>
               </tr>
             </thead>
             <tbody>
               {data.leases?.slice(0, 10).map(lease => (
                 <tr key={lease.mac} className="border-b border-gray-700/50">
-                  <td className="py-2 font-mono">
+                  <td className="px-4 py-1 font-mono">
                     {lease.hostname || <span className="text-gray-500">-</span>}
                   </td>
-                  <td className="py-2 font-mono text-blue-400">{lease.ip}</td>
-                  <td className="py-2 font-mono text-gray-400 text-xs">{lease.mac}</td>
-                  <td className="py-2 text-gray-400 text-xs">
+                  <td className="px-4 py-1 font-mono text-blue-400">{lease.ip}</td>
+                  <td className="px-4 py-1 font-mono text-gray-400 text-xs">{lease.mac}</td>
+                  <td className="px-4 py-1 text-gray-400 text-xs">
                     {new Date(lease.expiration).toLocaleString('fr-FR')}
                   </td>
                 </tr>

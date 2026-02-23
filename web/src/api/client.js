@@ -62,12 +62,6 @@ export const renewCertificates = () => api.post('/reverseproxy/certificates/rene
 export const reloadProxy = () => api.post('/reverseproxy/reload');
 export const getCertificatesStatus = () => api.get('/reverseproxy/certificates/status');
 
-// Application Service Control (powersave)
-export const startApplicationService = (appId, serviceType) =>
-  api.post(`/applications/${appId}/services/${serviceType}/start`);
-export const stopApplicationService = (appId, serviceType) =>
-  api.post(`/applications/${appId}/services/${serviceType}/stop`);
-
 // Rust Proxy
 export const getRustProxyStatus = () => api.get('/rust-proxy/status');
 
@@ -201,6 +195,19 @@ export const downloadDataverseBackup = (appId) => {
 
 // Store
 export const getStoreApps = () => api.get('/store/apps');
+
+// ========== Git ==========
+export const getGitRepos = () => api.get('/git/repos');
+export const getGitRepo = (slug) => api.get(`/git/repos/${slug}`);
+export const getGitCommits = (slug, limit = 50) => api.get(`/git/repos/${slug}/commits`, { params: { limit } });
+export const getGitBranches = (slug) => api.get(`/git/repos/${slug}/branches`);
+export const getGitMirrorConfig = (slug) => api.get(`/git/repos/${slug}/mirror`);
+export const updateGitMirrorConfig = (slug, config) => api.put(`/git/repos/${slug}/mirror`, config);
+export const triggerGitMirrorSync = (slug) => api.post(`/git/repos/${slug}/mirror/sync`);
+export const getGitSshKey = () => api.get('/git/ssh-key');
+export const generateGitSshKey = () => api.post('/git/ssh-key');
+export const getGitConfig = () => api.get('/git/config');
+export const updateGitConfig = (config) => api.put('/git/config', config);
 export const getStoreApp = (slug) => api.get(`/store/apps/${slug}`);
 export const checkStoreUpdates = (installed) => {
   const param = installed.map(i => `${i.slug}:${i.version}`).join(',');

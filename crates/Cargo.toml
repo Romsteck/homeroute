@@ -18,6 +18,7 @@ members = [
     "hr-dataverse",
     "hr-tunnel",
     "hr-cloud-relay",
+    "hr-git",
 ]
 
 [workspace.package]

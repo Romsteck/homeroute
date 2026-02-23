@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 
-use crate::protocol::{AgentMetrics, ServiceConfig, ServiceType};
+use crate::protocol::AgentMetrics;
 
 /// Port that code-server listens on inside each container.
 pub const CODE_SERVER_PORT: u16 = 13337;
@@ -55,12 +55,6 @@ pub struct Application {
     #[serde(default = "default_true")]
     pub code_server_enabled: bool,
 
-    /// Systemd services to manage for powersave.
-    #[serde(default)]
-    pub services: ServiceConfig,
-    /// Whether to show a wake page when service is starting (vs transparent wait).
-    #[serde(default = "default_true")]
-    pub wake_page_enabled: bool,
     /// Current metrics from agent (volatile, not persisted to disk).
     #[serde(skip_deserializing)]
     pub metrics: Option<AgentMetrics>,
@@ -100,7 +94,6 @@ impl Application {
                         target_port: CODE_SERVER_PORT,
                         auth_required: true,
                         allowed_groups: vec![],
-                        service_type: ServiceType::CodeServer,
                     });
                 }
                 routes.push(RouteInfo {
@@ -108,14 +101,12 @@ impl Application {
                     target_port: 5173,
                     auth_required: false,
                     allowed_groups: vec![],
-                    service_type: ServiceType::ViteDev,
                 });
                 routes.push(RouteInfo {
                     domain: format!("devapi.{}.{}", self.slug, base_domain),
                     target_port: 3000,
                     auth_required: false,
                     allowed_groups: vec![],
-                    service_type: ServiceType::CargoDev,
                 });
                 routes
             }
@@ -125,7 +116,6 @@ impl Application {
                     target_port: self.frontend.target_port,
                     auth_required: self.frontend.auth_required,
                     allowed_groups: self.frontend.allowed_groups.clone(),
-                    service_type: ServiceType::App,
                 }]
             }
         }
@@ -145,7 +135,6 @@ pub struct RouteInfo {
     pub target_port: u16,
     pub auth_required: bool,
     pub allowed_groups: Vec<String>,
-    pub service_type: ServiceType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,10 +195,6 @@ pub struct CreateApplicationRequest {
     pub linked_app_id: Option<String>,
     #[serde(default = "default_true")]
     pub code_server_enabled: bool,
-    #[serde(default)]
-    pub services: ServiceConfig,
-    #[serde(default = "default_true")]
-    pub wake_page_enabled: bool,
 }
 
 /// Request body for updating an application.
@@ -225,10 +210,6 @@ pub struct UpdateApplicationRequest {
     pub linked_app_id: Option<String>,
     #[serde(default)]
     pub code_server_enabled: Option<bool>,
-    #[serde(default)]
-    pub services: Option<ServiceConfig>,
-    #[serde(default)]
-    pub wake_page_enabled: Option<bool>,
 }
 
 // ── Agent Update Types ──────────────────────────────────────────
@@ -313,8 +294,6 @@ mod tests {
                 local_only: false,
             },
             code_server_enabled,
-            services: ServiceConfig::default(),
-            wake_page_enabled: true,
             metrics: None,
         }
     }

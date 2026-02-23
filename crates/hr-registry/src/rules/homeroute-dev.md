@@ -111,14 +111,51 @@ dev_test_endpoint url="http://localhost:3000/api/health" expected_status=200
 dev_test_browser url="http://localhost:5173" width=1280 height=720
 ```
 
+## Depot Git
+
+Le workspace est un depot Git initialise automatiquement. Le remote `origin` pointe vers le **serveur Git integre HomeRoute** :
+
+```
+origin  http://10.0.0.254:4000/api/git/repos/{{slug}}.git
+```
+
+### Regles Git
+
+1. **TOUJOURS committer et pusher vers `origin`** — c'est le seul remote autorise
+2. **NE JAMAIS ajouter de remote GitHub/GitLab directement** — le mirroring vers GitHub est gere cote serveur par HomeRoute
+3. **NE JAMAIS modifier la configuration du remote `origin`**
+4. **Committer regulierement** pour garder un historique propre
+
+### Workflow Git
+
+```bash
+# Verifier le statut
+git status
+
+# Ajouter les modifications
+git add -A
+
+# Committer
+git commit -m "description des changements"
+
+# Pusher vers le serveur HomeRoute
+git push origin main
+```
+
+### Mirroring GitHub
+
+Le mirroring vers GitHub est gere **automatiquement par le serveur HomeRoute** via des hooks post-receive. Si le mirroring est active pour ce depot, chaque `git push origin` declenche automatiquement un push vers GitHub. Vous n'avez rien a configurer dans le container.
+
 ## Workflow de developpement standard
 
 1. **Verifier les services** : `dev_health_check` — tous les services doivent etre `ACTIVE`
-3. **Coder** : modifier les fichiers dans `/root/workspace/`
+2. **Coder** : modifier les fichiers dans `/root/workspace/`
+3. **Committer** : `git add -A && git commit -m "..."` regulierement
 4. **Tester** : `dev_test_endpoint` sur les endpoints modifies
 5. **Verifier visuellement** : `dev_test_browser` pour le rendu frontend
 6. **Iterer** : les modifications sont appliquees automatiquement via hot-reload
-7. **Deployer** : uniquement sur demande utilisateur, via `deploy_app`
+7. **Pusher** : `git push origin main` pour sauvegarder sur le serveur HomeRoute
+8. **Deployer** : uniquement sur demande utilisateur, via `deploy_app`
 
 ## Resolution de problemes
 

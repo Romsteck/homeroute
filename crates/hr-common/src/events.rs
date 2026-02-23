@@ -13,8 +13,6 @@ pub struct EventBus {
     pub agent_status: broadcast::Sender<AgentStatusEvent>,
     /// Agent metrics events (registry → websocket)
     pub agent_metrics: broadcast::Sender<AgentMetricsEvent>,
-    /// Service command completion events (registry → websocket)
-    pub service_command: broadcast::Sender<ServiceCommandEvent>,
     /// Agent update events (registry → websocket)
     pub agent_update: broadcast::Sender<AgentUpdateEvent>,
     /// Migration progress events (API → websocket)
@@ -41,7 +39,6 @@ impl EventBus {
             updates: broadcast::channel(256).0,
             agent_status: broadcast::channel(64).0,
             agent_metrics: broadcast::channel(64).0,
-            service_command: broadcast::channel(64).0,
             agent_update: broadcast::channel(64).0,
             migration_progress: broadcast::channel(64).0,
             dataverse_schema: broadcast::channel(64).0,
@@ -107,22 +104,8 @@ pub enum UpdateEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentMetricsEvent {
     pub app_id: String,
-    pub code_server_status: String,
-    pub app_status: String,
-    pub db_status: String,
-    pub vite_dev_status: String,
-    pub cargo_dev_status: String,
     pub memory_bytes: u64,
     pub cpu_percent: f32,
-}
-
-/// Service command completion event (registry → websocket).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceCommandEvent {
-    pub app_id: String,
-    pub service_type: String,
-    pub action: String,
-    pub success: bool,
 }
 
 /// Agent update status.

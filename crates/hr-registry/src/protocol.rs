@@ -4,72 +4,9 @@ use crate::types::{Environment, FrontendEndpoint};
 
 // ── Shared Types ────────────────────────────────────────────────
 
-/// State of a managed service (code-server, app, or db).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ServiceState {
-    /// Service is running normally.
-    Running,
-    /// Service is stopped (auto-stopped due to idle or never started).
-    Stopped,
-    /// Service is currently starting.
-    Starting,
-    /// Service is currently stopping.
-    Stopping,
-    /// Service was manually stopped by user (no auto-wake).
-    ManuallyOff,
-}
-
-impl Default for ServiceState {
-    fn default() -> Self {
-        Self::Stopped
-    }
-}
-
-/// Type of service being managed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ServiceType {
-    CodeServer,
-    App,
-    Db,
-    ViteDev,
-    CargoDev,
-}
-
-/// Action to perform on a service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ServiceAction {
-    Start,
-    Stop,
-    Restart,
-}
-
-/// Configuration of which systemd services to manage.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ServiceConfig {
-    /// App service units (e.g., ["myapp.service"]).
-    #[serde(default)]
-    pub app: Vec<String>,
-    /// Database service units (e.g., ["postgresql.service"]).
-    #[serde(default)]
-    pub db: Vec<String>,
-}
-
 /// Metrics reported by the agent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentMetrics {
-    /// code-server service state.
-    pub code_server_status: ServiceState,
-    /// App services combined state.
-    pub app_status: ServiceState,
-    /// Database services combined state.
-    pub db_status: ServiceState,
-    /// Vite dev server state.
-    pub vite_dev_status: ServiceState,
-    /// Cargo dev (cargo-watch) state.
-    pub cargo_dev_status: ServiceState,
     /// RAM used in bytes.
     pub memory_bytes: u64,
     /// CPU usage percentage (0.0 - 100.0).
@@ -106,12 +43,6 @@ pub enum AgentMessage {
     /// Agent reports system and service metrics.
     #[serde(rename = "metrics")]
     Metrics(AgentMetrics),
-    /// Agent notifies that a service state changed.
-    #[serde(rename = "service_state_changed")]
-    ServiceStateChanged {
-        service_type: ServiceType,
-        new_state: ServiceState,
-    },
     /// Agent publishes its routes for reverse proxy registration.
     #[serde(rename = "publish_routes")]
     PublishRoutes {
@@ -151,7 +82,6 @@ pub enum AgentMessage {
 pub struct AgentRoute {
     pub domain: String,
     pub target_port: u16,
-    pub service_type: ServiceType,
     pub auth_required: bool,
     #[serde(default)]
     pub allowed_groups: Vec<String>,
@@ -202,9 +132,6 @@ pub enum RegistryMessage {
     #[serde(rename = "config")]
     Config {
         config_version: u64,
-        /// Services to manage.
-        #[serde(default)]
-        services: ServiceConfig,
         /// Base domain for route construction (e.g., "mynetwk.biz").
         #[serde(default)]
         base_domain: String,
@@ -220,9 +147,6 @@ pub enum RegistryMessage {
         /// Whether code-server is enabled.
         #[serde(default)]
         code_server_enabled: bool,
-        /// Whether wake page is enabled for this app.
-        #[serde(default = "default_true")]
-        wake_page_enabled: bool,
     },
     /// Agent should self-update.
     #[serde(rename = "update_available")]
@@ -234,12 +158,6 @@ pub enum RegistryMessage {
     /// Graceful shutdown request.
     #[serde(rename = "shutdown")]
     Shutdown,
-    /// Command to start/stop a specific service type.
-    #[serde(rename = "service_command")]
-    ServiceCommand {
-        service_type: ServiceType,
-        action: ServiceAction,
-    },
     /// Certificate has been renewed; agent should re-pull certs.
     #[serde(rename = "cert_renewal")]
     CertRenewal { slug: String },
@@ -261,10 +179,6 @@ pub enum RegistryMessage {
         /// Vec of (filename, content) pairs, e.g. [("homeroute-deploy.md", "# Deploy...")]
         rules: Vec<(String, String)>,
     },
-}
-
-fn default_true() -> bool {
-    true
 }
 
 // ── Dataverse Query Types ────────────────────────────────────────
