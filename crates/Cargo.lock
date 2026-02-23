@@ -628,6 +628,7 @@ dependencies = [
  "hr-container",
  "hr-dhcp",
  "hr-dns",
+ "hr-git",
  "hr-ipv6",
  "hr-proxy",
  "hr-registry",
@@ -727,6 +728,7 @@ dependencies = [
  "hr-container",
  "hr-dhcp",
  "hr-dns",
+ "hr-git",
  "hr-ipv6",
  "hr-proxy",
  "hr-registry",
@@ -857,6 +859,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hr-git"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "hr-host-agent"
 version = "0.1.0"
 dependencies = [
@@ -898,8 +912,6 @@ dependencies = [
  "chrono",
  "futures-util",
  "hr-auth",
- "hr-common",
- "hr-registry",
  "hyper",
  "hyper-util",
  "reqwest",
@@ -910,7 +922,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
- "tokio-stream",
  "tracing",
 ]
 

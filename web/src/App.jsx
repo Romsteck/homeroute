@@ -16,6 +16,7 @@ import DataBrowser from './pages/DataBrowser';
 import Containers from './pages/Containers';
 import CloudRelay from './pages/CloudRelay';
 import Store from './pages/Store';
+import Git from './pages/Git';
 import Login from './pages/Login';
 import Profile from './pages/Profile';
 
@@ -107,6 +108,7 @@ function AppRoutes() {
               <Route path="/certificates" element={<Certificates />} />
               <Route path="/cloud-relay" element={<CloudRelay />} />
               <Route path="/store" element={<Store />} />
+              <Route path="/git" element={<Git />} />
             </Routes>
           </Layout>
         </ProtectedRoute>

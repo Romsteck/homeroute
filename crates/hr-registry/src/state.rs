@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 use hr_acme::AcmeManager;
 use hr_common::config::EnvConfig;
 use hr_common::events::{AgentMetricsEvent, AgentStatusEvent, AgentUpdateEvent, AgentUpdateStatus, EventBus, HostPowerEvent, HostPowerState, PowerAction, WakeResult};
-use crate::protocol::{AgentMetrics, ContainerInfo, HostMetrics, HostRegistryMessage, NetworkInterfaceInfo, RegistryMessage, ServiceAction, ServiceState, ServiceType};
+use crate::protocol::{AgentMetrics, ContainerInfo, HostMetrics, HostRegistryMessage, NetworkInterfaceInfo, RegistryMessage};
 use crate::types::{
     AgentNotifyResult, AgentSkipResult, AgentStatus, AgentUpdateStatusInfo,
     Application, CreateApplicationRequest, RegistryState, UpdateApplicationRequest,
@@ -63,26 +63,6 @@ pub struct HostPowerInfo {
     pub since: DateTime<Utc>,
     pub last_wol_sent: Option<DateTime<Utc>>,
     pub mac_address: Option<String>,
-}
-
-fn service_state_str(s: ServiceState) -> String {
-    match s {
-        ServiceState::Running => "running".to_string(),
-        ServiceState::Stopped => "stopped".to_string(),
-        ServiceState::Starting => "starting".to_string(),
-        ServiceState::Stopping => "stopping".to_string(),
-        ServiceState::ManuallyOff => "manually_off".to_string(),
-    }
-}
-
-fn service_type_str(t: ServiceType) -> &'static str {
-    match t {
-        ServiceType::CodeServer => "code_server",
-        ServiceType::App => "app",
-        ServiceType::Db => "db",
-        ServiceType::ViteDev => "vite_dev",
-        ServiceType::CargoDev => "cargo_dev",
-    }
 }
 
 pub struct AgentRegistry {
@@ -211,8 +191,6 @@ impl AgentRegistry {
             created_at: Utc::now(),
             frontend: req.frontend,
             code_server_enabled: req.code_server_enabled,
-            services: req.services,
-            wake_page_enabled: req.wake_page_enabled,
             metrics: None,
         };
 
@@ -274,12 +252,6 @@ impl AgentRegistry {
         }
         if let Some(code_server_enabled) = req.code_server_enabled {
             app.code_server_enabled = code_server_enabled;
-        }
-        if let Some(services) = req.services {
-            app.services = services;
-        }
-        if let Some(wake_page_enabled) = req.wake_page_enabled {
-            app.wake_page_enabled = wake_page_enabled;
         }
 
         let app = app.clone();
@@ -492,13 +464,11 @@ impl AgentRegistry {
             let _ = tx
                 .send(RegistryMessage::Config {
                     config_version: 1,
-                    services: app.services.clone(),
                     base_domain: self.env.base_domain.clone(),
                     slug: app.slug.clone(),
                     frontend: Some(app.frontend.clone()),
                     environment: app.environment,
                     code_server_enabled: app.code_server_enabled,
-                    wake_page_enabled: app.wake_page_enabled,
                 })
                 .await;
         }
@@ -1139,13 +1109,11 @@ impl AgentRegistry {
             .tx
             .send(RegistryMessage::Config {
                 config_version: 1,
-                services: app.services.clone(),
                 base_domain: self.env.base_domain.clone(),
                 slug: app.slug.clone(),
                 frontend: Some(app.frontend.clone()),
                 environment: app.environment,
                 code_server_enabled: app.code_server_enabled,
-                wake_page_enabled: app.wake_page_enabled,
             })
             .await;
     }
@@ -1173,46 +1141,10 @@ impl AgentRegistry {
         let _ = conn.tx.send(RegistryMessage::UpdateRules { rules }).await;
     }
 
-    // ── Service control & metrics ──────────────────────────────────
-
-    /// Send a service start/stop command to a connected agent.
-    pub async fn send_service_command(
-        &self,
-        app_id: &str,
-        service_type: ServiceType,
-        action: ServiceAction,
-    ) -> Result<bool> {
-        let conns = self.connections.read().await;
-        let Some(conn) = conns.get(app_id) else {
-            return Ok(false);
-        };
-
-        conn.tx
-            .send(RegistryMessage::ServiceCommand {
-                service_type,
-                action,
-            })
-            .await
-            .map_err(|_| anyhow::anyhow!("Failed to send command to agent"))?;
-
-        info!(
-            app_id,
-            service_type = ?service_type,
-            action = ?action,
-            "Service command sent to agent"
-        );
-        Ok(true)
-    }
+    // ── Metrics ──────────────────────────────────────────────────
 
     /// Handle metrics received from an agent: update in-memory state and broadcast to WebSocket.
     pub async fn handle_metrics(&self, app_id: &str, metrics: AgentMetrics) {
-        // Convert ServiceState to string for broadcast
-        let code_server_status = service_state_str(metrics.code_server_status);
-        let app_status = service_state_str(metrics.app_status);
-        let db_status = service_state_str(metrics.db_status);
-        let vite_dev_status = service_state_str(metrics.vite_dev_status);
-        let cargo_dev_status = service_state_str(metrics.cargo_dev_status);
-
         // Update in-memory metrics (not persisted)
         {
             let mut state = self.state.write().await;
@@ -1224,11 +1156,6 @@ impl AgentRegistry {
         // Broadcast to WebSocket
         let _ = self.events.agent_metrics.send(AgentMetricsEvent {
             app_id: app_id.to_string(),
-            code_server_status,
-            app_status,
-            db_status,
-            vite_dev_status,
-            cargo_dev_status,
             memory_bytes: metrics.memory_bytes,
             cpu_percent: metrics.cpu_percent,
         });
@@ -1357,30 +1284,6 @@ impl AgentRegistry {
             .ok_or_else(|| anyhow::anyhow!("Agent not connected for app {}", app_id))?;
         conn.tx.send(msg).await.map_err(|_| anyhow::anyhow!("Failed to send to agent"))?;
         Ok(())
-    }
-
-    /// Handle service state changed event from agent (broadcasts to WebSocket).
-    pub fn handle_service_state_changed(
-        &self,
-        app_id: &str,
-        service_type: ServiceType,
-        new_state: ServiceState,
-    ) {
-        use hr_common::events::ServiceCommandEvent;
-
-        let action = match new_state {
-            ServiceState::Running => "started",
-            ServiceState::Stopped | ServiceState::ManuallyOff => "stopped",
-            ServiceState::Starting => "starting",
-            ServiceState::Stopping => "stopping",
-        };
-
-        let _ = self.events.service_command.send(ServiceCommandEvent {
-            app_id: app_id.to_string(),
-            service_type: service_type_str(service_type).to_string(),
-            action: action.to_string(),
-            success: true,
-        });
     }
 
     // ── Agent Update ────────────────────────────────────────────────

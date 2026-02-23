@@ -6,6 +6,7 @@ use hr_common::events::{CloudRelayCommand, CloudRelayStatus, EventBus, Migration
 use hr_common::service_registry::SharedServiceRegistry;
 use hr_dns::SharedDnsState;
 use hr_dhcp::SharedDhcpState;
+use hr_git::GitService;
 
 use hr_proxy::{ProxyState, TlsManager};
 use hr_registry::AgentRegistry;
@@ -99,6 +100,9 @@ pub struct ApiState {
 
     /// Container V2 manager (nspawn).
     pub container_manager: Option<Arc<ContainerManager>>,
+
+    /// Git repository service.
+    pub git: Option<Arc<GitService>>,
 
     /// Active migrations keyed by transfer_id.
     pub migrations: Arc<RwLock<HashMap<String, MigrationState>>>,

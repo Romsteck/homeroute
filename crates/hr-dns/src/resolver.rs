@@ -146,9 +146,33 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
     }
 
     // 3. Wildcard local domain (*.mynetwk.biz -> server IP, fallback for unknown hosts)
+    //    Only match subdomains up to 2 levels deep (e.g. wallet.mynetwk.biz,
+    //    code.wallet.mynetwk.biz) to avoid matching search-domain-appended
+    //    external names like api.stripe.com.mynetwk.biz (depth 3+).
     if !config.local_domain.is_empty() {
-        let is_local = name.ends_with(&format!(".{}", config.local_domain))
-            || *name == config.local_domain;
+        let suffix = format!(".{}", config.local_domain);
+        let is_local = if let Some(prefix) = name.strip_suffix(&suffix) {
+            // Count dots in the prefix: 0 = depth 1, 1 = depth 2, 2+ = external
+            prefix.chars().filter(|c| *c == '.').count() <= 1
+        } else {
+            *name == config.local_domain
+        };
+
+        if !is_local && name.ends_with(&suffix) {
+            // Deep subdomain (e.g. api.stripe.com.mynetwk.biz) — this is an
+            // external domain with the search domain appended by the client's
+            // resolver.  Return NXDOMAIN immediately so the client retries
+            // without the suffix.  Without this, the upstream Cloudflare
+            // wildcard *.mynetwk.biz would return a valid IP, causing a
+            // certificate mismatch on Stripe, Facebook, etc.
+            debug!("Rejecting deep subdomain of local domain: {} (search-domain noise)", name);
+            return ResolveResult {
+                records: vec![],
+                rcode: RCODE_NXDOMAIN,
+                cached: false,
+                blocked: false,
+            };
+        }
 
         if is_local {
             let records = match qtype {

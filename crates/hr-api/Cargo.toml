@@ -16,6 +16,7 @@ hr-adblock = { path = "../hr-adblock" }
 hr-registry = { path = "../hr-registry" }
 hr-tunnel = { path = "../hr-tunnel" }
 hr-container = { path = "../hr-container" }
+hr-git = { path = "../hr-git" }
 tokio = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }

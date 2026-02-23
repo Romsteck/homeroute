@@ -35,8 +35,6 @@ import {
   cancelMigration,
   getReverseProxyConfig,
   getHosts,
-  startApplicationService,
-  stopApplicationService,
   renameContainer,
   getRenameStatus,
 } from '../api/client';

@@ -1,4 +1,4 @@
-function Section({ title, children, contrast = false, className = '' }) {
+function Section({ title, children, contrast = false, flush = false, className = '' }) {
   return (
     <div className={`border-b border-gray-700 ${contrast ? 'bg-gray-800/50' : 'bg-gray-900'} ${className}`}>
       {title && (
@@ -6,7 +6,7 @@ function Section({ title, children, contrast = false, className = '' }) {
           <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">{title}</h2>
         </div>
       )}
-      <div className="px-6 py-3">
+      <div className={flush ? '' : 'px-6 py-3'}>
         {children}
       </div>
     </div>

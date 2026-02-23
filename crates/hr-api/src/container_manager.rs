@@ -14,7 +14,8 @@ use tracing::{error, info, warn};
 use hr_common::config::EnvConfig;
 use hr_common::events::{AgentStatusEvent, EventBus, MigrationPhase};
 use hr_container::NspawnClient;
-use hr_registry::protocol::{HostRegistryMessage, ServiceAction, ServiceType};
+use hr_git::GitService;
+use hr_registry::protocol::HostRegistryMessage;
 use hr_registry::types::{AgentStatus, CreateApplicationRequest, Environment, UpdateApplicationRequest};
 use hr_registry::AgentRegistry;
 
@@ -151,6 +152,7 @@ pub struct ContainerManager {
     pub env: Arc<EnvConfig>,
     pub events: Arc<EventBus>,
     pub registry: Arc<AgentRegistry>,
+    pub git: Option<Arc<GitService>>,
 }
 
 impl ContainerManager {
@@ -160,6 +162,7 @@ impl ContainerManager {
         env: Arc<EnvConfig>,
         events: Arc<EventBus>,
         registry: Arc<AgentRegistry>,
+        git: Option<Arc<GitService>>,
     ) -> Self {
         let state = match std::fs::read_to_string(&state_path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
@@ -180,6 +183,7 @@ impl ContainerManager {
             env,
             events,
             registry,
+            git,
         }
     }
 
@@ -292,8 +296,6 @@ impl ContainerManager {
             environment: req.environment,
             linked_app_id: req.linked_app_id.clone(),
             code_server_enabled: req.code_server_enabled,
-            services: Default::default(),
-            wake_page_enabled: true,
         };
 
         let (app, token) = self
@@ -301,6 +303,13 @@ impl ContainerManager {
             .create_application_headless(create_req)
             .await
             .map_err(|e| format!("Failed to create application record: {e}"))?;
+
+        // Create bare git repo for this application
+        if let Some(ref git) = self.git {
+            if let Err(e) = git.create_repo(&req.slug).await {
+                warn!(slug = %req.slug, "Failed to create bare git repo: {e}");
+            }
+        }
 
         // Use the container_name from the registry (single source of truth)
         let container_name = app.container_name.clone();
@@ -394,6 +403,13 @@ impl ContainerManager {
                 )
                 .await;
             // TODO: send DeleteNspawnContainer when protocol supports it
+        }
+
+        // Delete bare git repo
+        if let Some(ref git) = self.git {
+            if let Err(e) = git.delete_repo(&record.slug).await {
+                warn!(slug = %record.slug, "Failed to delete bare git repo: {e}");
+            }
         }
 
         // Remove from registry
@@ -807,7 +823,7 @@ WantedBy=multi-user.target
         emit("Installation des dependances...");
         let _ = NspawnClient::exec_with_retry(
             container_name,
-            &["apt-get update -qq && apt-get install -y -qq curl ca-certificates"],
+            &["apt-get update -qq && apt-get install -y -qq curl ca-certificates git"],
             3,
         )
         .await;
@@ -933,6 +949,28 @@ WantedBy=multi-user.target
             render_rules(include_str!("../../hr-registry/src/rules/homeroute-store.md")),
         )
         .await;
+
+        // Phase 11b: Git init workspace
+        emit("Initialisation du depot Git...");
+        // Write .gitignore directly to the workspace bind mount
+        let gitignore = "node_modules/\ntarget/\n.env\n*.db\n*.db-shm\n*.db-wal\ndist/\n.cache/\ntmp/\n";
+        let _ = tokio::fs::write(ws_dir.join(".gitignore"), gitignore).await;
+
+        // Initialize git repo inside the container
+        let api_port = self.env.api_port;
+        let git_init_cmd = format!(
+            r#"cd /root/workspace && \
+            git init && \
+            git config user.name "HomeRoute ({slug})" && \
+            git config user.email "{slug}@{base_domain}" && \
+            git add -A && \
+            git commit -m "Initial scaffold (HomeRoute)" && \
+            git remote add origin http://10.0.0.254:{api_port}/api/git/repos/{slug}.git"#,
+            slug = slug,
+            base_domain = base_domain,
+            api_port = api_port,
+        );
+        let _ = NspawnClient::exec(container_name, &[&git_init_cmd]).await;
 
         // Phase 12: Configure code-server
         emit("Configuration de code-server...");
@@ -1570,11 +1608,6 @@ WantedBy=multi-user.target
             None,
         )
         .await;
-
-        let _ = registry
-            .send_service_command(app_id, ServiceType::App, ServiceAction::Stop)
-            .await;
-        tokio::time::sleep(Duration::from_secs(5)).await;
 
         // Phase 2: Exporting
         crate::routes::applications::update_migration_phase(

@@ -17,6 +17,10 @@ pub struct SniResolver {
     certs: RwLock<HashMap<String, Arc<CertifiedKey>>>,
     /// Default/fallback certificate for unknown domains
     default_cert: RwLock<Option<Arc<CertifiedKey>>>,
+    /// Local base domain — fallback cert is only served for subdomains of this domain.
+    /// External domains (e.g. api.stripe.com) get rejected instead of receiving a
+    /// mismatched certificate.
+    local_domain: RwLock<Option<String>>,
 }
 
 impl SniResolver {
@@ -24,6 +28,16 @@ impl SniResolver {
         Self {
             certs: RwLock::new(HashMap::new()),
             default_cert: RwLock::new(None),
+            local_domain: RwLock::new(None),
+        }
+    }
+
+    /// Set the local base domain (e.g. "mynetwk.biz").
+    /// The fallback certificate will only be served for subdomains of this domain.
+    pub fn set_local_domain(&self, domain: &str) {
+        if let Ok(mut ld) = self.local_domain.write() {
+            *ld = Some(domain.to_string());
+            info!("SNI fallback restricted to *.{}", domain);
         }
     }
 
@@ -104,13 +118,27 @@ impl ResolvesServerCert for SniResolver {
             remaining = parent;
         }
 
-        // Use fallback certificate if available
+        // Use fallback certificate ONLY for local domain subdomains.
+        // External domains (e.g. api.stripe.com) are rejected so the client
+        // falls back to a direct connection instead of getting a cert mismatch.
         drop(certs); // Release read lock before acquiring another
-        if let Ok(default) = self.default_cert.read() {
-            if let Some(key) = default.clone() {
-                warn!("No certificate found for SNI: {}, using fallback", server_name);
-                return Some(key);
+
+        let is_local = self.local_domain.read().ok()
+            .and_then(|ld| ld.as_ref().map(|d| {
+                server_name == d.as_str() || server_name.ends_with(&format!(".{}", d))
+            }))
+            .unwrap_or(true); // if no local_domain set, allow fallback (backwards compat)
+
+        if is_local {
+            if let Ok(default) = self.default_cert.read() {
+                if let Some(key) = default.clone() {
+                    warn!("No specific cert for local SNI: {}, using fallback", server_name);
+                    return Some(key);
+                }
             }
+        } else {
+            warn!("Rejecting TLS for external domain: {}", server_name);
+            return None;
         }
 
         warn!("No certificate found for SNI: {} and no fallback available", server_name);

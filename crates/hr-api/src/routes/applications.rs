@@ -14,8 +14,8 @@ use tokio::io::AsyncReadExt;
 use tracing::{error, info, warn};
 
 use hr_proxy::AppRoute;
-use hr_registry::protocol::{AgentMessage, HostRegistryMessage, RegistryMessage, ServiceAction, ServiceConfig, ServiceType};
-use hr_registry::types::{TriggerUpdateRequest, UpdateApplicationRequest};
+use hr_registry::protocol::{AgentMessage, HostRegistryMessage, RegistryMessage};
+use hr_registry::types::TriggerUpdateRequest;
 use hr_common::events::{MigrationPhase, MigrationProgressEvent};
 use hr_acme::types::WildcardType;
 use hr_dns::config::StaticRecord;
@@ -24,8 +24,6 @@ use crate::state::{ApiState, MigrationState};
 
 pub fn router() -> Router<ApiState> {
     Router::new()
-        .route("/{id}/services/{service_type}/start", post(start_service))
-        .route("/{id}/services/{service_type}/stop", post(stop_service))
         .route("/{id}/update/fix", post(fix_agent_update))
         .route("/{id}/exec", post(exec_in_container))
         .route("/{id}/update-rules", post(update_rules_single))
@@ -42,72 +40,6 @@ pub fn router() -> Router<ApiState> {
         .route("/agents/update", post(trigger_agent_update))
         .route("/agents/update/status", get(get_update_status))
         .route("/agents/ws", get(agent_ws))
-}
-
-// ── REST handlers ────────────────────────────────────────────
-
-async fn start_service(
-    State(state): State<ApiState>,
-    Path((id, service_type_str)): Path<(String, String)>,
-) -> impl IntoResponse {
-    let Some(registry) = &state.registry else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"success": false, "error": "Registry not available"}))).into_response();
-    };
-
-    let service_type = match service_type_str.as_str() {
-        "code-server" => ServiceType::CodeServer,
-        "app" => ServiceType::App,
-        "db" => ServiceType::Db,
-        "vite-dev" | "vite_dev" => ServiceType::ViteDev,
-        "cargo-dev" | "cargo_dev" => ServiceType::CargoDev,
-        _ => {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": "Invalid service type"}))).into_response();
-        }
-    };
-
-    match registry.send_service_command(&id, service_type, ServiceAction::Start).await {
-        Ok(true) => {
-            info!(app_id = id, service = service_type_str, "Service start command sent");
-            Json(serde_json::json!({"success": true})).into_response()
-        }
-        Ok(false) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": "Application not found or not connected"}))).into_response(),
-        Err(e) => {
-            error!("Failed to send start command: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": e.to_string()}))).into_response()
-        }
-    }
-}
-
-async fn stop_service(
-    State(state): State<ApiState>,
-    Path((id, service_type_str)): Path<(String, String)>,
-) -> impl IntoResponse {
-    let Some(registry) = &state.registry else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"success": false, "error": "Registry not available"}))).into_response();
-    };
-
-    let service_type = match service_type_str.as_str() {
-        "code-server" => ServiceType::CodeServer,
-        "app" => ServiceType::App,
-        "db" => ServiceType::Db,
-        "vite-dev" | "vite_dev" => ServiceType::ViteDev,
-        "cargo-dev" | "cargo_dev" => ServiceType::CargoDev,
-        _ => {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": "Invalid service type"}))).into_response();
-        }
-    };
-
-    match registry.send_service_command(&id, service_type, ServiceAction::Stop).await {
-        Ok(true) => {
-            info!(app_id = id, service = service_type_str, "Service stop command sent");
-            Json(serde_json::json!({"success": true})).into_response()
-        }
-        Ok(false) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": "Application not found or not connected"}))).into_response(),
-        Err(e) => {
-            error!("Failed to send stop command: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": e.to_string()}))).into_response()
-        }
-    }
 }
 
 // ── Deploy (dev → prod) handlers ─────────────────────────────
@@ -186,7 +118,7 @@ async fn deploy_to_production(
 /// Returns Ok(message) on success or Err(error) on failure.
 async fn execute_deploy(
     registry: &Arc<hr_registry::AgentRegistry>,
-    prod_id: &str,
+    _prod_id: &str,
     prod_container: &str,
     prod_host: &str,
     binary_data: Vec<u8>,
@@ -226,19 +158,6 @@ fi"#;
     if !setup_result {
         warn!(deploy_id, "Setup command returned non-zero (may already be configured)");
     }
-
-    // Ensure prod app's ServiceConfig includes app.service
-    let update_req = UpdateApplicationRequest {
-        services: Some(ServiceConfig {
-            app: vec!["app.service".to_string()],
-            db: vec![],
-        }),
-        ..Default::default()
-    };
-    if let Err(e) = registry.update_application(prod_id, update_req).await {
-        warn!(deploy_id, "Failed to update prod ServiceConfig: {e}");
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Phase 1: Copy binary to /opt/app/app in prod container
     info!(deploy_id, binary_bytes = binary_data.len(), "Deploy: copying binary to prod container");
@@ -308,11 +227,11 @@ fi"#;
 
     let _ = tokio::fs::remove_file(&tmp_path).await;
 
-    // Phase 2: Restart prod app service (atomically stops + starts with new binary)
-    info!(deploy_id, "Deploy: restarting prod app service");
-    match registry.send_service_command(prod_id, ServiceType::App, ServiceAction::Restart).await {
-        Ok(true) => {}
-        Ok(false) => warn!(deploy_id, "Prod agent not connected, could not restart service"),
+    // Phase 2: Restart prod app service via exec (atomically stops + starts with new binary)
+    info!(deploy_id, "Deploy: restarting prod app service via exec");
+    match exec_in(registry, prod_container, prod_host, "systemctl restart app.service").await {
+        Ok((true, _, _)) => {}
+        Ok((false, _, stderr)) => warn!(deploy_id, "Failed to restart app.service: {stderr}"),
         Err(e) => warn!(deploy_id, "Failed to restart prod service: {e}"),
     }
 
@@ -1250,16 +1169,6 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
                                 registry.handle_heartbeat(&app_id).await;
                                 registry.handle_metrics(&app_id, m).await;
                             }
-                            Ok(AgentMessage::ServiceStateChanged { service_type, new_state }) => {
-                                info!(
-                                    app_id,
-                                    service_type = ?service_type,
-                                    new_state = ?new_state,
-                                    "Agent reported service state change"
-                                );
-                                // Broadcast to WebSocket clients
-                                registry.handle_service_state_changed(&app_id, service_type, new_state);
-                            }
                             Ok(AgentMessage::SchemaMetadata { tables, relations, version, db_size_bytes }) => {
                                 info!(app_id, tables = tables.len(), version, "Agent reported schema metadata");
                                 registry.handle_schema_metadata(&app_id, tables.clone(), relations.clone(), version, db_size_bytes).await;
@@ -1368,8 +1277,6 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
                                                 target_port: route.target_port,
                                                 auth_required: route.auth_required,
                                                 allowed_groups: route.allowed_groups.clone(),
-                                                service_type: route.service_type,
-                                                wake_page_enabled: app.wake_page_enabled,
                                                 local_only: app.frontend.local_only,
                                             });
                                         }

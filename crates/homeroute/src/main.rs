@@ -259,6 +259,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Restrict fallback cert to local domain only — external domains (e.g.
+    // api.stripe.com) that reach our port 443 via IPv6 gateway routing will
+    // be rejected instead of receiving a mismatched *.mynetwk.biz certificate.
+    tls_manager.resolver.set_local_domain(&env.base_domain);
+
     let tls_config = tls_manager.build_server_config()?;
 
     let proxy_state = Arc::new(
@@ -540,10 +545,6 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Connect proxy to registry for ActivityPing and Wake-on-Demand
-    proxy_state.set_registry(registry.clone());
-    proxy_state.set_events(events.clone());
-
     // Populate app routes for all applications with IPv4 addresses
     {
         let apps = registry.list_applications().await;
@@ -560,8 +561,6 @@ async fn main() -> anyhow::Result<()> {
                             target_port: route.target_port,
                             auth_required: route.auth_required,
                             allowed_groups: route.allowed_groups,
-                            service_type: route.service_type,
-                            wake_page_enabled: app.wake_page_enabled,
                             local_only: app.frontend.local_only,
                         },
                     );
@@ -577,12 +576,20 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Container V2 Manager (nspawn) ────────────────────────────────
 
+    // ── Git Service ──────────────────────────────────────────────────
+    let git_service = Arc::new(hr_git::GitService::new());
+    if let Err(e) = git_service.init().await {
+        warn!("Failed to initialize git service: {e}");
+    }
+    info!("Git service initialized");
+
     let container_v2_state_path = PathBuf::from("/var/lib/server-dashboard/containers-v2.json");
     let container_manager = Arc::new(hr_api::container_manager::ContainerManager::new(
         container_v2_state_path,
         Arc::new(env.clone()),
         events.clone(),
         registry.clone(),
+        Some(git_service.clone()),
     ));
 
     // ── Restore local containers that were running before reboot ──────
@@ -607,6 +614,7 @@ async fn main() -> anyhow::Result<()> {
 
         registry: Some(registry.clone()),
         container_manager: Some(container_manager.clone()),
+        git: Some(git_service.clone()),
         migrations: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         renames: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         dataverse_schemas: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
