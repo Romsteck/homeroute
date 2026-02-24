@@ -4,6 +4,7 @@ mod dataverse;
 mod mcp;
 mod metrics;
 mod proxy;
+mod studio;
 mod update;
 
 use std::sync::Arc;
@@ -495,6 +496,7 @@ async fn handle_registry_message(
                 match agent_proxy.update_certs().await {
                     Ok(()) => {
                         agent_proxy.start();
+                        agent_proxy.studio.start_ws_server();
                         *proxy_started = true;
                         info!("Agent HTTPS proxy started");
                     }
@@ -522,6 +524,13 @@ async fn handle_registry_message(
                     // Vite dev server (HMR) — API is proxied through Vite, no separate devapi route
                     routes.push(AgentRoute {
                         domain: format!("dev.{}.{}", slug, base_domain),
+                        target_port: 443,
+                        auth_required: false,
+                        allowed_groups: vec![],
+                    });
+                    // Studio (Claude Code headless UI)
+                    routes.push(AgentRoute {
+                        domain: format!("studio.{}.{}", slug, base_domain),
                         target_port: 443,
                         auth_required: false,
                         allowed_groups: vec![],

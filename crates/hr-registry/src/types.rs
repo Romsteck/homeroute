@@ -73,6 +73,7 @@ impl Application {
                 }
                 domains.push(format!("dev.{}.{}", self.slug, base_domain));
                 domains.push(format!("devapi.{}.{}", self.slug, base_domain));
+                domains.push(format!("studio.{}.{}", self.slug, base_domain));
                 domains
             }
             Environment::Production => {
@@ -106,6 +107,12 @@ impl Application {
                     domain: format!("devapi.{}.{}", self.slug, base_domain),
                     target_port: 3000,
                     auth_required: false,
+                    allowed_groups: vec![],
+                });
+                routes.push(RouteInfo {
+                    domain: format!("studio.{}.{}", self.slug, base_domain),
+                    target_port: 443,
+                    auth_required: true,
                     allowed_groups: vec![],
                 });
                 routes
@@ -303,7 +310,7 @@ mod tests {
         // Dev with code-server
         let app = make_test_app(Environment::Development, true);
         let domains = app.domains("example.com");
-        assert_eq!(domains, vec!["code.myapp.example.com", "dev.myapp.example.com", "devapi.myapp.example.com"]);
+        assert_eq!(domains, vec!["code.myapp.example.com", "dev.myapp.example.com", "devapi.myapp.example.com", "studio.myapp.example.com"]);
 
         // Prod
         let app = make_test_app(Environment::Production, true);
@@ -315,19 +322,22 @@ mod tests {
     fn test_domains_no_code_server() {
         let app = make_test_app(Environment::Development, false);
         let domains = app.domains("example.com");
-        assert_eq!(domains, vec!["dev.myapp.example.com", "devapi.myapp.example.com"]);
+        assert_eq!(domains, vec!["dev.myapp.example.com", "devapi.myapp.example.com", "studio.myapp.example.com"]);
     }
 
     #[test]
     fn test_routes_code_server() {
         let app = make_test_app(Environment::Development, true);
         let routes = app.routes("example.com");
-        assert_eq!(routes.len(), 3);
+        assert_eq!(routes.len(), 4);
         assert_eq!(routes[0].domain, "code.myapp.example.com");
         assert_eq!(routes[0].target_port, CODE_SERVER_PORT);
         assert!(routes[0].auth_required);
         assert_eq!(routes[1].domain, "dev.myapp.example.com");
         assert_eq!(routes[2].domain, "devapi.myapp.example.com");
+        assert_eq!(routes[3].domain, "studio.myapp.example.com");
+        assert_eq!(routes[3].target_port, 0);
+        assert!(routes[3].auth_required);
     }
 
     #[test]

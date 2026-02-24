@@ -371,6 +371,7 @@ async fn proxy_handler_inner(
                 let agent_client = reqwest::Client::builder()
                     .danger_accept_invalid_certs(true)
                     .resolve(domain_only, agent_addr)
+                    .redirect(reqwest::redirect::Policy::none())
                     .build()
                     .unwrap_or_else(|_| state.https_client.clone());
                 proxy_via_reqwest(&agent_client, req, &domain_uri, &host).await
