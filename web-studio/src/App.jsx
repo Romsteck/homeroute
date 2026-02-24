@@ -61,6 +61,7 @@ export default function App() {
               onSend={ws.sendPrompt}
               onAbort={ws.abort}
               connected={ws.connected}
+              todos={ws.todos}
             />
           </div>
           <div className="flex-1 flex flex-col min-w-0">

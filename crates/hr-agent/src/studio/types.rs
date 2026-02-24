@@ -14,6 +14,9 @@ pub enum WsInMessage {
         /// Optional model override (e.g. "claude-sonnet-4-6", "claude-opus-4-6")
         #[serde(default)]
         model: Option<String>,
+        /// Optional attached images (base64-encoded)
+        #[serde(default)]
+        images: Option<Vec<ImageAttachment>>,
     },
     Abort,
     ListSessions,
@@ -74,6 +77,20 @@ pub enum WsOutMessage {
         size: u64,
         truncated: bool,
     },
+}
+
+/// Base64-encoded image attachment from the client.
+#[derive(Debug, Deserialize)]
+pub struct ImageAttachment {
+    /// Base64-encoded image data
+    pub data: String,
+    /// MIME type (e.g. "image/png", "image/jpeg")
+    #[serde(default = "default_media_type", rename = "mediaType")]
+    pub media_type: String,
+}
+
+fn default_media_type() -> String {
+    "image/png".to_string()
 }
 
 /// A single entry in a directory listing.

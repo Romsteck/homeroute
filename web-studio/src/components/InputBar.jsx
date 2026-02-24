@@ -10,6 +10,7 @@ export default function InputBar({ onSend, onAbort, isStreaming, disabled, mode,
   const [text, setText] = useState('');
   const [model, setModel] = useState(() => localStorage.getItem('studio-model') || 'claude-opus-4-6');
   const [modelOpen, setModelOpen] = useState(false);
+  const [images, setImages] = useState([]); // [{data: base64, mediaType: 'image/png'}]
   const textareaRef = useRef(null);
   const gearRef = useRef(null);
 
@@ -31,15 +32,39 @@ export default function InputBar({ onSend, onAbort, isStreaming, disabled, mode,
     return () => document.removeEventListener('mousedown', handler);
   }, [modelOpen]);
 
+  const handlePaste = useCallback((e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (!file) continue;
+        const reader = new FileReader();
+        reader.onload = () => {
+          const base64 = reader.result.split(',')[1]; // strip data:image/...;base64,
+          setImages(prev => [...prev, { data: base64, mediaType: item.type }]);
+        };
+        reader.readAsDataURL(file);
+        break; // only handle first image
+      }
+    }
+  }, []);
+
+  const removeImage = useCallback((index) => {
+    setImages(prev => prev.filter((_, i) => i !== index));
+  }, []);
+
   const handleSubmit = useCallback(() => {
     const trimmed = text.trim();
-    if (!trimmed || isStreaming || disabled) return;
-    onSend(trimmed, mode, model);
+    if ((!trimmed && images.length === 0) || isStreaming || disabled) return;
+    onSend(trimmed || 'Describe this image.', mode, model, images.length > 0 ? images : undefined);
     setText('');
+    setImages([]);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [text, isStreaming, disabled, onSend, mode, model]);
+  }, [text, images, isStreaming, disabled, onSend, mode, model]);
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -145,6 +170,29 @@ export default function InputBar({ onSend, onAbort, isStreaming, disabled, mode,
         </button>
       </div>
 
+      {/* Image previews */}
+      {images.length > 0 && (
+        <div className="flex gap-2 px-4 py-2 overflow-x-auto">
+          {images.map((img, i) => (
+            <div key={i} className="relative group shrink-0">
+              <img
+                src={`data:${img.mediaType};base64,${img.data}`}
+                alt="Pasted"
+                className="h-16 rounded border border-gray-700 object-cover"
+              />
+              <button
+                onClick={() => removeImage(i)}
+                className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-gray-800 border border-gray-600 rounded-full flex items-center justify-center text-gray-400 hover:text-white hover:bg-red-600 hover:border-red-500 transition-colors opacity-0 group-hover:opacity-100"
+              >
+                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Textarea row */}
       <div className="relative">
         <textarea
@@ -152,7 +200,8 @@ export default function InputBar({ onSend, onAbort, isStreaming, disabled, mode,
           value={text}
           onChange={handleInput}
           onKeyDown={handleKeyDown}
-          placeholder={disabled ? 'Disconnected...' : isPlan ? 'Ask Claude to plan...' : 'Message Claude...'}
+          onPaste={handlePaste}
+          placeholder={disabled ? 'Disconnected...' : isPlan ? 'Ask Claude to plan...' : images.length > 0 ? 'Describe the image or press Enter...' : 'Message Claude...'}
           disabled={disabled || isStreaming}
           rows={1}
           className="w-full bg-transparent border-0 focus:ring-0 focus:outline-none px-4 py-3 text-sm text-gray-200 placeholder-gray-600 resize-none disabled:opacity-50"
