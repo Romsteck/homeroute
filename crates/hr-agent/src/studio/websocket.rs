@@ -1,15 +1,37 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, error, warn};
 
-use super::types::{WsInMessage, WsOutMessage};
+use super::types::{FileEntry, WsInMessage, WsOutMessage};
 use super::StudioBridge;
+
+const WORKSPACE_ROOT: &str = "/root/workspace";
+const MAX_FILE_PREVIEW_BYTES: u64 = 512_000;
+const MAX_DIR_ENTRIES: usize = 1000;
+
+/// Resolve a client-provided relative path to an absolute path within workspace.
+/// Returns None if the path escapes the sandbox.
+fn resolve_safe_path(relative: &str) -> Option<PathBuf> {
+    let root = Path::new(WORKSPACE_ROOT);
+    let candidate = root.join(relative);
+    match candidate.canonicalize() {
+        Ok(resolved) => {
+            if resolved.starts_with(root) {
+                Some(resolved)
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    }
+}
 
 /// Main WebSocket session loop.
 /// Called from StudioBridge::start_ws_server() after tokio-tungstenite accept_async().
@@ -100,6 +122,140 @@ where
                 // Send updated session list
                 let sessions = super::sessions::list_sessions();
                 let _ = out_tx.send(WsOutMessage::Sessions { sessions }).await;
+            }
+            WsInMessage::ListDirectory { path } => {
+                let out_tx = out_tx.clone();
+                tokio::spawn(async move {
+                    let resolved = match resolve_safe_path(&path) {
+                        Some(p) if p.is_dir() => p,
+                        _ => {
+                            let _ = out_tx
+                                .send(WsOutMessage::Error {
+                                    message: format!("Invalid or inaccessible directory: {path}"),
+                                })
+                                .await;
+                            return;
+                        }
+                    };
+
+                    let mut read_dir = match tokio::fs::read_dir(&resolved).await {
+                        Ok(rd) => rd,
+                        Err(e) => {
+                            let _ = out_tx
+                                .send(WsOutMessage::Error {
+                                    message: format!("Failed to read directory: {e}"),
+                                })
+                                .await;
+                            return;
+                        }
+                    };
+
+                    let mut entries = Vec::new();
+                    while let Ok(Some(entry)) = read_dir.next_entry().await {
+                        if entries.len() >= MAX_DIR_ENTRIES {
+                            break;
+                        }
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let meta = match entry.metadata().await {
+                            Ok(m) => m,
+                            Err(_) => continue,
+                        };
+                        let kind = if meta.is_dir() {
+                            "directory".to_string()
+                        } else {
+                            "file".to_string()
+                        };
+                        let size = meta.len();
+                        entries.push(FileEntry { name, kind, size });
+                    }
+
+                    // Sort: directories first, then alphabetical case-insensitive
+                    entries.sort_by(|a, b| {
+                        let dir_a = a.kind == "directory";
+                        let dir_b = b.kind == "directory";
+                        dir_b
+                            .cmp(&dir_a)
+                            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                    });
+
+                    let _ = out_tx
+                        .send(WsOutMessage::DirectoryListing { path, entries })
+                        .await;
+                });
+            }
+            WsInMessage::ReadFile { path } => {
+                let out_tx = out_tx.clone();
+                tokio::spawn(async move {
+                    let resolved = match resolve_safe_path(&path) {
+                        Some(p) if p.is_file() => p,
+                        _ => {
+                            let _ = out_tx
+                                .send(WsOutMessage::Error {
+                                    message: format!("Invalid or inaccessible file: {path}"),
+                                })
+                                .await;
+                            return;
+                        }
+                    };
+
+                    let meta = match tokio::fs::metadata(&resolved).await {
+                        Ok(m) => m,
+                        Err(e) => {
+                            let _ = out_tx
+                                .send(WsOutMessage::Error {
+                                    message: format!("Failed to read file metadata: {e}"),
+                                })
+                                .await;
+                            return;
+                        }
+                    };
+
+                    let size = meta.len();
+                    let (content, truncated) = if size > MAX_FILE_PREVIEW_BYTES {
+                        // Read only first 512KB
+                        let mut file = match tokio::fs::File::open(&resolved).await {
+                            Ok(f) => f,
+                            Err(e) => {
+                                let _ = out_tx
+                                    .send(WsOutMessage::Error {
+                                        message: format!("Failed to open file: {e}"),
+                                    })
+                                    .await;
+                                return;
+                            }
+                        };
+                        let mut buf = vec![0u8; MAX_FILE_PREVIEW_BYTES as usize];
+                        let n = match file.read(&mut buf).await {
+                            Ok(n) => n,
+                            Err(e) => {
+                                let _ = out_tx
+                                    .send(WsOutMessage::Error {
+                                        message: format!("Failed to read file: {e}"),
+                                    })
+                                    .await;
+                                return;
+                            }
+                        };
+                        buf.truncate(n);
+                        let text = String::from_utf8(buf)
+                            .unwrap_or_else(|_| "(binary file)".to_string());
+                        (text, true)
+                    } else {
+                        match tokio::fs::read_to_string(&resolved).await {
+                            Ok(text) => (text, false),
+                            Err(_) => ("(binary file)".to_string(), false),
+                        }
+                    };
+
+                    let _ = out_tx
+                        .send(WsOutMessage::FileContent {
+                            path,
+                            content,
+                            size,
+                            truncated,
+                        })
+                        .await;
+                });
             }
         }
     }

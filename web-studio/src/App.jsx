@@ -72,7 +72,7 @@ export default function App() {
           <PreviewPanel slug={appInfo.slug} domain={appInfo.domain} mode="full" />
         </div>
         {/* Files tab - only mounted when active */}
-        {activeTab === 'files' && <FilesPanel />}
+        {activeTab === 'files' && <FilesPanel sendRaw={ws.sendRaw} subscribe={ws.subscribe} connected={ws.connected} />}
       </div>
 
       <StatusBar
