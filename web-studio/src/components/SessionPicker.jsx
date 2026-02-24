@@ -170,9 +170,9 @@ export default function SessionPicker({ sessions, currentSessionId, onSelect, on
             onClick={(e) => e.stopPropagation()}
             onMouseDown={(e) => e.stopPropagation()}
           >
-          {/* Search + New */}
-          <div className="p-2 border-b border-gray-800 flex gap-2">
-            <div className="flex-1 relative">
+          {/* Search */}
+          <div className="p-2 border-b border-gray-800">
+            <div className="relative">
               <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
               </svg>
@@ -185,12 +185,6 @@ export default function SessionPicker({ sessions, currentSessionId, onSelect, on
                 className="w-full bg-gray-800/50 border border-gray-700 rounded-lg pl-8 pr-3 py-1.5 text-sm text-gray-300 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/50"
               />
             </div>
-            <button
-              onClick={handleNew}
-              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-medium transition-colors shrink-0"
-            >
-              New Chat
-            </button>
           </div>
 
           {/* Session list */}

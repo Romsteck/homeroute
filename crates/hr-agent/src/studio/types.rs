@@ -11,6 +11,9 @@ pub enum WsInMessage {
         /// Permission mode: "default", "plan", "acceptEdits"
         #[serde(default = "default_mode")]
         mode: String,
+        /// Optional model override (e.g. "claude-sonnet-4-6", "claude-opus-4-6")
+        #[serde(default)]
+        model: Option<String>,
     },
     Abort,
     ListSessions,
