@@ -76,6 +76,7 @@ export default function useStudioWebSocket() {
   }, []);
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
+  const lastModeRef = useRef('default');
 
   const connect = useCallback(() => {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -126,6 +127,10 @@ export default function useStudioWebSocket() {
           if (data.session_id) {
             setCurrentSessionId(data.session_id);
           }
+          // If we were in plan mode, add a plan_complete action message
+          if (lastModeRef.current === 'plan') {
+            setMessages(prev => [...prev, { type: 'plan_complete' }]);
+          }
           // Refresh session list to pick up new summaries
           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ type: 'list_sessions' }));
@@ -163,6 +168,7 @@ export default function useStudioWebSocket() {
 
   const sendPrompt = useCallback((text, mode = 'default') => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    lastModeRef.current = mode;
     setMessages(prev => [...prev, { type: 'human', content: text }]);
     setIsStreaming(true);
     const payload = { type: 'prompt', prompt: text, mode };

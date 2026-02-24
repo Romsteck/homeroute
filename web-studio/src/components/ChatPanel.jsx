@@ -4,7 +4,7 @@ import InputBar from './InputBar';
 export default function ChatPanel({ messages, isStreaming, onSend, onAbort, connected }) {
   return (
     <div className="flex-1 flex flex-col min-h-0 min-w-0 bg-gray-900">
-      <MessageList messages={messages} isStreaming={isStreaming} />
+      <MessageList messages={messages} isStreaming={isStreaming} onSend={onSend} />
       <InputBar
         onSend={onSend}
         onAbort={onAbort}
