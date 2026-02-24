@@ -96,13 +96,24 @@ export default function useStudioWebSocket() {
       }
 
       switch (data.type) {
-        case 'stream':
-          setMessages(prev => updateMessagesFromStream(prev, data.event || data));
+        case 'stream': {
+          const event = data.data || data.event || data;
+          setMessages(prev => updateMessagesFromStream(prev, event));
+          // Extract session_id from stream events (init or result)
+          if (event.session_id) {
+            setCurrentSessionId(event.session_id);
+          }
+          setIsStreaming(true);
           break;
+        }
         case 'done':
           setIsStreaming(false);
           if (data.session_id) {
             setCurrentSessionId(data.session_id);
+          }
+          // Refresh session list to pick up new summaries
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'list_sessions' }));
           }
           break;
         case 'error':

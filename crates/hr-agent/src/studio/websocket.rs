@@ -119,7 +119,8 @@ async fn spawn_claude(
     let mut cmd = Command::new("claude");
     cmd.arg("-p")
         .arg(prompt)
-        .arg("--dangerously-skip-permissions")
+        .arg("--allowedTools")
+        .arg("Read,Write,Edit,Bash,Glob,Grep,WebSearch,WebFetch,TodoWrite,Task,NotebookEdit")
         .arg("--output-format")
         .arg("stream-json")
         .arg("--verbose");
@@ -157,6 +158,31 @@ async fn spawn_claude(
             return;
         }
     };
+
+    // Spawn stderr reader to capture and forward errors
+    if let Some(stderr) = child.stderr.take() {
+        let out_tx_err = out_tx.clone();
+        tokio::spawn(async move {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            let mut stderr_buf = String::new();
+            while let Ok(Some(line)) = lines.next_line().await {
+                debug!("claude stderr: {}", line);
+                if !line.is_empty() {
+                    stderr_buf.push_str(&line);
+                    stderr_buf.push('\n');
+                }
+            }
+            // If there's stderr output and it looks like an error, send to frontend
+            if !stderr_buf.is_empty() && stderr_buf.len() < 2000 {
+                let _ = out_tx_err
+                    .send(WsOutMessage::Error {
+                        message: stderr_buf.trim().to_string(),
+                    })
+                    .await;
+            }
+        });
+    }
 
     // Spawn reader task to stream stdout
     let out_tx_clone = out_tx.clone();

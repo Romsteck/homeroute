@@ -137,19 +137,27 @@ fn extract_session_info(path: &std::path::Path) -> (usize, String) {
                 let msg_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
                 if msg_type == "user" {
-                    // Extract text from message.content array
+                    // Extract text from message.content (string or array)
                     if let Some(text) = val
                         .get("message")
                         .and_then(|m| m.get("content"))
-                        .and_then(|c| c.as_array())
-                        .and_then(|arr| {
-                            arr.iter().find_map(|item| {
-                                if item.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                    item.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
-                                } else {
-                                    None
-                                }
-                            })
+                        .and_then(|c| {
+                            // -p mode: content is a plain string
+                            if let Some(s) = c.as_str() {
+                                Some(s.to_string())
+                            }
+                            // Interactive mode: content is an array of blocks
+                            else if let Some(arr) = c.as_array() {
+                                arr.iter().find_map(|item| {
+                                    if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                        item.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            } else {
+                                None
+                            }
                         })
                     {
                         // Skip IDE context tags
