@@ -166,7 +166,7 @@ export default function useStudioWebSocket() {
     };
   }, [connect]);
 
-  const sendPrompt = useCallback((text, mode = 'default') => {
+  const sendPrompt = useCallback((text, mode = 'default', model) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     lastModeRef.current = mode;
     setMessages(prev => [...prev, { type: 'human', content: text }]);
@@ -174,6 +174,9 @@ export default function useStudioWebSocket() {
     const payload = { type: 'prompt', prompt: text, mode };
     if (currentSessionId) {
       payload.session_id = currentSessionId;
+    }
+    if (model) {
+      payload.model = model;
     }
     wsRef.current.send(JSON.stringify(payload));
   }, [currentSessionId]);

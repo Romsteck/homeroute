@@ -73,11 +73,11 @@ where
         };
 
         match parsed {
-            WsInMessage::Prompt { prompt, session_id, mode } => {
+            WsInMessage::Prompt { prompt, session_id, mode, model } => {
                 // Kill any active subprocess first
                 kill_active(studio, conn_id).await;
                 // Spawn new claude process
-                spawn_claude(studio, conn_id, &prompt, session_id, &mode, out_tx.clone()).await;
+                spawn_claude(studio, conn_id, &prompt, session_id, &mode, model.as_deref(), out_tx.clone()).await;
             }
             WsInMessage::Abort => {
                 kill_active(studio, conn_id).await;
@@ -115,6 +115,7 @@ async fn spawn_claude(
     prompt: &str,
     session_id: Option<String>,
     mode: &str,
+    model: Option<&str>,
     out_tx: mpsc::Sender<WsOutMessage>,
 ) {
     let mut cmd = Command::new("claude");
@@ -123,6 +124,11 @@ async fn spawn_claude(
         .arg("--output-format")
         .arg("stream-json")
         .arg("--verbose");
+
+    // Model override
+    if let Some(m) = model {
+        cmd.arg("--model").arg(m);
+    }
 
     // Permission mode: plan = read-only analysis, default = full execution
     match mode {

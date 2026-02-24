@@ -19,8 +19,18 @@ export default function Header({
 
   return (
     <header className="h-12 bg-gray-900/80 backdrop-blur border-b border-gray-800 flex items-center justify-between px-4 shrink-0">
-      {/* Left: Session picker + title */}
-      <div className="flex items-center gap-3">
+      {/* Left: New button + Session picker + title */}
+      <div className="flex items-center gap-2">
+        <button
+          onClick={onNewSession}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors"
+          title="New Chat"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+          </svg>
+          New
+        </button>
         <SessionPicker
           sessions={sessions}
           currentSessionId={currentSessionId}
