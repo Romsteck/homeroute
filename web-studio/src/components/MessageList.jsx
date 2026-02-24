@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import MessageRenderer from './MessageRenderer';
 
-export default function MessageList({ messages, isStreaming, onSend }) {
+export default function MessageList({ messages, isStreaming, onSend, mode }) {
   const containerRef = useRef(null);
   const bottomRef = useRef(null);
   const shouldAutoScroll = useRef(true);
@@ -40,11 +40,11 @@ export default function MessageList({ messages, isStreaming, onSend }) {
         {isStreaming && (
           <div className="flex items-center gap-2 text-gray-500 text-xs ml-2 mb-4">
             <div className="flex gap-1">
-              <span className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-bounce-dot" style={{animationDelay: '0ms'}} />
-              <span className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-bounce-dot" style={{animationDelay: '150ms'}} />
-              <span className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-bounce-dot" style={{animationDelay: '300ms'}} />
+              <span className={`w-1.5 h-1.5 ${mode === 'plan' ? 'bg-amber-500' : 'bg-purple-500'} rounded-full animate-bounce-dot`} style={{animationDelay: '0ms'}} />
+              <span className={`w-1.5 h-1.5 ${mode === 'plan' ? 'bg-amber-500' : 'bg-purple-500'} rounded-full animate-bounce-dot`} style={{animationDelay: '150ms'}} />
+              <span className={`w-1.5 h-1.5 ${mode === 'plan' ? 'bg-amber-500' : 'bg-purple-500'} rounded-full animate-bounce-dot`} style={{animationDelay: '300ms'}} />
             </div>
-            <span>Claude is thinking...</span>
+            <span>{mode === 'plan' ? 'Claude is analyzing...' : 'Claude is thinking...'}</span>
           </div>
         )}
         <div ref={bottomRef} />

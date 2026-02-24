@@ -862,6 +862,15 @@ WantedBy=multi-user.target
         )
         .await;
 
+        // Phase 8b3: Create studio user for Claude Studio (non-root Claude CLI execution)
+        emit("Création utilisateur studio...");
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["id studio >/dev/null 2>&1 || useradd -m -s /bin/bash studio && chmod 755 /root && chmod -R a+rwX /root/.claude && mkdir -p /home/studio/.claude && cp -f /root/.claude/settings.json /home/studio/.claude/settings.json 2>/dev/null && ln -sf /root/.claude/projects /home/studio/.claude/projects; chown -R studio:studio /home/studio"],
+            3,
+        )
+        .await;
+
         // Phase 8c: Install Rust toolchain + cargo-watch
         emit("Installation Rust toolchain + cargo-watch...");
         let _ = NspawnClient::exec_with_retry(

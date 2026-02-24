@@ -13,8 +13,37 @@ use super::types::{FileEntry, WsInMessage, WsOutMessage};
 use super::StudioBridge;
 
 const WORKSPACE_ROOT: &str = "/root/workspace";
+const STUDIO_USER: &str = "studio";
+const STUDIO_HOME: &str = "/home/studio";
 const MAX_FILE_PREVIEW_BYTES: u64 = 512_000;
 const MAX_DIR_ENTRIES: usize = 1000;
+
+/// Sync Claude credentials from root to studio user's home.
+/// Studio user is pre-created during container provisioning.
+async fn sync_studio_credentials() {
+    let studio_claude = format!("{STUDIO_HOME}/.claude");
+    let _ = tokio::fs::create_dir_all(&studio_claude).await;
+
+    // Copy credentials file (may be refreshed by agent)
+    let src = "/root/.claude/.credentials.json";
+    let dst = format!("{studio_claude}/.credentials.json");
+    if std::path::Path::new(src).exists() {
+        let _ = tokio::fs::copy(src, &dst).await;
+    }
+
+    // Copy settings
+    let src = "/root/.claude/settings.json";
+    let dst = format!("{studio_claude}/settings.json");
+    if std::path::Path::new(src).exists() {
+        let _ = tokio::fs::copy(src, &dst).await;
+    }
+
+    // Ensure studio user owns its home
+    let _ = tokio::process::Command::new("chown")
+        .args(["-R", &format!("{STUDIO_USER}:{STUDIO_USER}"), STUDIO_HOME])
+        .output()
+        .await;
+}
 
 /// Resolve a client-provided relative path to an absolute path within workspace.
 /// Returns None if the path escapes the sandbox.
@@ -43,6 +72,9 @@ where
 
     // Channel for outgoing messages
     let (out_tx, mut out_rx) = mpsc::channel::<WsOutMessage>(256);
+
+    // Register this connection for cross-client broadcast
+    studio.register_connection(conn_id, out_tx.clone()).await;
 
     // Task to forward channel messages to WebSocket
     let mut ws_tx = ws_tx;
@@ -103,9 +135,7 @@ where
             }
             WsInMessage::Abort => {
                 kill_active(studio, conn_id).await;
-                let _ = out_tx
-                    .send(WsOutMessage::Done { session_id: None })
-                    .await;
+                studio.broadcast_all(&WsOutMessage::Done { session_id: None }).await;
             }
             WsInMessage::ListSessions => {
                 let sessions = super::sessions::list_sessions();
@@ -119,9 +149,9 @@ where
             }
             WsInMessage::DeleteSession { session_id } => {
                 super::sessions::delete_session(&session_id);
-                // Send updated session list
+                // Broadcast updated session list to all clients
                 let sessions = super::sessions::list_sessions();
-                let _ = out_tx.send(WsOutMessage::Sessions { sessions }).await;
+                studio.broadcast_all(&WsOutMessage::Sessions { sessions }).await;
             }
             WsInMessage::ListDirectory { path } => {
                 let out_tx = out_tx.clone();
@@ -274,33 +304,48 @@ async fn spawn_claude(
     model: Option<&str>,
     out_tx: mpsc::Sender<WsOutMessage>,
 ) {
-    let mut cmd = Command::new("claude");
-    cmd.arg("-p")
-        .arg(prompt)
-        .arg("--output-format")
-        .arg("stream-json")
-        .arg("--verbose");
+    // Sync credentials to studio user (pre-created during provisioning)
+    sync_studio_credentials().await;
+
+    // Build the claude command arguments
+    let mut claude_args = vec![
+        "-p".to_string(),
+        prompt.to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
+    ];
 
     // Model override
     if let Some(m) = model {
-        cmd.arg("--model").arg(m);
+        claude_args.push("--model".to_string());
+        claude_args.push(m.to_string());
     }
 
-    // Permission mode: plan = read-only analysis, default = full execution
-    match mode {
-        "plan" => {
-            cmd.arg("--permission-mode").arg("plan");
-            cmd.arg("--allowedTools").arg("Read,Glob,Grep,WebSearch,WebFetch");
-        }
-        _ => {
-            cmd.arg("--allowedTools")
-                .arg("Read,Write,Edit,Bash,Glob,Grep,WebSearch,WebFetch,TodoWrite,Task,NotebookEdit");
-        }
+    // Plan mode: restrict to read-only tools. Execute mode: bypass permissions
+    if mode == "plan" {
+        claude_args.push("--allowedTools".to_string());
+        claude_args.push("Read,Glob,Grep,WebSearch,WebFetch".to_string());
+    } else {
+        claude_args.push("--permission-mode".to_string());
+        claude_args.push("bypassPermissions".to_string());
     }
 
     if let Some(sid) = &session_id {
-        cmd.arg("--resume").arg(sid);
+        claude_args.push("--resume".to_string());
+        claude_args.push(sid.clone());
     }
+
+    // Run as non-root "studio" user via runuser
+    // This allows --permission-mode bypassPermissions (blocked as root)
+    let mut cmd = Command::new("runuser");
+    cmd.arg("-u")
+        .arg(STUDIO_USER)
+        .arg("--")
+        .arg("env")
+        .arg(format!("HOME={STUDIO_HOME}"))
+        .arg("claude")
+        .args(&claude_args);
 
     cmd.current_dir("/root/workspace");
     cmd.stdout(std::process::Stdio::piped());
@@ -346,54 +391,104 @@ async fn spawn_claude(
                     stderr_buf.push('\n');
                 }
             }
-            // If there's stderr output and it looks like an error, send to frontend
-            if !stderr_buf.is_empty() && stderr_buf.len() < 2000 {
+            // Always forward stderr to frontend, truncating if necessary
+            if !stderr_buf.is_empty() {
+                let msg = if stderr_buf.len() > 4000 {
+                    format!("{}...\n(truncated)", &stderr_buf[..4000])
+                } else {
+                    stderr_buf.trim().to_string()
+                };
                 let _ = out_tx_err
-                    .send(WsOutMessage::Error {
-                        message: stderr_buf.trim().to_string(),
-                    })
+                    .send(WsOutMessage::Error { message: msg })
                     .await;
             }
         });
     }
 
-    // Spawn reader task to stream stdout
-    let out_tx_clone = out_tx.clone();
+    // Spawn reader task to stream stdout (with progressive timeout + crash detection)
+    let studio_reader = Arc::clone(studio);
     let conn_id_owned = conn_id.to_string();
     let reader_handle = tokio::spawn(async move {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
         let mut found_session_id: Option<String> = None;
+        let mut saw_result = false;
+        let mut consecutive_timeouts: u32 = 0;
 
-        while let Ok(Some(line)) = lines.next_line().await {
-            match serde_json::from_str::<serde_json::Value>(&line) {
-                Ok(data) => {
-                    // Extract session_id from stream events
-                    if found_session_id.is_none() {
-                        if let Some(sid) = data.get("session_id").and_then(|v| v.as_str()) {
-                            found_session_id = Some(sid.to_string());
+        loop {
+            match tokio::time::timeout(Duration::from_secs(120), lines.next_line()).await {
+                Ok(Ok(Some(line))) => {
+                    consecutive_timeouts = 0;
+                    match serde_json::from_str::<serde_json::Value>(&line) {
+                        Ok(data) => {
+                            // Extract session_id from stream events
+                            if found_session_id.is_none() {
+                                if let Some(sid) = data.get("session_id").and_then(|v| v.as_str()) {
+                                    found_session_id = Some(sid.to_string());
+                                }
+                            }
+                            // Track if we see a result event
+                            if data.get("type").and_then(|v| v.as_str()) == Some("result") {
+                                saw_result = true;
+                            }
+                            // Broadcast stream events to all connected clients
+                            studio_reader.broadcast_all(&WsOutMessage::Stream { data }).await;
+                        }
+                        Err(_) => {
+                            debug!("Non-JSON line from claude ({}): {}", conn_id_owned, line);
                         }
                     }
-                    if out_tx_clone
-                        .send(WsOutMessage::Stream { data })
-                        .await
-                        .is_err()
-                    {
-                        break;
+                }
+                Ok(Ok(None)) => {
+                    // EOF — stream ended
+                    if !saw_result {
+                        studio_reader.broadcast_all(&WsOutMessage::Error {
+                            message: "Claude process ended unexpectedly".to_string(),
+                        }).await;
                     }
+                    break;
+                }
+                Ok(Err(e)) => {
+                    warn!("Reader IO error for {}: {e}", conn_id_owned);
+                    studio_reader.broadcast_all(&WsOutMessage::Error {
+                        message: format!("Read error: {e}"),
+                    }).await;
+                    break;
                 }
                 Err(_) => {
-                    debug!("Non-JSON line from claude ({}): {}", conn_id_owned, line);
+                    // Timeout — no output for 120s
+                    consecutive_timeouts += 1;
+                    if consecutive_timeouts == 1 {
+                        warn!("Claude process inactive for 2 min ({})", conn_id_owned);
+                        studio_reader.broadcast_all(&WsOutMessage::Error {
+                            message: "Warning: Claude has been inactive for 2 minutes".to_string(),
+                        }).await;
+                    } else {
+                        // 2nd consecutive timeout (4 min total) — kill the process
+                        warn!("Claude process inactive for 4 min, killing ({})", conn_id_owned);
+                        studio_reader.broadcast_all(&WsOutMessage::Error {
+                            message: "Claude process killed after 4 minutes of inactivity".to_string(),
+                        }).await;
+                        // Kill the process from active_processes
+                        let mut procs = studio_reader.active_processes.write().await;
+                        if let Some(mut proc) = procs.remove(&conn_id_owned) {
+                            let _ = proc.child.kill().await;
+                        }
+                        break;
+                    }
                 }
             }
         }
 
-        // Stream ended
-        let _ = out_tx_clone
-            .send(WsOutMessage::Done {
-                session_id: found_session_id,
-            })
-            .await;
+        // Stream ended — broadcast Done and refresh session list
+        let done_msg = WsOutMessage::Done {
+            session_id: found_session_id,
+        };
+        studio_reader.broadcast_all(&done_msg).await;
+
+        // Broadcast updated session list so all clients stay in sync
+        let sessions = super::sessions::list_sessions();
+        studio_reader.broadcast_all(&WsOutMessage::Sessions { sessions }).await;
     });
 
     let reader_abort = reader_handle.abort_handle();
@@ -409,23 +504,20 @@ async fn spawn_claude(
         .await
         .insert(conn_id.to_string(), process);
 
-    // Spawn a timeout watchdog (10 minutes)
-    let studio_clone = Arc::clone(studio);
+    // Spawn a timeout watchdog (5 minutes — safety net)
+    let studio_watchdog = Arc::clone(studio);
     let conn_id_owned = conn_id.to_string();
-    let out_tx_clone = out_tx.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(600)).await;
+        tokio::time::sleep(Duration::from_secs(300)).await;
         // If process is still running after timeout, kill it
-        let mut procs = studio_clone.active_processes.write().await;
+        let mut procs = studio_watchdog.active_processes.write().await;
         if let Some(mut proc) = procs.remove(&conn_id_owned) {
             warn!("Claude process timed out for {}", conn_id_owned);
             proc.reader_abort.abort();
             let _ = proc.child.kill().await;
-            let _ = out_tx_clone
-                .send(WsOutMessage::Error {
-                    message: "Claude process timed out (10 minutes)".to_string(),
-                })
-                .await;
+            studio_watchdog.broadcast_all(&WsOutMessage::Error {
+                message: "Claude process timed out (5 minutes)".to_string(),
+            }).await;
         }
     });
 }
