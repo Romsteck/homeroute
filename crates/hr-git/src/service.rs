@@ -5,8 +5,9 @@ use chrono::DateTime;
 use tokio::process::Command;
 use tracing::{info, warn, error};
 
+use crate::github::GitHubClient;
 use crate::types::{
-    BranchInfo, CommitInfo, GitConfig, RepoInfo, SshKeyInfo,
+    BranchInfo, CommitInfo, GitConfig, MirrorConfig, RepoInfo, RepoVisibility, SshKeyInfo,
 };
 
 const DEFAULT_REPOS_DIR: &str = "/opt/homeroute/data/git/repos";
@@ -66,6 +67,12 @@ impl GitService {
         }
 
         info!(slug, path = %repo_path.display(), "Repository created");
+
+        // Auto-enable mirror if GitHub config is set
+        if let Err(e) = self.auto_mirror_new_repo(slug).await {
+            warn!(slug, error = %e, "Failed to auto-enable mirror for new repo");
+        }
+
         Ok(repo_path)
     }
 
@@ -319,11 +326,13 @@ impl GitService {
         Ok(())
     }
 
-    pub async fn enable_mirror(&self, slug: &str, ssh_url: &str) -> anyhow::Result<()> {
+    pub async fn enable_mirror(&self, slug: &str, org: &str) -> anyhow::Result<()> {
         let repo_path = self.repo_path(slug);
         if !repo_path.exists() {
             bail!("Repository '{slug}' not found");
         }
+
+        let ssh_url = format!("git@github.com:{}/{}.git", org, slug);
 
         // Add remote "github" (remove first if exists)
         let _ = Command::new("git")
@@ -333,7 +342,7 @@ impl GitService {
             .await;
 
         let output = Command::new("git")
-            .args(["remote", "add", "github", ssh_url])
+            .args(["remote", "add", "github", &ssh_url])
             .current_dir(&repo_path)
             .output()
             .await
@@ -351,7 +360,8 @@ impl GitService {
         let hook_path = hooks_dir.join("post-receive");
         let hook_script = format!(
             r#"#!/bin/bash
-GIT_SSH_COMMAND="ssh -i {SSH_KEY_PATH} -o StrictHostKeyChecking=no" git push --mirror github
+# Async mirror push — does not block the local git push
+nohup bash -c 'GIT_SSH_COMMAND="ssh -i {SSH_KEY_PATH} -o StrictHostKeyChecking=no" git push --mirror github' &>/dev/null &
 "#
         );
 
@@ -372,7 +382,7 @@ GIT_SSH_COMMAND="ssh -i {SSH_KEY_PATH} -o StrictHostKeyChecking=no" git push --m
             bail!("chmod +x failed: {stderr}");
         }
 
-        info!(slug, ssh_url, "Mirror enabled with post-receive hook");
+        info!(slug, ssh_url = %ssh_url, "Mirror enabled with post-receive hook");
         Ok(())
     }
 
@@ -416,6 +426,19 @@ GIT_SSH_COMMAND="ssh -i {SSH_KEY_PATH} -o StrictHostKeyChecking=no" git push --m
             .await
             .context("Failed to push mirror")?;
 
+        // Persist last_sync / last_error in config
+        let mut config = self.load_config().await.unwrap_or_default();
+        if let Some(mirror) = config.mirrors.get_mut(slug) {
+            if output.status.success() {
+                mirror.last_sync = Some(chrono::Utc::now());
+                mirror.last_error = None;
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                mirror.last_error = Some(stderr.clone());
+            }
+            let _ = self.save_config(&config).await;
+        }
+
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             error!(slug, stderr = %stderr, "Mirror sync failed");
@@ -423,6 +446,51 @@ GIT_SSH_COMMAND="ssh -i {SSH_KEY_PATH} -o StrictHostKeyChecking=no" git push --m
         }
 
         info!(slug, "Mirror sync completed");
+        Ok(())
+    }
+
+    /// Auto-enable mirror for a newly created repo if GitHub org+token are configured.
+    pub async fn auto_mirror_new_repo(&self, slug: &str) -> anyhow::Result<()> {
+        let mut config = self.load_config().await?;
+
+        let token = match config.github_token.as_ref() {
+            Some(t) if !t.is_empty() => t.clone(),
+            _ => return Ok(()), // No token configured, skip
+        };
+
+        let org = &config.github_org;
+        if org.is_empty() {
+            return Ok(()); // No org configured, skip
+        }
+
+        let gh = GitHubClient::new(token);
+
+        // Create GitHub repo if it doesn't exist
+        match gh.repo_exists(org, slug).await? {
+            false => {
+                gh.create_repo(slug, Some(org), true).await?;
+            }
+            true => {}
+        }
+
+        // Enable mirror in the bare repo
+        self.enable_mirror(slug, org).await?;
+
+        // Save mirror config
+        let ssh_url = format!("git@github.com:{org}/{slug}.git");
+        config.mirrors.insert(
+            slug.to_string(),
+            MirrorConfig {
+                enabled: true,
+                github_ssh_url: Some(ssh_url),
+                visibility: RepoVisibility::Private,
+                last_sync: None,
+                last_error: None,
+            },
+        );
+
+        self.save_config(&config).await?;
+        info!(slug, "Auto-enabled mirror for new repo");
         Ok(())
     }
 

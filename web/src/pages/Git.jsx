@@ -7,8 +7,8 @@ import {
 import PageHeader from '../components/PageHeader';
 import Button from '../components/Button';
 import {
-  getGitRepos, getGitCommits, getGitBranches, getGitMirrorConfig,
-  updateGitMirrorConfig, triggerGitMirrorSync, getGitSshKey,
+  getGitRepos, getGitCommits, getGitBranches,
+  triggerGitMirrorSync, syncAllGitRepos, getGitSshKey,
   generateGitSshKey, getGitConfig, updateGitConfig
 } from '../api/client';
 
@@ -44,11 +44,23 @@ function Git() {
   const [message, setMessage] = useState(null);
   const [showToken, setShowToken] = useState(false);
   const [tokenInput, setTokenInput] = useState('');
+  const [orgInput, setOrgInput] = useState('');
   const [savingConfig, setSavingConfig] = useState(false);
   const [generatingKey, setGeneratingKey] = useState(false);
   const [syncing, setSyncing] = useState({});
-  const [mirrorConfigs, setMirrorConfigs] = useState({});
+  const [syncingAll, setSyncingAll] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const [activityLog, setActivityLog] = useState([]);
+
+  const addActivity = (action, slug = null) => {
+    const id = Date.now();
+    setActivityLog(prev => [{ id, time: new Date(), action, slug, status: 'pending' }, ...prev]);
+    return id;
+  };
+
+  const updateActivity = (id, status, detail = null) => {
+    setActivityLog(prev => prev.map(e => e.id === id ? { ...e, status, detail } : e));
+  };
 
   const fetchRepos = useCallback(async () => {
     try {
@@ -74,7 +86,10 @@ function Git() {
     try {
       const res = await getGitConfig();
       setConfig(res.data);
-      setTokenInput(res.data?.github_token || '');
+      // Don't prefill with masked token — keep empty unless user types a new one
+      const t = res.data?.github_token || '';
+      setTokenInput(t.includes('...') ? '' : t);
+      setOrgInput(res.data?.github_org || '');
     } catch {
       setConfig(null);
     }
@@ -93,16 +108,12 @@ function Git() {
     setCommits([]);
     setBranches([]);
     try {
-      const [commitsRes, branchesRes, mirrorRes] = await Promise.all([
+      const [commitsRes, branchesRes] = await Promise.all([
         getGitCommits(slug).catch(() => ({ data: { commits: [] } })),
         getGitBranches(slug).catch(() => ({ data: { branches: [] } })),
-        getGitMirrorConfig(slug).catch(() => ({ data: null })),
       ]);
       setCommits(commitsRes.data?.commits || commitsRes.data || []);
       setBranches(branchesRes.data?.branches || branchesRes.data || []);
-      if (mirrorRes.data) {
-        setMirrorConfigs(prev => ({ ...prev, [slug]: mirrorRes.data }));
-      }
     } catch {
       setMessage({ type: 'error', text: 'Erreur lors du chargement du depot' });
     } finally {
@@ -111,26 +122,39 @@ function Git() {
   };
 
   const handleGenerateKey = async () => {
+    const logId = addActivity('Cle SSH');
     setGeneratingKey(true);
     try {
       const res = await generateGitSshKey();
       setSshKey(res.data);
       setMessage({ type: 'success', text: 'Cle SSH generee' });
+      updateActivity(logId, 'ok');
     } catch {
       setMessage({ type: 'error', text: 'Erreur lors de la generation de la cle' });
+      updateActivity(logId, 'error', 'Erreur lors de la generation de la cle');
     } finally {
       setGeneratingKey(false);
     }
   };
 
   const handleSaveConfig = async () => {
+    const hasExistingToken = !!config?.github_token;
+    if ((!tokenInput.trim() && !hasExistingToken) || !orgInput.trim()) {
+      setMessage({ type: 'error', text: 'Le token et l\'organisation sont requis' });
+      return;
+    }
+    const logId = addActivity('Config');
     setSavingConfig(true);
+    const payload = { github_org: orgInput };
+    if (tokenInput.trim()) payload.github_token = tokenInput;
     try {
-      await updateGitConfig({ github_token: tokenInput });
+      await updateGitConfig(payload);
       setMessage({ type: 'success', text: 'Configuration sauvegardee' });
+      updateActivity(logId, 'ok');
       fetchConfig();
     } catch {
       setMessage({ type: 'error', text: 'Erreur lors de la sauvegarde' });
+      updateActivity(logId, 'error', 'Erreur lors de la sauvegarde');
     } finally {
       setSavingConfig(false);
     }
@@ -145,42 +169,40 @@ function Git() {
   };
 
   const handleSync = async (slug) => {
+    const logId = addActivity('Sync', slug);
     setSyncing(prev => ({ ...prev, [slug]: true }));
     try {
       await triggerGitMirrorSync(slug);
       setMessage({ type: 'success', text: `Synchronisation de ${slug} lancee` });
+      updateActivity(logId, 'ok');
       fetchRepos();
+      fetchConfig();
     } catch {
       setMessage({ type: 'error', text: `Erreur de synchronisation pour ${slug}` });
+      updateActivity(logId, 'error', `Erreur de synchronisation pour ${slug}`);
     } finally {
       setSyncing(prev => ({ ...prev, [slug]: false }));
     }
   };
 
-  const handleMirrorToggle = async (slug, currentConfig) => {
-    const enabled = !(currentConfig?.enabled);
-    const org = currentConfig?.github_org || '';
+  const handleSyncAll = async () => {
+    const logId = addActivity('Sync All');
+    setSyncingAll(true);
     try {
-      await updateGitMirrorConfig(slug, { enabled, github_org: org });
-      setMirrorConfigs(prev => ({ ...prev, [slug]: { ...currentConfig, enabled } }));
-      setMessage({ type: 'success', text: `Mirror ${enabled ? 'active' : 'desactive'} pour ${slug}` });
+      const res = await syncAllGitRepos();
+      const count = res.data?.synced || res.data?.count || 'tous les';
+      setMessage({ type: 'success', text: `Synchronisation de ${count} depots lancee` });
+      updateActivity(logId, 'ok', `${count} depots synchronises`);
+      if (res.data?.mirrors) {
+        setConfig(prev => ({ ...prev, mirrors: res.data.mirrors }));
+      }
+      fetchRepos();
+      fetchConfig();
     } catch {
-      setMessage({ type: 'error', text: 'Erreur lors de la mise a jour du mirror' });
-    }
-  };
-
-  const handleMirrorOrgChange = (slug, org) => {
-    const currentConfig = mirrorConfigs[slug] || {};
-    setMirrorConfigs(prev => ({ ...prev, [slug]: { ...currentConfig, github_org: org } }));
-  };
-
-  const handleMirrorOrgSave = async (slug) => {
-    const mc = mirrorConfigs[slug] || {};
-    try {
-      await updateGitMirrorConfig(slug, { enabled: mc.enabled || false, github_org: mc.github_org || '' });
-      setMessage({ type: 'success', text: 'Organisation sauvegardee' });
-    } catch {
-      setMessage({ type: 'error', text: 'Erreur lors de la sauvegarde' });
+      setMessage({ type: 'error', text: 'Erreur lors de la synchronisation globale' });
+      updateActivity(logId, 'error', 'Erreur lors de la synchronisation globale');
+    } finally {
+      setSyncingAll(false);
     }
   };
 
@@ -192,7 +214,7 @@ function Git() {
   }, [message]);
 
   const selectedRepoData = repos.find(r => r.slug === selectedRepo);
-  const mc = selectedRepo ? (mirrorConfigs[selectedRepo] || selectedRepoData?.mirror || {}) : {};
+  const mc = selectedRepo ? (config?.mirrors?.[selectedRepo] || {}) : {};
 
   if (loading) {
     return (
@@ -208,6 +230,11 @@ function Git() {
   return (
     <div className="h-full flex flex-col">
       <PageHeader icon={GitBranch} title="Git">
+        {orgInput && config?.github_token && (
+          <Button variant="secondary" onClick={handleSyncAll} loading={syncingAll} title="Sync All">
+            <ArrowUpCircle className="w-4 h-4" />
+          </Button>
+        )}
         <Button variant="secondary" onClick={() => setShowConfig(!showConfig)}>
           <Settings className="w-4 h-4" />
         </Button>
@@ -266,7 +293,7 @@ function Git() {
               )}
             </div>
 
-            {/* GitHub Token */}
+            {/* GitHub Token + Organisation */}
             <div>
               <label className="block text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">
                 Token GitHub (Personal Access Token)
@@ -280,7 +307,7 @@ function Git() {
                     type={showToken ? 'text' : 'password'}
                     value={tokenInput}
                     onChange={(e) => setTokenInput(e.target.value)}
-                    placeholder="ghp_..."
+                    placeholder={config?.github_token ? 'Token configure (laisser vide pour garder)' : 'ghp_...'}
                     className="w-full bg-gray-800 border border-gray-700 text-gray-300 text-sm font-mono px-3 py-2 pr-10 focus:outline-none focus:border-blue-500"
                   />
                   <button
@@ -290,16 +317,31 @@ function Git() {
                     {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 </div>
+                <input
+                  type="text"
+                  value={orgInput}
+                  onChange={(e) => setOrgInput(e.target.value)}
+                  placeholder="Organisation GitHub"
+                  className="bg-gray-800 border border-gray-700 text-gray-300 text-sm px-3 py-2 w-48 focus:outline-none focus:border-blue-500"
+                />
                 <Button onClick={handleSaveConfig} loading={savingConfig} className="text-xs px-3 py-1.5">
                   <Save className="w-3.5 h-3.5" /> Sauvegarder
                 </Button>
               </div>
+              <a
+                href="https://github.com/settings/tokens/new?scopes=repo&description=HomeRoute"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 mt-2"
+              >
+                <ExternalLink className="w-3 h-3" /> Generer un token
+              </a>
             </div>
           </div>
         </div>
       )}
 
-      {/* Main split layout */}
+      {/* Main 3-column layout */}
       <div className="flex-1 min-h-0 flex">
         {/* Left: Repo list */}
         <div className="w-72 flex-shrink-0 border-r border-gray-700 bg-gray-800/50 flex flex-col">
@@ -328,7 +370,7 @@ function Git() {
             ) : (
               repos.map((repo) => {
                 const isSelected = selectedRepo === repo.slug;
-                const repoMc = mirrorConfigs[repo.slug] || repo.mirror || {};
+                const repoMc = config?.mirrors?.[repo.slug] || {};
                 return (
                   <button
                     key={repo.slug}
@@ -361,7 +403,7 @@ function Git() {
           </div>
         </div>
 
-        {/* Right: Detail panel */}
+        {/* Center: Detail panel */}
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
           {!selectedRepo ? (
             <div className="flex-1 flex items-center justify-center">
@@ -383,6 +425,17 @@ function Git() {
                   <div>
                     <h2 className="text-lg font-semibold text-white flex items-center gap-2">
                       {selectedRepo}
+                      {orgInput && (
+                        <a
+                          href={`https://github.com/${orgInput}/${selectedRepo}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-gray-500 hover:text-blue-400 transition-colors"
+                          title={`github.com/${orgInput}/${selectedRepo}`}
+                        >
+                          <ExternalLink className="w-4 h-4" />
+                        </a>
+                      )}
                     </h2>
                     <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
                       {selectedRepoData?.head_ref && (
@@ -409,7 +462,7 @@ function Git() {
                       )}
                     </div>
                   </div>
-                  {mc.enabled && (
+                  {orgInput && config?.github_token && (
                     <Button
                       variant="secondary"
                       onClick={() => handleSync(selectedRepo)}
@@ -444,63 +497,41 @@ function Git() {
                 </div>
               )}
 
-              {/* Mirror config */}
-              <div className="px-6 py-3 border-b border-gray-700/50 bg-gray-800/20">
-                <div className="flex items-center gap-2 mb-2">
-                  <ArrowUpCircle className="w-3.5 h-3.5 text-gray-500" />
-                  <span className="text-xs text-gray-500 uppercase tracking-wider">Mirroring GitHub</span>
-                </div>
-                <p className="text-xs text-gray-600 mb-3">
-                  Chaque push vers ce depot sera automatiquement replique sur GitHub.
-                </p>
-                <div className="flex items-center gap-3 flex-wrap">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={mc.enabled || false}
-                      onChange={() => handleMirrorToggle(selectedRepo, mc)}
-                      className="rounded border-gray-600 bg-gray-700 text-blue-500 focus:ring-blue-500"
-                    />
-                    <span className="text-sm text-gray-300">Activer</span>
-                  </label>
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs text-gray-500">Org :</span>
-                    <input
-                      type="text"
-                      value={mc.github_org || ''}
-                      onChange={(e) => handleMirrorOrgChange(selectedRepo, e.target.value)}
-                      placeholder="homeroute-mirror"
-                      className="bg-gray-800 border border-gray-700 text-gray-300 text-xs px-2 py-1 w-40 focus:outline-none focus:border-blue-500"
-                    />
-                    <button
-                      onClick={() => handleMirrorOrgSave(selectedRepo)}
-                      className="text-xs text-blue-400 hover:text-blue-300 px-1"
-                    >
-                      OK
-                    </button>
+              {/* Mirror / Sync details */}
+              {orgInput && config?.github_token && (
+                <div className="px-6 py-3 border-b border-gray-700/50 bg-gray-800/20">
+                  <div className="flex items-center gap-2 mb-2">
+                    <ArrowUpCircle className="w-3.5 h-3.5 text-gray-500" />
+                    <span className="text-xs text-gray-500 uppercase tracking-wider">GitHub Mirror</span>
                   </div>
-                  {mc.enabled && mc.github_ssh_url && (
-                    <a
-                      href={`https://github.com/${mc.github_org || 'homeroute-mirror'}/${selectedRepo}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1"
-                    >
-                      <ExternalLink className="w-3 h-3" /> Voir sur GitHub
-                    </a>
-                  )}
-                  {mc.last_sync && (
-                    <span className="text-xs text-gray-600">
-                      Derniere sync : {timeAgo(mc.last_sync)}
-                    </span>
-                  )}
-                  {mc.last_error && (
-                    <span className="text-xs text-red-400">
-                      {mc.last_error}
-                    </span>
-                  )}
+                  <div className="space-y-1.5 text-xs">
+                    <div className="flex items-center gap-2">
+                      <span className="text-gray-500 w-20">SSH URL</span>
+                      <span className="font-mono text-gray-400 truncate">git@github.com:{orgInput}/{selectedRepo}.git</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-gray-500 w-20">Statut</span>
+                      {mc.enabled ? (
+                        <span className="flex items-center gap-1.5 text-green-400">
+                          <span className="w-2 h-2 rounded-full bg-green-500" /> Actif
+                        </span>
+                      ) : (
+                        <span className="text-gray-600">Non configure</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-gray-500 w-20">Derniere sync</span>
+                      <span className="text-gray-400">{mc.last_sync ? timeAgo(mc.last_sync) : '--'}</span>
+                    </div>
+                    {mc.last_error && (
+                      <div className="flex items-start gap-2">
+                        <span className="text-gray-500 w-20 flex-shrink-0">Erreur</span>
+                        <span className="text-red-400 break-all">{mc.last_error}</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Commits */}
               <div>
@@ -549,6 +580,40 @@ function Git() {
               </div>
             </div>
           )}
+        </div>
+
+        {/* Right: Activity panel */}
+        <div className="w-80 flex-shrink-0 border-l border-gray-700 bg-gray-800/30 flex flex-col">
+          <div className="px-4 py-2 border-b border-gray-700 bg-gray-900/80">
+            <span className="text-[11px] text-gray-500 uppercase tracking-wider">
+              Activite ({activityLog.length})
+            </span>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {activityLog.length === 0 ? (
+              <div className="px-4 py-8 text-center">
+                <p className="text-xs text-gray-600">Aucune activite</p>
+              </div>
+            ) : (
+              activityLog.map(entry => (
+                <div key={entry.id} className="px-4 py-2 border-b border-gray-700/30 text-xs">
+                  <div className="flex items-center gap-2">
+                    {entry.status === 'pending' && <Loader2 className="w-3 h-3 text-blue-400 animate-spin flex-shrink-0" />}
+                    {entry.status === 'ok' && <span className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />}
+                    {entry.status === 'error' && <span className="w-2 h-2 rounded-full bg-red-500 flex-shrink-0" />}
+                    <span className="text-gray-300 font-medium">{entry.action}</span>
+                    {entry.slug && <span className="text-gray-500 font-mono truncate">{entry.slug}</span>}
+                    <span className="text-gray-600 ml-auto flex-shrink-0">{timeAgo(entry.time)}</span>
+                  </div>
+                  {entry.detail && (
+                    <p className={`mt-1 pl-5 truncate ${entry.status === 'error' ? 'text-red-400' : 'text-gray-500'}`}>
+                      {entry.detail}
+                    </p>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
         </div>
       </div>
     </div>
