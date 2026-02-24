@@ -56,12 +56,12 @@ export default function SessionPicker({ sessions, currentSessionId, onSelect, on
 
   const currentSession = sessions.find(s => (s.session_id || s.id) === currentSessionId);
   const currentLabel = currentSession
-    ? (currentSession.summary || currentSession.project || 'Unnamed')
+    ? (currentSession.summary || (currentSessionId ? currentSessionId.slice(0, 8) + '...' : 'Chat'))
     : 'New Chat';
 
   const filtered = search.trim()
     ? sessions.filter(s => {
-        const name = (s.summary || s.project || '').toLowerCase();
+        const name = (s.summary || s.session_id || '').toLowerCase();
         return name.includes(search.toLowerCase());
       })
     : sessions;
@@ -91,7 +91,7 @@ export default function SessionPicker({ sessions, currentSessionId, onSelect, on
           const id = s.session_id || s.id;
           const isSelected = id === currentSessionId;
           const isHovered = id === hoveredId;
-          const displayName = s.summary || s.project || 'Unnamed';
+          const displayName = s.summary || (id ? id.slice(0, 8) + '...' : 'New Chat');
           return (
             <div
               key={id}
@@ -154,7 +154,7 @@ export default function SessionPicker({ sessions, currentSessionId, onSelect, on
 
       {/* Dropdown panel */}
       {open && (
-        <div className="absolute top-full left-0 mt-1 w-[350px] max-h-[400px] bg-gray-900 border border-gray-700 rounded-xl shadow-2xl shadow-black/40 overflow-hidden z-50 flex flex-col">
+        <div className="absolute top-full left-0 mt-1 w-[700px] max-h-[500px] bg-gray-900 border border-gray-700 rounded-xl shadow-2xl shadow-black/40 overflow-hidden z-50 flex flex-col">
           {/* Search + New */}
           <div className="p-2 border-b border-gray-800 flex gap-2">
             <div className="flex-1 relative">
