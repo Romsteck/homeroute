@@ -184,7 +184,7 @@ function ThinkingMessage({ message }) {
   );
 }
 
-export default function MessageRenderer({ message }) {
+export default function MessageRenderer({ message, onSend }) {
   switch (message.type) {
     case 'human':
       return (
@@ -220,6 +220,27 @@ export default function MessageRenderer({ message }) {
         <div className="flex justify-start mb-4">
           <div className="max-w-[85%] bg-red-900/20 border border-red-500/30 rounded-2xl px-4 py-3 text-red-300 text-sm">
             {message.content}
+          </div>
+        </div>
+      );
+
+    case 'plan_complete':
+      return (
+        <div className="flex justify-center my-6">
+          <div className="flex items-center gap-3 bg-gray-800/60 border border-gray-700 rounded-2xl px-5 py-3">
+            <span className="text-sm text-gray-400">Plan ready.</span>
+            <button
+              onClick={() => onSend && onSend('Proceed with the plan and implement all changes.', 'default')}
+              className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl transition-colors"
+            >
+              Execute plan
+            </button>
+            <button
+              onClick={() => onSend && onSend('Refine the plan based on my feedback.', 'plan')}
+              className="px-4 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm font-medium rounded-xl transition-colors"
+            >
+              Refine
+            </button>
           </div>
         </div>
       );
