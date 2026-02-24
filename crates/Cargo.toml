@@ -116,3 +116,6 @@ bytes = "1"
 
 # Checksums (for binary transfer protocol)
 xxhash-rust = { version = "0.8", features = ["xxh32"] }
+
+# Embedded static files
+rust-embed = { version = "8", features = ["compression"] }

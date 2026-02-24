@@ -27,13 +27,13 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::AgentConfig;
 
-type BoxBody = http_body_util::combinators::BoxBody<bytes::Bytes, hyper::Error>;
+pub(crate) type BoxBody = http_body_util::combinators::BoxBody<bytes::Bytes, hyper::Error>;
 
-fn full_body(body: impl Into<bytes::Bytes>) -> BoxBody {
+pub(crate) fn full_body(body: impl Into<bytes::Bytes>) -> BoxBody {
     Full::new(body.into()).map_err(|never| match never {}).boxed()
 }
 
-fn empty_body() -> BoxBody {
+pub(crate) fn empty_body() -> BoxBody {
     Full::new(bytes::Bytes::new()).map_err(|never| match never {}).boxed()
 }
 
@@ -45,6 +45,9 @@ struct LocalRoute {
     target_port: u16,
     auth_required: bool,
     allowed_groups: Vec<String>,
+    /// If true, non-WS requests are handled internally (embedded SPA + API).
+    /// WS requests are proxied to target_port normally.
+    is_studio: bool,
 }
 
 /// Cached forward-auth result.
@@ -118,6 +121,7 @@ pub struct AgentProxy {
     auth_cache: Arc<RwLock<HashMap<String, (Instant, AuthResult)>>>,
     homeroute_url: String,
     agent_token: String,
+    pub(crate) studio: Arc<super::studio::StudioBridge>,
 }
 
 impl AgentProxy {
@@ -134,6 +138,7 @@ impl AgentProxy {
             auth_cache: Arc::new(RwLock::new(HashMap::new())),
             homeroute_url: format!("http://{}:{}", host, config.homeroute_port),
             agent_token: config.token.clone(),
+            studio: Arc::new(super::studio::StudioBridge::new()),
         }
     }
 
@@ -167,6 +172,7 @@ impl AgentProxy {
                         target_port: fe.target_port,
                         auth_required: fe.auth_required,
                         allowed_groups: fe.allowed_groups.clone(),
+                        is_studio: false,
                     },
                 );
             }
@@ -178,6 +184,7 @@ impl AgentProxy {
                     target_port: 13337,
                     auth_required: true,
                     allowed_groups: vec![],
+                    is_studio: false,
                 },
             );
         }
@@ -189,6 +196,19 @@ impl AgentProxy {
                     target_port: 5173,
                     auth_required: false,
                     allowed_groups: vec![],
+                    is_studio: false,
+                },
+            );
+            // Studio (Claude Code headless UI)
+            // WS requests go to local port STUDIO_WS_PORT (tokio-tungstenite server).
+            // Non-WS requests are handled internally (embedded SPA + API).
+            new_routes.insert(
+                format!("studio.{}.{}", slug, base_domain),
+                LocalRoute {
+                    target_port: super::studio::STUDIO_WS_PORT,
+                    auth_required: true,
+                    allowed_groups: vec![],
+                    is_studio: true,
                 },
             );
         }
@@ -286,6 +306,7 @@ impl AgentProxy {
             let routes = Arc::clone(&self.routes);
             let auth_cache = Arc::clone(&self.auth_cache);
             let homeroute_url = self.homeroute_url.clone();
+            let studio = Arc::clone(&self.studio);
 
             tokio::spawn(async move {
                 let tls_stream = match acceptor.accept(tcp_stream).await {
@@ -301,8 +322,9 @@ impl AgentProxy {
                     let routes = Arc::clone(&routes);
                     let auth_cache = Arc::clone(&auth_cache);
                     let homeroute_url = homeroute_url.clone();
+                    let studio = Arc::clone(&studio);
                     async move {
-                        handle_request(req, peer_addr, &routes, &auth_cache, &homeroute_url).await
+                        handle_request(req, peer_addr, &routes, &auth_cache, &homeroute_url, &studio).await
                     }
                 });
 
@@ -334,6 +356,7 @@ async fn handle_request(
     routes: &RwLock<HashMap<String, LocalRoute>>,
     auth_cache: &RwLock<HashMap<String, (Instant, AuthResult)>>,
     homeroute_url: &str,
+    studio: &Arc<super::studio::StudioBridge>,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let host = req
         .headers()
@@ -389,6 +412,13 @@ async fn handle_request(
             }
         }
     }
+
+    // Studio: WS goes to local port (bidirectional copy), HTTP handled internally
+    if route.is_studio && !is_websocket_upgrade(&req) {
+        return super::studio::handler::handle_studio_request(req, studio).await;
+    }
+    // For studio WS requests, fall through to the normal proxy/WS handler below
+    // which will proxy to STUDIO_WS_PORT via bidirectional TCP copy.
 
     // Set forwarding headers
     let headers = req.headers_mut();
@@ -475,7 +505,7 @@ async fn proxy_http(
 
 // ── WebSocket upgrade ──────────────────────────────────────────────
 
-fn is_websocket_upgrade<T>(req: &Request<T>) -> bool {
+pub(crate) fn is_websocket_upgrade<T>(req: &Request<T>) -> bool {
     let has_upgrade = req
         .headers()
         .get("upgrade")

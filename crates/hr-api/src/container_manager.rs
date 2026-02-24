@@ -853,6 +853,15 @@ WantedBy=multi-user.target
         )
         .await;
 
+        // Phase 8b2: Disable Claude Code auto-update for managed containers
+        emit("Configuration Claude Code...");
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["mkdir -p /root/.claude && printf '{\"autoUpdates\":\"disabled\"}' > /root/.claude/settings.json"],
+            3,
+        )
+        .await;
+
         // Phase 8c: Install Rust toolchain + cargo-watch
         emit("Installation Rust toolchain + cargo-watch...");
         let _ = NspawnClient::exec_with_retry(

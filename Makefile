@@ -1,7 +1,7 @@
 # HomeRoute Build System
 # Usage: make all, make deploy, make test
 
-.PHONY: server web all deploy test clean store
+.PHONY: server web studio all deploy test clean store
 
 # Build server binary
 server:
@@ -11,8 +11,12 @@ server:
 web:
 	cd web && npm run build
 
-# Full build (server + frontend)
-all: server web
+# Build Studio frontend (Claude Code headless UI)
+studio:
+	cd web-studio && npm install --silent && npm run build
+
+# Full build (studio + server + frontend)
+all: studio server web
 
 # Deploy (build + restart service)
 deploy: all
