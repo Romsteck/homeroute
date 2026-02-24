@@ -39,6 +39,13 @@ function parseSessionMessages(rawMessages) {
       if (msg.message?.is_error || msg.is_error) isError = true;
       if (text || isError) {
         result.push({ type: 'tool_result', content: text, is_error: isError });
+        // Annotate the last tool_use with success/error status
+        for (let j = result.length - 2; j >= 0; j--) {
+          if (result[j].type === 'tool_use' && !result[j].status) {
+            result[j] = { ...result[j], status: isError ? 'error' : 'success' };
+            break;
+          }
+        }
       }
     }
     // Skip queue-operation, file-history-snapshot, etc.
@@ -78,6 +85,7 @@ export default function useStudioWebSocket() {
   const reconnectTimer = useRef(null);
   const lastModeRef = useRef('default');
   const listenersRef = useRef({});
+  const abortedRef = useRef(false);
 
   const connect = useCallback(() => {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -140,10 +148,11 @@ export default function useStudioWebSocket() {
           if (data.session_id) {
             setCurrentSessionId(data.session_id);
           }
-          // If we were in plan mode, add a plan_complete action message
-          if (lastModeRef.current === 'plan') {
+          // If we were in plan mode, add a plan_complete action message (skip if aborted)
+          if (lastModeRef.current === 'plan' && !abortedRef.current) {
             setMessages(prev => [...prev, { type: 'plan_complete' }]);
           }
+          abortedRef.current = false;
           // Refresh session list to pick up new summaries
           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ type: 'list_sessions' }));
@@ -181,6 +190,7 @@ export default function useStudioWebSocket() {
 
   const sendPrompt = useCallback((text, mode = 'default', model) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    abortedRef.current = false;
     lastModeRef.current = mode;
     setMessages(prev => [...prev, { type: 'human', content: text }]);
     setIsStreaming(true);
@@ -196,6 +206,8 @@ export default function useStudioWebSocket() {
 
   const abort = useCallback(() => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    abortedRef.current = true;
+    setIsStreaming(false);
     wsRef.current.send(JSON.stringify({ type: 'abort' }));
   }, []);
 

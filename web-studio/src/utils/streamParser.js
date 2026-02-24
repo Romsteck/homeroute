@@ -1,4 +1,17 @@
 /**
+ * Walk backward through messages to find the last tool_use without a status
+ * and annotate it with 'success' or 'error' based on the tool_result.
+ */
+function annotateLastToolUse(messages, isError) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].type === 'tool_use' && !messages[i].status) {
+      messages[i] = { ...messages[i], status: isError ? 'error' : 'success' };
+      break;
+    }
+  }
+}
+
+/**
  * Process a Claude Code stream-json event and update the messages array.
  *
  * Claude stream-json format:
@@ -59,6 +72,7 @@ export function updateMessagesFromStream(messages, event) {
             content: text,
             is_error: block.is_error || false,
           });
+          annotateLastToolUse(next, block.is_error || false);
         }
       }
     }
@@ -82,6 +96,7 @@ export function updateMessagesFromStream(messages, event) {
       content: text,
       is_error: event.is_error || false,
     });
+    annotateLastToolUse(next, event.is_error || false);
     return next;
   }
 

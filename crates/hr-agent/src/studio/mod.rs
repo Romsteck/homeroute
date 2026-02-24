@@ -7,14 +7,18 @@ pub mod sessions;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 use tokio_tungstenite::accept_async;
-use tracing::{error, info};
+use tracing::{error, info, warn};
+
+use types::WsOutMessage;
 
 pub const STUDIO_WS_PORT: u16 = 3839;
 
 pub struct StudioBridge {
     pub active_processes: RwLock<HashMap<String, ClaudeProcess>>,
+    /// All connected WebSocket clients, keyed by connection ID.
+    connections: RwLock<HashMap<String, mpsc::Sender<WsOutMessage>>>,
 }
 
 pub struct ClaudeProcess {
@@ -26,6 +30,42 @@ impl StudioBridge {
     pub fn new() -> Self {
         Self {
             active_processes: RwLock::new(HashMap::new()),
+            connections: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Register a WebSocket connection for broadcast.
+    pub async fn register_connection(&self, conn_id: &str, tx: mpsc::Sender<WsOutMessage>) {
+        self.connections
+            .write()
+            .await
+            .insert(conn_id.to_string(), tx);
+    }
+
+    /// Unregister a WebSocket connection.
+    pub async fn unregister_connection(&self, conn_id: &str) {
+        self.connections.write().await.remove(conn_id);
+    }
+
+    /// Broadcast a message to all connected clients except `exclude`.
+    pub async fn broadcast(&self, exclude: &str, msg: &WsOutMessage) {
+        let conns = self.connections.read().await;
+        for (id, tx) in conns.iter() {
+            if id != exclude {
+                if tx.send(msg.clone()).await.is_err() {
+                    warn!("Failed to broadcast to connection {}", id);
+                }
+            }
+        }
+    }
+
+    /// Broadcast a message to ALL connected clients.
+    pub async fn broadcast_all(&self, msg: &WsOutMessage) {
+        let conns = self.connections.read().await;
+        for (id, tx) in conns.iter() {
+            if tx.send(msg.clone()).await.is_err() {
+                warn!("Failed to broadcast to connection {}", id);
+            }
         }
     }
 
@@ -70,6 +110,7 @@ impl StudioBridge {
                     info!("Studio WebSocket disconnected: {}", conn_id);
 
                     websocket::kill_active(&studio, &conn_id).await;
+                    studio.unregister_connection(&conn_id).await;
                 });
             }
         })

@@ -14,11 +14,12 @@ import {
   HardDrive,
   ExternalLink,
   Monitor,
+  Sparkles,
 } from 'lucide-react';
 
 // Shared grid template — used by ContainerCard rows and column header in Containers.jsx
 // 9 columns: Env | Status | Auth | Local | Acces | CPU | RAM | Host | Actions
-export const CONTAINER_GRID = '50px 1.2fr 26px 26px 160px 55px 65px 1fr 140px';
+export const CONTAINER_GRID = '50px 1.2fr 26px 26px 230px 55px 65px 1fr 140px';
 
 const STATUS_BADGES = {
   connected: { color: 'text-green-400 bg-green-900/30', icon: Wifi, label: 'Connecte' },
@@ -75,6 +76,7 @@ function ContainerCard({
     ? `code.${container.slug}.${baseDomain}/?folder=/root/workspace`
     : null;
   const devUrl = baseDomain && isDev ? `dev.${container.slug}.${baseDomain}` : null;
+  const studioUrl = baseDomain && isDev ? `studio.${container.slug}.${baseDomain}` : null;
   const prodAppUrl = baseDomain && !isDev ? `${container.slug}.${baseDomain}` : null;
 
   const isConnected = displayStatus === 'connected';
@@ -133,6 +135,18 @@ function ContainerCard({
             >
               <Monitor className="w-3 h-3" />
               DEV
+            </a>
+          )}
+          {studioUrl && (
+            <a
+              href={`https://${studioUrl}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-xs text-violet-400 hover:text-violet-300 bg-violet-900/20 rounded"
+              title="Studio AI"
+            >
+              <Sparkles className="w-3 h-3" />
+              Studio
             </a>
           )}
           {ideUrl && (

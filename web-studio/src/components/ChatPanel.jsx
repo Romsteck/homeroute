@@ -20,7 +20,7 @@ export default function ChatPanel({ messages, isStreaming, onSend, onAbort, conn
 
   return (
     <div className="flex-1 flex flex-col min-h-0 min-w-0 bg-gray-900">
-      <MessageList messages={messages} isStreaming={isStreaming} onSend={handleSendFromMessage} />
+      <MessageList messages={messages} isStreaming={isStreaming} onSend={handleSendFromMessage} mode={mode} />
       <InputBar
         onSend={onSend}
         onAbort={onAbort}

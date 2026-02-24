@@ -1,61 +1,68 @@
+use std::collections::HashSet;
 use tracing::{debug, warn};
 
 use super::types::SessionInfo;
 
-const PROJECTS_DIR: &str = "/root/.claude/projects";
+const PROJECTS_DIRS: &[&str] = &[
+    "/home/studio/.claude/projects",
+    "/root/.claude/projects",
+];
 
-/// List all Claude Code sessions from the projects directory.
+/// List all Claude Code sessions from all known projects directories.
 pub fn list_sessions() -> Vec<SessionInfo> {
-    let projects_path = std::path::Path::new(PROJECTS_DIR);
-    if !projects_path.is_dir() {
-        return vec![];
-    }
-
     let mut sessions = Vec::new();
+    let mut seen_ids = HashSet::new();
 
-    if let Ok(entries) = std::fs::read_dir(projects_path) {
-        for entry in entries.flatten() {
-            let project_path = entry.path();
-            if !project_path.is_dir() {
-                continue;
-            }
-            let project_name = entry.file_name().to_string_lossy().to_string();
+    for projects_dir in PROJECTS_DIRS {
+        let projects_path = std::path::Path::new(projects_dir);
+        if !projects_path.is_dir() {
+            continue;
+        }
 
-            // Look for .jsonl files directly in the project directory
-            if let Ok(files) = std::fs::read_dir(&project_path) {
-                for file in files.flatten() {
-                    let file_path = file.path();
-                    if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                        continue;
+        if let Ok(entries) = std::fs::read_dir(projects_path) {
+            for entry in entries.flatten() {
+                let project_path = entry.path();
+                if !project_path.is_dir() {
+                    continue;
+                }
+                let project_name = entry.file_name().to_string_lossy().to_string();
+
+                // Look for .jsonl files directly in the project directory
+                if let Ok(files) = std::fs::read_dir(&project_path) {
+                    for file in files.flatten() {
+                        let file_path = file.path();
+                        if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                            continue;
+                        }
+                        let session_id = file_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        if session_id.is_empty() || !seen_ids.insert(session_id.clone()) {
+                            continue;
+                        }
+
+                        let last_modified = file_path
+                            .metadata()
+                            .ok()
+                            .and_then(|m| m.modified().ok())
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+
+                        // Count lines and extract summary from first user message
+                        let (message_count, summary) = extract_session_info(&file_path);
+
+                        sessions.push(SessionInfo {
+                            session_id,
+                            project: project_name.clone(),
+                            last_modified,
+                            message_count,
+                            summary,
+                        });
                     }
-                    let session_id = file_path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    if session_id.is_empty() {
-                        continue;
-                    }
-
-                    let last_modified = file_path
-                        .metadata()
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-
-                    // Count lines and extract summary from first user message
-                    let (message_count, summary) = extract_session_info(&file_path);
-
-                    sessions.push(SessionInfo {
-                        session_id,
-                        project: project_name.clone(),
-                        last_modified,
-                        message_count,
-                        summary,
-                    });
                 }
             }
         }
@@ -68,23 +75,25 @@ pub fn list_sessions() -> Vec<SessionInfo> {
 
 /// Delete a session file. Returns true if successful.
 pub fn delete_session(session_id: &str) -> bool {
-    let projects_path = std::path::Path::new(PROJECTS_DIR);
-    if !projects_path.is_dir() {
-        return false;
-    }
+    for projects_dir in PROJECTS_DIRS {
+        let projects_path = std::path::Path::new(projects_dir);
+        if !projects_path.is_dir() {
+            continue;
+        }
 
-    if let Ok(entries) = std::fs::read_dir(projects_path) {
-        for entry in entries.flatten() {
-            let file_path = entry.path().join(format!("{}.jsonl", session_id));
-            if file_path.is_file() {
-                match std::fs::remove_file(&file_path) {
-                    Ok(()) => {
-                        debug!("Deleted session file: {}", file_path.display());
-                        return true;
-                    }
-                    Err(e) => {
-                        warn!("Failed to delete session {}: {}", session_id, e);
-                        return false;
+        if let Ok(entries) = std::fs::read_dir(projects_path) {
+            for entry in entries.flatten() {
+                let file_path = entry.path().join(format!("{}.jsonl", session_id));
+                if file_path.is_file() {
+                    match std::fs::remove_file(&file_path) {
+                        Ok(()) => {
+                            debug!("Deleted session file: {}", file_path.display());
+                            return true;
+                        }
+                        Err(e) => {
+                            warn!("Failed to delete session {}: {}", session_id, e);
+                            return false;
+                        }
                     }
                 }
             }
@@ -96,17 +105,19 @@ pub fn delete_session(session_id: &str) -> bool {
 
 /// Read messages from a specific session.
 pub fn get_session_messages(session_id: &str, limit: usize) -> Vec<serde_json::Value> {
-    let projects_path = std::path::Path::new(PROJECTS_DIR);
-    if !projects_path.is_dir() {
-        return vec![];
-    }
+    for projects_dir in PROJECTS_DIRS {
+        let projects_path = std::path::Path::new(projects_dir);
+        if !projects_path.is_dir() {
+            continue;
+        }
 
-    // Search for the session file across all project directories
-    if let Ok(entries) = std::fs::read_dir(projects_path) {
-        for entry in entries.flatten() {
-            let file_path = entry.path().join(format!("{}.jsonl", session_id));
-            if file_path.is_file() {
-                return read_jsonl_messages(&file_path, limit);
+        // Search for the session file across all project directories
+        if let Ok(entries) = std::fs::read_dir(projects_path) {
+            for entry in entries.flatten() {
+                let file_path = entry.path().join(format!("{}.jsonl", session_id));
+                if file_path.is_file() {
+                    return read_jsonl_messages(&file_path, limit);
+                }
             }
         }
     }

@@ -127,6 +127,8 @@ function ToolUseMessage({ message }) {
       >
         <ChevronIcon className={`w-3 h-3 transition-transform ${expanded ? 'rotate-90' : ''}`} />
         <span className="font-medium">{message.tool}</span>
+        {message.status === 'success' && <span className="text-green-500 text-xs font-bold">&#10003;</span>}
+        {message.status === 'error' && <span className="text-red-400 text-xs font-bold">&#10007;</span>}
         {brief && <span className="text-gray-600 font-mono truncate max-w-[300px]">{brief}</span>}
       </button>
       {expanded && inputStr && (
@@ -227,16 +229,19 @@ export default function MessageRenderer({ message, onSend }) {
     case 'plan_complete':
       return (
         <div className="flex justify-center my-6">
-          <div className="flex items-center gap-3 bg-gray-800/60 border border-gray-700 rounded-2xl px-5 py-3">
-            <span className="text-sm text-gray-400">Plan ready.</span>
+          <div className="flex items-center gap-3 bg-amber-950/30 border border-amber-500/30 rounded-2xl px-5 py-3">
+            <svg className="w-4 h-4 text-amber-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span className="text-sm text-amber-300 font-medium">Plan complete</span>
             <button
-              onClick={() => onSend && onSend('Proceed with the plan and implement all changes.', 'default')}
+              onClick={() => onSend && onSend('Proceed with the plan. Execute all proposed changes.', 'default')}
               className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl transition-colors"
             >
-              Execute plan
+              Execute
             </button>
             <button
-              onClick={() => onSend && onSend('Refine the plan based on my feedback.', 'plan')}
+              onClick={() => onSend && onSend('Please revise the plan with my additional feedback.', 'plan')}
               className="px-4 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm font-medium rounded-xl transition-colors"
             >
               Refine

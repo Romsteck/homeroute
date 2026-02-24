@@ -42,7 +42,7 @@ fn default_mode() -> String {
 }
 
 /// Server → Client WebSocket messages.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsOutMessage {
     Stream {
@@ -77,7 +77,7 @@ pub enum WsOutMessage {
 }
 
 /// A single entry in a directory listing.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FileEntry {
     pub name: String,
     /// "file" or "directory"
@@ -86,7 +86,7 @@ pub struct FileEntry {
 }
 
 /// Session metadata.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SessionInfo {
     pub session_id: String,
     pub project: String,
