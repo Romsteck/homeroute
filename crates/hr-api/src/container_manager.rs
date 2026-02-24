@@ -898,6 +898,14 @@ WantedBy=multi-user.target
         )
         .await;
 
+        // Phase 8f: Grant studio user read access to dev tools (nvm, cargo, rustup)
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["chmod -R a+rX /root/.nvm /root/.cargo /root/.rustup 2>/dev/null; true"],
+            3,
+        )
+        .await;
+
         // Phase 9: Create workspace
         emit("Creation du volume workspace...");
         let _ = NspawnClient::create_workspace(container_name, storage).await;

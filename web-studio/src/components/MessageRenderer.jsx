@@ -192,6 +192,26 @@ export default function MessageRenderer({ message, onSend }) {
       return (
         <div className="flex justify-end mb-4">
           <div className="max-w-[85%] bg-indigo-600/20 border border-indigo-500/30 rounded-2xl px-4 py-3">
+            {message.images && message.images.length > 0 && (
+              <div className="flex flex-wrap gap-2 mb-2">
+                {message.images.map((img, i) => (
+                  <img
+                    key={i}
+                    src={`data:${img.mediaType || 'image/png'};base64,${img.data}`}
+                    alt="Attached"
+                    className="max-h-48 rounded-lg border border-indigo-500/20 cursor-pointer hover:border-indigo-400/40 transition-colors"
+                    onClick={(e) => {
+                      // Open full-size in new tab
+                      const w = window.open();
+                      if (w) {
+                        w.document.write(`<img src="${e.target.src}" style="max-width:100%;background:#111">`);
+                        w.document.title = 'Image';
+                      }
+                    }}
+                  />
+                ))}
+              </div>
+            )}
             <p className="text-gray-200 text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
           </div>
         </div>

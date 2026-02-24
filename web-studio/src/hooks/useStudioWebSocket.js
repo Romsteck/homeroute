@@ -11,8 +11,11 @@ function parseSessionMessages(rawMessages) {
     const type = msg.type;
     if (type === 'user') {
       const content = extractTextContent(msg);
-      if (content) {
-        result.push({ type: 'human', content });
+      const images = extractImageContent(msg);
+      if (content || images.length > 0) {
+        const humanMsg = { type: 'human', content: content || '' };
+        if (images.length > 0) humanMsg.images = images;
+        result.push(humanMsg);
       }
     } else if (type === 'assistant') {
       const content = extractTextContent(msg);
@@ -53,6 +56,32 @@ function parseSessionMessages(rawMessages) {
   return result;
 }
 
+/**
+ * Scan raw session messages (JSONL) backward for the last TodoWrite tool_use.
+ * Returns the todos array or [].
+ */
+function extractLastTodos(rawMessages) {
+  for (let i = rawMessages.length - 1; i >= 0; i--) {
+    const content = rawMessages[i].message?.content;
+    if (Array.isArray(content)) {
+      for (let j = content.length - 1; j >= 0; j--) {
+        if (content[j].type === 'tool_use' && content[j].name === 'TodoWrite') {
+          return content[j].input?.todos || [];
+        }
+      }
+    }
+  }
+  return [];
+}
+
+function extractImageContent(msg) {
+  const content = msg.message?.content;
+  if (!Array.isArray(content)) return [];
+  return content
+    .filter(b => b.type === 'image' && b.source?.type === 'base64')
+    .map(b => ({ data: b.source.data, mediaType: b.source.media_type || 'image/png' }));
+}
+
 function extractTextContent(msg) {
   const content = msg.message?.content;
   if (typeof content === 'string') return content;
@@ -70,6 +99,7 @@ export default function useStudioWebSocket() {
   const [messages, setMessages] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [todos, setTodos] = useState([]);
   const [currentSessionId, _setCurrentSessionId] = useState(() => {
     return localStorage.getItem('studio-session-id') || null;
   });
@@ -140,6 +170,17 @@ export default function useStudioWebSocket() {
           if (event.session_id) {
             setCurrentSessionId(event.session_id);
           }
+          // Extract todos from TodoWrite tool_use events
+          if (event.type === 'assistant') {
+            const blocks = event.message?.content;
+            if (Array.isArray(blocks)) {
+              for (const block of blocks) {
+                if (block.type === 'tool_use' && block.name === 'TodoWrite') {
+                  setTodos(block.input?.todos || []);
+                }
+              }
+            }
+          }
           setIsStreaming(true);
           break;
         }
@@ -167,7 +208,10 @@ export default function useStudioWebSocket() {
           break;
         case 'session_messages':
           setMessages(parseSessionMessages(data.messages || []));
-          setIsStreaming(false);
+          setTodos(extractLastTodos(data.messages || []));
+          // Don't force isStreaming=false here — if a stream is active,
+          // replayed buffer events will follow and set isStreaming=true.
+          // On fresh page load, isStreaming defaults to false already.
           break;
         case 'busy':
           setMessages(prev => [...prev, { type: 'error', content: 'Session is busy. Please wait for the current operation to complete.' }]);
@@ -188,11 +232,16 @@ export default function useStudioWebSocket() {
     };
   }, [connect]);
 
-  const sendPrompt = useCallback((text, mode = 'default', model) => {
+  const sendPrompt = useCallback((text, mode = 'default', model, images) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     abortedRef.current = false;
     lastModeRef.current = mode;
-    setMessages(prev => [...prev, { type: 'human', content: text }]);
+    // Build display message with optional images
+    const humanMsg = { type: 'human', content: text };
+    if (images && images.length > 0) {
+      humanMsg.images = images;
+    }
+    setMessages(prev => [...prev, humanMsg]);
     setIsStreaming(true);
     const payload = { type: 'prompt', prompt: text, mode };
     if (currentSessionId) {
@@ -200,6 +249,9 @@ export default function useStudioWebSocket() {
     }
     if (model) {
       payload.model = model;
+    }
+    if (images && images.length > 0) {
+      payload.images = images;
     }
     wsRef.current.send(JSON.stringify(payload));
   }, [currentSessionId]);
@@ -219,6 +271,7 @@ export default function useStudioWebSocket() {
 
   const newSession = useCallback(() => {
     setMessages([]);
+    setTodos([]);
     setCurrentSessionId(null);
   }, []);
 
@@ -253,6 +306,7 @@ export default function useStudioWebSocket() {
     sessions,
     isStreaming,
     currentSessionId,
+    todos,
     sendPrompt,
     abort,
     loadSession,

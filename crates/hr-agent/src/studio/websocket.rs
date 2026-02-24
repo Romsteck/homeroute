@@ -1,3 +1,4 @@
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, error, warn};
 
-use super::types::{FileEntry, WsInMessage, WsOutMessage};
+use super::types::{FileEntry, ImageAttachment, WsInMessage, WsOutMessage};
 use super::StudioBridge;
 
 const WORKSPACE_ROOT: &str = "/root/workspace";
@@ -41,6 +42,13 @@ async fn sync_studio_credentials() {
     // Ensure studio user owns its home
     let _ = tokio::process::Command::new("chown")
         .args(["-R", &format!("{STUDIO_USER}:{STUDIO_USER}"), STUDIO_HOME])
+        .output()
+        .await;
+
+    // Ensure workspace files are readable/writable by studio user
+    // (workspace may contain files owned by different UIDs from nspawn mapping)
+    let _ = tokio::process::Command::new("chmod")
+        .args(["-R", "a+rwX", WORKSPACE_ROOT])
         .output()
         .await;
 }
@@ -127,14 +135,14 @@ where
         };
 
         match parsed {
-            WsInMessage::Prompt { prompt, session_id, mode, model } => {
-                // Kill any active subprocess first
-                kill_active(studio, conn_id).await;
+            WsInMessage::Prompt { prompt, session_id, mode, model, images } => {
+                // Kill any active subprocess (from any connection)
+                studio.kill_all_active().await;
                 // Spawn new claude process
-                spawn_claude(studio, conn_id, &prompt, session_id, &mode, model.as_deref(), out_tx.clone()).await;
+                spawn_claude(studio, conn_id, &prompt, session_id, &mode, model.as_deref(), images, out_tx.clone()).await;
             }
             WsInMessage::Abort => {
-                kill_active(studio, conn_id).await;
+                studio.kill_all_active().await;
                 studio.broadcast_all(&WsOutMessage::Done { session_id: None }).await;
             }
             WsInMessage::ListSessions => {
@@ -146,6 +154,8 @@ where
                 let _ = out_tx
                     .send(WsOutMessage::SessionMessages { messages })
                     .await;
+                // If there's an active stream, replay buffered events so client catches up
+                studio.replay_stream_buffer(&out_tx).await;
             }
             WsInMessage::DeleteSession { session_id } => {
                 super::sessions::delete_session(&session_id);
@@ -294,6 +304,42 @@ where
     writer_handle.abort();
 }
 
+/// Save base64-encoded images to temp files, returning the file paths.
+async fn save_image_attachments(images: &[ImageAttachment]) -> Vec<String> {
+    let mut paths = Vec::new();
+    let upload_dir = "/tmp/studio-uploads";
+    let _ = tokio::fs::create_dir_all(upload_dir).await;
+
+    for img in images {
+        let ext = match img.media_type.as_str() {
+            "image/jpeg" | "image/jpg" => "jpg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            _ => "png",
+        };
+        let id = uuid::Uuid::new_v4();
+        let path = format!("{upload_dir}/{id}.{ext}");
+
+        use base64::Engine;
+        match base64::engine::general_purpose::STANDARD.decode(&img.data) {
+            Ok(bytes) => {
+                if tokio::fs::write(&path, &bytes).await.is_ok() {
+                    // Make readable by studio user
+                    let _ = tokio::fs::set_permissions(
+                        &path,
+                        std::os::unix::fs::PermissionsExt::from_mode(0o644),
+                    ).await;
+                    paths.push(path);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to decode base64 image: {e}");
+            }
+        }
+    }
+    paths
+}
+
 /// Spawn a Claude CLI subprocess and stream its output.
 async fn spawn_claude(
     studio: &Arc<StudioBridge>,
@@ -302,15 +348,33 @@ async fn spawn_claude(
     session_id: Option<String>,
     mode: &str,
     model: Option<&str>,
+    images: Option<Vec<ImageAttachment>>,
     out_tx: mpsc::Sender<WsOutMessage>,
 ) {
     // Sync credentials to studio user (pre-created during provisioning)
     sync_studio_credentials().await;
 
+    // Save any attached images to temp files
+    let image_paths = if let Some(imgs) = &images {
+        save_image_attachments(imgs).await
+    } else {
+        Vec::new()
+    };
+
+    // Build the prompt, prepending image references if any
+    let effective_prompt = if image_paths.is_empty() {
+        prompt.to_string()
+    } else {
+        let refs: Vec<String> = image_paths.iter()
+            .map(|p| format!("[Attached image: {p} — use the Read tool to view it]"))
+            .collect();
+        format!("{}\n\n{}", refs.join("\n"), prompt)
+    };
+
     // Build the claude command arguments
     let mut claude_args = vec![
         "-p".to_string(),
-        prompt.to_string(),
+        effective_prompt,
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--verbose".to_string(),
@@ -338,12 +402,32 @@ async fn spawn_claude(
 
     // Run as non-root "studio" user via runuser
     // This allows --permission-mode bypassPermissions (blocked as root)
+    // Build PATH that includes root's nvm/cargo/local bins so Claude's Bash tools work
+    let mut extra_paths = vec![
+        "/root/.cargo/bin".to_string(),
+        "/root/.local/bin".to_string(),
+    ];
+    // Auto-detect nvm node version
+    let nvm_dir = std::path::Path::new("/root/.nvm/versions/node");
+    if let Ok(entries) = std::fs::read_dir(nvm_dir) {
+        if let Some(entry) = entries.filter_map(|e| e.ok()).last() {
+            extra_paths.insert(0, format!("{}/bin", entry.path().display()));
+        }
+    }
+    let sys_path = std::env::var("PATH").unwrap_or_default();
+    let full_path = format!(
+        "{}:{}",
+        extra_paths.join(":"),
+        sys_path
+    );
+
     let mut cmd = Command::new("runuser");
     cmd.arg("-u")
         .arg(STUDIO_USER)
         .arg("--")
         .arg("env")
         .arg(format!("HOME={STUDIO_HOME}"))
+        .arg(format!("PATH={full_path}"))
         .arg("claude")
         .args(&claude_args);
 
@@ -405,7 +489,7 @@ async fn spawn_claude(
         });
     }
 
-    // Spawn reader task to stream stdout (with progressive timeout + crash detection)
+    // Spawn reader task to stream stdout (crash detection only, no timeout)
     let studio_reader = Arc::clone(studio);
     let conn_id_owned = conn_id.to_string();
     let reader_handle = tokio::spawn(async move {
@@ -413,12 +497,10 @@ async fn spawn_claude(
         let mut lines = reader.lines();
         let mut found_session_id: Option<String> = None;
         let mut saw_result = false;
-        let mut consecutive_timeouts: u32 = 0;
 
         loop {
-            match tokio::time::timeout(Duration::from_secs(120), lines.next_line()).await {
-                Ok(Ok(Some(line))) => {
-                    consecutive_timeouts = 0;
+            match lines.next_line().await {
+                Ok(Some(line)) => {
                     match serde_json::from_str::<serde_json::Value>(&line) {
                         Ok(data) => {
                             // Extract session_id from stream events
@@ -431,15 +513,15 @@ async fn spawn_claude(
                             if data.get("type").and_then(|v| v.as_str()) == Some("result") {
                                 saw_result = true;
                             }
-                            // Broadcast stream events to all connected clients
-                            studio_reader.broadcast_all(&WsOutMessage::Stream { data }).await;
+                            // Buffer + broadcast stream events to all connected clients
+                            studio_reader.buffer_and_broadcast(WsOutMessage::Stream { data }).await;
                         }
                         Err(_) => {
                             debug!("Non-JSON line from claude ({}): {}", conn_id_owned, line);
                         }
                     }
                 }
-                Ok(Ok(None)) => {
+                Ok(None) => {
                     // EOF — stream ended
                     if !saw_result {
                         studio_reader.broadcast_all(&WsOutMessage::Error {
@@ -448,37 +530,21 @@ async fn spawn_claude(
                     }
                     break;
                 }
-                Ok(Err(e)) => {
+                Err(e) => {
                     warn!("Reader IO error for {}: {e}", conn_id_owned);
                     studio_reader.broadcast_all(&WsOutMessage::Error {
                         message: format!("Read error: {e}"),
                     }).await;
                     break;
                 }
-                Err(_) => {
-                    // Timeout — no output for 120s
-                    consecutive_timeouts += 1;
-                    if consecutive_timeouts == 1 {
-                        warn!("Claude process inactive for 2 min ({})", conn_id_owned);
-                        studio_reader.broadcast_all(&WsOutMessage::Error {
-                            message: "Warning: Claude has been inactive for 2 minutes".to_string(),
-                        }).await;
-                    } else {
-                        // 2nd consecutive timeout (4 min total) — kill the process
-                        warn!("Claude process inactive for 4 min, killing ({})", conn_id_owned);
-                        studio_reader.broadcast_all(&WsOutMessage::Error {
-                            message: "Claude process killed after 4 minutes of inactivity".to_string(),
-                        }).await;
-                        // Kill the process from active_processes
-                        let mut procs = studio_reader.active_processes.write().await;
-                        if let Some(mut proc) = procs.remove(&conn_id_owned) {
-                            let _ = proc.child.kill().await;
-                        }
-                        break;
-                    }
-                }
             }
         }
+
+        // Clear stream buffer before Done so new connections don't get stale data
+        studio_reader.clear_stream_buffer().await;
+
+        // Remove this process from active_processes (it finished naturally)
+        studio_reader.active_processes.write().await.remove(&conn_id_owned);
 
         // Stream ended — broadcast Done and refresh session list
         let done_msg = WsOutMessage::Done {
@@ -504,30 +570,8 @@ async fn spawn_claude(
         .await
         .insert(conn_id.to_string(), process);
 
-    // Spawn a timeout watchdog (5 minutes — safety net)
-    let studio_watchdog = Arc::clone(studio);
-    let conn_id_owned = conn_id.to_string();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(300)).await;
-        // If process is still running after timeout, kill it
-        let mut procs = studio_watchdog.active_processes.write().await;
-        if let Some(mut proc) = procs.remove(&conn_id_owned) {
-            warn!("Claude process timed out for {}", conn_id_owned);
-            proc.reader_abort.abort();
-            let _ = proc.child.kill().await;
-            studio_watchdog.broadcast_all(&WsOutMessage::Error {
-                message: "Claude process timed out (5 minutes)".to_string(),
-            }).await;
-        }
-    });
+    // No global watchdog — the reader task's progressive timeout handles stalls:
+    // 2 min no output → warning, 4 min no output → kill.
+    // A global watchdog would kill actively-working Claude processes.
 }
 
-/// Kill any active Claude subprocess for a connection.
-pub async fn kill_active(studio: &Arc<StudioBridge>, conn_id: &str) {
-    let mut procs = studio.active_processes.write().await;
-    if let Some(mut proc) = procs.remove(conn_id) {
-        proc.reader_abort.abort();
-        let _ = proc.child.kill().await;
-        debug!("Killed active Claude process for {}", conn_id);
-    }
-}
