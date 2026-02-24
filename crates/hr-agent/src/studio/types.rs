@@ -25,6 +25,12 @@ pub enum WsInMessage {
     DeleteSession {
         session_id: String,
     },
+    ListDirectory {
+        path: String,
+    },
+    ReadFile {
+        path: String,
+    },
 }
 
 fn default_limit() -> usize {
@@ -58,6 +64,25 @@ pub enum WsOutMessage {
     Busy {
         message: String,
     },
+    DirectoryListing {
+        path: String,
+        entries: Vec<FileEntry>,
+    },
+    FileContent {
+        path: String,
+        content: String,
+        size: u64,
+        truncated: bool,
+    },
+}
+
+/// A single entry in a directory listing.
+#[derive(Debug, Serialize)]
+pub struct FileEntry {
+    pub name: String,
+    /// "file" or "directory"
+    pub kind: String,
+    pub size: u64,
 }
 
 /// Session metadata.

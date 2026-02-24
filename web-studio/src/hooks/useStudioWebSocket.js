@@ -77,6 +77,7 @@ export default function useStudioWebSocket() {
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
   const lastModeRef = useRef('default');
+  const listenersRef = useRef({});
 
   const connect = useCallback(() => {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -109,6 +110,18 @@ export default function useStudioWebSocket() {
         data = JSON.parse(evt.data);
       } catch {
         return;
+      }
+
+      // Dispatch to external subscribers
+      const listeners = listenersRef.current[data.type];
+      if (listeners && listeners.length > 0) {
+        for (const cb of listeners) {
+          cb(data);
+        }
+        // For non-chat types, don't fall through to switch
+        if (!['stream', 'done', 'error', 'sessions', 'session_messages', 'busy'].includes(data.type)) {
+          return;
+        }
       }
 
       switch (data.type) {
@@ -197,6 +210,21 @@ export default function useStudioWebSocket() {
     setCurrentSessionId(null);
   }, []);
 
+  const subscribe = useCallback((type, callback) => {
+    if (!listenersRef.current[type]) {
+      listenersRef.current[type] = [];
+    }
+    listenersRef.current[type].push(callback);
+    return () => {
+      listenersRef.current[type] = listenersRef.current[type].filter(cb => cb !== callback);
+    };
+  }, []);
+
+  const sendRaw = useCallback((msg) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify(msg));
+  }, []);
+
   const deleteSession = useCallback((sessionId) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     wsRef.current.send(JSON.stringify({ type: 'delete_session', session_id: sessionId }));
@@ -218,5 +246,7 @@ export default function useStudioWebSocket() {
     loadSession,
     newSession,
     deleteSession,
+    sendRaw,
+    subscribe,
   };
 }
