@@ -73,11 +73,11 @@ where
         };
 
         match parsed {
-            WsInMessage::Prompt { prompt, session_id } => {
+            WsInMessage::Prompt { prompt, session_id, mode } => {
                 // Kill any active subprocess first
                 kill_active(studio, conn_id).await;
                 // Spawn new claude process
-                spawn_claude(studio, conn_id, &prompt, session_id, out_tx.clone()).await;
+                spawn_claude(studio, conn_id, &prompt, session_id, &mode, out_tx.clone()).await;
             }
             WsInMessage::Abort => {
                 kill_active(studio, conn_id).await;
@@ -114,16 +114,27 @@ async fn spawn_claude(
     conn_id: &str,
     prompt: &str,
     session_id: Option<String>,
+    mode: &str,
     out_tx: mpsc::Sender<WsOutMessage>,
 ) {
     let mut cmd = Command::new("claude");
     cmd.arg("-p")
         .arg(prompt)
-        .arg("--allowedTools")
-        .arg("Read,Write,Edit,Bash,Glob,Grep,WebSearch,WebFetch,TodoWrite,Task,NotebookEdit")
         .arg("--output-format")
         .arg("stream-json")
         .arg("--verbose");
+
+    // Permission mode: plan = read-only analysis, default = full execution
+    match mode {
+        "plan" => {
+            cmd.arg("--permission-mode").arg("plan");
+            cmd.arg("--allowedTools").arg("Read,Glob,Grep,WebSearch,WebFetch");
+        }
+        _ => {
+            cmd.arg("--allowedTools")
+                .arg("Read,Write,Edit,Bash,Glob,Grep,WebSearch,WebFetch,TodoWrite,Task,NotebookEdit");
+        }
+    }
 
     if let Some(sid) = &session_id {
         cmd.arg("--resume").arg(sid);

@@ -4,7 +4,6 @@ import Header from './components/Header';
 import ChatPanel from './components/ChatPanel';
 import PreviewPanel from './components/PreviewPanel';
 import FilesPanel from './components/FilesPanel';
-import ActivityPanel from './components/ActivityPanel';
 import StatusBar from './components/StatusBar';
 
 function getAppInfo() {
@@ -23,8 +22,9 @@ function getAppInfo() {
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('agent');
-  const [activityPanelOpen, setActivityPanelOpen] = useState(true);
+  const [activeTab, setActiveTab] = useState(() => {
+    return localStorage.getItem('studio-active-tab') || 'studio';
+  });
   const ws = useStudioWebSocket();
   const appInfo = useMemo(() => getAppInfo(), []);
 
@@ -32,47 +32,18 @@ export default function App() {
     document.title = `Studio - ${appInfo.appName}`;
   }, [appInfo.appName]);
 
-  const activities = useMemo(() => {
-    const acts = [];
-    for (let i = 0; i < ws.messages.length; i++) {
-      const msg = ws.messages[i];
-      if (msg.type === 'tool_use') {
-        const activity = {
-          id: i,
-          tool: msg.tool,
-          description: getToolDescription(msg),
-          status: 'done',
-          timestamp: new Date(),
-        };
-        const next = ws.messages[i + 1];
-        if (next && next.type === 'tool_result' && next.is_error) {
-          activity.status = 'error';
-        }
-        acts.push(activity);
-      }
-    }
-    if (ws.isStreaming && acts.length > 0) {
-      const lastAct = acts[acts.length - 1];
-      const lastMsg = ws.messages[ws.messages.length - 1];
-      if (lastMsg && lastMsg.type === 'tool_use') {
-        lastAct.status = 'running';
-      }
-    }
-    return acts;
-  }, [ws.messages, ws.isStreaming]);
-
-  const toggleActivity = useCallback(() => setActivityPanelOpen(s => !s), []);
+  const handleTabChange = useCallback((tab) => {
+    setActiveTab(tab);
+    localStorage.setItem('studio-active-tab', tab);
+  }, []);
 
   return (
     <div className="h-screen flex flex-col bg-gray-900">
       <Header
         appName={appInfo.appName}
         activeTab={activeTab}
-        onTabChange={setActiveTab}
+        onTabChange={handleTabChange}
         connected={ws.connected}
-        onToggleActivity={toggleActivity}
-        activityPanelOpen={activityPanelOpen}
-        activityCount={activities.length}
         sessions={ws.sessions}
         currentSessionId={ws.currentSessionId}
         onSelectSession={ws.loadSession}
@@ -81,9 +52,9 @@ export default function App() {
       />
 
       <div className="flex flex-1 min-h-0">
-        {/* Main panel area */}
-        <div className="flex-1 flex flex-col min-h-0 min-w-0">
-          {activeTab === 'agent' && (
+        {/* Studio tab - always mounted, hidden when inactive */}
+        <div className="flex flex-1 min-h-0" style={{display: activeTab === 'studio' ? 'flex' : 'none'}}>
+          <div className="w-[30%] min-w-[300px] flex flex-col border-r border-gray-800">
             <ChatPanel
               messages={ws.messages}
               isStreaming={ws.isStreaming}
@@ -91,20 +62,17 @@ export default function App() {
               onAbort={ws.abort}
               connected={ws.connected}
             />
-          )}
-          {activeTab === 'preview' && (
-            <PreviewPanel slug={appInfo.slug} domain={appInfo.domain} />
-          )}
-          {activeTab === 'files' && <FilesPanel />}
+          </div>
+          <div className="flex-1 flex flex-col min-w-0">
+            <PreviewPanel slug={appInfo.slug} domain={appInfo.domain} mode="split" />
+          </div>
         </div>
-
-        {/* Activity side panel */}
-        {activityPanelOpen && (
-          <ActivityPanel
-            activities={activities}
-            onClose={() => setActivityPanelOpen(false)}
-          />
-        )}
+        {/* Preview tab - always mounted, hidden when inactive */}
+        <div className="flex-1" style={{display: activeTab === 'preview' ? 'flex' : 'none'}}>
+          <PreviewPanel slug={appInfo.slug} domain={appInfo.domain} mode="full" />
+        </div>
+        {/* Files tab - only mounted when active */}
+        {activeTab === 'files' && <FilesPanel />}
       </div>
 
       <StatusBar
@@ -114,17 +82,4 @@ export default function App() {
       />
     </div>
   );
-}
-
-function getToolDescription(msg) {
-  if (!msg.input) return '';
-  const input = msg.input;
-  if (input.file_path) return input.file_path.split('/').pop();
-  if (input.command) {
-    const cmd = input.command;
-    return cmd.length > 60 ? cmd.slice(0, 60) + '...' : cmd;
-  }
-  if (input.pattern) return input.pattern;
-  if (input.query) return input.query.length > 50 ? input.query.slice(0, 50) + '...' : input.query;
-  return '';
 }

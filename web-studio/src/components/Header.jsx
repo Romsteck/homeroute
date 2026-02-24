@@ -5,9 +5,6 @@ export default function Header({
   activeTab,
   onTabChange,
   connected,
-  onToggleActivity,
-  activityPanelOpen,
-  activityCount,
   sessions,
   currentSessionId,
   onSelectSession,
@@ -15,7 +12,7 @@ export default function Header({
   onDeleteSession,
 }) {
   const tabs = [
-    { id: 'agent', label: 'Agent', icon: AgentIcon },
+    { id: 'studio', label: 'Studio', icon: StudioIcon },
     { id: 'preview', label: 'Preview', icon: PreviewIcon },
     { id: 'files', label: 'Files', icon: FilesIcon },
   ];
@@ -59,34 +56,18 @@ export default function Header({
         })}
       </div>
 
-      {/* Right: connection + activity toggle */}
-      <div className="flex items-center gap-3">
-        <div className="flex items-center gap-2">
-          <span className={`inline-block w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
-          <span className={`text-xs ${connected ? 'text-gray-500' : 'text-red-400'}`}>
-            {connected ? 'Connected' : 'Disconnected'}
-          </span>
-        </div>
-        <button
-          onClick={onToggleActivity}
-          className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors relative ${
-            activityPanelOpen ? 'bg-gray-800 text-indigo-400' : 'text-gray-500 hover:bg-gray-800 hover:text-gray-300'
-          }`}
-          title="Toggle activity panel"
-        >
-          <ActivityIcon className="w-4 h-4" />
-          {activityCount > 0 && (
-            <span className="absolute -top-1 -right-1 w-4 h-4 bg-indigo-500 text-white rounded-full text-[10px] flex items-center justify-center font-bold">
-              {activityCount > 99 ? '99' : activityCount}
-            </span>
-          )}
-        </button>
+      {/* Right: connection status */}
+      <div className="flex items-center gap-2">
+        <span className={`inline-block w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
+        <span className={`text-xs ${connected ? 'text-gray-500' : 'text-red-400'}`}>
+          {connected ? 'Connected' : 'Disconnected'}
+        </span>
       </div>
     </header>
   );
 }
 
-function AgentIcon({ className }) {
+function StudioIcon({ className }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3M5.25 20.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z" />
@@ -107,14 +88,6 @@ function FilesIcon({ className }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
-    </svg>
-  );
-}
-
-function ActivityIcon({ className }) {
-  return (
-    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5M12 17.25h8.25" />
     </svg>
   );
 }

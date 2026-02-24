@@ -8,6 +8,9 @@ pub enum WsInMessage {
         prompt: String,
         #[serde(default)]
         session_id: Option<String>,
+        /// Permission mode: "default", "plan", "acceptEdits"
+        #[serde(default = "default_mode")]
+        mode: String,
     },
     Abort,
     ListSessions,
@@ -23,6 +26,10 @@ pub enum WsInMessage {
 
 fn default_limit() -> usize {
     50
+}
+
+fn default_mode() -> String {
+    "default".to_string()
 }
 
 /// Server → Client WebSocket messages.

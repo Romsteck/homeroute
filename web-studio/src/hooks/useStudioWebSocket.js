@@ -63,7 +63,17 @@ export default function useStudioWebSocket() {
   const [messages, setMessages] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [currentSessionId, setCurrentSessionId] = useState(null);
+  const [currentSessionId, _setCurrentSessionId] = useState(() => {
+    return localStorage.getItem('studio-session-id') || null;
+  });
+  const setCurrentSessionId = useCallback((id) => {
+    _setCurrentSessionId(id);
+    if (id) {
+      localStorage.setItem('studio-session-id', id);
+    } else {
+      localStorage.removeItem('studio-session-id');
+    }
+  }, []);
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
 
@@ -75,6 +85,11 @@ export default function useStudioWebSocket() {
     ws.onopen = () => {
       setConnected(true);
       ws.send(JSON.stringify({ type: 'list_sessions' }));
+      // Restore last session if any
+      const savedSession = localStorage.getItem('studio-session-id');
+      if (savedSession) {
+        ws.send(JSON.stringify({ type: 'get_session', session_id: savedSession }));
+      }
     };
 
     ws.onclose = () => {
@@ -146,11 +161,11 @@ export default function useStudioWebSocket() {
     };
   }, [connect]);
 
-  const sendPrompt = useCallback((text) => {
+  const sendPrompt = useCallback((text, mode = 'default') => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     setMessages(prev => [...prev, { type: 'human', content: text }]);
     setIsStreaming(true);
-    const payload = { type: 'prompt', prompt: text };
+    const payload = { type: 'prompt', prompt: text, mode };
     if (currentSessionId) {
       payload.session_id = currentSessionId;
     }
