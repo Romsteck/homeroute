@@ -43,6 +43,8 @@ pub struct GitConfig {
     #[serde(default)]
     pub github_token: Option<String>,
     #[serde(default)]
+    pub github_org: String,
+    #[serde(default)]
     pub mirrors: HashMap<String, MirrorConfig>,
 }
 
@@ -50,6 +52,7 @@ impl Default for GitConfig {
     fn default() -> Self {
         Self {
             github_token: None,
+            github_org: String::new(),
             mirrors: HashMap::new(),
         }
     }
@@ -60,8 +63,6 @@ pub struct MirrorConfig {
     pub enabled: bool,
     #[serde(default)]
     pub github_ssh_url: Option<String>,
-    #[serde(default)]
-    pub github_org: Option<String>,
     pub visibility: RepoVisibility,
     #[serde(default)]
     pub last_sync: Option<DateTime<Utc>>,

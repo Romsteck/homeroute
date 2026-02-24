@@ -4,7 +4,7 @@ use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
@@ -19,9 +19,9 @@ pub fn router() -> Router<ApiState> {
         .route("/repos/{slug}", get(get_repo))
         .route("/repos/{slug}/commits", get(get_commits))
         .route("/repos/{slug}/branches", get(get_branches))
-        // Mirror management
-        .route("/repos/{slug}/mirror", get(get_mirror).put(update_mirror))
+        // Mirror management (per-repo sync + sync-all)
         .route("/repos/{slug}/mirror/sync", post(trigger_sync))
+        .route("/repos/sync-all", post(sync_all))
         // SSH key management
         .route("/ssh-key", get(get_ssh_key).post(generate_ssh_key))
         // Git global config
@@ -119,100 +119,6 @@ async fn get_branches(
 
 // ── Mirror handlers ─────────────────────────────────────────
 
-async fn get_mirror(
-    State(state): State<ApiState>,
-    Path(slug): Path<String>,
-) -> impl IntoResponse {
-    let Some(ref git) = state.git else {
-        return err_unavailable();
-    };
-    match git.load_config().await {
-        Ok(config) => {
-            let mirror = config.mirrors.get(&slug).cloned();
-            Json(json!({"mirror": mirror})).into_response()
-        }
-        Err(e) => err_internal(e),
-    }
-}
-
-#[derive(Deserialize)]
-struct UpdateMirrorRequest {
-    enabled: bool,
-    #[serde(default)]
-    github_org: Option<String>,
-    #[serde(default = "default_private")]
-    visibility: hr_git::types::RepoVisibility,
-}
-fn default_private() -> hr_git::types::RepoVisibility {
-    hr_git::types::RepoVisibility::Private
-}
-
-async fn update_mirror(
-    State(state): State<ApiState>,
-    Path(slug): Path<String>,
-    Json(req): Json<UpdateMirrorRequest>,
-) -> impl IntoResponse {
-    let Some(ref git) = state.git else {
-        return err_unavailable();
-    };
-
-    let mut config = match git.load_config().await {
-        Ok(c) => c,
-        Err(e) => return err_internal(e),
-    };
-
-    if req.enabled {
-        // Ensure we have a GitHub token
-        if config.github_token.is_none() {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "GitHub token not configured. Set it via PUT /api/git/config first."})),
-            )
-                .into_response();
-        }
-
-        // Build SSH URL for the repo
-        let org = req
-            .github_org
-            .as_deref()
-            .unwrap_or("homeroute-mirror");
-        let ssh_url = format!("git@github.com:{org}/{slug}.git");
-
-        // Enable mirror in the bare repo
-        if let Err(e) = git.enable_mirror(&slug, &ssh_url).await {
-            return err_internal(e);
-        }
-
-        // Update config
-        config.mirrors.insert(
-            slug.clone(),
-            hr_git::types::MirrorConfig {
-                enabled: true,
-                github_ssh_url: Some(ssh_url),
-                github_org: Some(org.to_string()),
-                visibility: req.visibility,
-                last_sync: None,
-                last_error: None,
-            },
-        );
-    } else {
-        // Disable mirror
-        if let Err(e) = git.disable_mirror(&slug).await {
-            return err_internal(e);
-        }
-
-        if let Some(mirror) = config.mirrors.get_mut(&slug) {
-            mirror.enabled = false;
-        }
-    }
-
-    if let Err(e) = git.save_config(&config).await {
-        return err_internal(e);
-    }
-
-    Json(json!({"ok": true})).into_response()
-}
-
 async fn trigger_sync(
     State(state): State<ApiState>,
     Path(slug): Path<String>,
@@ -224,6 +130,44 @@ async fn trigger_sync(
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(e) => err_internal(e),
     }
+}
+
+async fn sync_all(State(state): State<ApiState>) -> impl IntoResponse {
+    let Some(ref git) = state.git else {
+        return err_unavailable();
+    };
+
+    let config = match git.load_config().await {
+        Ok(c) => c,
+        Err(e) => return err_internal(e),
+    };
+
+    let mut synced = Vec::new();
+    let mut errors = Vec::new();
+
+    for (slug, mirror) in &config.mirrors {
+        if !mirror.enabled {
+            continue;
+        }
+        match git.trigger_sync(slug).await {
+            Ok(()) => synced.push(slug.clone()),
+            Err(e) => {
+                error!(slug = %slug, error = %e, "sync-all: mirror sync failed");
+                errors.push(json!({"slug": slug, "error": e.to_string()}));
+            }
+        }
+    }
+
+    // Reload config to get updated last_sync/last_error values
+    let updated_mirrors = git.load_config().await.ok().map(|c| c.mirrors);
+
+    Json(json!({
+        "ok": errors.is_empty(),
+        "synced": synced,
+        "errors": errors,
+        "mirrors": updated_mirrors,
+    }))
+    .into_response()
 }
 
 // ── SSH key handlers ────────────────────────────────────────
@@ -266,6 +210,7 @@ async fn get_config(State(state): State<ApiState>) -> impl IntoResponse {
             });
             Json(json!({
                 "github_token": masked_token,
+                "github_org": config.github_org,
                 "mirrors": config.mirrors,
             }))
             .into_response()
@@ -277,6 +222,7 @@ async fn get_config(State(state): State<ApiState>) -> impl IntoResponse {
 #[derive(Deserialize)]
 struct UpdateConfigRequest {
     github_token: Option<String>,
+    github_org: Option<String>,
 }
 
 async fn update_config(
@@ -292,11 +238,83 @@ async fn update_config(
     };
 
     if let Some(token) = req.github_token {
-        config.github_token = Some(token);
+        // Ignore masked tokens (returned by GET /config) to avoid overwriting the real one
+        if !token.contains("...") && !token.contains("****") {
+            config.github_token = Some(token);
+        }
+    }
+    if let Some(org) = req.github_org {
+        config.github_org = org;
+    }
+
+    // Auto-enable mirrors for ALL existing repos when org+token are both set
+    let has_org = !config.github_org.is_empty();
+    let has_token = config
+        .github_token
+        .as_ref()
+        .map(|t| !t.is_empty())
+        .unwrap_or(false);
+
+    let mut mirror_errors = Vec::new();
+
+    if has_org && has_token {
+        let token = config.github_token.clone().unwrap();
+        let org = config.github_org.clone();
+        let gh = hr_git::github::GitHubClient::new(token);
+
+        let repos = match git.list_repos().await {
+            Ok(r) => r,
+            Err(e) => return err_internal(e),
+        };
+
+        for repo in &repos {
+            let slug = &repo.slug;
+
+            // Create GitHub repo if it doesn't exist
+            match gh.repo_exists(&org, slug).await {
+                Ok(false) => {
+                    if let Err(e) = gh.create_repo(slug, Some(&org), true).await {
+                        error!(slug = %slug, error = %e, "Failed to create GitHub repo");
+                        mirror_errors.push(json!({"slug": slug, "error": e.to_string()}));
+                        continue;
+                    }
+                }
+                Ok(true) => {}
+                Err(e) => {
+                    error!(slug = %slug, error = %e, "Failed to check GitHub repo");
+                    mirror_errors.push(json!({"slug": slug, "error": e.to_string()}));
+                    continue;
+                }
+            }
+
+            // Enable mirror in the bare repo
+            if let Err(e) = git.enable_mirror(slug, &org).await {
+                error!(slug = %slug, error = %e, "Failed to enable mirror");
+                mirror_errors.push(json!({"slug": slug, "error": e.to_string()}));
+                continue;
+            }
+
+            // Save mirror config
+            let ssh_url = format!("git@github.com:{org}/{slug}.git");
+            config.mirrors.insert(
+                slug.clone(),
+                hr_git::types::MirrorConfig {
+                    enabled: true,
+                    github_ssh_url: Some(ssh_url),
+                    visibility: hr_git::types::RepoVisibility::Private,
+                    last_sync: None,
+                    last_error: None,
+                },
+            );
+        }
     }
 
     match git.save_config(&config).await {
-        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Ok(()) => Json(json!({
+            "ok": mirror_errors.is_empty(),
+            "mirror_errors": mirror_errors,
+        }))
+        .into_response(),
         Err(e) => err_internal(e),
     }
 }
