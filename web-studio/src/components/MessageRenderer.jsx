@@ -8,6 +8,50 @@ function ChevronIcon({ className }) {
   );
 }
 
+// --- Markdown rendering ---
+
+function renderInline(line) {
+  const parts = [];
+  // Order matters: ** before *, ~~ before single chars
+  const regex = /(\*\*(.+?)\*\*|~~(.+?)~~|\*(.+?)\*|_(.+?)_|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\))/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = regex.exec(line)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(line.slice(lastIndex, match.index));
+    }
+    if (match[2]) {
+      // Bold **text**
+      parts.push(<strong key={parts.length} className="text-gray-100 font-semibold">{match[2]}</strong>);
+    } else if (match[3]) {
+      // Strikethrough ~~text~~
+      parts.push(<del key={parts.length} className="text-gray-500">{match[3]}</del>);
+    } else if (match[4]) {
+      // Italic *text*
+      parts.push(<em key={parts.length} className="text-gray-300 italic">{match[4]}</em>);
+    } else if (match[5]) {
+      // Italic _text_
+      parts.push(<em key={parts.length} className="text-gray-300 italic">{match[5]}</em>);
+    } else if (match[6]) {
+      // Inline code `code`
+      parts.push(
+        <code key={parts.length} className="bg-gray-800 px-1.5 py-0.5 rounded text-[13px] font-mono text-gray-300">{match[6]}</code>
+      );
+    } else if (match[7] && match[8]) {
+      // Link [text](url)
+      parts.push(
+        <a key={parts.length} href={match[8]} className="text-indigo-400 hover:underline" target="_blank" rel="noopener noreferrer">{match[7]}</a>
+      );
+    }
+    lastIndex = regex.lastIndex;
+  }
+  if (lastIndex < line.length) {
+    parts.push(line.slice(lastIndex));
+  }
+  return parts;
+}
+
 function renderMarkdown(text) {
   if (!text) return null;
   const parts = [];
@@ -15,6 +59,14 @@ function renderMarkdown(text) {
   let i = 0;
 
   while (i < lines.length) {
+    // Empty lines → spacer
+    if (lines[i].trim() === '') {
+      parts.push(<div key={parts.length} className="h-2" />);
+      i++;
+      continue;
+    }
+
+    // Code blocks ```
     if (lines[i].startsWith('```')) {
       const lang = lines[i].slice(3).trim();
       const codeLines = [];
@@ -23,7 +75,7 @@ function renderMarkdown(text) {
         codeLines.push(lines[i]);
         i++;
       }
-      i++;
+      if (i < lines.length) i++; // skip closing ```
       parts.push(
         <div key={parts.length} className="my-2">
           {lang && (
@@ -36,7 +88,96 @@ function renderMarkdown(text) {
           </pre>
         </div>
       );
-    } else if (lines[i].startsWith('- ') || lines[i].startsWith('* ')) {
+      continue;
+    }
+
+    // Headings # ## ### ####
+    const headingMatch = lines[i].match(/^(#{1,4})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const headingText = headingMatch[2];
+      const sizes = {
+        1: 'text-xl font-bold',
+        2: 'text-lg font-semibold',
+        3: 'text-base font-semibold',
+        4: 'text-sm font-semibold',
+      };
+      parts.push(
+        <div key={parts.length} className={`${sizes[level]} text-gray-100 mt-4 mb-2`}>
+          {renderInline(headingText)}
+        </div>
+      );
+      i++;
+      continue;
+    }
+
+    // Horizontal rules --- *** ___
+    if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(lines[i])) {
+      parts.push(<hr key={parts.length} className="border-gray-700 my-4" />);
+      i++;
+      continue;
+    }
+
+    // Blockquotes > text
+    if (lines[i].startsWith('> ')) {
+      const quoteLines = [];
+      while (i < lines.length && lines[i].startsWith('> ')) {
+        quoteLines.push(lines[i].slice(2));
+        i++;
+      }
+      parts.push(
+        <blockquote key={parts.length} className="border-l-2 border-gray-600 pl-3 my-2 text-gray-400 italic">
+          {renderMarkdown(quoteLines.join('\n'))}
+        </blockquote>
+      );
+      continue;
+    }
+
+    // Tables | col | col |
+    if (lines[i].startsWith('|') && lines[i].includes('|', 1)) {
+      const tableLines = [];
+      while (i < lines.length && lines[i].startsWith('|')) {
+        tableLines.push(lines[i]);
+        i++;
+      }
+      if (tableLines.length >= 2) {
+        const parseRow = (line) => line.split('|').slice(1, -1).map(c => c.trim());
+        const headers = parseRow(tableLines[0]);
+        // Skip separator line (|---|---|), take rest as rows
+        const startRow = (tableLines.length > 1 && /^[\s|:-]+$/.test(tableLines[1])) ? 2 : 1;
+        const rows = tableLines.slice(startRow).map(parseRow);
+        parts.push(
+          <div key={parts.length} className="my-2 overflow-x-auto">
+            <table className="text-sm border-collapse">
+              <thead>
+                <tr>
+                  {headers.map((h, j) => (
+                    <th key={j} className="border border-gray-700 px-3 py-1.5 text-left text-gray-300 bg-gray-800/50 font-medium">
+                      {renderInline(h)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, ri) => (
+                  <tr key={ri}>
+                    {row.map((cell, ci) => (
+                      <td key={ci} className="border border-gray-700 px-3 py-1.5 text-gray-400">
+                        {renderInline(cell)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
+        continue;
+      }
+    }
+
+    // Bullet lists (- or *)
+    if (lines[i].startsWith('- ') || lines[i].startsWith('* ')) {
       const listItems = [];
       while (i < lines.length && (lines[i].startsWith('- ') || lines[i].startsWith('* '))) {
         listItems.push(lines[i].slice(2));
@@ -49,7 +190,11 @@ function renderMarkdown(text) {
           ))}
         </ul>
       );
-    } else if (/^\d+\.\s/.test(lines[i])) {
+      continue;
+    }
+
+    // Numbered lists
+    if (/^\d+\.\s/.test(lines[i])) {
       const startNum = parseInt(lines[i].match(/^(\d+)\./)[1], 10);
       const listItems = [];
       while (i < lines.length && /^\d+\.\s/.test(lines[i])) {
@@ -63,53 +208,26 @@ function renderMarkdown(text) {
           ))}
         </ol>
       );
-    } else {
-      parts.push(
-        <span key={parts.length}>
-          {renderInline(lines[i])}
-          {i < lines.length - 1 ? '\n' : ''}
-        </span>
-      );
-      i++;
+      continue;
     }
+
+    // Regular paragraph line
+    parts.push(
+      <p key={parts.length} className="my-0.5">
+        {renderInline(lines[i])}
+      </p>
+    );
+    i++;
   }
   return parts;
 }
 
-function renderInline(line) {
-  const parts = [];
-  const regex = /(\*\*(.+?)\*\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\))/g;
-  let lastIndex = 0;
-  let match;
-
-  while ((match = regex.exec(line)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push(line.slice(lastIndex, match.index));
-    }
-    if (match[2]) {
-      parts.push(<strong key={parts.length} className="text-gray-100 font-semibold">{match[2]}</strong>);
-    } else if (match[3]) {
-      parts.push(
-        <code key={parts.length} className="bg-gray-800 px-1.5 py-0.5 rounded text-[13px] font-mono text-gray-300">{match[3]}</code>
-      );
-    } else if (match[4] && match[5]) {
-      parts.push(
-        <a key={parts.length} href={match[5]} className="text-indigo-400 hover:underline" target="_blank" rel="noopener noreferrer">{match[4]}</a>
-      );
-    }
-    lastIndex = regex.lastIndex;
-  }
-  if (lastIndex < line.length) {
-    parts.push(line.slice(lastIndex));
-  }
-  return parts;
-}
+// --- Tool use / result messages ---
 
 function ToolUseMessage({ message }) {
   const [expanded, setExpanded] = useState(false);
   const inputStr = message.input ? JSON.stringify(message.input, null, 2) : '';
 
-  // Generate a brief description from the input
   let brief = '';
   if (message.input) {
     if (message.input.file_path) brief = message.input.file_path.split('/').pop();
@@ -199,12 +317,12 @@ function AskUserQuestionWidget({ message, pendingAnswersRef }) {
     return init;
   });
 
-  // Sync answers to ref whenever they change
+  // Sync answers to ref keyed by tool_use_id
   useEffect(() => {
-    if (pendingAnswersRef) {
-      pendingAnswersRef.current = answers;
+    if (pendingAnswersRef && message.tool_use_id) {
+      pendingAnswersRef.current[message.tool_use_id] = answers;
     }
-  }, [answers, pendingAnswersRef]);
+  }, [answers, pendingAnswersRef, message.tool_use_id]);
 
   if (!questions || questions.length === 0) return null;
 
@@ -217,7 +335,6 @@ function AskUserQuestionWidget({ message, pendingAnswersRef }) {
         } else {
           q.selected = [...q.selected, label];
         }
-        // Deselect "other" radio when selecting a normal option
       } else {
         q.selected = [label];
         q.other = '';
@@ -229,21 +346,8 @@ function AskUserQuestionWidget({ message, pendingAnswersRef }) {
   function selectOther(qIdx, multiSelect) {
     setAnswers(prev => {
       const q = { ...prev[qIdx] };
-      if (multiSelect) {
-        // Toggle — if other is already in "mode", keep it; just focus the input
-      } else {
+      if (!multiSelect) {
         q.selected = [];
-      }
-      return { ...prev, [qIdx]: q };
-    });
-  }
-
-  function setOtherText(qIdx, text) {
-    setAnswers(prev => {
-      const q = { ...prev[qIdx] };
-      q.other = text;
-      if (!q.selected.includes('__other__')) {
-        q.selected = q.selected.filter(s => s !== '__other__');
       }
       return { ...prev, [qIdx]: q };
     });
@@ -278,7 +382,6 @@ function AskUserQuestionWidget({ message, pendingAnswersRef }) {
                           : 'border border-transparent hover:bg-gray-800'
                       }`}
                     >
-                      {/* Radio or checkbox indicator */}
                       <span className={`mt-0.5 shrink-0 w-4 h-4 rounded-${q.multiSelect ? 'sm' : 'full'} border-2 flex items-center justify-center ${
                         isSelected
                           ? 'border-indigo-500 bg-indigo-500'
@@ -335,7 +438,10 @@ function AskUserQuestionWidget({ message, pendingAnswersRef }) {
                             [qIdx]: { ...prev[qIdx], selected: [], other: e.target.value },
                           }));
                         } else {
-                          setOtherText(qIdx, e.target.value);
+                          setAnswers(prev => ({
+                            ...prev,
+                            [qIdx]: { ...prev[qIdx], other: e.target.value },
+                          }));
                         }
                       }}
                       onFocus={() => selectOther(qIdx, q.multiSelect)}
@@ -359,14 +465,14 @@ function PlanCompleteMessage({ onSend, pendingAnswersRef }) {
   const [action, setAction] = useState(null);
 
   function compileAnswersText() {
-    const answers = pendingAnswersRef?.current || {};
-    const entries = Object.values(answers);
-    if (entries.length === 0) return '';
-    const hasAnyAnswer = entries.some(a => a.selected.length > 0 || a.other);
+    const allAnswerSets = pendingAnswersRef?.current || {};
+    const allEntries = Object.values(allAnswerSets).flatMap(a => Object.values(a));
+    if (allEntries.length === 0) return '';
+    const hasAnyAnswer = allEntries.some(a => a.selected?.length > 0 || a.other);
     if (!hasAnyAnswer) return '';
     let text = '\n\nAnswers to your questions:\n';
-    for (const a of entries) {
-      const answer = a.selected.length > 0 ? a.selected.join(', ') : (a.other || '(no answer)');
+    for (const a of allEntries) {
+      const answer = a.selected?.length > 0 ? a.selected.join(', ') : (a.other || '(no answer)');
       text += `- ${a.question} -> ${answer}\n`;
     }
     return text;
@@ -432,6 +538,8 @@ function PlanCompleteMessage({ onSend, pendingAnswersRef }) {
   );
 }
 
+// --- Main renderer ---
+
 export default function MessageRenderer({ message, onSend, pendingAnswersRef }) {
   switch (message.type) {
     case 'human':
@@ -447,7 +555,6 @@ export default function MessageRenderer({ message, onSend, pendingAnswersRef }) 
                     alt="Attached"
                     className="max-h-48 rounded-lg border border-indigo-500/20 cursor-pointer hover:border-indigo-400/40 transition-colors"
                     onClick={(e) => {
-                      // Open full-size in new tab
                       const w = window.open();
                       if (w) {
                         w.document.write(`<img src="${e.target.src}" style="max-width:100%;background:#111">`);
@@ -467,7 +574,7 @@ export default function MessageRenderer({ message, onSend, pendingAnswersRef }) 
       return (
         <div className="flex justify-start mb-4">
           <div className="max-w-[85%]">
-            <div className="text-gray-300 text-sm leading-relaxed prose-studio whitespace-pre-wrap">
+            <div className="text-gray-300 text-sm leading-relaxed prose-studio">
               {renderMarkdown(message.content)}
             </div>
           </div>
@@ -475,6 +582,7 @@ export default function MessageRenderer({ message, onSend, pendingAnswersRef }) 
       );
 
     case 'tool_use':
+      if (message.hidden) return null;
       return <ToolUseMessage message={message} />;
 
     case 'tool_result':

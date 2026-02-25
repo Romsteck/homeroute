@@ -27,7 +27,17 @@ function parseSessionMessages(rawMessages) {
             result.push({ type: 'assistant', subtype: 'text', content: block.text, complete: true });
           } else if (block.type === 'tool_use') {
             if (block.name === 'AskUserQuestion') {
-              result.push({ type: 'ask_user_question', questions: block.input?.questions || [], tool_use_id: block.id });
+              const questions = block.input?.questions || [];
+              // Dedup: skip if previous message has identical questions
+              const prev = result[result.length - 1];
+              if (prev?.type === 'ask_user_question' &&
+                  JSON.stringify(prev.questions) === JSON.stringify(questions)) {
+                result[result.length - 1] = { ...prev, tool_use_id: block.id };
+              } else {
+                result.push({ type: 'ask_user_question', questions, tool_use_id: block.id });
+              }
+            } else if (block.name === 'TodoWrite') {
+              result.push({ type: 'tool_use', tool: 'TodoWrite', input: block.input, tool_use_id: block.id, hidden: true });
             } else {
               result.push({ type: 'tool_use', tool: block.name, input: block.input });
             }
@@ -47,15 +57,17 @@ function parseSessionMessages(rawMessages) {
       if (text || isError) {
         // Annotate the last tool_use/ask_user_question with success/error status
         let annotatedType = null;
+        let annotatedHidden = false;
         for (let j = result.length - 1; j >= 0; j--) {
           const m = result[j];
           if ((m.type === 'tool_use' || m.type === 'ask_user_question') && !m.status) {
             result[j] = { ...m, status: isError ? 'error' : 'success' };
             annotatedType = m.type;
+            annotatedHidden = m.hidden || false;
             break;
           }
         }
-        result.push({ type: 'tool_result', content: text, is_error: isError, hidden: annotatedType === 'ask_user_question' });
+        result.push({ type: 'tool_result', content: text, is_error: isError, hidden: annotatedType === 'ask_user_question' || annotatedHidden });
       }
     }
     // Skip queue-operation, file-history-snapshot, etc.
