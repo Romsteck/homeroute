@@ -354,7 +354,7 @@ impl ContainerManager {
                         .await;
                 }
                 hr_registry::types::Environment::Production => {
-                    mgr.run_nspawn_deploy_prod(&app_id, &slug, &container_name, &host_id, &token_deploy)
+                    mgr.run_nspawn_deploy_prod(&app_id, &slug, &container_name, &host_id, &token_deploy, stack)
                         .await;
                 }
             }
@@ -1312,6 +1312,7 @@ WantedBy=multi-user.target
         container_name: &str,
         host_id: &str,
         token: &str,
+        stack: hr_registry::types::AppStack,
     ) {
         let emit = |message: &str| {
             let _ = self.events.agent_status.send(AgentStatusEvent {
@@ -1455,6 +1456,17 @@ WantedBy=multi-user.target
             3,
         )
         .await;
+
+        // Phase 7b: Install Node.js for NextJs stack
+        if stack == hr_registry::types::AppStack::NextJs {
+            emit("Installation Node.js 22 (PROD)...");
+            let _ = NspawnClient::exec_with_retry(
+                container_name,
+                &["curl -4 -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y -qq nodejs"],
+                3,
+            )
+            .await;
+        }
 
         // Update status (no workspace for prod containers)
         self.set_container_status(app_id, ContainerV2Status::Running)

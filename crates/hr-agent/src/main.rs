@@ -386,15 +386,17 @@ async fn start_deploy_mcp() -> Result<()> {
         _ => anyhow::bail!("Unexpected message during auth handshake"),
     };
 
-    // Read the Config message to get the environment
+    // Read the Config message to get the environment and stack
     let mut environment = hr_registry::types::Environment::Development;
+    let mut stack = hr_registry::types::AppStack::ViteRust;
     if let Ok(Some(Ok(msg))) = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         ws_stream.next(),
     ).await {
         if let Message::Text(text) = msg {
-            if let Ok(RegistryMessage::Config { environment: env, .. }) = serde_json::from_str::<RegistryMessage>(&text) {
+            if let Ok(RegistryMessage::Config { environment: env, stack: s, .. }) = serde_json::from_str::<RegistryMessage>(&text) {
                 environment = env;
+                stack = s;
             }
         }
     }
@@ -405,6 +407,7 @@ async fn start_deploy_mcp() -> Result<()> {
         app_id,
         api_base_url,
         environment,
+        stack,
     };
 
     // Close the WebSocket (deploy MCP doesn't need ongoing WS connection)

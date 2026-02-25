@@ -16,7 +16,7 @@ use hr_dataverse::query::*;
 use hr_dataverse::schema::*;
 use hr_registry::protocol::{AgentMessage, AppSchemaOverview};
 
-use hr_registry::types::Environment;
+use hr_registry::types::{AppStack, Environment};
 
 use crate::dataverse::LocalDataverse;
 
@@ -60,6 +60,7 @@ pub struct DeployContext {
     pub app_id: String,
     pub api_base_url: String,
     pub environment: Environment,
+    pub stack: AppStack,
 }
 
 /// Context for store tools (available in all environments).
@@ -1036,7 +1037,7 @@ fn get_deploy_tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "deploy_app",
-            "description": "Full deployment pipeline: build the Rust binary, optionally build frontend, migrate schema, push frontend assets, deploy the binary, and run a health check.",
+            "description": "Full deployment pipeline. Automatically adapts to the app stack. Rust: cargo build, optionally build frontend, migrate schema, push frontend assets, deploy binary, health check. Next.js: npm build, push build artifacts to prod, ensure Node.js on prod, install deps, create/update service, restart, health check.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1060,7 +1061,7 @@ fn get_deploy_tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "dev_health_check",
-            "description": "Check the status of all DEV services (code-server, vite-dev, cargo-dev) and their ports (13337, 5173, 3000).",
+            "description": "Check the status of all DEV services and their ports. Adapts to the app stack: Rust checks code-server, vite-dev, cargo-dev (ports 13337, 5173, 3000). Next.js checks code-server, nextjs-dev (ports 13337, 3000).",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
@@ -2359,323 +2360,583 @@ async fn handle_deploy_tool_call(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
-            let mut report = Vec::new();
-            if dry_run {
-                report.push("# DRY RUN MODE — no changes will be made\n".to_string());
-            }
-
-            // Step 1: cargo build --release
-            report.push("## Step 1: Building Rust binary...".to_string());
-            // Ensure cargo is in PATH (rustup installs to ~/.cargo/bin, not in systemd PATH)
-            let path_env = format!(
-                "/root/.cargo/bin:{}",
-                std::env::var("PATH").unwrap_or_default()
-            );
-            if dry_run {
-                report.push("DRY RUN: Would run `cargo build --release` in /root/workspace".to_string());
-            } else {
-                let build_output = tokio::process::Command::new("cargo")
-                    .args(["build", "--release"])
-                    .current_dir("/root/workspace")
-                    .env("PATH", &path_env)
-                    .output()
-                    .await
-                    .map_err(|e| format!("Failed to run cargo build: {e}"))?;
-                if !build_output.status.success() {
-                    let stderr = String::from_utf8_lossy(&build_output.stderr);
-                    report.push(format!("FAILED: cargo build --release\n{}", stderr));
-                    return Ok(text_result(report.join("\n\n")));
-                }
-                report.push("OK: cargo build --release".to_string());
-            }
-
-            // Step 2: Frontend build (if frontend/ exists and not skipped)
-            let frontend_dir = std::path::Path::new("/root/workspace/frontend");
-            if frontend_dir.exists() && !skip_frontend {
-                report.push("## Step 2: Building frontend...".to_string());
-                if dry_run {
-                    report.push("DRY RUN: Would run `npm run build` in /root/workspace/frontend".to_string());
-                } else {
-                    let npm_output = tokio::process::Command::new("npm")
-                        .args(["run", "build"])
-                        .current_dir("/root/workspace/frontend")
-                        .output()
-                        .await
-                        .map_err(|e| format!("Failed to run npm build: {e}"))?;
-                    if !npm_output.status.success() {
-                        let stderr = String::from_utf8_lossy(&npm_output.stderr);
-                        report.push(format!("FAILED: npm run build\n{}", stderr));
-                        return Ok(text_result(report.join("\n\n")));
+            match ctx.stack {
+                AppStack::NextJs => {
+                    let mut report = Vec::new();
+                    if dry_run {
+                        report.push("# DRY RUN MODE — no changes will be made\n".to_string());
                     }
-                    report.push("OK: npm run build".to_string());
-                }
-            } else {
-                report.push("## Step 2: Frontend build SKIPPED".to_string());
-            }
 
-            // Step 3: Schema migration (if .dataverse/ exists and not skipped)
-            let dataverse_dir = std::path::Path::new("/root/workspace/.dataverse");
-            if dataverse_dir.exists() && !skip_schema {
-                report.push("## Step 3: Schema migration...".to_string());
-                let dev_output = tokio::process::Command::new("sqlite3")
-                    .arg("/root/workspace/.dataverse/app.db")
-                    .arg(".schema")
-                    .output()
-                    .await
-                    .map_err(|e| format!("Failed to read DEV schema: {e}"))?;
-                if dev_output.status.success() {
-                    let dev_schema = String::from_utf8_lossy(&dev_output.stdout).to_string();
-                    match exec_on_prod(ctx, "sqlite3 /opt/app/.dataverse/app.db '.schema'").await {
-                        Ok(prod_schema) => {
-                            let dev_tables = parse_schema_tables(&dev_schema);
-                            let prod_tables = parse_schema_tables(&prod_schema);
-                            let diff = compute_schema_diff(&dev_tables, &prod_tables);
-                            let statements = generate_migration_sql(&diff);
-                            if statements.is_empty() {
-                                report.push("OK: No schema changes needed".to_string());
-                            } else if dry_run {
-                                report.push(format!(
-                                    "DRY RUN: Would execute {} migration statement(s):\n{}",
-                                    statements.len(),
-                                    statements.iter().map(|s| format!("  {}", s)).collect::<Vec<_>>().join("\n")
-                                ));
-                            } else {
-                                let mut migration_results = Vec::new();
-                                for stmt in &statements {
-                                    let cmd = format!(
-                                        "sqlite3 /opt/app/.dataverse/app.db \"{}\"",
-                                        stmt.replace('"', "\\\"")
-                                    );
-                                    match exec_on_prod(ctx, &cmd).await {
-                                        Ok(_) => migration_results.push(format!("  OK: {}", stmt)),
-                                        Err(e) => migration_results
-                                            .push(format!("  FAIL: {} ({})", stmt, e)),
+                    // Step 1: npm run build
+                    report.push("## Step 1: Building Next.js app...".to_string());
+                    // Detect Node.js path (NVM or system)
+                    let node_path = if std::path::Path::new("/root/.nvm/versions/node").exists() {
+                        let nvm_dir = std::fs::read_dir("/root/.nvm/versions/node")
+                            .ok()
+                            .and_then(|mut d| d.next())
+                            .and_then(|e| e.ok())
+                            .map(|e| format!("{}/bin", e.path().display()))
+                            .unwrap_or_else(|| "/usr/bin".to_string());
+                        format!("{}:/usr/bin:/usr/local/bin:{}", nvm_dir, std::env::var("PATH").unwrap_or_default())
+                    } else {
+                        format!("/usr/bin:/usr/local/bin:{}", std::env::var("PATH").unwrap_or_default())
+                    };
+
+                    if dry_run {
+                        report.push("DRY RUN: Would run `npm run build` in /root/workspace".to_string());
+                    } else {
+                        let build_output = tokio::process::Command::new("npm")
+                            .args(["run", "build"])
+                            .current_dir("/root/workspace")
+                            .env("PATH", &node_path)
+                            .output()
+                            .await
+                            .map_err(|e| format!("Failed to run npm build: {e}"))?;
+                        if !build_output.status.success() {
+                            let stderr = String::from_utf8_lossy(&build_output.stderr);
+                            report.push(format!("FAILED: npm run build\n{}", stderr));
+                            return Ok(text_result(report.join("\n\n")));
+                        }
+                        report.push("OK: npm run build".to_string());
+                    }
+
+                    // Step 2: Schema migration (if .dataverse/ exists and not skipped)
+                    let dataverse_dir = std::path::Path::new("/root/workspace/.dataverse");
+                    if dataverse_dir.exists() && !skip_schema {
+                        report.push("## Step 2: Schema migration...".to_string());
+                        let dev_output = tokio::process::Command::new("sqlite3")
+                            .arg("/root/workspace/.dataverse/app.db")
+                            .arg(".schema")
+                            .output()
+                            .await
+                            .map_err(|e| format!("Failed to read DEV schema: {e}"))?;
+                        if dev_output.status.success() {
+                            let dev_schema = String::from_utf8_lossy(&dev_output.stdout).to_string();
+                            match exec_on_prod(ctx, "sqlite3 /opt/app/.dataverse/app.db '.schema'").await {
+                                Ok(prod_schema) => {
+                                    let dev_tables = parse_schema_tables(&dev_schema);
+                                    let prod_tables = parse_schema_tables(&prod_schema);
+                                    let diff = compute_schema_diff(&dev_tables, &prod_tables);
+                                    let statements = generate_migration_sql(&diff);
+                                    if statements.is_empty() {
+                                        report.push("OK: No schema changes needed".to_string());
+                                    } else if dry_run {
+                                        report.push(format!(
+                                            "DRY RUN: Would execute {} migration statement(s):\n{}",
+                                            statements.len(),
+                                            statements.iter().map(|s| format!("  {}", s)).collect::<Vec<_>>().join("\n")
+                                        ));
+                                    } else {
+                                        let mut migration_results = Vec::new();
+                                        for stmt in &statements {
+                                            let cmd = format!(
+                                                "sqlite3 /opt/app/.dataverse/app.db \"{}\"",
+                                                stmt.replace('"', "\\\"")
+                                            );
+                                            match exec_on_prod(ctx, &cmd).await {
+                                                Ok(_) => migration_results.push(format!("  OK: {}", stmt)),
+                                                Err(e) => migration_results
+                                                    .push(format!("  FAIL: {} ({})", stmt, e)),
+                                            }
+                                        }
+                                        report.push(format!(
+                                            "Migrated {} statement(s):\n{}",
+                                            statements.len(),
+                                            migration_results.join("\n")
+                                        ));
                                     }
                                 }
-                                report.push(format!(
-                                    "Migrated {} statement(s):\n{}",
-                                    statements.len(),
-                                    migration_results.join("\n")
-                                ));
+                                Err(e) => {
+                                    report.push(format!("WARNING: Could not read PROD schema: {}", e));
+                                }
+                            }
+                        } else {
+                            report.push("WARNING: Could not read DEV schema".to_string());
+                        }
+                    } else {
+                        report.push("## Step 2: Schema migration SKIPPED".to_string());
+                    }
+
+                    // Step 3: Push build artifacts to PROD
+                    report.push("## Step 3: Pushing build artifacts to PROD...".to_string());
+
+                    if dry_run {
+                        report.push("DRY RUN: Would ensure Node.js on PROD, push build output, install deps".to_string());
+                    } else {
+                        // 3a: Ensure Node.js on PROD
+                        report.push("Ensuring Node.js is installed on PROD...".to_string());
+                        let node_check = exec_on_prod(ctx, "which node || (curl -4 -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y -qq nodejs)").await;
+                        match node_check {
+                            Ok(_) => report.push("OK: Node.js available on PROD".to_string()),
+                            Err(e) => {
+                                report.push(format!("FAILED: Could not ensure Node.js on PROD: {}", e));
+                                return Ok(text_result(report.join("\n\n")));
                             }
                         }
-                        Err(e) => {
-                            report.push(format!("WARNING: Could not read PROD schema: {}", e));
+
+                        // 3b: Clean old build on PROD
+                        let _ = exec_on_prod(ctx, "rm -rf /opt/app/.next").await;
+
+                        // 3c: Create tarball of build artifacts (WITHOUT node_modules)
+                        let tar_path = "/tmp/deploy-nextjs.tar.gz";
+
+                        // Build list of files/dirs that exist
+                        let mut tar_items = Vec::new();
+                        for item in &[".next", "package.json", "package-lock.json", "server.ts", "next.config.ts", "next.config.js", "next.config.mjs", "lib", "app", "public", "tsconfig.json"] {
+                            let path = format!("/root/workspace/{}", item);
+                            if std::path::Path::new(&path).exists() {
+                                tar_items.push(*item);
+                            }
                         }
-                    }
-                } else {
-                    report.push("WARNING: Could not read DEV schema".to_string());
-                }
-            } else {
-                report.push("## Step 3: Schema migration SKIPPED".to_string());
-            }
 
-            // Step 4: Push frontend assets if frontend/dist exists
-            let frontend_dist = std::path::Path::new("/root/workspace/frontend/dist");
-            if frontend_dist.exists() {
-                report.push("## Step 4: Pushing frontend assets to prod...".to_string());
-                if dry_run {
-                    // Count files in frontend/dist for the dry-run report
-                    let count_output = tokio::process::Command::new("find")
-                        .args(["/root/workspace/frontend/dist", "-type", "f"])
-                        .output()
-                        .await;
-                    let file_count = count_output
-                        .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
-                        .unwrap_or(0);
-                    report.push(format!(
-                        "DRY RUN: Would push frontend/dist ({} files) to /opt/app/frontend/dist",
-                        file_count
-                    ));
-                } else {
-                    // Create tarball
-                    let tar_path = "/tmp/deploy-frontend.tar.gz";
-                    let tar_output = tokio::process::Command::new("tar")
-                        .args(["czf", tar_path, "-C", "/root/workspace/frontend/dist", "."])
-                        .output()
-                        .await
-                        .map_err(|e| format!("Failed to create frontend tarball: {e}"))?;
-                    if tar_output.status.success() {
-                        let archive_data = tokio::fs::read(tar_path)
+                        let tar_args: Vec<String> = std::iter::once("czf".to_string())
+                            .chain(std::iter::once(tar_path.to_string()))
+                            .chain(std::iter::once("-C".to_string()))
+                            .chain(std::iter::once("/root/workspace".to_string()))
+                            .chain(tar_items.iter().map(|s| s.to_string()))
+                            .collect();
+                        let tar_refs: Vec<&str> = tar_args.iter().map(|s| s.as_str()).collect();
+
+                        let tar_output = tokio::process::Command::new("tar")
+                            .args(&tar_refs)
+                            .output()
                             .await
-                            .map_err(|e| format!("Failed to read frontend tarball: {e}"))?;
-                        let _ = tokio::fs::remove_file(tar_path).await;
+                            .map_err(|e| format!("Failed to create tarball: {e}"))?;
 
-                        let push_url = format!(
-                            "{}/api/applications/{}/prod/push",
-                            ctx.api_base_url, ctx.app_id
-                        );
+                        if !tar_output.status.success() {
+                            let stderr = String::from_utf8_lossy(&tar_output.stderr);
+                            report.push(format!("FAILED: tar creation failed: {}", stderr));
+                            return Ok(text_result(report.join("\n\n")));
+                        }
+
+                        // 3d: Push tarball via prod_push API
+                        let archive_data = tokio::fs::read(tar_path).await
+                            .map_err(|e| format!("Failed to read tarball: {e}"))?;
+                        let _ = tokio::fs::remove_file(tar_path).await;
+                        let archive_size = archive_data.len();
+
+                        let push_url = format!("{}/api/applications/{}/prod/push", ctx.api_base_url, ctx.app_id);
                         let push_client = reqwest::Client::builder()
                             .timeout(std::time::Duration::from_secs(120))
                             .build()
                             .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
-                        let push_resp = push_client
-                            .post(&push_url)
+                        let push_resp = push_client.post(&push_url)
                             .header("Content-Type", "application/octet-stream")
-                            .header("X-Remote-Path", "/opt/app/frontend/dist")
+                            .header("X-Remote-Path", "/opt/app")
                             .header("X-Is-Directory", "true")
                             .body(archive_data)
                             .send()
                             .await
-                            .map_err(|e| format!("Failed to push frontend: {e}"))?;
+                            .map_err(|e| format!("Failed to push artifacts: {e}"))?;
 
-                        let push_body: Value = push_resp
+                        let push_body: Value = push_resp.json().await
+                            .map_err(|e| format!("Failed to parse push response: {e}"))?;
+                        if push_body.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            report.push(format!("OK: Build artifacts pushed ({} bytes)", archive_size));
+                        } else {
+                            let err = push_body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
+                            report.push(format!("FAILED: Push failed: {}", err));
+                            return Ok(text_result(report.join("\n\n")));
+                        }
+
+                        // 3e: Install production deps on PROD
+                        report.push("Installing dependencies on PROD...".to_string());
+                        match exec_on_prod(ctx, "cd /opt/app && npm ci 2>&1 || npm install 2>&1").await {
+                            Ok(output) => {
+                                let lines: Vec<&str> = output.lines().collect();
+                                let tail: String = lines.iter().rev().take(5).rev().cloned().collect::<Vec<_>>().join("\n");
+                                report.push(format!("OK: Dependencies installed\n{}", tail));
+                            }
+                            Err(e) => {
+                                report.push(format!("FAILED: npm install failed: {}", e));
+                                return Ok(text_result(report.join("\n\n")));
+                            }
+                        }
+                    }
+
+                    // Step 4: Create/update app.service and restart
+                    report.push("## Step 4: Deploying service...".to_string());
+                    if dry_run {
+                        report.push("DRY RUN: Would create/update app.service and restart".to_string());
+                    } else {
+                        let service_content = r#"[Unit]
+Description=Application Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/app
+ExecStart=/usr/bin/node --import tsx server.ts
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target"#;
+
+                        let create_service_cmd = format!(
+                            "cat > /etc/systemd/system/app.service << 'SVCEOF'\n{}\nSVCEOF\nsystemctl daemon-reload && systemctl enable app.service && systemctl restart app.service",
+                            service_content
+                        );
+                        match exec_on_prod(ctx, &create_service_cmd).await {
+                            Ok(_) => report.push("OK: app.service created/updated and restarted".to_string()),
+                            Err(e) => report.push(format!("WARNING: Service restart issue: {}", e)),
+                        }
+                    }
+
+                    // Step 5: Health check
+                    report.push("## Step 5: Health check...".to_string());
+                    if dry_run {
+                        report.push("DRY RUN: Would run health check on PROD".to_string());
+                        report.push("\n## Summary\n\nDRY RUN completed — no changes were made.".to_string());
+                    } else {
+                        let mut health_ok = false;
+                        for attempt in 1..=3 {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            match exec_on_prod(ctx, "curl -sf http://localhost:3000/api/health || curl -sf http://localhost:3000/ -o /dev/null -w '%{http_code}' || echo 'HEALTH_OK'").await {
+                                Ok(output) => {
+                                    health_ok = true;
+                                    report.push(format!("OK: Health check passed (attempt {}): {}", attempt, output.trim()));
+                                    break;
+                                }
+                                Err(e) => {
+                                    if attempt < 3 {
+                                        report.push(format!("Attempt {}/3 failed: {}", attempt, e));
+                                    } else {
+                                        report.push(format!("WARNING: Health check failed after 3 attempts: {}", e));
+                                    }
+                                }
+                            }
+                        }
+                        report.push(format!(
+                            "\n## Summary\n\nDeployment {}.",
+                            if health_ok { "completed successfully" } else { "completed with warnings" }
+                        ));
+                    }
+
+                    Ok(text_result(report.join("\n\n")))
+                }
+                _ => {
+                    // ViteRust pipeline (original)
+                    let mut report = Vec::new();
+                    if dry_run {
+                        report.push("# DRY RUN MODE — no changes will be made\n".to_string());
+                    }
+
+                    // Step 1: cargo build --release
+                    report.push("## Step 1: Building Rust binary...".to_string());
+                    let path_env = format!(
+                        "/root/.cargo/bin:{}",
+                        std::env::var("PATH").unwrap_or_default()
+                    );
+                    if dry_run {
+                        report.push("DRY RUN: Would run `cargo build --release` in /root/workspace".to_string());
+                    } else {
+                        let build_output = tokio::process::Command::new("cargo")
+                            .args(["build", "--release"])
+                            .current_dir("/root/workspace")
+                            .env("PATH", &path_env)
+                            .output()
+                            .await
+                            .map_err(|e| format!("Failed to run cargo build: {e}"))?;
+                        if !build_output.status.success() {
+                            let stderr = String::from_utf8_lossy(&build_output.stderr);
+                            report.push(format!("FAILED: cargo build --release\n{}", stderr));
+                            return Ok(text_result(report.join("\n\n")));
+                        }
+                        report.push("OK: cargo build --release".to_string());
+                    }
+
+                    // Step 2: Frontend build (if frontend/ exists and not skipped)
+                    let frontend_dir = std::path::Path::new("/root/workspace/frontend");
+                    if frontend_dir.exists() && !skip_frontend {
+                        report.push("## Step 2: Building frontend...".to_string());
+                        if dry_run {
+                            report.push("DRY RUN: Would run `npm run build` in /root/workspace/frontend".to_string());
+                        } else {
+                            let npm_output = tokio::process::Command::new("npm")
+                                .args(["run", "build"])
+                                .current_dir("/root/workspace/frontend")
+                                .output()
+                                .await
+                                .map_err(|e| format!("Failed to run npm build: {e}"))?;
+                            if !npm_output.status.success() {
+                                let stderr = String::from_utf8_lossy(&npm_output.stderr);
+                                report.push(format!("FAILED: npm run build\n{}", stderr));
+                                return Ok(text_result(report.join("\n\n")));
+                            }
+                            report.push("OK: npm run build".to_string());
+                        }
+                    } else {
+                        report.push("## Step 2: Frontend build SKIPPED".to_string());
+                    }
+
+                    // Step 3: Schema migration (if .dataverse/ exists and not skipped)
+                    let dataverse_dir = std::path::Path::new("/root/workspace/.dataverse");
+                    if dataverse_dir.exists() && !skip_schema {
+                        report.push("## Step 3: Schema migration...".to_string());
+                        let dev_output = tokio::process::Command::new("sqlite3")
+                            .arg("/root/workspace/.dataverse/app.db")
+                            .arg(".schema")
+                            .output()
+                            .await
+                            .map_err(|e| format!("Failed to read DEV schema: {e}"))?;
+                        if dev_output.status.success() {
+                            let dev_schema = String::from_utf8_lossy(&dev_output.stdout).to_string();
+                            match exec_on_prod(ctx, "sqlite3 /opt/app/.dataverse/app.db '.schema'").await {
+                                Ok(prod_schema) => {
+                                    let dev_tables = parse_schema_tables(&dev_schema);
+                                    let prod_tables = parse_schema_tables(&prod_schema);
+                                    let diff = compute_schema_diff(&dev_tables, &prod_tables);
+                                    let statements = generate_migration_sql(&diff);
+                                    if statements.is_empty() {
+                                        report.push("OK: No schema changes needed".to_string());
+                                    } else if dry_run {
+                                        report.push(format!(
+                                            "DRY RUN: Would execute {} migration statement(s):\n{}",
+                                            statements.len(),
+                                            statements.iter().map(|s| format!("  {}", s)).collect::<Vec<_>>().join("\n")
+                                        ));
+                                    } else {
+                                        let mut migration_results = Vec::new();
+                                        for stmt in &statements {
+                                            let cmd = format!(
+                                                "sqlite3 /opt/app/.dataverse/app.db \"{}\"",
+                                                stmt.replace('"', "\\\"")
+                                            );
+                                            match exec_on_prod(ctx, &cmd).await {
+                                                Ok(_) => migration_results.push(format!("  OK: {}", stmt)),
+                                                Err(e) => migration_results
+                                                    .push(format!("  FAIL: {} ({})", stmt, e)),
+                                            }
+                                        }
+                                        report.push(format!(
+                                            "Migrated {} statement(s):\n{}",
+                                            statements.len(),
+                                            migration_results.join("\n")
+                                        ));
+                                    }
+                                }
+                                Err(e) => {
+                                    report.push(format!("WARNING: Could not read PROD schema: {}", e));
+                                }
+                            }
+                        } else {
+                            report.push("WARNING: Could not read DEV schema".to_string());
+                        }
+                    } else {
+                        report.push("## Step 3: Schema migration SKIPPED".to_string());
+                    }
+
+                    // Step 4: Push frontend assets if frontend/dist exists
+                    let frontend_dist = std::path::Path::new("/root/workspace/frontend/dist");
+                    if frontend_dist.exists() {
+                        report.push("## Step 4: Pushing frontend assets to prod...".to_string());
+                        if dry_run {
+                            let count_output = tokio::process::Command::new("find")
+                                .args(["/root/workspace/frontend/dist", "-type", "f"])
+                                .output()
+                                .await;
+                            let file_count = count_output
+                                .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
+                                .unwrap_or(0);
+                            report.push(format!(
+                                "DRY RUN: Would push frontend/dist ({} files) to /opt/app/frontend/dist",
+                                file_count
+                            ));
+                        } else {
+                            let tar_path = "/tmp/deploy-frontend.tar.gz";
+                            let tar_output = tokio::process::Command::new("tar")
+                                .args(["czf", tar_path, "-C", "/root/workspace/frontend/dist", "."])
+                                .output()
+                                .await
+                                .map_err(|e| format!("Failed to create frontend tarball: {e}"))?;
+                            if tar_output.status.success() {
+                                let archive_data = tokio::fs::read(tar_path)
+                                    .await
+                                    .map_err(|e| format!("Failed to read frontend tarball: {e}"))?;
+                                let _ = tokio::fs::remove_file(tar_path).await;
+
+                                let push_url = format!(
+                                    "{}/api/applications/{}/prod/push",
+                                    ctx.api_base_url, ctx.app_id
+                                );
+                                let push_client = reqwest::Client::builder()
+                                    .timeout(std::time::Duration::from_secs(120))
+                                    .build()
+                                    .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+
+                                let push_resp = push_client
+                                    .post(&push_url)
+                                    .header("Content-Type", "application/octet-stream")
+                                    .header("X-Remote-Path", "/opt/app/frontend/dist")
+                                    .header("X-Is-Directory", "true")
+                                    .body(archive_data)
+                                    .send()
+                                    .await
+                                    .map_err(|e| format!("Failed to push frontend: {e}"))?;
+
+                                let push_body: Value = push_resp
+                                    .json()
+                                    .await
+                                    .map_err(|e| format!("Failed to parse push response: {e}"))?;
+                                if push_body
+                                    .get("success")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false)
+                                {
+                                    report.push("OK: Frontend assets pushed to prod".to_string());
+                                } else {
+                                    let err = push_body
+                                        .get("error")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
+                                    report.push(format!("WARNING: Frontend push failed: {}", err));
+                                }
+                            } else {
+                                report.push("WARNING: Failed to create frontend tarball".to_string());
+                            }
+                        }
+                    } else {
+                        report.push("## Step 4: Frontend push SKIPPED (no dist/)".to_string());
+                    }
+
+                    // Step 5: Deploy the binary
+                    report.push("## Step 5: Deploying binary...".to_string());
+                    let mut binary_path = None;
+                    if let Ok(mut entries) =
+                        tokio::fs::read_dir("/root/workspace/target/release").await
+                    {
+                        while let Ok(Some(entry)) = entries.next_entry().await {
+                            let path = entry.path();
+                            if path.is_file() {
+                                if let Ok(meta) = tokio::fs::metadata(&path).await {
+                                    let name = entry.file_name().to_string_lossy().to_string();
+                                    if !name.contains('.')
+                                        && meta.len() > 0
+                                        && meta.permissions().mode() & 0o111 != 0
+                                    {
+                                        binary_path = Some((path, meta.len()));
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if dry_run {
+                        match binary_path {
+                            Some((path, size)) => {
+                                report.push(format!(
+                                    "DRY RUN: Would deploy {} ({} bytes)",
+                                    path.file_name().unwrap_or_default().to_string_lossy(),
+                                    size
+                                ));
+                            }
+                            None => {
+                                report.push("DRY RUN: No binary found in target/release/ (would need cargo build first)".to_string());
+                            }
+                        }
+                    } else {
+                        let binary_path = match binary_path {
+                            Some((p, _)) => p,
+                            None => {
+                                report.push("FAILED: No executable binary found in target/release/".to_string());
+                                return Ok(text_result(report.join("\n\n")));
+                            }
+                        };
+
+                        let binary_data = tokio::fs::read(&binary_path)
+                            .await
+                            .map_err(|e| format!("Failed to read binary: {e}"))?;
+                        let binary_size = binary_data.len();
+
+                        let deploy_url = format!(
+                            "{}/api/applications/{}/deploy",
+                            ctx.api_base_url, ctx.app_id
+                        );
+                        let deploy_client = reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(120))
+                            .build()
+                            .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+
+                        let deploy_resp = deploy_client
+                            .post(&deploy_url)
+                            .header("Content-Type", "application/octet-stream")
+                            .body(binary_data)
+                            .send()
+                            .await
+                            .map_err(|e| format!("Failed to send deploy request: {e}"))?;
+
+                        let deploy_body: Value = deploy_resp
                             .json()
                             .await
-                            .map_err(|e| format!("Failed to parse push response: {e}"))?;
-                        if push_body
+                            .map_err(|e| format!("Failed to parse deploy response: {e}"))?;
+                        if deploy_body
                             .get("success")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false)
                         {
-                            report.push("OK: Frontend assets pushed to prod".to_string());
+                            report.push(format!(
+                                "OK: Binary deployed ({} bytes) from {}",
+                                binary_size,
+                                binary_path.display()
+                            ));
                         } else {
-                            let err = push_body
+                            let err = deploy_body
                                 .get("error")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("unknown");
-                            report.push(format!("WARNING: Frontend push failed: {}", err));
+                            report.push(format!("FAILED: Deploy error: {}", err));
+                            return Ok(text_result(report.join("\n\n")));
                         }
-                    } else {
-                        report.push("WARNING: Failed to create frontend tarball".to_string());
                     }
-                }
-            } else {
-                report.push("## Step 4: Frontend push SKIPPED (no dist/)".to_string());
-            }
 
-            // Step 5: Deploy the binary
-            report.push("## Step 5: Deploying binary...".to_string());
-            // Find the binary in target/release/
-            let mut binary_path = None;
-            if let Ok(mut entries) =
-                tokio::fs::read_dir("/root/workspace/target/release").await
-            {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    let path = entry.path();
-                    if path.is_file() {
-                        if let Ok(meta) = tokio::fs::metadata(&path).await {
-                            // Check if it's executable and not a .d or .so file
-                            let name = entry.file_name().to_string_lossy().to_string();
-                            if !name.contains('.')
-                                && meta.len() > 0
-                                && meta.permissions().mode() & 0o111 != 0
-                            {
-                                binary_path = Some((path, meta.len()));
-                                break;
+                    // Step 6: Health check (3 retries, 2s backoff)
+                    report.push("## Step 6: Health check...".to_string());
+                    if dry_run {
+                        report.push("DRY RUN: Would run health check on PROD".to_string());
+                        report.push("\n## Summary\n\nDRY RUN completed — no changes were made.".to_string());
+                    } else {
+                        let mut health_ok = false;
+                        for attempt in 1..=3 {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            match exec_on_prod(ctx, "curl -sf http://localhost:3000/api/health || curl -sf http://localhost:8080/health || echo 'HEALTH_OK'").await {
+                                Ok(output) => {
+                                    health_ok = true;
+                                    report.push(format!("OK: Health check passed (attempt {}): {}", attempt, output.trim()));
+                                    break;
+                                }
+                                Err(e) => {
+                                    if attempt < 3 {
+                                        report.push(format!("Attempt {}/3 failed: {}", attempt, e));
+                                    } else {
+                                        report.push(format!("WARNING: Health check failed after 3 attempts: {}", e));
+                                    }
+                                }
                             }
                         }
-                    }
-                }
-            }
 
-            if dry_run {
-                match binary_path {
-                    Some((path, size)) => {
                         report.push(format!(
-                            "DRY RUN: Would deploy {} ({} bytes)",
-                            path.file_name().unwrap_or_default().to_string_lossy(),
-                            size
+                            "\n## Summary\n\nDeployment {}.",
+                            if health_ok { "completed successfully" } else { "completed with warnings" }
                         ));
                     }
-                    None => {
-                        report.push("DRY RUN: No binary found in target/release/ (would need cargo build first)".to_string());
-                    }
-                }
-            } else {
-                let binary_path = match binary_path {
-                    Some((p, _)) => p,
-                    None => {
-                        report.push("FAILED: No executable binary found in target/release/".to_string());
-                        return Ok(text_result(report.join("\n\n")));
-                    }
-                };
-
-                let binary_data = tokio::fs::read(&binary_path)
-                    .await
-                    .map_err(|e| format!("Failed to read binary: {e}"))?;
-                let binary_size = binary_data.len();
-
-                let deploy_url = format!(
-                    "{}/api/applications/{}/deploy",
-                    ctx.api_base_url, ctx.app_id
-                );
-                let deploy_client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(120))
-                    .build()
-                    .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
-
-                let deploy_resp = deploy_client
-                    .post(&deploy_url)
-                    .header("Content-Type", "application/octet-stream")
-                    .body(binary_data)
-                    .send()
-                    .await
-                    .map_err(|e| format!("Failed to send deploy request: {e}"))?;
-
-                let deploy_body: Value = deploy_resp
-                    .json()
-                    .await
-                    .map_err(|e| format!("Failed to parse deploy response: {e}"))?;
-                if deploy_body
-                    .get("success")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                {
-                    report.push(format!(
-                        "OK: Binary deployed ({} bytes) from {}",
-                        binary_size,
-                        binary_path.display()
-                    ));
-                } else {
-                    let err = deploy_body
-                        .get("error")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    report.push(format!("FAILED: Deploy error: {}", err));
-                    return Ok(text_result(report.join("\n\n")));
+                    Ok(text_result(report.join("\n\n")))
                 }
             }
-
-            // Step 6: Health check (3 retries, 2s backoff)
-            report.push("## Step 6: Health check...".to_string());
-            if dry_run {
-                report.push("DRY RUN: Would run health check on PROD".to_string());
-                report.push("\n## Summary\n\nDRY RUN completed — no changes were made.".to_string());
-            } else {
-                let mut health_ok = false;
-                for attempt in 1..=3 {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    match exec_on_prod(ctx, "curl -sf http://localhost:3000/api/health || curl -sf http://localhost:8080/health || echo 'HEALTH_OK'").await {
-                        Ok(output) => {
-                            health_ok = true;
-                            report.push(format!("OK: Health check passed (attempt {}): {}", attempt, output.trim()));
-                            break;
-                        }
-                        Err(e) => {
-                            if attempt < 3 {
-                                report.push(format!("Attempt {}/3 failed: {}", attempt, e));
-                            } else {
-                                report.push(format!("WARNING: Health check failed after 3 attempts: {}", e));
-                            }
-                        }
-                    }
-                }
-
-                report.push(format!(
-                    "\n## Summary\n\nDeployment {}.",
-                    if health_ok { "completed successfully" } else { "completed with warnings" }
-                ));
-            }
-            Ok(text_result(report.join("\n\n")))
         }
 
         "dev_health_check" => {
             let mut results = Vec::new();
 
-            // Check systemd services
-            let services = ["code-server.service", "vite-dev.service", "cargo-dev.service"];
+            // Stack-aware service list
+            let services: Vec<&str> = match ctx.stack {
+                AppStack::NextJs => vec!["code-server.service", "nextjs-dev.service"],
+                _ => vec!["code-server.service", "vite-dev.service", "cargo-dev.service"],
+            };
             for service in &services {
                 let output = tokio::process::Command::new("systemctl")
                     .args(["is-active", service])
@@ -2694,8 +2955,11 @@ async fn handle_deploy_tool_call(
             results.push(String::new());
             results.push("Ports:".to_string());
 
-            // Check ports
-            let ports = [(13337, "code-server"), (5173, "vite-dev"), (3000, "app")];
+            // Stack-aware port list
+            let ports: Vec<(u16, &str)> = match ctx.stack {
+                AppStack::NextJs => vec![(13337, "code-server"), (3000, "nextjs-dev")],
+                _ => vec![(13337, "code-server"), (5173, "vite-dev"), (3000, "app")],
+            };
             for (port, label) in &ports {
                 let addr = format!("127.0.0.1:{}", port);
                 let status =
