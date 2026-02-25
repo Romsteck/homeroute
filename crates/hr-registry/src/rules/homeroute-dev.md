@@ -17,9 +17,9 @@ Trois services gèrent les processus de développement :
 
 | Service | Commande systemd | Description |
 |---------|-------------------|-------------|
-| `code-server.service` | `systemctl start/stop/restart code-server` | IDE VS Code dans le navigateur |
-| `vite-dev.service` | `systemctl start/stop/restart vite-dev` | Serveur Vite avec Hot Module Replacement |
-| `cargo-dev.service` | `systemctl start/stop/restart cargo-dev` | cargo-watch : recompilation Rust automatique sur changement |
+| `code-server.service` | `sudo systemctl start/stop/restart code-server` | IDE VS Code dans le navigateur |
+| `vite-dev.service` | `sudo systemctl start/stop/restart vite-dev` | Serveur Vite avec Hot Module Replacement |
+| `cargo-dev.service` | `sudo systemctl start/stop/restart cargo-dev` | cargo-watch : recompilation Rust automatique sur changement |
 
 ### Etat des services
 
@@ -30,12 +30,16 @@ Trois services gèrent les processus de développement :
 ### Redemarrer un service
 
 ```bash
-# Si un service a un probleme, le redemarrer :
-systemctl restart vite-dev
-systemctl restart cargo-dev
+# Si un service a un probleme, le redemarrer (sudo requis, sans mot de passe) :
+sudo systemctl restart vite-dev
+sudo systemctl restart cargo-dev
 
-# Verifier l'etat
+# Tuer un processus root si necessaire :
+sudo kill -9 <pid>
+
+# Verifier l'etat (pas de sudo requis)
 dev_health_check
+journalctl -u cargo-dev -n 50
 ```
 
 ## Structure du workspace
@@ -161,10 +165,10 @@ Le mirroring vers GitHub est gere **automatiquement par le serveur HomeRoute** v
 
 | Probleme | Solution |
 |----------|----------|
-| Port 5173 CLOSED | `systemctl restart vite-dev` puis `systemctl status vite-dev` |
-| Port 3000 CLOSED | `systemctl restart cargo-dev` puis `systemctl status cargo-dev` |
-| Hot-reload ne fonctionne pas | `systemctl restart vite-dev` ou `systemctl restart cargo-dev` |
+| Port 5173 CLOSED | `sudo systemctl restart vite-dev` puis `systemctl status vite-dev` |
+| Port 3000 CLOSED | `sudo systemctl restart cargo-dev` puis `systemctl status cargo-dev` |
+| Hot-reload ne fonctionne pas | `sudo systemctl restart vite-dev` ou `sudo systemctl restart cargo-dev` |
 | Erreur de compilation Rust | Verifier les logs : `journalctl -u cargo-dev -n 50` |
 | Erreur npm/Vite | Verifier les logs : `journalctl -u vite-dev -n 50` |
-| code-server inaccessible | `systemctl restart code-server` |
+| code-server inaccessible | `sudo systemctl restart code-server` |
 | Erreurs CORS dans la console | **Fausse erreur** — cargo-watch est en train de recompiler. Configurer le proxy Vite (voir section ci-dessus) pour eviter ce probleme. |
