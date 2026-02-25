@@ -71,6 +71,8 @@ pub struct ContainerV2Record {
     pub host_id: String,
     #[serde(default)]
     pub environment: hr_registry::types::Environment,
+    #[serde(default)]
+    pub stack: hr_registry::types::AppStack,
     pub status: ContainerV2Status,
     pub created_at: DateTime<Utc>,
 }
@@ -88,6 +90,8 @@ pub struct CreateContainerRequest {
     pub code_server_enabled: bool,
     #[serde(default)]
     pub host_id: Option<String>,
+    #[serde(default)]
+    pub stack: hr_registry::types::AppStack,
 }
 
 fn default_true() -> bool {
@@ -142,6 +146,8 @@ pub struct UpdateContainerRequest {
     pub frontend: Option<hr_registry::types::FrontendEndpoint>,
     #[serde(default)]
     pub code_server_enabled: Option<bool>,
+    #[serde(default)]
+    pub stack: Option<hr_registry::types::AppStack>,
 }
 
 // ── ContainerManager ─────────────────────────────────────────────
@@ -296,6 +302,7 @@ impl ContainerManager {
             environment: req.environment,
             linked_app_id: req.linked_app_id.clone(),
             code_server_enabled: req.code_server_enabled,
+            stack: req.stack,
         };
 
         let (app, token) = self
@@ -321,6 +328,7 @@ impl ContainerManager {
             container_name: container_name.clone(),
             host_id: host_id.clone(),
             environment: req.environment,
+            stack: req.stack,
             status: ContainerV2Status::Deploying,
             created_at: Utc::now(),
         };
@@ -338,10 +346,11 @@ impl ContainerManager {
         let slug = req.slug.clone();
         let token_deploy = token.clone();
         let environment = req.environment;
+        let stack = req.stack;
         tokio::spawn(async move {
             match environment {
                 hr_registry::types::Environment::Development => {
-                    mgr.run_nspawn_deploy_dev(&app_id, &slug, &container_name, &host_id, &token_deploy)
+                    mgr.run_nspawn_deploy_dev(&app_id, &slug, &container_name, &host_id, &token_deploy, stack)
                         .await;
                 }
                 hr_registry::types::Environment::Production => {
@@ -361,6 +370,7 @@ impl ContainerManager {
                 linked_app_id: Some(app.id.clone()),
                 code_server_enabled: false,
                 frontend: auto_prod_frontend,
+                stack: req.stack,
             };
             let mgr_prod = Arc::clone(self);
             tokio::spawn(async move {
@@ -521,6 +531,7 @@ impl ContainerManager {
             name: req.name.clone(),
             frontend: req.frontend,
             code_server_enabled: req.code_server_enabled,
+            stack: req.stack,
             ..Default::default()
         };
 
@@ -683,6 +694,7 @@ impl ContainerManager {
         container_name: &str,
         host_id: &str,
         token: &str,
+        stack: hr_registry::types::AppStack,
     ) {
         let emit = |message: &str| {
             let _ = self.events.agent_status.send(AgentStatusEvent {
@@ -969,14 +981,22 @@ WantedBy=multi-user.target
             render_rules(include_str!("../../hr-registry/src/rules/homeroute-dataverse.md")),
         )
         .await;
+        let dev_md_content = match stack {
+            hr_registry::types::AppStack::NextJs => render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev-nextjs.md")),
+            hr_registry::types::AppStack::ViteRust => render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev.md")),
+        };
+        let deploy_md_content = match stack {
+            hr_registry::types::AppStack::NextJs => render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy-nextjs.md")),
+            hr_registry::types::AppStack::ViteRust => render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy.md")),
+        };
         let _ = tokio::fs::write(
             rules_dir.join("homeroute-deploy.md"),
-            render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy.md")),
+            deploy_md_content,
         )
         .await;
         let _ = tokio::fs::write(
             rules_dir.join("homeroute-dev.md"),
-            render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev.md")),
+            dev_md_content,
         )
         .await;
         let _ = tokio::fs::write(

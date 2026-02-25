@@ -16,7 +16,7 @@ use hr_common::events::{AgentMetricsEvent, AgentStatusEvent, AgentUpdateEvent, A
 use crate::protocol::{AgentMetrics, ContainerInfo, HostMetrics, HostRegistryMessage, NetworkInterfaceInfo, RegistryMessage};
 use crate::types::{
     AgentNotifyResult, AgentSkipResult, AgentStatus, AgentUpdateStatusInfo,
-    Application, CreateApplicationRequest, RegistryState, UpdateApplicationRequest,
+    AppStack, Application, CreateApplicationRequest, RegistryState, UpdateApplicationRequest,
     UpdateBatchResult, UpdateStatusResult,
 };
 
@@ -191,6 +191,7 @@ impl AgentRegistry {
             created_at: Utc::now(),
             frontend: req.frontend,
             code_server_enabled: req.code_server_enabled,
+            stack: req.stack,
             metrics: None,
         };
 
@@ -252,6 +253,9 @@ impl AgentRegistry {
         }
         if let Some(code_server_enabled) = req.code_server_enabled {
             app.code_server_enabled = code_server_enabled;
+        }
+        if let Some(stack) = req.stack {
+            app.stack = stack;
         }
 
         let app = app.clone();
@@ -1132,8 +1136,13 @@ impl AgentRegistry {
                 .replace("{{domain}}", base_domain)
         };
 
+        let deploy_rules = match app.stack {
+            AppStack::NextJs => include_str!("rules/homeroute-deploy-nextjs.md"),
+            AppStack::ViteRust => include_str!("rules/homeroute-deploy.md"),
+        };
+
         let rules = vec![
-            ("homeroute-deploy.md".to_string(), render(include_str!("rules/homeroute-deploy.md"))),
+            ("homeroute-deploy.md".to_string(), render(deploy_rules)),
             ("homeroute-dataverse.md".to_string(), render(include_str!("rules/homeroute-dataverse.md"))),
             ("homeroute-store.md".to_string(), render(include_str!("rules/homeroute-store.md"))),
             ("homeroute-studio-todos.md".to_string(), render(include_str!("rules/homeroute-studio-todos.md"))),
