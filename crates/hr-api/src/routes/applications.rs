@@ -621,6 +621,10 @@ fn render_rules(slug: &str, domain: &str) -> Vec<(String, String)> {
             "homeroute-store.md".to_string(),
             render(include_str!("../../../hr-registry/src/rules/homeroute-store.md")),
         ),
+        (
+            "homeroute-studio-todos.md".to_string(),
+            render(include_str!("../../../hr-registry/src/rules/homeroute-studio-todos.md")),
+        ),
     ]
 }
 

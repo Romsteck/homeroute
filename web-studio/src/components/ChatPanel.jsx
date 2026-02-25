@@ -3,7 +3,7 @@ import MessageList from './MessageList';
 import InputBar from './InputBar';
 import TodoPanel from './TodoPanel';
 
-export default function ChatPanel({ messages, isStreaming, onSend, onAbort, connected, todos }) {
+export default function ChatPanel({ messages, isStreaming, onSend, onAbort, connected, todos, authStatus, onOpenAuthDialog }) {
   const [mode, setMode] = useState(() => localStorage.getItem('studio-mode') || 'default');
 
   const handleModeChange = useCallback((newMode) => {
@@ -30,6 +30,8 @@ export default function ChatPanel({ messages, isStreaming, onSend, onAbort, conn
         disabled={!connected}
         mode={mode}
         onModeChange={handleModeChange}
+        authStatus={authStatus}
+        onOpenAuthDialog={onOpenAuthDialog}
       />
     </div>
   );

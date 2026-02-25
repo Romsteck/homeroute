@@ -61,6 +61,14 @@ async fn main() -> Result<()> {
         return start_store_mcp().await;
     }
 
+    if args.len() > 1 && args[1] == "mcp-studio" {
+        tracing_subscriber::fmt()
+            .with_env_filter("warn")
+            .with_writer(std::io::stderr)
+            .init();
+        return mcp::run_studio_mcp_server().await;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

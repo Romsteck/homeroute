@@ -10,6 +10,8 @@ export default function Header({
   onSelectSession,
   onNewSession,
   onDeleteSession,
+  authStatus,
+  onOpenAuthDialog,
 }) {
   const tabs = [
     { id: 'studio', label: 'Studio', icon: StudioIcon },
@@ -66,12 +68,31 @@ export default function Header({
         })}
       </div>
 
-      {/* Right: connection status */}
-      <div className="flex items-center gap-2">
-        <span className={`inline-block w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
-        <span className={`text-xs ${connected ? 'text-gray-500' : 'text-red-400'}`}>
-          {connected ? 'Connected' : 'Disconnected'}
-        </span>
+      {/* Right: auth + connection status */}
+      <div className="flex items-center gap-3">
+        {authStatus?.authenticated ? (
+          <button
+            onClick={onOpenAuthDialog}
+            className="flex items-center gap-1.5 px-2 py-1 rounded-md text-xs text-green-400 hover:bg-green-500/10 transition-colors"
+          >
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-500" />
+            Claude Linked
+          </button>
+        ) : (
+          <button
+            onClick={onOpenAuthDialog}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 transition-colors"
+          >
+            Link Claude Account
+          </button>
+        )}
+        <div className="h-4 w-px bg-gray-800" />
+        <div className="flex items-center gap-2">
+          <span className={`inline-block w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
+          <span className={`text-xs ${connected ? 'text-gray-500' : 'text-red-400'}`}>
+            {connected ? 'Connected' : 'Disconnected'}
+          </span>
+        </div>
       </div>
     </header>
   );

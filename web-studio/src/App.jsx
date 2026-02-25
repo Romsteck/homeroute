@@ -1,10 +1,12 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import useStudioWebSocket from './hooks/useStudioWebSocket';
+import useClaudeAuth from './hooks/useClaudeAuth';
 import Header from './components/Header';
 import ChatPanel from './components/ChatPanel';
 import PreviewPanel from './components/PreviewPanel';
 import FilesPanel from './components/FilesPanel';
 import StatusBar from './components/StatusBar';
+import AuthDialog from './components/AuthDialog';
 
 function getAppInfo() {
   const hostname = window.location.hostname;
@@ -26,6 +28,7 @@ export default function App() {
     return localStorage.getItem('studio-active-tab') || 'studio';
   });
   const ws = useStudioWebSocket();
+  const auth = useClaudeAuth(ws.subscribe, ws.sendRaw, ws.connected);
   const appInfo = useMemo(() => getAppInfo(), []);
 
   useEffect(() => {
@@ -49,6 +52,8 @@ export default function App() {
         onSelectSession={ws.loadSession}
         onNewSession={ws.newSession}
         onDeleteSession={ws.deleteSession}
+        authStatus={auth.authStatus}
+        onOpenAuthDialog={auth.openAuthDialog}
       />
 
       <div className="flex flex-1 min-h-0">
@@ -62,6 +67,8 @@ export default function App() {
               onAbort={ws.abort}
               connected={ws.connected}
               todos={ws.todos}
+              authStatus={auth.authStatus}
+              onOpenAuthDialog={auth.openAuthDialog}
             />
           </div>
           <div className="flex-1 flex flex-col min-w-0">
@@ -81,6 +88,17 @@ export default function App() {
         sessionId={ws.currentSessionId}
         isStreaming={ws.isStreaming}
       />
+
+      {auth.showAuthDialog && (
+        <AuthDialog
+          authStatus={auth.authStatus}
+          authEvent={auth.authEvent}
+          onClose={auth.closeAuthDialog}
+          sendRaw={ws.sendRaw}
+          onUnlink={auth.unlinkAuth}
+          setAuthEvent={auth.setAuthEvent}
+        />
+      )}
     </div>
   );
 }

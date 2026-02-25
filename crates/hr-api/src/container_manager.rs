@@ -975,6 +975,11 @@ WantedBy=multi-user.target
             render_rules(include_str!("../../hr-registry/src/rules/homeroute-store.md")),
         )
         .await;
+        let _ = tokio::fs::write(
+            rules_dir.join("homeroute-studio-todos.md"),
+            render_rules(include_str!("../../hr-registry/src/rules/homeroute-studio-todos.md")),
+        )
+        .await;
 
         // Phase 11b: Git init workspace
         emit("Initialisation du depot Git...");
