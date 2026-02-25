@@ -1401,11 +1401,13 @@ pub fn generate_mcp_json(is_dev: bool) -> String {
 pub async fn run_studio_mcp_server() -> Result<()> {
     info!("Starting MCP Studio server");
 
-    let stdin = io::stdin();
+    let stdin = tokio::io::BufReader::new(tokio::io::stdin());
     let stdout = io::stdout();
 
-    for line in stdin.lock().lines() {
-        let line = line?;
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = stdin.lines();
+
+    while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
             continue;
         }
@@ -1460,7 +1462,7 @@ pub async fn run_studio_mcp_server() -> Result<()> {
                     .get("arguments")
                     .cloned()
                     .unwrap_or(json!({}));
-                handle_studio_tool_call(tool_name, &arguments)
+                handle_studio_tool_call(tool_name, &arguments).await
             }
             _ => Err(format!("Method not found: {}", request.method)),
         };
@@ -1523,10 +1525,72 @@ fn get_studio_tool_definitions() -> Vec<Value> {
                 "properties": {}
             }
         }),
+        json!({
+            "name": "browser_screenshot",
+            "description": "Capture a screenshot of the dev site using headless Chromium. Returns the screenshot as a base64-encoded PNG image. Installs Chrome on first use if not present.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to capture (default: http://localhost:5173)"
+                    },
+                    "width": {
+                        "type": "integer",
+                        "default": 1280,
+                        "description": "Viewport width in pixels (default: 1280)"
+                    },
+                    "height": {
+                        "type": "integer",
+                        "default": 720,
+                        "description": "Viewport height in pixels (default: 720)"
+                    },
+                    "wait_ms": {
+                        "type": "integer",
+                        "default": 2000,
+                        "description": "Wait time in ms after page load before capture (default: 2000)"
+                    }
+                }
+            }
+        }),
+        json!({
+            "name": "browser_console_logs",
+            "description": "Read browser console logs captured from the dev preview iframe. Logs are intercepted via injected script and stored server-side.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "level": {
+                        "type": "string",
+                        "description": "Filter by log level (log, warn, error, info, debug)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 100,
+                        "description": "Maximum number of log entries to return (default: 100)"
+                    },
+                    "since": {
+                        "type": "integer",
+                        "description": "Only return logs after this timestamp (ms since epoch)"
+                    }
+                }
+            }
+        }),
+        json!({
+            "name": "browser_console_clear",
+            "description": "Clear all stored browser console logs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
     ]
 }
 
-fn handle_studio_tool_call(tool: &str, args: &Value) -> Result<Value, String> {
+async fn handle_studio_tool_call(tool: &str, args: &Value) -> Result<Value, String> {
+    let text_result = |text: String| -> Value {
+        json!({ "content": [{ "type": "text", "text": text }] })
+    };
+
     match tool {
         "todo_save" => {
             let empty = json!([]);
@@ -1553,6 +1617,173 @@ fn handle_studio_tool_call(tool: &str, args: &Value) -> Result<Value, String> {
                 "content": [{ "type": "text", "text": content }]
             }))
         }
+
+        "browser_screenshot" => {
+            use base64::Engine;
+
+            let url = args.get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("http://localhost:5173");
+            let width = args.get("width")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1280);
+            let height = args.get("height")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(720);
+            let wait_ms = args.get("wait_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(2000);
+
+            // Find chromium/chrome binary, install if not present
+            let candidates = ["chromium-browser", "chromium", "google-chrome-stable"];
+            let mut chromium_bin = String::new();
+            for candidate in &candidates {
+                let check = tokio::process::Command::new("which")
+                    .arg(candidate)
+                    .output()
+                    .await;
+                if check.map(|o| o.status.success()).unwrap_or(false) {
+                    chromium_bin = candidate.to_string();
+                    break;
+                }
+            }
+
+            if chromium_bin.is_empty() {
+                let install_script = r#"
+                    apt-get update -qq 2>/dev/null
+                    apt-get install -y -qq wget gnupg 2>/dev/null
+                    wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+                    apt-get install -y -qq /tmp/chrome.deb 2>/dev/null || (apt-get -f install -y -qq 2>/dev/null && apt-get install -y -qq /tmp/chrome.deb 2>/dev/null)
+                    rm -f /tmp/chrome.deb
+                "#;
+                let install = tokio::process::Command::new("bash")
+                    .args(["-c", install_script])
+                    .output()
+                    .await
+                    .map_err(|e| format!("Failed to install Chrome: {e}"))?;
+
+                let check = tokio::process::Command::new("which")
+                    .arg("google-chrome-stable")
+                    .output()
+                    .await;
+                if check.map(|o| o.status.success()).unwrap_or(false) {
+                    chromium_bin = "google-chrome-stable".to_string();
+                } else {
+                    let stderr = String::from_utf8_lossy(&install.stderr);
+                    return Ok(text_result(format!(
+                        "ERROR: Failed to install Chrome.\n{}",
+                        stderr.chars().take(500).collect::<String>()
+                    )));
+                }
+            }
+
+            let screenshot_path = "/tmp/studio-screenshot.png";
+            let window_size = format!("--window-size={},{}", width, height);
+
+            let output = tokio::process::Command::new(&chromium_bin)
+                .args([
+                    "--headless",
+                    "--no-sandbox",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    &window_size,
+                    &format!("--screenshot={}", screenshot_path),
+                    &format!("--virtual-time-budget={}", wait_ms),
+                    url,
+                ])
+                .output()
+                .await
+                .map_err(|e| format!("Failed to run chromium: {e}"))?;
+
+            if !std::path::Path::new(screenshot_path).exists() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Ok(text_result(format!(
+                    "ERROR: Screenshot failed.\nChromium stderr: {}",
+                    stderr.chars().take(1000).collect::<String>()
+                )));
+            }
+
+            let screenshot_data = tokio::fs::read(screenshot_path)
+                .await
+                .map_err(|e| format!("Failed to read screenshot: {e}"))?;
+            let _ = tokio::fs::remove_file(screenshot_path).await;
+
+            let base64_data = base64::engine::general_purpose::STANDARD.encode(&screenshot_data);
+
+            Ok(json!({
+                "content": [{
+                    "type": "image",
+                    "data": base64_data,
+                    "mimeType": "image/png"
+                }, {
+                    "type": "text",
+                    "text": format!("Screenshot captured: {}x{} pixels, {} bytes, URL: {}", width, height, screenshot_data.len(), url)
+                }]
+            }))
+        }
+
+        "browser_console_logs" => {
+            let level_filter = args.get("level").and_then(|v| v.as_str());
+            let limit = args.get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(100) as usize;
+            let since = args.get("since").and_then(|v| v.as_u64());
+
+            let log_path = "/tmp/studio-console-logs.json";
+            let logs: Vec<Value> = match tokio::fs::read_to_string(log_path).await {
+                Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+                Err(_) => Vec::new(),
+            };
+
+            if logs.is_empty() {
+                return Ok(text_result("No console logs recorded.".to_string()));
+            }
+
+            // Filter and limit
+            let filtered: Vec<&Value> = logs.iter()
+                .filter(|entry| {
+                    if let Some(level) = level_filter {
+                        entry.get("level").and_then(|l| l.as_str()) == Some(level)
+                    } else {
+                        true
+                    }
+                })
+                .filter(|entry| {
+                    if let Some(ts) = since {
+                        entry.get("timestamp").and_then(|t| t.as_u64()).unwrap_or(0) > ts
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+
+            let total = filtered.len();
+            let display: Vec<&Value> = filtered.into_iter().rev().take(limit).collect::<Vec<_>>().into_iter().rev().collect();
+
+            let mut output = format!("Console logs ({} shown, {} total):\n\n", display.len(), total);
+            for entry in &display {
+                let level = entry.get("level").and_then(|l| l.as_str()).unwrap_or("log");
+                let message = entry.get("message").and_then(|m| m.as_str()).unwrap_or("");
+                let ts = entry.get("timestamp").and_then(|t| t.as_u64()).unwrap_or(0);
+                let icon = match level {
+                    "error" => "[ERROR]",
+                    "warn" => "[WARN]",
+                    "info" => "[INFO]",
+                    "debug" => "[DEBUG]",
+                    _ => "[LOG]",
+                };
+                output.push_str(&format!("{} {} (ts: {})\n", icon, message, ts));
+            }
+
+            Ok(text_result(output))
+        }
+
+        "browser_console_clear" => {
+            let log_path = "/tmp/studio-console-logs.json";
+            let _ = tokio::fs::remove_file(log_path).await;
+            Ok(text_result("Console logs cleared.".to_string()))
+        }
+
         _ => Err(format!("Unknown studio tool: {}", tool)),
     }
 }

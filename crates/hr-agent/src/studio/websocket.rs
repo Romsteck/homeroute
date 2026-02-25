@@ -386,6 +386,32 @@ where
                     }).await;
                 }
             }
+            WsInMessage::ConsoleLogs { logs } => {
+                tokio::spawn(async move {
+                    let log_path = "/tmp/studio-console-logs.json";
+                    // Read existing logs
+                    let mut existing: Vec<serde_json::Value> = match tokio::fs::read_to_string(log_path).await {
+                        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+                        Err(_) => Vec::new(),
+                    };
+                    // Append new logs
+                    for entry in logs {
+                        existing.push(serde_json::json!({
+                            "level": entry.level,
+                            "message": entry.message,
+                            "timestamp": entry.timestamp,
+                        }));
+                    }
+                    // Keep max 500 entries (FIFO)
+                    if existing.len() > 500 {
+                        existing = existing.split_off(existing.len() - 500);
+                    }
+                    // Write updated file
+                    if let Ok(content) = serde_json::to_string(&existing) {
+                        let _ = tokio::fs::write(log_path, content).await;
+                    }
+                });
+            }
         }
     }
 

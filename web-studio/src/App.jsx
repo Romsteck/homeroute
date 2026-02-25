@@ -72,12 +72,12 @@ export default function App() {
             />
           </div>
           <div className="flex-1 flex flex-col min-w-0">
-            <PreviewPanel slug={appInfo.slug} domain={appInfo.domain} mode="split" />
+            <PreviewPanel slug={appInfo.slug} domain={appInfo.domain} mode="split" sendRaw={ws.sendRaw} />
           </div>
         </div>
         {/* Preview tab - always mounted, hidden when inactive */}
         <div className="flex-1" style={{display: activeTab === 'preview' ? 'flex' : 'none'}}>
-          <PreviewPanel slug={appInfo.slug} domain={appInfo.domain} mode="full" />
+          <PreviewPanel slug={appInfo.slug} domain={appInfo.domain} mode="full" sendRaw={ws.sendRaw} />
         </div>
         {/* Files tab - only mounted when active */}
         {activeTab === 'files' && <FilesPanel sendRaw={ws.sendRaw} subscribe={ws.subscribe} connected={ws.connected} />}

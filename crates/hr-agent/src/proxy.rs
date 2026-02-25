@@ -48,6 +48,8 @@ struct LocalRoute {
     /// If true, non-WS requests are handled internally (embedded SPA + API).
     /// WS requests are proxied to target_port normally.
     is_studio: bool,
+    /// If true, inject console interceptor script into HTML responses for Studio dev preview.
+    inject_console: bool,
 }
 
 /// Cached forward-auth result.
@@ -173,6 +175,7 @@ impl AgentProxy {
                         auth_required: fe.auth_required,
                         allowed_groups: fe.allowed_groups.clone(),
                         is_studio: false,
+                        inject_console: false,
                     },
                 );
             }
@@ -185,6 +188,7 @@ impl AgentProxy {
                     auth_required: true,
                     allowed_groups: vec![],
                     is_studio: false,
+                    inject_console: false,
                 },
             );
         }
@@ -197,6 +201,7 @@ impl AgentProxy {
                     auth_required: false,
                     allowed_groups: vec![],
                     is_studio: false,
+                    inject_console: true,
                 },
             );
             // Studio (Claude Code headless UI)
@@ -209,6 +214,7 @@ impl AgentProxy {
                     auth_required: true,
                     allowed_groups: vec![],
                     is_studio: true,
+                    inject_console: false,
                 },
             );
         }
@@ -441,7 +447,125 @@ async fn handle_request(
     }
 
     // Regular HTTP proxy to localhost:{port}
-    proxy_http(req, route.target_port).await
+    if route.inject_console {
+        proxy_http_with_injection(req, route.target_port).await
+    } else {
+        proxy_http(req, route.target_port).await
+    }
+}
+
+// ── Console interceptor script (injected into dev preview HTML) ────
+
+const CONSOLE_INTERCEPTOR_SCRIPT: &str = r#"<script>(function(){var _c={};['log','warn','error','info','debug'].forEach(function(l){_c[l]=console[l];console[l]=function(){_c[l].apply(console,arguments);try{var a=Array.prototype.slice.call(arguments);var m=a.map(function(x){return typeof x==='object'?JSON.stringify(x):String(x)}).join(' ');window.parent.postMessage({type:'__studio_console',level:l,message:m,timestamp:Date.now()},'*')}catch(e){}}});window.addEventListener('error',function(e){var m=e.message+' at '+e.filename+':'+e.lineno+':'+e.colno;window.parent.postMessage({type:'__studio_console',level:'error',message:m,timestamp:Date.now()},'*')});window.addEventListener('unhandledrejection',function(e){var m='Unhandled rejection: '+(e.reason&&e.reason.message||e.reason||'unknown');window.parent.postMessage({type:'__studio_console',level:'error',message:m,timestamp:Date.now()},'*')});function reportUrl(){window.parent.postMessage({type:'__studio_url',url:location.href,path:location.pathname+location.search+location.hash},'*')}var _push=history.pushState,_replace=history.replaceState;history.pushState=function(){_push.apply(history,arguments);reportUrl()};history.replaceState=function(){_replace.apply(history,arguments);reportUrl()};window.addEventListener('popstate',reportUrl);setTimeout(reportUrl,0);window.addEventListener('message',function(e){if(e.data&&e.data.type==='__studio_navigate'){if(e.data.action==='back')history.back();else if(e.data.action==='forward')history.forward()}})})()</script>"#;
+
+// ── HTTP proxy with script injection ──────────────────────────────
+
+async fn proxy_http_with_injection(
+    mut req: Request<Incoming>,
+    target_port: u16,
+) -> Result<Response<BoxBody>, hyper::Error> {
+    // Force identity encoding so the backend doesn't compress the response
+    req.headers_mut().remove("accept-encoding");
+    req.headers_mut().insert(
+        "accept-encoding",
+        hyper::header::HeaderValue::from_static("identity"),
+    );
+
+    // Remove hop-by-hop headers
+    req.headers_mut().remove("connection");
+    req.headers_mut().remove("upgrade");
+
+    // Build target URI (origin-form only)
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.to_string())
+        .unwrap_or_else(|| "/".to_string());
+    let target_uri: hyper::Uri = path
+        .parse()
+        .unwrap_or_else(|_| "/".parse().unwrap());
+    *req.uri_mut() = target_uri;
+
+    let backend_addr = format!("127.0.0.1:{}", target_port);
+    let tcp_stream = match TcpStream::connect(&backend_addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Backend connect failed ({}): {e}", backend_addr);
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(full_body(format!("Backend unavailable: {e}")))
+                .unwrap());
+        }
+    };
+
+    let io = TokioIo::new(tcp_stream);
+    let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
+        .preserve_header_case(true)
+        .title_case_headers(true)
+        .handshake(io)
+        .await
+        .map_err(|e| {
+            warn!("Backend handshake failed: {e}");
+            e
+        })?;
+
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            let msg = e.to_string();
+            if !msg.contains("connection closed") && !msg.contains("not connected") {
+                debug!("Backend connection error: {e}");
+            }
+        }
+    });
+
+    let resp = sender.send_request(req).await?;
+
+    // Check if response is text/html
+    let is_html = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.contains("text/html"))
+        .unwrap_or(false);
+
+    if !is_html {
+        // Not HTML — stream through unmodified
+        return Ok(resp.map(|b| b.boxed()));
+    }
+
+    // Buffer the HTML body for injection
+    let (parts, body) = resp.into_parts();
+    let body_bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => {
+            warn!("Failed to collect response body for injection: {e}");
+            return Ok(Response::from_parts(parts, empty_body()));
+        }
+    };
+
+    let body_str = String::from_utf8_lossy(&body_bytes);
+
+    if let Some(pos) = body_str.find("</head>") {
+        // Inject script before </head>
+        let mut modified = String::with_capacity(body_str.len() + CONSOLE_INTERCEPTOR_SCRIPT.len());
+        modified.push_str(&body_str[..pos]);
+        modified.push_str(CONSOLE_INTERCEPTOR_SCRIPT);
+        modified.push_str(&body_str[pos..]);
+
+        let modified_bytes = bytes::Bytes::from(modified);
+        let mut response = Response::from_parts(parts, full_body(modified_bytes.clone()));
+        // Update Content-Length
+        response.headers_mut().insert(
+            "content-length",
+            hyper::header::HeaderValue::from_str(&modified_bytes.len().to_string()).unwrap(),
+        );
+        // Remove Content-Encoding in case it was set
+        response.headers_mut().remove("content-encoding");
+        Ok(response)
+    } else {
+        // No </head> found — return original body unmodified
+        Ok(Response::from_parts(parts, full_body(body_bytes)))
+    }
 }
 
 // ── HTTP proxy ─────────────────────────────────────────────────────

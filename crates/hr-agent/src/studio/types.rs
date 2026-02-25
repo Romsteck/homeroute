@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+/// A single console log entry forwarded from the browser dev preview.
+#[derive(Debug, Deserialize)]
+pub struct ConsoleLogEntry {
+    pub level: String,
+    pub message: String,
+    pub timestamp: u64,
+}
+
 /// Client → Server WebSocket messages.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -39,6 +47,9 @@ pub enum WsInMessage {
     },
     GetAuthStatus,
     UnlinkAuth,
+    ConsoleLogs {
+        logs: Vec<ConsoleLogEntry>,
+    },
 }
 
 fn default_limit() -> usize {
