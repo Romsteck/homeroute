@@ -871,6 +871,15 @@ WantedBy=multi-user.target
         )
         .await;
 
+        // Phase 8b4: Grant studio sudo for service/process management (NOPASSWD)
+        emit("Configuration sudo studio...");
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["apt-get install -y -qq sudo 2>/dev/null; printf 'studio ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /bin/systemctl, /usr/bin/kill, /bin/kill\\n' > /etc/sudoers.d/studio && chmod 440 /etc/sudoers.d/studio && visudo -cf /etc/sudoers.d/studio"],
+            3,
+        )
+        .await;
+
         // Phase 8c: Install Rust toolchain + cargo-watch
         emit("Installation Rust toolchain + cargo-watch...");
         let _ = NspawnClient::exec_with_retry(
