@@ -26,7 +26,11 @@ function parseSessionMessages(rawMessages) {
           if (block.type === 'text' && block.text) {
             result.push({ type: 'assistant', subtype: 'text', content: block.text, complete: true });
           } else if (block.type === 'tool_use') {
-            result.push({ type: 'tool_use', tool: block.name, input: block.input });
+            if (block.name === 'AskUserQuestion') {
+              result.push({ type: 'ask_user_question', questions: block.input?.questions || [], tool_use_id: block.id });
+            } else {
+              result.push({ type: 'tool_use', tool: block.name, input: block.input });
+            }
           }
         }
       } else if (content) {
@@ -41,14 +45,17 @@ function parseSessionMessages(rawMessages) {
       }
       if (msg.message?.is_error || msg.is_error) isError = true;
       if (text || isError) {
-        result.push({ type: 'tool_result', content: text, is_error: isError });
-        // Annotate the last tool_use with success/error status
-        for (let j = result.length - 2; j >= 0; j--) {
-          if (result[j].type === 'tool_use' && !result[j].status) {
-            result[j] = { ...result[j], status: isError ? 'error' : 'success' };
+        // Annotate the last tool_use/ask_user_question with success/error status
+        let annotatedType = null;
+        for (let j = result.length - 1; j >= 0; j--) {
+          const m = result[j];
+          if ((m.type === 'tool_use' || m.type === 'ask_user_question') && !m.status) {
+            result[j] = { ...m, status: isError ? 'error' : 'success' };
+            annotatedType = m.type;
             break;
           }
         }
+        result.push({ type: 'tool_result', content: text, is_error: isError, hidden: annotatedType === 'ask_user_question' });
       }
     }
     // Skip queue-operation, file-history-snapshot, etc.

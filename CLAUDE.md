@@ -2,53 +2,43 @@
 
 ## Architecture
 
-HomeRoute est un **binaire Rust unifié** qui gère tous les services réseau.
+HomeRoute est un **binaire Rust unifié** gérant tous les services réseau.
 
-- **Frontend**: Application React/Vite dans `web/` — servie comme fichiers statiques par le backend Rust
-- **Backend**: Binaire Rust unique (Cargo workspace) dans `/opt/homeroute/crates/`
-- **Service systemd**: `homeroute.service`
+- **Frontend** : React/Vite dans `web/` — fichiers statiques servis par Rust
+- **Backend** : Cargo workspace dans `crates/` — un seul binaire `homeroute`
+- **Service** : `homeroute.service` (systemd)
 
 ### Cargo Workspace
 
 ```
 crates/
-├── homeroute/       # Binaire principal (supervisor + main)
+├── homeroute/       # Binaire principal (supervisor)
 ├── hr-common/       # Types partagés, config, EventBus
 ├── hr-auth/         # Auth (SQLite sessions, YAML users, Argon2id)
-├── hr-proxy/        # Reverse proxy HTTPS (TLS/SNI, WebSocket, forward-auth)
-├── hr-dns/          # Serveur DNS (UDP/TCP port 53, cache, upstream)
-├── hr-dhcp/         # Serveur DHCP (DHCPv4, leases, DORA)
+├── hr-proxy/        # Reverse proxy HTTPS (TLS/SNI, WebSocket)
+├── hr-dns/          # DNS (UDP/TCP port 53, cache, upstream)
+├── hr-dhcp/         # DHCP (DHCPv4, leases, DORA)
 ├── hr-ipv6/         # IPv6 RA + DHCPv6 stateless
-├── hr-adblock/      # Moteur adblock (FxHashSet, sources, whitelist)
-├── hr-acme/         # Let's Encrypt ACME (wildcards DNS-01 via Cloudflare)
+├── hr-adblock/      # Adblock (FxHashSet, sources, whitelist)
+├── hr-acme/         # ACME Let's Encrypt (DNS-01 Cloudflare)
 ├── hr-firewall/     # Firewall IPv6 (nftables)
-├── hr-container/    # Gestion containers systemd-nspawn
-├── hr-registry/     # Registry des applications/agents
-├── hr-agent/        # Agent binaire déployé dans les containers nspawn
+├── hr-container/    # Containers systemd-nspawn
+├── hr-registry/     # Registry applications/agents
+├── hr-agent/        # Agent binaire dans les containers nspawn
 ├── hr-host-agent/   # Agent hôte
-├── hr-api/          # Routeur API HTTP (axum, routes /api/*, WebSocket)
+└── hr-api/          # API HTTP (axum, /api/*, WebSocket)
 ```
-
-## Gestion du serveur
-
-- Le service systemd `homeroute.service` gère le binaire Rust
-- `systemctl restart homeroute` pour redémarrer après modifications
-- `systemctl reload homeroute` (SIGHUP) pour hot-reload de la config proxy
-- Le build frontend (`cd /opt/homeroute/web && npm run build`) peut être lancé
 
 ## Stockage
 
-| Données | Format | Chemin |
-|---------|--------|--------|
-| Sessions | SQLite | `/opt/homeroute/data/auth.db` |
-| Users | YAML | `/opt/homeroute/data/users.yml` |
-| Hosts | JSON | `/opt/homeroute/data/hosts.json` |
-| Config proxy | JSON | `/var/lib/server-dashboard/rust-proxy-config.json` |
-| Config DNS/DHCP | JSON | `/var/lib/server-dashboard/dns-dhcp-config.json` |
-| Config reverseproxy | JSON | `/var/lib/server-dashboard/reverseproxy-config.json` |
-| Certificats ACME | PEM | `/var/lib/server-dashboard/acme/` |
-| DHCP leases | JSON | `/var/lib/server-dashboard/dhcp-leases` |
-| Env config | dotenv | `/opt/homeroute/.env` |
+| Données | Chemin |
+|---------|--------|
+| Sessions SQLite | `/opt/homeroute/data/auth.db` |
+| Users YAML | `/opt/homeroute/data/users.yml` |
+| Hosts JSON | `/opt/homeroute/data/hosts.json` |
+| Config proxy/DNS/DHCP | `/var/lib/server-dashboard/*.json` |
+| Certificats ACME | `/var/lib/server-dashboard/acme/` |
+| Env config | `/opt/homeroute/.env` |
 
 ## Ports
 
@@ -56,117 +46,57 @@ crates/
 |------|---------|
 | 443 | HTTPS reverse proxy (hr-proxy) |
 | 80 | HTTP→HTTPS redirect |
-| 53 | DNS (hr-dns, UDP+TCP) |
+| 53 | DNS (hr-dns) |
 | 67 | DHCP (hr-dhcp) |
-| 4000 | API management (hr-api, interne) |
+| 4000 | API management (hr-api) |
 
 ## Cloudflare
 
-⚠️ **JAMAIS désactiver le mode proxied Cloudflare** - il convertit IPv6 → IPv4 pour les clients externes.
-Sauf en mode Cloud Gateway
+⚠️ **JAMAIS désactiver le mode proxied** — convertit IPv6 → IPv4 pour clients externes. Sauf en mode Cloud Gateway.
 
-Les enregistrements DNS sont synchronisés automatiquement:
-- **Cloudflare**: AAAA → IPv6 agent (proxied)
-- **DNS local**: A → IPv4 agent + AAAA → IPv6 agent (direct aux containers nspawn)
-
-## Commandes utiles
+## Commandes
 
 ```bash
-# Build tout (serveur + frontend Vite)
-cd /opt/homeroute && make all
-
-# Déployer (build + restart service)
-cd /opt/homeroute && make deploy
-
-# Build serveur uniquement
-cd /opt/homeroute && make server
-
-# Build frontend Vite uniquement
-cd /opt/homeroute && make web
-
-# Tests
-cd /opt/homeroute && make test
-
-# Redémarrer le service
-systemctl restart homeroute
-
-# Hot-reload config proxy
-systemctl reload homeroute
-
-# Logs
+make deploy          # build tout + systemctl restart homeroute
+make server          # cargo build --release seulement
+make web             # npm run build (web/) seulement
+make test            # cargo test
 journalctl -u homeroute -f
-
-# Vérifier le service
 curl -s http://localhost:4000/api/health | jq
+systemctl reload homeroute   # hot-reload config proxy (SIGHUP, sans restart)
 ```
+
+## Règles obligatoires
+
+- **JAMAIS** `cargo run` directement — utiliser `systemctl` et `make deploy`
+- **TOUJOURS** `make deploy` après modification du backend Rust
+- Pour la mise à jour du binaire `hr-agent` dans les containers : utiliser le subagent `agent-updater`
+- Exécuter les commandes dans les containers via **`POST /api/applications/{id}/exec`** (pas machinectl)
+- Passer les commandes comme un seul string bash : `command: ["cmd"]`
 
 ## Équipes d'agents (OBLIGATOIRE)
 
-- **TOUJOURS** créer une équipe d'agents (TeamCreate + Task) pour traiter les tâches dès que possible
-- Paralléliser le travail en répartissant les sous-tâches entre plusieurs agents spécialisés
-- Exemples de répartition :
-  - **Tâches fullstack** : un agent backend (Rust/API) + un agent frontend (React/Vite) en parallèle
-  - **Refactoring** : un agent par crate ou module concerné
-  - **Bug fixing** : un agent pour l'investigation + un agent pour le correctif
-  - **Ajout de feature** : un agent pour l'exploration/planification + des agents pour l'implémentation
-- Ne travailler seul (sans équipe) que pour les tâches triviales (correction d'un typo, modification d'une seule ligne, question simple)
+**TOUJOURS** créer une équipe (TeamCreate + Task) sauf pour les modifications triviales (typo, 1 ligne).
 
-## Règles Frontend (OBLIGATOIRE)
+### Subagents spécialisés disponibles
 
-- **JAMAIS** lancer le serveur manuellement (`cargo run`, etc.)
-- **TOUJOURS** utiliser `systemctl` pour gérer le service
-- **TOUJOURS** utiliser `make deploy` pour build + restart
-- Pour tester après modification : `make deploy && curl -s http://localhost:4000/api/health`
+| Tâche | subagent_type |
+|-------|---------------|
+| Backend Rust, crates/, API | `backend-rust` |
+| Frontend React/Vite (web/ ou web-studio/) | `frontend-react` |
+| Mise à jour binaire hr-agent dans les containers | `agent-updater` |
+| Autre (investigations, scripts) | `general-purpose` |
 
-## Workflow de mise à jour des agents (OBLIGATOIRE)
+### Répartitions types
 
-Lors de la modification du binaire `hr-agent`, suivre **obligatoirement** ce workflow:
+- **Fullstack** : `backend-rust` + `frontend-react` en parallèle
+- **Refactoring** : un agent `backend-rust` par crate concernée
+- **Bug** : un agent investigation + un agent correctif
 
-### 1. Build du nouvel agent
+### Reporting — limitation connue et workarounds
 
-```bash
-cd /opt/homeroute && cargo build --release -p hr-agent
-```
+Les agents peuvent parfois ne pas marquer leurs tâches comme complètes. Pour contourner :
 
-### 2. Copie vers le répertoire de distribution
-
-```bash
-cp target/release/hr-agent /opt/homeroute/data/agent-binaries/hr-agent
-```
-
-### 3. Déclenchement de la mise à jour
-
-```bash
-curl -X POST http://localhost:4000/api/applications/agents/update
-```
-
-### 4. Vérification de l'état
-
-```bash
-curl http://localhost:4000/api/applications/agents/update/status | jq
-```
-
-Vérifier que tous les agents ont:
-- `status: "connected"`
-- `current_version` = version attendue
-- `metrics_flowing: true`
-
-### 5. Correction des agents défaillants
-
-Si un agent ne se reconnecte pas après la mise à jour:
-
-```bash
-# Via API (recommandé):
-curl -X POST http://localhost:4000/api/applications/{id}/update/fix
-
-# Ou manuellement via machinectl:
-machinectl shell hr-v2-{slug} /bin/bash -c "curl -fsSL http://10.0.0.254:4000/api/applications/agents/binary -o /usr/local/bin/hr-agent && chmod +x /usr/local/bin/hr-agent && systemctl restart hr-agent"
-```
-
-### Checklist de vérification
-
-Après déclenchement d'une mise à jour, vérifier:
-- [ ] Tous les agents montrent `status: connected`
-- [ ] Tous les agents reportent la `current_version` attendue
-- [ ] `metrics_flowing: true` pour tous les agents
-- [ ] Aucun agent en état `failed_reconnect`
+1. **Inclure dans chaque prompt de spawn** : _"Quand tu as terminé : appelle TaskUpdate pour marquer la tâche completed, puis envoie-moi un SendMessage résumant ce que tu as fait."_
+2. **Si un agent semble bloqué** : lui envoyer un SendMessage — _"Où en es-tu ? Si terminé, marque la tâche et résume."_
+3. Les subagents `backend-rust`, `frontend-react` et `agent-updater` incluent déjà ces instructions dans leur system prompt.

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 function ChevronIcon({ className }) {
   return (
@@ -50,13 +50,14 @@ function renderMarkdown(text) {
         </ul>
       );
     } else if (/^\d+\.\s/.test(lines[i])) {
+      const startNum = parseInt(lines[i].match(/^(\d+)\./)[1], 10);
       const listItems = [];
       while (i < lines.length && /^\d+\.\s/.test(lines[i])) {
         listItems.push(lines[i].replace(/^\d+\.\s/, ''));
         i++;
       }
       parts.push(
-        <ol key={parts.length} className="list-decimal list-inside space-y-1 my-1 ml-2">
+        <ol key={parts.length} start={startNum} className="list-decimal list-inside space-y-1 my-1 ml-2">
           {listItems.map((item, j) => (
             <li key={j}>{renderInline(item)}</li>
           ))}
@@ -186,7 +187,252 @@ function ThinkingMessage({ message }) {
   );
 }
 
-export default function MessageRenderer({ message, onSend }) {
+// --- AskUserQuestion interactive widget ---
+
+function AskUserQuestionWidget({ message, pendingAnswersRef }) {
+  const { questions } = message;
+  const [answers, setAnswers] = useState(() => {
+    const init = {};
+    (questions || []).forEach((q, i) => {
+      init[i] = { question: q.question, selected: [], other: '' };
+    });
+    return init;
+  });
+
+  // Sync answers to ref whenever they change
+  useEffect(() => {
+    if (pendingAnswersRef) {
+      pendingAnswersRef.current = answers;
+    }
+  }, [answers, pendingAnswersRef]);
+
+  if (!questions || questions.length === 0) return null;
+
+  function toggleOption(qIdx, label, multiSelect) {
+    setAnswers(prev => {
+      const q = { ...prev[qIdx] };
+      if (multiSelect) {
+        if (q.selected.includes(label)) {
+          q.selected = q.selected.filter(s => s !== label);
+        } else {
+          q.selected = [...q.selected, label];
+        }
+        // Deselect "other" radio when selecting a normal option
+      } else {
+        q.selected = [label];
+        q.other = '';
+      }
+      return { ...prev, [qIdx]: q };
+    });
+  }
+
+  function selectOther(qIdx, multiSelect) {
+    setAnswers(prev => {
+      const q = { ...prev[qIdx] };
+      if (multiSelect) {
+        // Toggle — if other is already in "mode", keep it; just focus the input
+      } else {
+        q.selected = [];
+      }
+      return { ...prev, [qIdx]: q };
+    });
+  }
+
+  function setOtherText(qIdx, text) {
+    setAnswers(prev => {
+      const q = { ...prev[qIdx] };
+      q.other = text;
+      if (!q.selected.includes('__other__')) {
+        q.selected = q.selected.filter(s => s !== '__other__');
+      }
+      return { ...prev, [qIdx]: q };
+    });
+  }
+
+  return (
+    <div className="flex justify-start mb-4">
+      <div className="max-w-[85%] w-full space-y-4">
+        {questions.map((q, qIdx) => {
+          const a = answers[qIdx];
+          const isOtherActive = a.selected.length === 0 && a.other !== '';
+          return (
+            <div key={qIdx} className="bg-gray-800/50 border border-gray-700 rounded-xl p-4">
+              <div className="flex items-center gap-2 mb-3">
+                {q.header && (
+                  <span className="text-xs bg-gray-700 text-gray-300 rounded px-2 py-0.5 font-medium">
+                    {q.header}
+                  </span>
+                )}
+              </div>
+              <p className="text-sm text-gray-200 font-medium mb-3">{q.question}</p>
+              <div className="space-y-1.5">
+                {(q.options || []).map((opt, oIdx) => {
+                  const isSelected = a.selected.includes(opt.label);
+                  return (
+                    <button
+                      key={oIdx}
+                      onClick={() => toggleOption(qIdx, opt.label, q.multiSelect)}
+                      className={`w-full flex items-start gap-3 p-2.5 rounded-lg text-left transition-colors ${
+                        isSelected
+                          ? 'bg-indigo-600/15 border border-indigo-500/30'
+                          : 'border border-transparent hover:bg-gray-800'
+                      }`}
+                    >
+                      {/* Radio or checkbox indicator */}
+                      <span className={`mt-0.5 shrink-0 w-4 h-4 rounded-${q.multiSelect ? 'sm' : 'full'} border-2 flex items-center justify-center ${
+                        isSelected
+                          ? 'border-indigo-500 bg-indigo-500'
+                          : 'border-gray-600'
+                      }`}>
+                        {isSelected && (
+                          q.multiSelect
+                            ? <svg className="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                            : <span className="w-1.5 h-1.5 bg-white rounded-full" />
+                        )}
+                      </span>
+                      <div className="min-w-0">
+                        <span className="text-sm text-gray-200">{opt.label}</span>
+                        {opt.description && (
+                          <p className="text-xs text-gray-500 mt-0.5">{opt.description}</p>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+                {/* "Other" option */}
+                <div
+                  className={`flex items-start gap-3 p-2.5 rounded-lg transition-colors ${
+                    isOtherActive
+                      ? 'bg-indigo-600/15 border border-indigo-500/30'
+                      : 'border border-transparent hover:bg-gray-800'
+                  }`}
+                >
+                  <button
+                    onClick={() => selectOther(qIdx, q.multiSelect)}
+                    className="mt-0.5 shrink-0"
+                  >
+                    <span className={`w-4 h-4 rounded-${q.multiSelect ? 'sm' : 'full'} border-2 flex items-center justify-center ${
+                      isOtherActive
+                        ? 'border-indigo-500 bg-indigo-500'
+                        : 'border-gray-600'
+                    }`}>
+                      {isOtherActive && (
+                        q.multiSelect
+                          ? <svg className="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                          : <span className="w-1.5 h-1.5 bg-white rounded-full" />
+                      )}
+                    </span>
+                  </button>
+                  <div className="flex-1 min-w-0">
+                    <span className="text-sm text-gray-400">Other:</span>
+                    <input
+                      type="text"
+                      value={a.other}
+                      onChange={e => {
+                        if (!q.multiSelect) {
+                          setAnswers(prev => ({
+                            ...prev,
+                            [qIdx]: { ...prev[qIdx], selected: [], other: e.target.value },
+                          }));
+                        } else {
+                          setOtherText(qIdx, e.target.value);
+                        }
+                      }}
+                      onFocus={() => selectOther(qIdx, q.multiSelect)}
+                      placeholder="Tell Claude what to do instead..."
+                      className="mt-1 w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-indigo-500/50"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// --- PlanComplete message with action badges ---
+
+function PlanCompleteMessage({ onSend, pendingAnswersRef }) {
+  const [action, setAction] = useState(null);
+
+  function compileAnswersText() {
+    const answers = pendingAnswersRef?.current || {};
+    const entries = Object.values(answers);
+    if (entries.length === 0) return '';
+    const hasAnyAnswer = entries.some(a => a.selected.length > 0 || a.other);
+    if (!hasAnyAnswer) return '';
+    let text = '\n\nAnswers to your questions:\n';
+    for (const a of entries) {
+      const answer = a.selected.length > 0 ? a.selected.join(', ') : (a.other || '(no answer)');
+      text += `- ${a.question} -> ${answer}\n`;
+    }
+    return text;
+  }
+
+  function handleExecute() {
+    setAction('execute');
+    const answers = compileAnswersText();
+    onSend && onSend('Proceed with the plan. Execute all proposed changes.' + answers, 'default');
+  }
+
+  function handleRefine() {
+    setAction('refine');
+    const answers = compileAnswersText();
+    onSend && onSend('Please revise the plan with my additional feedback.' + answers, 'plan');
+  }
+
+  if (action) {
+    return (
+      <div className="flex justify-center my-4">
+        <div className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium ${
+          action === 'execute'
+            ? 'bg-indigo-600/20 border border-indigo-500/30 text-indigo-300'
+            : 'bg-amber-950/30 border border-amber-500/30 text-amber-300'
+        }`}>
+          {action === 'execute' ? (
+            <>
+              <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+              Executing plan
+            </>
+          ) : (
+            <>
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+              Refining plan
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex justify-center my-6">
+      <div className="flex items-center gap-3 bg-amber-950/30 border border-amber-500/30 rounded-2xl px-5 py-3">
+        <svg className="w-4 h-4 text-amber-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <span className="text-sm text-amber-300 font-medium">Plan complete</span>
+        <button
+          onClick={handleExecute}
+          className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl transition-colors"
+        >
+          Execute
+        </button>
+        <button
+          onClick={handleRefine}
+          className="px-4 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm font-medium rounded-xl transition-colors"
+        >
+          Refine
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export default function MessageRenderer({ message, onSend, pendingAnswersRef }) {
   switch (message.type) {
     case 'human':
       return (
@@ -232,7 +478,11 @@ export default function MessageRenderer({ message, onSend }) {
       return <ToolUseMessage message={message} />;
 
     case 'tool_result':
+      if (message.hidden) return null;
       return <ToolResultMessage message={message} />;
+
+    case 'ask_user_question':
+      return <AskUserQuestionWidget message={message} pendingAnswersRef={pendingAnswersRef} />;
 
     case 'thinking':
       return <ThinkingMessage message={message} />;
@@ -247,28 +497,7 @@ export default function MessageRenderer({ message, onSend }) {
       );
 
     case 'plan_complete':
-      return (
-        <div className="flex justify-center my-6">
-          <div className="flex items-center gap-3 bg-amber-950/30 border border-amber-500/30 rounded-2xl px-5 py-3">
-            <svg className="w-4 h-4 text-amber-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <span className="text-sm text-amber-300 font-medium">Plan complete</span>
-            <button
-              onClick={() => onSend && onSend('Proceed with the plan. Execute all proposed changes.', 'default')}
-              className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl transition-colors"
-            >
-              Execute
-            </button>
-            <button
-              onClick={() => onSend && onSend('Please revise the plan with my additional feedback.', 'plan')}
-              className="px-4 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm font-medium rounded-xl transition-colors"
-            >
-              Refine
-            </button>
-          </div>
-        </div>
-      );
+      return <PlanCompleteMessage onSend={onSend} pendingAnswersRef={pendingAnswersRef} />;
 
     case 'raw':
       return (

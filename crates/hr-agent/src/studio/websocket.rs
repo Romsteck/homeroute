@@ -525,14 +525,13 @@ async fn spawn_claude(
         claude_args.push(m.to_string());
     }
 
-    // Plan mode: restrict to read-only tools. Execute mode: bypass permissions
+    // Plan mode: restrict to read-only tools. Both modes use bypassPermissions (headless).
     if mode == "plan" {
         claude_args.push("--allowedTools".to_string());
         claude_args.push("Read,Glob,Grep,WebSearch,WebFetch".to_string());
-    } else {
-        claude_args.push("--permission-mode".to_string());
-        claude_args.push("bypassPermissions".to_string());
     }
+    claude_args.push("--permission-mode".to_string());
+    claude_args.push("bypassPermissions".to_string());
 
     if let Some(sid) = &session_id {
         claude_args.push("--resume".to_string());

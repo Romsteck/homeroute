@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import MessageRenderer from './MessageRenderer';
 
-export default function MessageList({ messages, isStreaming, onSend, mode }) {
+export default function MessageList({ messages, isStreaming, onSend, mode, pendingAnswersRef }) {
   const containerRef = useRef(null);
   const bottomRef = useRef(null);
   const shouldAutoScroll = useRef(true);
@@ -35,7 +35,7 @@ export default function MessageList({ messages, isStreaming, onSend, mode }) {
           </div>
         )}
         {messages.map((msg, i) => (
-          <MessageRenderer key={i} message={msg} onSend={onSend} />
+          <MessageRenderer key={i} message={msg} onSend={onSend} pendingAnswersRef={pendingAnswersRef} />
         ))}
         {isStreaming && (
           <div className="flex items-center gap-2 text-gray-500 text-xs ml-2 mb-4">

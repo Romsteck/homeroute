@@ -2,13 +2,20 @@
  * Walk backward through messages to find the last tool_use without a status
  * and annotate it with 'success' or 'error' based on the tool_result.
  */
+/**
+ * Walk backward through messages to find the last tool_use or ask_user_question
+ * without a status and annotate it with 'success' or 'error'.
+ * Returns the annotated message type so callers can react (e.g. hide tool_result).
+ */
 function annotateLastToolUse(messages, isError) {
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].type === 'tool_use' && !messages[i].status) {
-      messages[i] = { ...messages[i], status: isError ? 'error' : 'success' };
-      break;
+    const m = messages[i];
+    if ((m.type === 'tool_use' || m.type === 'ask_user_question') && !m.status) {
+      messages[i] = { ...m, status: isError ? 'error' : 'success' };
+      return m.type;
     }
   }
+  return null;
 }
 
 /**
@@ -57,22 +64,32 @@ export function updateMessagesFromStream(messages, event) {
           if (last && last.type === 'assistant' && last.subtype === 'text') {
             next[next.length - 1] = { ...last, complete: true };
           }
-          next.push({
-            type: 'tool_use',
-            tool: block.name || 'unknown',
-            input: block.input,
-            tool_use_id: block.id,
-          });
+          // AskUserQuestion gets a special message type for interactive rendering
+          if (block.name === 'AskUserQuestion') {
+            next.push({
+              type: 'ask_user_question',
+              questions: block.input?.questions || [],
+              tool_use_id: block.id,
+            });
+          } else {
+            next.push({
+              type: 'tool_use',
+              tool: block.name || 'unknown',
+              input: block.input,
+              tool_use_id: block.id,
+            });
+          }
         } else if (block.type === 'tool_result') {
           const text = Array.isArray(block.content)
             ? block.content.map(c => c.text || '').join('\n')
             : (typeof block.content === 'string' ? block.content : '');
+          const annotatedType = annotateLastToolUse(next, block.is_error || false);
           next.push({
             type: 'tool_result',
             content: text,
             is_error: block.is_error || false,
+            hidden: annotatedType === 'ask_user_question',
           });
-          annotateLastToolUse(next, block.is_error || false);
         }
       }
     }
@@ -91,12 +108,13 @@ export function updateMessagesFromStream(messages, event) {
     const text = Array.isArray(event.content)
       ? event.content.map(c => c.text || '').join('\n')
       : (typeof event.content === 'string' ? event.content : JSON.stringify(event.content || ''));
+    const annotatedType = annotateLastToolUse(next, event.is_error || false);
     next.push({
       type: 'tool_result',
       content: text,
       is_error: event.is_error || false,
+      hidden: annotatedType === 'ask_user_question',
     });
-    annotateLastToolUse(next, event.is_error || false);
     return next;
   }
 
