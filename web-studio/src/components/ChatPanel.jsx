@@ -3,9 +3,10 @@ import MessageList from './MessageList';
 import InputBar from './InputBar';
 import TodoPanel from './TodoPanel';
 
-export default function ChatPanel({ messages, isStreaming, onSend, onAbort, connected, todos, authStatus, onOpenAuthDialog }) {
+export default function ChatPanel({ messages, isStreaming, onSend, onAbort, connected, todos, authStatus, onOpenAuthDialog, pendingAnswersRef, draft, onDraftChange }) {
   const [mode, setMode] = useState(() => localStorage.getItem('studio-mode') || 'default');
-  const pendingAnswersRef = useRef({});
+  const fallbackRef = useRef({});
+  const answersRef = pendingAnswersRef || fallbackRef;
 
   const handleModeChange = useCallback((newMode) => {
     setMode(newMode);
@@ -23,7 +24,7 @@ export default function ChatPanel({ messages, isStreaming, onSend, onAbort, conn
   return (
     <div className="flex-1 flex flex-col min-h-0 min-w-0 bg-gray-900">
       <TodoPanel todos={todos} />
-      <MessageList messages={messages} isStreaming={isStreaming} onSend={handleSendFromMessage} mode={mode} pendingAnswersRef={pendingAnswersRef} />
+      <MessageList messages={messages} isStreaming={isStreaming} onSend={handleSendFromMessage} mode={mode} pendingAnswersRef={answersRef} />
       <InputBar
         onSend={onSend}
         onAbort={onAbort}
@@ -33,6 +34,9 @@ export default function ChatPanel({ messages, isStreaming, onSend, onAbort, conn
         onModeChange={handleModeChange}
         authStatus={authStatus}
         onOpenAuthDialog={onOpenAuthDialog}
+        defaultText={draft?.text}
+        defaultImages={draft?.images}
+        onDraftChange={onDraftChange}
       />
     </div>
   );

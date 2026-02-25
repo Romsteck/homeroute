@@ -1,7 +1,9 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import useStudioWebSocket from './hooks/useStudioWebSocket';
+import useSessionTabs from './hooks/useSessionTabs';
 import useClaudeAuth from './hooks/useClaudeAuth';
 import Header from './components/Header';
+import SessionTabs from './components/SessionTabs';
 import ChatPanel from './components/ChatPanel';
 import PreviewPanel from './components/PreviewPanel';
 import FilesPanel from './components/FilesPanel';
@@ -28,8 +30,10 @@ export default function App() {
     return localStorage.getItem('studio-active-tab') || 'studio';
   });
   const ws = useStudioWebSocket();
+  const sessionManager = useSessionTabs(ws);
   const auth = useClaudeAuth(ws.subscribe, ws.sendRaw, ws.connected);
   const appInfo = useMemo(() => getAppInfo(), []);
+  const activeState = sessionManager.getActiveState();
 
   useEffect(() => {
     document.title = `Studio - ${appInfo.appName}`;
@@ -48,27 +52,42 @@ export default function App() {
         onTabChange={handleTabChange}
         connected={ws.connected}
         sessions={ws.sessions}
-        currentSessionId={ws.currentSessionId}
-        onSelectSession={ws.loadSession}
-        onNewSession={ws.newSession}
+        currentSessionId={sessionManager.activeSessionId}
+        onSelectSession={(id, label) => sessionManager.openTab(id, label)}
+        onNewSession={sessionManager.newTab}
         onDeleteSession={ws.deleteSession}
         authStatus={auth.authStatus}
         onOpenAuthDialog={auth.openAuthDialog}
       />
+
+      {/* Session tabs - only visible in studio mode */}
+      {activeTab === 'studio' && (
+        <SessionTabs
+          tabs={sessionManager.tabs}
+          activeIndex={sessionManager.activeTabIndex}
+          onSwitch={sessionManager.switchTab}
+          onClose={sessionManager.closeTab}
+          onNew={sessionManager.newTab}
+        />
+      )}
 
       <div className="flex flex-1 min-h-0">
         {/* Studio tab - always mounted, hidden when inactive */}
         <div className="flex flex-1 min-h-0" style={{display: activeTab === 'studio' ? 'flex' : 'none'}}>
           <div className="w-[30%] min-w-[300px] flex flex-col border-r border-gray-800">
             <ChatPanel
-              messages={ws.messages}
-              isStreaming={ws.isStreaming}
-              onSend={ws.sendPrompt}
-              onAbort={ws.abort}
+              key={sessionManager.activeSessionId || `new-${sessionManager.activeTabIndex}`}
+              messages={activeState.messages}
+              isStreaming={activeState.isStreaming}
+              onSend={sessionManager.sendPrompt}
+              onAbort={sessionManager.abortActiveSession}
               connected={ws.connected}
-              todos={ws.todos}
+              todos={activeState.todos}
               authStatus={auth.authStatus}
               onOpenAuthDialog={auth.openAuthDialog}
+              pendingAnswersRef={sessionManager.pendingAnswersRef}
+              draft={activeState.draft}
+              onDraftChange={sessionManager.updateDraft}
             />
           </div>
           <div className="flex-1 flex flex-col min-w-0">
@@ -85,8 +104,9 @@ export default function App() {
 
       <StatusBar
         connected={ws.connected}
-        sessionId={ws.currentSessionId}
-        isStreaming={ws.isStreaming}
+        sessionId={sessionManager.activeSessionId}
+        isStreaming={activeState.isStreaming}
+        activeCount={sessionManager.activeStreamCount}
       />
 
       {auth.showAuthDialog && (

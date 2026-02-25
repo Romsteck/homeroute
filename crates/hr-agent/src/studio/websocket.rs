@@ -27,20 +27,6 @@ async fn sync_studio_credentials() {
     let studio_claude = format!("{STUDIO_HOME}/.claude");
     let _ = tokio::fs::create_dir_all(&studio_claude).await;
 
-    // Copy credentials file (may be refreshed by agent)
-    let src = "/root/.claude/.credentials.json";
-    let dst = format!("{studio_claude}/.credentials.json");
-    if std::path::Path::new(src).exists() {
-        let _ = tokio::fs::copy(src, &dst).await;
-    }
-
-    // Copy settings
-    let src = "/root/.claude/settings.json";
-    let dst = format!("{studio_claude}/settings.json");
-    if std::path::Path::new(src).exists() {
-        let _ = tokio::fs::copy(src, &dst).await;
-    }
-
     // Ensure studio user owns its home
     let _ = tokio::process::Command::new("chown")
         .args(["-R", &format!("{STUDIO_USER}:{STUDIO_USER}"), STUDIO_HOME])
@@ -53,25 +39,6 @@ async fn sync_studio_credentials() {
         .args(["-R", "a+rwX", WORKSPACE_ROOT])
         .output()
         .await;
-
-    // Fix ownership of root's Claude projects directory (old sessions created as root)
-    let root_projects = "/root/.claude/projects";
-    if std::path::Path::new(root_projects).exists() {
-        let _ = tokio::process::Command::new("chown")
-            .args(["-R", &format!("{STUDIO_USER}:{STUDIO_USER}"), root_projects])
-            .output()
-            .await;
-    }
-
-    // Ensure the projects symlink exists (containers provisioned before symlink was added)
-    let studio_projects = format!("{STUDIO_HOME}/.claude/projects");
-    let studio_projects_path = std::path::Path::new(&studio_projects);
-    if !studio_projects_path.exists() && std::path::Path::new(root_projects).exists() {
-        let _ = tokio::process::Command::new("ln")
-            .args(["-sf", root_projects, &studio_projects])
-            .output()
-            .await;
-    }
 }
 
 /// Resolve a client-provided relative path to an absolute path within workspace.
@@ -149,6 +116,7 @@ where
                 let _ = out_tx
                     .send(WsOutMessage::Error {
                         message: format!("Invalid message: {e}"),
+                        session_id: None,
                     })
                     .await;
                 continue;
@@ -157,14 +125,42 @@ where
 
         match parsed {
             WsInMessage::Prompt { prompt, session_id, mode, model, images } => {
-                // Kill any active subprocess (from any connection)
-                studio.kill_all_active().await;
-                // Spawn new claude process
-                spawn_claude(studio, conn_id, &prompt, session_id, &mode, model.as_deref(), images, out_tx.clone(), user.as_deref()).await;
+                // If session_id provided and that session is already active, kill it first
+                if let Some(ref sid) = session_id {
+                    if studio.is_session_active(sid).await {
+                        studio.kill_session(sid).await;
+                    }
+                }
+                // Check concurrency limit
+                if studio.active_count().await >= studio.max_concurrent {
+                    let _ = out_tx.send(WsOutMessage::Error {
+                        message: format!("Maximum concurrent sessions ({}) reached", studio.max_concurrent),
+                        session_id: session_id.clone(),
+                    }).await;
+                } else {
+                    // Spawn new claude process
+                    spawn_claude(studio, conn_id, &prompt, session_id, &mode, model.as_deref(), images, out_tx.clone(), user.as_deref()).await;
+                }
             }
-            WsInMessage::Abort => {
-                studio.kill_all_active().await;
-                studio.broadcast_all(&WsOutMessage::Done { session_id: None }).await;
+            WsInMessage::Abort { session_id } => {
+                if let Some(sid) = session_id {
+                    // Abort a specific session
+                    studio.kill_session(&sid).await;
+                    studio.broadcast_all(&WsOutMessage::Done { session_id: Some(sid) }).await;
+                } else {
+                    // Abort all sessions (backward compat)
+                    let active_ids = studio.active_session_ids().await;
+                    studio.kill_all_active().await;
+                    for sid in active_ids {
+                        studio.broadcast_all(&WsOutMessage::Done { session_id: Some(sid) }).await;
+                    }
+                    // Also send a Done with no session_id for legacy clients
+                    studio.broadcast_all(&WsOutMessage::Done { session_id: None }).await;
+                }
+            }
+            WsInMessage::GetActiveStreams => {
+                let session_ids = studio.active_session_ids().await;
+                let _ = out_tx.send(WsOutMessage::ActiveStreams { session_ids }).await;
             }
             WsInMessage::ListSessions => {
                 let sessions = super::sessions::list_sessions();
@@ -173,10 +169,10 @@ where
             WsInMessage::GetSession { session_id, limit } => {
                 let messages = super::sessions::get_session_messages(&session_id, limit);
                 let _ = out_tx
-                    .send(WsOutMessage::SessionMessages { messages })
+                    .send(WsOutMessage::SessionMessages { messages, session_id: Some(session_id.clone()) })
                     .await;
-                // If there's an active stream, replay buffered events so client catches up
-                studio.replay_stream_buffer(&out_tx).await;
+                // If there's an active stream for this session, replay buffered events
+                studio.replay_session_buffer(&session_id, &out_tx).await;
             }
             WsInMessage::DeleteSession { session_id } => {
                 super::sessions::delete_session(&session_id);
@@ -193,6 +189,7 @@ where
                             let _ = out_tx
                                 .send(WsOutMessage::Error {
                                     message: format!("Invalid or inaccessible directory: {path}"),
+                                    session_id: None,
                                 })
                                 .await;
                             return;
@@ -205,6 +202,7 @@ where
                             let _ = out_tx
                                 .send(WsOutMessage::Error {
                                     message: format!("Failed to read directory: {e}"),
+                                    session_id: None,
                                 })
                                 .await;
                             return;
@@ -253,6 +251,7 @@ where
                             let _ = out_tx
                                 .send(WsOutMessage::Error {
                                     message: format!("Invalid or inaccessible file: {path}"),
+                                    session_id: None,
                                 })
                                 .await;
                             return;
@@ -265,6 +264,7 @@ where
                             let _ = out_tx
                                 .send(WsOutMessage::Error {
                                     message: format!("Failed to read file metadata: {e}"),
+                                    session_id: None,
                                 })
                                 .await;
                             return;
@@ -280,6 +280,7 @@ where
                                 let _ = out_tx
                                     .send(WsOutMessage::Error {
                                         message: format!("Failed to open file: {e}"),
+                                        session_id: None,
                                     })
                                     .await;
                                 return;
@@ -292,6 +293,7 @@ where
                                 let _ = out_tx
                                     .send(WsOutMessage::Error {
                                         message: format!("Failed to read file: {e}"),
+                                        session_id: None,
                                     })
                                     .await;
                                 return;
@@ -362,12 +364,14 @@ where
                         Err(e) => {
                             let _ = out_tx.send(WsOutMessage::Error {
                                 message: format!("Failed to save token: {e}"),
+                                session_id: None,
                             }).await;
                         }
                     }
                 } else {
                     let _ = out_tx.send(WsOutMessage::Error {
                         message: "No user identity available.".to_string(),
+                        session_id: None,
                     }).await;
                 }
             }
@@ -383,6 +387,7 @@ where
                 } else {
                     let _ = out_tx.send(WsOutMessage::Error {
                         message: "No user identity available.".to_string(),
+                        session_id: None,
                     }).await;
                 }
             }
@@ -478,9 +483,14 @@ async fn spawn_claude(
                     let _ = tokio::fs::write(&claude_json, r#"{"hasCompletedOnboarding":true}"#).await;
                 }
             }
-            _ => {
+            Some(_) => {
+                // OAuth or native claudeAiOauth: Claude uses its own credentials from HOME
+                // No env var needed — claude CLI will find /home/studio/.claude/.credentials.json
+            }
+            None => {
                 let _ = out_tx.send(WsOutMessage::Error {
                     message: "No Claude credentials configured. Use the auth panel to link your Claude account.".to_string(),
+                    session_id: session_id.clone(),
                 }).await;
                 return;
             }
@@ -592,6 +602,7 @@ async fn spawn_claude(
             let _ = out_tx
                 .send(WsOutMessage::Error {
                     message: format!("Failed to start Claude: {e}"),
+                    session_id: session_id.clone(),
                 })
                 .await;
             return;
@@ -605,15 +616,21 @@ async fn spawn_claude(
             let _ = out_tx
                 .send(WsOutMessage::Error {
                     message: "No stdout from Claude process".to_string(),
+                    session_id: session_id.clone(),
                 })
                 .await;
             return;
         }
     };
 
+    // Use a temp key for the process until we discover the real session_id from stdout
+    let temp_key = session_id.clone().unwrap_or_else(|| format!("_tmp_{}", conn_id));
+    let initial_session_id = session_id.clone();
+
     // Spawn stderr reader to capture and forward errors
     if let Some(stderr) = child.stderr.take() {
         let out_tx_err = out_tx.clone();
+        let stderr_session_id = initial_session_id.clone();
         tokio::spawn(async move {
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
@@ -633,7 +650,10 @@ async fn spawn_claude(
                     stderr_buf.trim().to_string()
                 };
                 let _ = out_tx_err
-                    .send(WsOutMessage::Error { message: msg })
+                    .send(WsOutMessage::Error {
+                        message: msg,
+                        session_id: stderr_session_id,
+                    })
                     .await;
             }
         });
@@ -641,33 +661,49 @@ async fn spawn_claude(
 
     // Spawn reader task to stream stdout (crash detection only, no timeout)
     let studio_reader = Arc::clone(studio);
-    let conn_id_owned = conn_id.to_string();
+    let temp_key_reader = temp_key.clone();
     let reader_handle = tokio::spawn(async move {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
         let mut found_session_id: Option<String> = None;
         let mut saw_result = false;
+        // The key currently used in active_processes — starts as temp_key, re-keyed when session_id discovered
+        let mut current_key = temp_key_reader.clone();
 
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
                     match serde_json::from_str::<serde_json::Value>(&line) {
                         Ok(data) => {
-                            // Extract session_id from stream events
+                            // Extract session_id from stream events and re-key if needed
                             if found_session_id.is_none() {
                                 if let Some(sid) = data.get("session_id").and_then(|v| v.as_str()) {
                                     found_session_id = Some(sid.to_string());
+                                    // Re-key from temp key to real session_id
+                                    if current_key != sid {
+                                        let mut procs = studio_reader.active_processes.write().await;
+                                        if let Some(proc) = procs.remove(&current_key) {
+                                            procs.insert(sid.to_string(), proc);
+                                        }
+                                        drop(procs);
+                                        current_key = sid.to_string();
+                                    }
                                 }
                             }
                             // Track if we see a result event
                             if data.get("type").and_then(|v| v.as_str()) == Some("result") {
                                 saw_result = true;
                             }
-                            // Buffer + broadcast stream events to all connected clients
-                            studio_reader.buffer_and_broadcast(WsOutMessage::Stream { data }).await;
+                            // Buffer + broadcast stream events tagged with session_id
+                            let sid = found_session_id.clone();
+                            let buffer_key = sid.clone().unwrap_or_else(|| current_key.clone());
+                            studio_reader.buffer_and_broadcast_session(
+                                &buffer_key,
+                                WsOutMessage::Stream { data, session_id: sid },
+                            ).await;
                         }
                         Err(_) => {
-                            debug!("Non-JSON line from claude ({}): {}", conn_id_owned, line);
+                            debug!("Non-JSON line from claude ({}): {}", current_key, line);
                         }
                     }
                 }
@@ -676,25 +712,30 @@ async fn spawn_claude(
                     if !saw_result {
                         studio_reader.broadcast_all(&WsOutMessage::Error {
                             message: "Claude process ended unexpectedly".to_string(),
+                            session_id: found_session_id.clone(),
                         }).await;
                     }
                     break;
                 }
                 Err(e) => {
-                    warn!("Reader IO error for {}: {e}", conn_id_owned);
+                    warn!("Reader IO error for {}: {e}", current_key);
                     studio_reader.broadcast_all(&WsOutMessage::Error {
                         message: format!("Read error: {e}"),
+                        session_id: found_session_id.clone(),
                     }).await;
                     break;
                 }
             }
         }
 
-        // Clear stream buffer before Done so new connections don't get stale data
-        studio_reader.clear_stream_buffer().await;
+        // Clear session buffer before Done so new connections don't get stale data
+        let final_key = found_session_id.clone().unwrap_or(current_key.clone());
+        studio_reader.clear_session_buffer(&final_key).await;
 
         // Remove this process from active_processes (it finished naturally)
-        studio_reader.active_processes.write().await.remove(&conn_id_owned);
+        studio_reader.active_processes.write().await.remove(&current_key);
+        // Fix race: also clean up by temp key in case re-keying happened before the insert
+        studio_reader.active_processes.write().await.remove(&temp_key_reader);
 
         // Stream ended — broadcast Done and refresh session list
         let done_msg = WsOutMessage::Done {
@@ -709,7 +750,7 @@ async fn spawn_claude(
 
     let reader_abort = reader_handle.abort_handle();
 
-    // Store the process
+    // Store the process keyed by session_id (or temp key for new sessions)
     let process = super::ClaudeProcess {
         child,
         reader_abort,
@@ -718,7 +759,7 @@ async fn spawn_claude(
         .active_processes
         .write()
         .await
-        .insert(conn_id.to_string(), process);
+        .insert(temp_key, process);
 
     // No global watchdog — the reader task's progressive timeout handles stalls:
     // 2 min no output → warning, 4 min no output → kill.
