@@ -46,21 +46,34 @@ pub async fn has_credentials(username: &str) -> bool {
 /// Read the user's credential metadata, returning None if not found or invalid.
 pub async fn get_auth_status(username: &str) -> Option<UserCredentials> {
     let meta = user_meta_path(username);
-    let data = tokio::fs::read_to_string(&meta).await.ok()?;
-    let cred: UserCredentials = serde_json::from_str(&data).ok()?;
-
-    // Validate: for oauth, the .credentials.json must also exist
-    if cred.method == "oauth" && !user_credentials_json(username).exists() {
-        debug!("OAuth metadata exists for {username} but .credentials.json missing");
-        return None;
+    if let Ok(data) = tokio::fs::read_to_string(&meta).await {
+        if let Ok(cred) = serde_json::from_str::<UserCredentials>(&data) {
+            // Validate: for oauth, the .credentials.json must also exist
+            if cred.method == "oauth" && !user_credentials_json(username).exists() {
+                debug!("OAuth metadata exists for {username} but .credentials.json missing");
+            } else if cred.method == "token" && cred.token.is_none() {
+                // For token method, the token field must be present
+                debug!("Token metadata exists for {username} but token field is empty");
+            } else {
+                return Some(cred);
+            }
+        }
     }
-    // For token method, the token field must be present
-    if cred.method == "token" && cred.token.is_none() {
-        debug!("Token metadata exists for {username} but token field is empty");
-        return None;
+
+    // Fallback: detect native Claude OAuth credentials at /home/studio/.claude/.credentials.json
+    // This covers users who authenticated via `claude` CLI directly (not via Studio token flow)
+    let native_creds = PathBuf::from(format!("{STUDIO_HOME}/.claude/.credentials.json"));
+    if native_creds.exists() {
+        debug!("Native Claude OAuth credentials found for {username}");
+        return Some(UserCredentials {
+            method: "claudeAiOauth".to_string(),
+            token: None,
+            subscription_type: None,
+            created_at: 0,
+        });
     }
 
-    Some(cred)
+    None
 }
 
 /// Save a pasted API/OAuth token for a user.

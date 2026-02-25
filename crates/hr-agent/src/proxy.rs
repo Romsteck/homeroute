@@ -162,6 +162,7 @@ impl AgentProxy {
         frontend: Option<&hr_registry::types::FrontendEndpoint>,
         environment: hr_registry::types::Environment,
         code_server_enabled: bool,
+        stack: hr_registry::types::AppStack,
     ) {
         let mut new_routes = HashMap::new();
         if let Some(fe) = frontend {
@@ -193,11 +194,15 @@ impl AgentProxy {
             );
         }
         if environment == hr_registry::types::Environment::Development {
-            // Vite dev server (port 5173) — API is proxied through Vite config
+            // Dev server port depends on stack: Vite (5173) or Next.js (3000)
+            let dev_port = match stack {
+                hr_registry::types::AppStack::ViteRust => 5173,
+                hr_registry::types::AppStack::NextJs => 3000,
+            };
             new_routes.insert(
                 format!("dev.{}.{}", slug, base_domain),
                 LocalRoute {
-                    target_port: 5173,
+                    target_port: dev_port,
                     auth_required: false,
                     allowed_groups: vec![],
                     is_studio: false,
@@ -554,17 +559,26 @@ async fn proxy_http_with_injection(
 
         let modified_bytes = bytes::Bytes::from(modified);
         let mut response = Response::from_parts(parts, full_body(modified_bytes.clone()));
-        // Update Content-Length
+        // Update Content-Length and remove Transfer-Encoding (body is now fully buffered)
         response.headers_mut().insert(
             "content-length",
             hyper::header::HeaderValue::from_str(&modified_bytes.len().to_string()).unwrap(),
         );
+        response.headers_mut().remove("transfer-encoding");
         // Remove Content-Encoding in case it was set
         response.headers_mut().remove("content-encoding");
         Ok(response)
     } else {
-        // No </head> found — return original body unmodified
-        Ok(Response::from_parts(parts, full_body(body_bytes)))
+        // No </head> found — return original body unmodified (also fully buffered)
+        let body_len = body_bytes.len();
+        let mut response = Response::from_parts(parts, full_body(body_bytes));
+        response.headers_mut().insert(
+            "content-length",
+            hyper::header::HeaderValue::from_str(&body_len.to_string()).unwrap(),
+        );
+        response.headers_mut().remove("transfer-encoding");
+        response.headers_mut().remove("content-encoding");
+        Ok(response)
     }
 }
 

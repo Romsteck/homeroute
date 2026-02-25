@@ -26,7 +26,11 @@ pub enum WsInMessage {
         #[serde(default)]
         images: Option<Vec<ImageAttachment>>,
     },
-    Abort,
+    Abort {
+        #[serde(default)]
+        session_id: Option<String>,
+    },
+    GetActiveStreams,
     ListSessions,
     GetSession {
         session_id: String,
@@ -66,6 +70,8 @@ fn default_mode() -> String {
 pub enum WsOutMessage {
     Stream {
         data: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
     Done {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -73,15 +79,24 @@ pub enum WsOutMessage {
     },
     Error {
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
     Sessions {
         sessions: Vec<SessionInfo>,
     },
     SessionMessages {
         messages: Vec<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
     Busy {
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
+    ActiveStreams {
+        session_ids: Vec<String>,
     },
     DirectoryListing {
         path: String,

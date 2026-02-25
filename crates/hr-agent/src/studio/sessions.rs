@@ -178,7 +178,12 @@ fn extract_session_info(path: &std::path::Path) -> (usize, String) {
                             .unwrap_or(&text)
                             .trim();
                         let truncated = if clean.len() > 80 {
-                            format!("{}...", &clean[..80])
+                            let boundary = clean.char_indices()
+                                .take_while(|(i, _)| *i < 80)
+                                .last()
+                                .map(|(i, c)| i + c.len_utf8())
+                                .unwrap_or(0);
+                            format!("{}...", &clean[..boundary])
                         } else {
                             clean.to_string()
                         };

@@ -36,7 +36,11 @@ export default function Header({
         <SessionPicker
           sessions={sessions}
           currentSessionId={currentSessionId}
-          onSelect={onSelectSession}
+          onSelect={(id) => {
+            const session = sessions.find(s => (s.session_id || s.id) === id);
+            const label = session?.summary || (id ? id.slice(0, 8) + '...' : 'New Chat');
+            onSelectSession(id, label);
+          }}
           onNew={onNewSession}
           onDelete={onDeleteSession}
         />

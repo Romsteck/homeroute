@@ -17,12 +17,14 @@ use types::WsOutMessage;
 pub const STUDIO_WS_PORT: u16 = 3839;
 
 pub struct StudioBridge {
+    /// Active Claude processes, keyed by session_id.
     pub active_processes: RwLock<HashMap<String, ClaudeProcess>>,
     /// All connected WebSocket clients, keyed by connection ID.
     connections: RwLock<HashMap<String, mpsc::Sender<WsOutMessage>>>,
-    /// Buffer of stream events for the current Claude turn.
-    /// Replayed to new connections that join mid-stream (e.g. page refresh).
-    stream_buffer: RwLock<Vec<WsOutMessage>>,
+    /// Per-session stream buffers for replaying events to late joiners.
+    stream_buffers: RwLock<HashMap<String, Vec<WsOutMessage>>>,
+    /// Maximum number of concurrent Claude sessions.
+    pub max_concurrent: usize,
 }
 
 pub struct ClaudeProcess {
@@ -35,7 +37,8 @@ impl StudioBridge {
         Self {
             active_processes: RwLock::new(HashMap::new()),
             connections: RwLock::new(HashMap::new()),
-            stream_buffer: RwLock::new(Vec::new()),
+            stream_buffers: RwLock::new(HashMap::new()),
+            max_concurrent: 3,
         }
     }
 
@@ -74,38 +77,68 @@ impl StudioBridge {
         }
     }
 
-    /// Buffer a stream event and broadcast it to all connections.
-    /// Used for stream events so new connections can catch up.
-    pub async fn buffer_and_broadcast(&self, msg: WsOutMessage) {
-        self.stream_buffer.write().await.push(msg.clone());
+    /// Buffer a stream event for a specific session and broadcast it to all connections.
+    pub async fn buffer_and_broadcast_session(&self, session_id: &str, msg: WsOutMessage) {
+        self.stream_buffers
+            .write()
+            .await
+            .entry(session_id.to_string())
+            .or_default()
+            .push(msg.clone());
         self.broadcast_all(&msg).await;
     }
 
-    /// Clear the stream buffer (called on Done or new Prompt).
-    pub async fn clear_stream_buffer(&self) {
-        self.stream_buffer.write().await.clear();
+    /// Clear the stream buffer for a specific session.
+    pub async fn clear_session_buffer(&self, session_id: &str) {
+        self.stream_buffers.write().await.remove(session_id);
     }
 
-    /// Replay buffered stream events to a specific connection.
-    /// Called after get_session so the client catches up on an ongoing stream.
-    pub async fn replay_stream_buffer(&self, tx: &mpsc::Sender<WsOutMessage>) {
-        let buf = self.stream_buffer.read().await;
-        for msg in buf.iter() {
-            if tx.send(msg.clone()).await.is_err() {
-                break;
+    /// Replay buffered stream events for a specific session to a connection.
+    pub async fn replay_session_buffer(&self, session_id: &str, tx: &mpsc::Sender<WsOutMessage>) {
+        let bufs = self.stream_buffers.read().await;
+        if let Some(buf) = bufs.get(session_id) {
+            for msg in buf.iter() {
+                if tx.send(msg.clone()).await.is_err() {
+                    break;
+                }
             }
         }
     }
 
-    /// Kill ALL active Claude processes (used on new Prompt or Abort).
+    /// Kill a specific session's Claude process and clear its buffer.
+    pub async fn kill_session(&self, session_id: &str) {
+        if let Some(mut proc) = self.active_processes.write().await.remove(session_id) {
+            proc.reader_abort.abort();
+            let _ = proc.child.kill().await;
+            debug!("Killed active Claude process for session {}", session_id);
+        }
+        self.clear_session_buffer(session_id).await;
+    }
+
+    /// Kill ALL active Claude processes (backward compat for abort-all).
     pub async fn kill_all_active(&self) {
         let mut procs = self.active_processes.write().await;
         for (id, mut proc) in procs.drain() {
             proc.reader_abort.abort();
             let _ = proc.child.kill().await;
-            debug!("Killed active Claude process for {}", id);
+            debug!("Killed active Claude process for session {}", id);
         }
-        self.stream_buffer.write().await.clear();
+        self.stream_buffers.write().await.clear();
+    }
+
+    /// Number of currently active Claude sessions.
+    pub async fn active_count(&self) -> usize {
+        self.active_processes.read().await.len()
+    }
+
+    /// Check if a specific session is currently active.
+    pub async fn is_session_active(&self, session_id: &str) -> bool {
+        self.active_processes.read().await.contains_key(session_id)
+    }
+
+    /// Get all active session IDs.
+    pub async fn active_session_ids(&self) -> Vec<String> {
+        self.active_processes.read().await.keys().cloned().collect()
     }
 
     /// Start the Studio WebSocket server on a local port.

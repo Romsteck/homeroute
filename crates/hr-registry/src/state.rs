@@ -473,6 +473,7 @@ impl AgentRegistry {
                     frontend: Some(app.frontend.clone()),
                     environment: app.environment,
                     code_server_enabled: app.code_server_enabled,
+                    stack: app.stack,
                 })
                 .await;
         }
@@ -1118,6 +1119,7 @@ impl AgentRegistry {
                 frontend: Some(app.frontend.clone()),
                 environment: app.environment,
                 code_server_enabled: app.code_server_enabled,
+                stack: app.stack,
             })
             .await;
     }

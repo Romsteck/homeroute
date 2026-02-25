@@ -1,11 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { updateMessagesFromStream } from '../utils/streamParser';
 
 /**
  * Convert Claude JSONL session messages into display format.
- * JSONL format: {"type":"user|assistant","message":{"role":"...","content":[{"type":"text","text":"..."}]}}
+ * Exported for use by useSessionTabs.
  */
-function parseSessionMessages(rawMessages) {
+export function parseSessionMessages(rawMessages) {
   const result = [];
   for (const msg of rawMessages) {
     const type = msg.type;
@@ -18,8 +17,6 @@ function parseSessionMessages(rawMessages) {
         result.push(humanMsg);
       }
     } else if (type === 'assistant') {
-      const content = extractTextContent(msg);
-      // Check for tool_use blocks in content array
       const contentArr = msg.message?.content;
       if (Array.isArray(contentArr)) {
         for (const block of contentArr) {
@@ -28,7 +25,6 @@ function parseSessionMessages(rawMessages) {
           } else if (block.type === 'tool_use') {
             if (block.name === 'AskUserQuestion') {
               const questions = block.input?.questions || [];
-              // Dedup: skip if previous message has identical questions
               const prev = result[result.length - 1];
               if (prev?.type === 'ask_user_question' &&
                   JSON.stringify(prev.questions) === JSON.stringify(questions)) {
@@ -43,8 +39,11 @@ function parseSessionMessages(rawMessages) {
             }
           }
         }
-      } else if (content) {
-        result.push({ type: 'assistant', subtype: 'text', content, complete: true });
+      } else {
+        const content = extractTextContent(msg);
+        if (content) {
+          result.push({ type: 'assistant', subtype: 'text', content, complete: true });
+        }
       }
     } else if (type === 'tool_result' || msg.message?.role === 'tool') {
       const contentArr = msg.message?.content;
@@ -55,7 +54,6 @@ function parseSessionMessages(rawMessages) {
       }
       if (msg.message?.is_error || msg.is_error) isError = true;
       if (text || isError) {
-        // Annotate the last tool_use/ask_user_question with success/error status
         let annotatedType = null;
         let annotatedHidden = false;
         for (let j = result.length - 1; j >= 0; j--) {
@@ -70,7 +68,6 @@ function parseSessionMessages(rawMessages) {
         result.push({ type: 'tool_result', content: text, is_error: isError, hidden: annotatedType === 'ask_user_question' || annotatedHidden });
       }
     }
-    // Skip queue-operation, file-history-snapshot, etc.
   }
   return result;
 }
@@ -79,7 +76,7 @@ function parseSessionMessages(rawMessages) {
  * Scan raw session messages (JSONL) backward for the last TodoWrite tool_use.
  * Returns the todos array or [].
  */
-function extractLastTodos(rawMessages) {
+export function extractLastTodos(rawMessages) {
   for (let i = rawMessages.length - 1; i >= 0; i--) {
     const content = rawMessages[i].message?.content;
     if (Array.isArray(content)) {
@@ -113,28 +110,17 @@ function extractTextContent(msg) {
   return '';
 }
 
+/**
+ * Pure WebSocket transport hook.
+ * Manages connection, sessions list, and subscriber dispatch.
+ * No per-session state (messages, todos, isStreaming) — that lives in useSessionTabs.
+ */
 export default function useStudioWebSocket() {
   const [connected, setConnected] = useState(false);
-  const [messages, setMessages] = useState([]);
   const [sessions, setSessions] = useState([]);
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [todos, setTodos] = useState([]);
-  const [currentSessionId, _setCurrentSessionId] = useState(() => {
-    return localStorage.getItem('studio-session-id') || null;
-  });
-  const setCurrentSessionId = useCallback((id) => {
-    _setCurrentSessionId(id);
-    if (id) {
-      localStorage.setItem('studio-session-id', id);
-    } else {
-      localStorage.removeItem('studio-session-id');
-    }
-  }, []);
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
-  const lastModeRef = useRef('default');
   const listenersRef = useRef({});
-  const abortedRef = useRef(false);
 
   const connect = useCallback(() => {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -144,11 +130,7 @@ export default function useStudioWebSocket() {
     ws.onopen = () => {
       setConnected(true);
       ws.send(JSON.stringify({ type: 'list_sessions' }));
-      // Restore last session if any
-      const savedSession = localStorage.getItem('studio-session-id');
-      if (savedSession) {
-        ws.send(JSON.stringify({ type: 'get_session', session_id: savedSession }));
-      }
+      ws.send(JSON.stringify({ type: 'get_active_streams' }));
     };
 
     ws.onclose = () => {
@@ -169,71 +151,18 @@ export default function useStudioWebSocket() {
         return;
       }
 
-      // Dispatch to external subscribers
+      // Dispatch to all subscribers for this message type
       const listeners = listenersRef.current[data.type];
       if (listeners && listeners.length > 0) {
         for (const cb of listeners) {
           cb(data);
         }
-        // For non-chat types, don't fall through to switch
-        if (!['stream', 'done', 'error', 'sessions', 'session_messages', 'busy'].includes(data.type)) {
-          return;
-        }
       }
 
+      // Only handle sessions globally — everything else is dispatched via subscribe
       switch (data.type) {
-        case 'stream': {
-          const event = data.data || data.event || data;
-          setMessages(prev => updateMessagesFromStream(prev, event));
-          // Extract session_id from stream events (init or result)
-          if (event.session_id) {
-            setCurrentSessionId(event.session_id);
-          }
-          // Extract todos from TodoWrite tool_use events
-          if (event.type === 'assistant') {
-            const blocks = event.message?.content;
-            if (Array.isArray(blocks)) {
-              for (const block of blocks) {
-                if (block.type === 'tool_use' && block.name === 'TodoWrite') {
-                  setTodos(block.input?.todos || []);
-                }
-              }
-            }
-          }
-          setIsStreaming(true);
-          break;
-        }
-        case 'done':
-          setIsStreaming(false);
-          if (data.session_id) {
-            setCurrentSessionId(data.session_id);
-          }
-          // If we were in plan mode, add a plan_complete action message (skip if aborted)
-          if (lastModeRef.current === 'plan' && !abortedRef.current) {
-            setMessages(prev => [...prev, { type: 'plan_complete' }]);
-          }
-          abortedRef.current = false;
-          // Refresh session list to pick up new summaries
-          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({ type: 'list_sessions' }));
-          }
-          break;
-        case 'error':
-          setMessages(prev => [...prev, { type: 'error', content: data.message || data.error || 'Unknown error' }]);
-          setIsStreaming(false);
-          break;
         case 'sessions':
           setSessions(data.sessions || []);
-          break;
-        case 'session_messages':
-          setMessages(parseSessionMessages(data.messages || []));
-          setTodos(extractLastTodos(data.messages || []));
-          // Don't force isStreaming=false here — if a stream is active,
-          // replayed buffer events will follow and set isStreaming=true.
-          // On fresh page load, isStreaming defaults to false already.
-          break;
-        case 'busy':
-          setMessages(prev => [...prev, { type: 'error', content: 'Session is busy. Please wait for the current operation to complete.' }]);
           break;
         default:
           break;
@@ -251,20 +180,11 @@ export default function useStudioWebSocket() {
     };
   }, [connect]);
 
-  const sendPrompt = useCallback((text, mode = 'default', model, images) => {
+  const sendPrompt = useCallback((text, mode = 'default', model, images, sessionId) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    abortedRef.current = false;
-    lastModeRef.current = mode;
-    // Build display message with optional images
-    const humanMsg = { type: 'human', content: text };
-    if (images && images.length > 0) {
-      humanMsg.images = images;
-    }
-    setMessages(prev => [...prev, humanMsg]);
-    setIsStreaming(true);
     const payload = { type: 'prompt', prompt: text, mode };
-    if (currentSessionId) {
-      payload.session_id = currentSessionId;
+    if (sessionId) {
+      payload.session_id = sessionId;
     }
     if (model) {
       payload.model = model;
@@ -273,25 +193,25 @@ export default function useStudioWebSocket() {
       payload.images = images;
     }
     wsRef.current.send(JSON.stringify(payload));
-  }, [currentSessionId]);
+  }, []);
 
-  const abort = useCallback(() => {
+  const abort = useCallback((sessionId) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    abortedRef.current = true;
-    setIsStreaming(false);
-    wsRef.current.send(JSON.stringify({ type: 'abort' }));
+    const payload = { type: 'abort' };
+    if (sessionId) {
+      payload.session_id = sessionId;
+    }
+    wsRef.current.send(JSON.stringify(payload));
   }, []);
 
   const loadSession = useCallback((sessionId) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    setCurrentSessionId(sessionId);
     wsRef.current.send(JSON.stringify({ type: 'get_session', session_id: sessionId }));
   }, []);
 
-  const newSession = useCallback(() => {
-    setMessages([]);
-    setTodos([]);
-    setCurrentSessionId(null);
+  const deleteSession = useCallback((sessionId) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify({ type: 'delete_session', session_id: sessionId }));
   }, []);
 
   const subscribe = useCallback((type, callback) => {
@@ -309,27 +229,12 @@ export default function useStudioWebSocket() {
     wsRef.current.send(JSON.stringify(msg));
   }, []);
 
-  const deleteSession = useCallback((sessionId) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    wsRef.current.send(JSON.stringify({ type: 'delete_session', session_id: sessionId }));
-    // If deleting the current session, clear it
-    if (sessionId === currentSessionId) {
-      setMessages([]);
-      setCurrentSessionId(null);
-    }
-  }, [currentSessionId]);
-
   return {
     connected,
-    messages,
     sessions,
-    isStreaming,
-    currentSessionId,
-    todos,
     sendPrompt,
     abort,
     loadSession,
-    newSession,
     deleteSession,
     sendRaw,
     subscribe,

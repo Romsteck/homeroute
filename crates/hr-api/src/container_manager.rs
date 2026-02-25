@@ -540,14 +540,24 @@ impl ContainerManager {
             .await
             .map_err(|e| e.to_string())?;
 
-        // Update name in V2 state if provided
-        if let Some(ref new_name) = req.name {
+        // Update V2 state (name / stack) if provided
+        {
+            let mut need_save = false;
             let mut state = self.state.write().await;
             if let Some(c) = state.containers.iter_mut().find(|c| c.id == id) {
-                c.name = new_name.clone();
+                if let Some(ref new_name) = req.name {
+                    c.name = new_name.clone();
+                    need_save = true;
+                }
+                if let Some(new_stack) = req.stack {
+                    c.stack = new_stack;
+                    need_save = true;
+                }
             }
             drop(state);
-            let _ = self.save_state().await;
+            if need_save {
+                let _ = self.save_state().await;
+            }
         }
 
         info!(id, "Container V2 updated via API");
@@ -865,20 +875,11 @@ WantedBy=multi-user.target
         )
         .await;
 
-        // Phase 8b2: Disable Claude Code auto-update for managed containers
-        emit("Configuration Claude Code...");
-        let _ = NspawnClient::exec_with_retry(
-            container_name,
-            &["mkdir -p /root/.claude && printf '{\"autoUpdates\":\"disabled\"}' > /root/.claude/settings.json"],
-            3,
-        )
-        .await;
-
         // Phase 8b3: Create studio user for Claude Studio (non-root Claude CLI execution)
         emit("Création utilisateur studio...");
         let _ = NspawnClient::exec_with_retry(
             container_name,
-            &["id studio >/dev/null 2>&1 || useradd -m -s /bin/bash studio && chmod 755 /root && chmod -R a+rwX /root/.claude && mkdir -p /home/studio/.claude && cp -f /root/.claude/settings.json /home/studio/.claude/settings.json 2>/dev/null && ln -sf /root/.claude/projects /home/studio/.claude/projects; chown -R studio:studio /home/studio"],
+            &["id studio >/dev/null 2>&1 || useradd -m -s /bin/bash studio && chmod 755 /root && mkdir -p /home/studio/.claude/projects && printf '{\"autoUpdates\":\"disabled\"}' > /home/studio/.claude/settings.json; chown -R studio:studio /home/studio"],
             3,
         )
         .await;
@@ -1175,9 +1176,11 @@ WantedBy=multi-user.target
         )
         .await;
 
-        // Phase 13: Vite dev server systemd unit (enabled — always running in DEV)
-        emit("Configuration vite-dev.service...");
-        let vite_unit = r#"[Unit]
+        // Phase 13-14: Dev server systemd units (stack-dependent)
+        match stack {
+            hr_registry::types::AppStack::ViteRust => {
+                emit("Configuration vite-dev.service...");
+                let vite_unit = r#"[Unit]
 Description=Vite Dev Server (HMR)
 After=network.target
 
@@ -1193,20 +1196,19 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin:/root/.cargo/bin
 [Install]
 WantedBy=multi-user.target
 "#;
-        let tmp_vite_unit = PathBuf::from(format!("/tmp/vite-unit-v2-{slug}.service"));
-        let _ = tokio::fs::write(&tmp_vite_unit, vite_unit).await;
-        let _ = NspawnClient::push_file(
-            container_name,
-            &tmp_vite_unit,
-            "etc/systemd/system/vite-dev.service",
-            storage,
-        )
-        .await;
-        let _ = tokio::fs::remove_file(&tmp_vite_unit).await;
+                let tmp_vite_unit = PathBuf::from(format!("/tmp/vite-unit-v2-{slug}.service"));
+                let _ = tokio::fs::write(&tmp_vite_unit, vite_unit).await;
+                let _ = NspawnClient::push_file(
+                    container_name,
+                    &tmp_vite_unit,
+                    "etc/systemd/system/vite-dev.service",
+                    storage,
+                )
+                .await;
+                let _ = tokio::fs::remove_file(&tmp_vite_unit).await;
 
-        // Phase 14: Cargo watch dev server systemd unit (enabled — always running in DEV)
-        emit("Configuration cargo-dev.service...");
-        let cargo_unit = r#"[Unit]
+                emit("Configuration cargo-dev.service...");
+                let cargo_unit = r#"[Unit]
 Description=Cargo Watch Dev Server
 After=network.target
 
@@ -1223,25 +1225,65 @@ Environment=RUST_LOG=info
 [Install]
 WantedBy=multi-user.target
 "#;
-        let tmp_cargo_unit = PathBuf::from(format!("/tmp/cargo-unit-v2-{slug}.service"));
-        let _ = tokio::fs::write(&tmp_cargo_unit, cargo_unit).await;
-        let _ = NspawnClient::push_file(
-            container_name,
-            &tmp_cargo_unit,
-            "etc/systemd/system/cargo-dev.service",
-            storage,
-        )
-        .await;
-        let _ = tokio::fs::remove_file(&tmp_cargo_unit).await;
+                let tmp_cargo_unit =
+                    PathBuf::from(format!("/tmp/cargo-unit-v2-{slug}.service"));
+                let _ = tokio::fs::write(&tmp_cargo_unit, cargo_unit).await;
+                let _ = NspawnClient::push_file(
+                    container_name,
+                    &tmp_cargo_unit,
+                    "etc/systemd/system/cargo-dev.service",
+                    storage,
+                )
+                .await;
+                let _ = tokio::fs::remove_file(&tmp_cargo_unit).await;
 
-        let _ = NspawnClient::exec(container_name, &["systemctl", "daemon-reload"]).await;
+                let _ =
+                    NspawnClient::exec(container_name, &["systemctl", "daemon-reload"]).await;
+                let _ = NspawnClient::exec(
+                    container_name,
+                    &["systemctl", "enable", "--now", "vite-dev", "cargo-dev"],
+                )
+                .await;
+            }
+            hr_registry::types::AppStack::NextJs => {
+                emit("Configuration nextjs-dev.service...");
+                let nextjs_unit = r#"[Unit]
+Description=Next.js Dev Server
+After=network.target
 
-        // Enable and start dev services (always running in DEV containers)
-        let _ = NspawnClient::exec(
-            container_name,
-            &["systemctl", "enable", "--now", "vite-dev", "cargo-dev"],
-        )
-        .await;
+[Service]
+Type=simple
+WorkingDirectory=/root/workspace
+ExecStart=/usr/bin/npx next dev --hostname 0.0.0.0 --port 3000
+Restart=always
+RestartSec=3
+Environment=HOME=/root
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target
+"#;
+                let tmp_nextjs_unit =
+                    PathBuf::from(format!("/tmp/nextjs-unit-v2-{slug}.service"));
+                let _ = tokio::fs::write(&tmp_nextjs_unit, nextjs_unit).await;
+                let _ = NspawnClient::push_file(
+                    container_name,
+                    &tmp_nextjs_unit,
+                    "etc/systemd/system/nextjs-dev.service",
+                    storage,
+                )
+                .await;
+                let _ = tokio::fs::remove_file(&tmp_nextjs_unit).await;
+
+                let _ =
+                    NspawnClient::exec(container_name, &["systemctl", "daemon-reload"]).await;
+                let _ = NspawnClient::exec(
+                    container_name,
+                    &["systemctl", "enable", "--now", "nextjs-dev"],
+                )
+                .await;
+            }
+        }
 
         // Update status to Pending (agent not yet connected)
         self.set_container_status(app_id, ContainerV2Status::Running)

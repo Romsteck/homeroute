@@ -24,6 +24,7 @@ function CreateContainerModal({
     frontend: { auth_required: true, allowed_groups: [], local_only: false },
     code_server_enabled: isPaired ? (initialEnvironment !== 'production') : true,
     linked_app_id: initialLinkedAppId || '',
+    stack: 'vite-rust',
   });
 
   const isDev = form.environment === 'development';
@@ -44,6 +45,7 @@ function CreateContainerModal({
       },
       code_server_enabled: isDev ? form.code_server_enabled : false,
       linked_app_id: form.linked_app_id || null,
+      stack: form.stack,
     };
 
     onCreate(payload);
@@ -136,6 +138,32 @@ function CreateContainerModal({
               ))}
             </select>
           </div>
+
+          {/* Stack selector (only when creating from scratch) */}
+          {!isPaired && (
+            <div>
+              <label className="block text-sm text-gray-400 mb-1">Stack</label>
+              <div className="flex gap-0">
+                {[
+                  { value: 'vite-rust', label: 'Vite + Rust' },
+                  { value: 'next-js', label: 'Next.js' },
+                ].map(({ value, label }) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => setForm({ ...form, stack: value })}
+                    className={`px-4 py-2 text-sm border border-gray-600 transition-colors ${
+                      form.stack === value
+                        ? 'bg-indigo-600 border-indigo-500 text-white'
+                        : 'bg-gray-900 text-gray-400 hover:bg-gray-800'
+                    } ${value === 'vite-rust' ? 'rounded-l' : 'rounded-r border-l-0'}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Auto-creation note (only when creating from scratch) */}
           {!isPaired && (

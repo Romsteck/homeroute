@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Environment, FrontendEndpoint};
+use crate::types::{AppStack, Environment, FrontendEndpoint};
 
 // ── Shared Types ────────────────────────────────────────────────
 
@@ -147,6 +147,9 @@ pub enum RegistryMessage {
         /// Whether code-server is enabled.
         #[serde(default)]
         code_server_enabled: bool,
+        /// Technology stack (vite-rust or next-js).
+        #[serde(default)]
+        stack: AppStack,
     },
     /// Agent should self-update.
     #[serde(rename = "update_available")]

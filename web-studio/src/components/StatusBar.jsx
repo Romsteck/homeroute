@@ -1,4 +1,4 @@
-export default function StatusBar({ connected, sessionId, isStreaming }) {
+export default function StatusBar({ connected, sessionId, isStreaming, activeCount }) {
   return (
     <div className="h-7 bg-gray-800 border-t border-gray-700 px-4 flex items-center justify-between text-xs shrink-0 font-mono">
       <div className="flex items-center gap-2">
@@ -11,7 +11,13 @@ export default function StatusBar({ connected, sessionId, isStreaming }) {
         {sessionId ? `Session: ${sessionId.slice(0, 8)}` : 'No session'}
       </div>
       <div className="flex items-center gap-2">
-        {isStreaming && (
+        {activeCount > 0 && (
+          <>
+            <span className="inline-block w-1.5 h-1.5 bg-purple-500 rounded-full animate-pulse"></span>
+            <span className="text-purple-400">{activeCount} active</span>
+          </>
+        )}
+        {isStreaming && !activeCount && (
           <>
             <span className="inline-block w-1.5 h-1.5 bg-amber-500 rounded-full animate-pulse"></span>
             <span className="text-amber-500">Streaming</span>

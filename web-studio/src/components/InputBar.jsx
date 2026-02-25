@@ -6,13 +6,17 @@ const MODELS = [
   { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
 ];
 
-export default function InputBar({ onSend, onAbort, isStreaming, disabled, mode, onModeChange, authStatus, onOpenAuthDialog }) {
-  const [text, setText] = useState('');
+export default function InputBar({ onSend, onAbort, isStreaming, disabled, mode, onModeChange, authStatus, onOpenAuthDialog, defaultText, defaultImages, onDraftChange }) {
+  const [text, setText] = useState(() => defaultText || '');
   const [model, setModel] = useState(() => localStorage.getItem('studio-model') || 'claude-opus-4-6');
   const [modelOpen, setModelOpen] = useState(false);
-  const [images, setImages] = useState([]); // [{data: base64, mediaType: 'image/png'}]
+  const [images, setImages] = useState(() => defaultImages || []); // [{data: base64, mediaType: 'image/png'}]
   const textareaRef = useRef(null);
   const gearRef = useRef(null);
+
+  useEffect(() => {
+    if (onDraftChange) onDraftChange(text, images);
+  }, [text, images, onDraftChange]);
 
   useEffect(() => {
     if (!isStreaming && textareaRef.current) {

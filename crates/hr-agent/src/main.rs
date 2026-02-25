@@ -476,7 +476,7 @@ async fn handle_registry_message(
     msg: RegistryMessage,
 ) {
     match msg {
-        RegistryMessage::Config { base_domain, slug, frontend, environment, code_server_enabled, .. } => {
+        RegistryMessage::Config { base_domain, slug, frontend, environment, code_server_enabled, stack, .. } => {
             info!("Received config from HomeRoute");
 
             // Write/update .mcp.json for MCP tool discovery
@@ -497,6 +497,7 @@ async fn handle_registry_message(
                 frontend.as_ref(),
                 environment,
                 code_server_enabled,
+                stack,
             );
 
             // On first Config: pull certs and start the HTTPS proxy
