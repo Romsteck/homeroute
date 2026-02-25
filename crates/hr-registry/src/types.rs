@@ -21,6 +21,15 @@ impl Default for Environment {
     }
 }
 
+/// Technology stack for a container application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppStack {
+    #[default]
+    ViteRust,
+    NextJs,
+}
+
 /// A registered application with its container and agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Application {
@@ -54,6 +63,10 @@ pub struct Application {
     /// Whether code-server IDE is enabled for this application.
     #[serde(default = "default_true")]
     pub code_server_enabled: bool,
+
+    /// Stack technologique du container (vite-rust par défaut).
+    #[serde(default)]
+    pub stack: AppStack,
 
     /// Current metrics from agent (volatile, not persisted to disk).
     #[serde(skip_deserializing)]
@@ -97,18 +110,31 @@ impl Application {
                         allowed_groups: vec![],
                     });
                 }
-                routes.push(RouteInfo {
-                    domain: format!("dev.{}.{}", self.slug, base_domain),
-                    target_port: 5173,
-                    auth_required: false,
-                    allowed_groups: vec![],
-                });
-                routes.push(RouteInfo {
-                    domain: format!("devapi.{}.{}", self.slug, base_domain),
-                    target_port: 3000,
-                    auth_required: false,
-                    allowed_groups: vec![],
-                });
+                match self.stack {
+                    AppStack::ViteRust => {
+                        routes.push(RouteInfo {
+                            domain: format!("dev.{}.{}", self.slug, base_domain),
+                            target_port: 5173,
+                            auth_required: false,
+                            allowed_groups: vec![],
+                        });
+                        routes.push(RouteInfo {
+                            domain: format!("devapi.{}.{}", self.slug, base_domain),
+                            target_port: 3000,
+                            auth_required: false,
+                            allowed_groups: vec![],
+                        });
+                    }
+                    AppStack::NextJs => {
+                        routes.push(RouteInfo {
+                            domain: format!("dev.{}.{}", self.slug, base_domain),
+                            target_port: 3000,
+                            auth_required: false,
+                            allowed_groups: vec![],
+                        });
+                        // Next.js gère /api/* en interne — pas de devapi séparé
+                    }
+                }
                 routes.push(RouteInfo {
                     domain: format!("studio.{}.{}", self.slug, base_domain),
                     target_port: 443,
@@ -202,6 +228,8 @@ pub struct CreateApplicationRequest {
     pub linked_app_id: Option<String>,
     #[serde(default = "default_true")]
     pub code_server_enabled: bool,
+    #[serde(default)]
+    pub stack: AppStack,
 }
 
 /// Request body for updating an application.
@@ -217,6 +245,8 @@ pub struct UpdateApplicationRequest {
     pub linked_app_id: Option<String>,
     #[serde(default)]
     pub code_server_enabled: Option<bool>,
+    #[serde(default)]
+    pub stack: Option<AppStack>,
 }
 
 // ── Agent Update Types ──────────────────────────────────────────
@@ -301,6 +331,7 @@ mod tests {
                 local_only: false,
             },
             code_server_enabled,
+            stack: AppStack::ViteRust,
             metrics: None,
         }
     }

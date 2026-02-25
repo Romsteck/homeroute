@@ -597,13 +597,25 @@ async fn prod_push(
 
 // ── Rules update handlers ────────────────────────────────────
 
-/// Render the 4 rule templates with the given slug and domain.
-fn render_rules(slug: &str, domain: &str) -> Vec<(String, String)> {
+/// Render the rule templates with the given slug, domain, and stack.
+fn render_rules(slug: &str, domain: &str, stack: hr_registry::types::AppStack) -> Vec<(String, String)> {
+    use hr_registry::types::AppStack;
+
     let render = |template: &str| -> String {
         template
             .replace("{{slug}}", slug)
             .replace("{{domain}}", domain)
     };
+
+    let dev_rules = match stack {
+        AppStack::NextJs => include_str!("../../../hr-registry/src/rules/homeroute-dev-nextjs.md"),
+        AppStack::ViteRust => include_str!("../../../hr-registry/src/rules/homeroute-dev.md"),
+    };
+    let deploy_rules = match stack {
+        AppStack::NextJs => include_str!("../../../hr-registry/src/rules/homeroute-deploy-nextjs.md"),
+        AppStack::ViteRust => include_str!("../../../hr-registry/src/rules/homeroute-deploy.md"),
+    };
+
     vec![
         (
             "homeroute-dataverse.md".to_string(),
@@ -611,11 +623,11 @@ fn render_rules(slug: &str, domain: &str) -> Vec<(String, String)> {
         ),
         (
             "homeroute-deploy.md".to_string(),
-            render(include_str!("../../../hr-registry/src/rules/homeroute-deploy.md")),
+            render(deploy_rules),
         ),
         (
             "homeroute-dev.md".to_string(),
-            render(include_str!("../../../hr-registry/src/rules/homeroute-dev.md")),
+            render(dev_rules),
         ),
         (
             "homeroute-store.md".to_string(),
@@ -642,7 +654,7 @@ async fn update_rules_single(
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": "Application not found"}))).into_response();
     };
 
-    let rules = render_rules(&app.slug, &state.env.base_domain);
+    let rules = render_rules(&app.slug, &state.env.base_domain, app.stack);
     match registry.send_to_agent(&id, RegistryMessage::UpdateRules { rules }).await {
         Ok(()) => {
             info!(app_id = id, slug = app.slug, "Rules update sent to agent");
@@ -668,7 +680,7 @@ async fn update_rules_all(
     let mut sent = 0u32;
     let mut failed = 0u32;
     for app in &apps {
-        let rules = render_rules(&app.slug, &state.env.base_domain);
+        let rules = render_rules(&app.slug, &state.env.base_domain, app.stack);
         match registry.send_to_agent(&app.id, RegistryMessage::UpdateRules { rules }).await {
             Ok(()) => sent += 1,
             Err(_) => failed += 1,
