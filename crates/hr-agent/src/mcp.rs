@@ -1380,7 +1380,181 @@ pub fn generate_mcp_json(is_dev: bool) -> String {
         }),
     );
 
+    let studio_tools: Vec<String> = get_studio_tool_definitions()
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect();
+    servers.insert(
+        "studio".to_string(),
+        json!({
+            "command": "/usr/local/bin/hr-agent",
+            "args": ["mcp-studio"],
+            "autoApprove": studio_tools
+        }),
+    );
+
     serde_json::to_string_pretty(&json!({ "mcpServers": servers })).unwrap()
+}
+
+// ── Studio MCP Server ──────────────────────────────────────────────────
+
+pub async fn run_studio_mcp_server() -> Result<()> {
+    info!("Starting MCP Studio server");
+
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let request: JsonRpcRequest = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(e) => {
+                let resp = JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: Value::Null,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32700,
+                        message: format!("Parse error: {}", e),
+                        data: None,
+                    }),
+                };
+                writeln!(&stdout, "{}", serde_json::to_string(&resp)?)?;
+                continue;
+            }
+        };
+
+        let id = request.id.clone().unwrap_or(Value::Null);
+
+        let result = match request.method.as_str() {
+            "initialize" => Ok(json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "hr-studio",
+                    "version": "0.1.0"
+                },
+                "instructions": "Studio workflow tools. Use todo_save after each TodoWrite call, and todo_load when resuming work."
+            })),
+            "notifications/initialized" => {
+                continue;
+            }
+            "tools/list" => {
+                let tools = get_studio_tool_definitions();
+                Ok(json!({ "tools": tools }))
+            }
+            "tools/call" => {
+                let tool_name = request
+                    .params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let arguments = request
+                    .params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or(json!({}));
+                handle_studio_tool_call(tool_name, &arguments)
+            }
+            _ => Err(format!("Method not found: {}", request.method)),
+        };
+
+        let resp = match result {
+            Ok(value) => JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: Some(value),
+                error: None,
+            },
+            Err(e) => JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32603,
+                    message: e,
+                    data: None,
+                }),
+            },
+        };
+
+        writeln!(&stdout, "{}", serde_json::to_string(&resp)?)?;
+        stdout.lock().flush()?;
+    }
+
+    Ok(())
+}
+
+fn get_studio_tool_definitions() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "todo_save",
+            "description": "Save the current todo list to persistent storage. Call this after every TodoWrite to ensure the todo list survives context compaction.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": { "type": "string" },
+                                "status": { "type": "string" },
+                                "activeForm": { "type": "string" }
+                            }
+                        },
+                        "description": "The todo list to save"
+                    }
+                },
+                "required": ["todos"]
+            }
+        }),
+        json!({
+            "name": "todo_load",
+            "description": "Load the previously saved todo list from persistent storage. Call this when resuming work or after context compaction to recover your task list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+    ]
+}
+
+fn handle_studio_tool_call(tool: &str, args: &Value) -> Result<Value, String> {
+    match tool {
+        "todo_save" => {
+            let empty = json!([]);
+            let todos = args.get("todos").unwrap_or(&empty);
+            let path = std::path::Path::new("/root/workspace/.studio-todos.json");
+            let content = serde_json::to_string_pretty(todos)
+                .map_err(|e| format!("Failed to serialize todos: {e}"))?;
+            std::fs::write(path, &content)
+                .map_err(|e| format!("Failed to write todos file: {e}"))?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))
+                .map_err(|e| format!("Failed to set permissions: {e}"))?;
+            let count = todos.as_array().map(|a| a.len()).unwrap_or(0);
+            Ok(json!({
+                "content": [{ "type": "text", "text": format!("Saved {} todo(s) to persistent storage.", count) }]
+            }))
+        }
+        "todo_load" => {
+            let path = std::path::Path::new("/root/workspace/.studio-todos.json");
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(_) => "[]".to_string(),
+            };
+            Ok(json!({
+                "content": [{ "type": "text", "text": content }]
+            }))
+        }
+        _ => Err(format!("Unknown studio tool: {}", tool)),
+    }
 }
 
 /// Helper to execute a shell command on the linked production container via the API.

@@ -34,6 +34,11 @@ pub enum WsInMessage {
     ReadFile {
         path: String,
     },
+    SubmitToken {
+        token: String,
+    },
+    GetAuthStatus,
+    UnlinkAuth,
 }
 
 fn default_limit() -> usize {
@@ -76,6 +81,15 @@ pub enum WsOutMessage {
         content: String,
         size: u64,
         truncated: bool,
+    },
+    AuthStatus {
+        authenticated: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subscription_type: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expires_at: Option<u64>,
     },
 }
 

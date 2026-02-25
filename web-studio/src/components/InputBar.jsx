@@ -6,7 +6,7 @@ const MODELS = [
   { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
 ];
 
-export default function InputBar({ onSend, onAbort, isStreaming, disabled, mode, onModeChange }) {
+export default function InputBar({ onSend, onAbort, isStreaming, disabled, mode, onModeChange, authStatus, onOpenAuthDialog }) {
   const [text, setText] = useState('');
   const [model, setModel] = useState(() => localStorage.getItem('studio-model') || 'claude-opus-4-6');
   const [modelOpen, setModelOpen] = useState(false);
@@ -95,6 +95,23 @@ export default function InputBar({ onSend, onAbort, isStreaming, disabled, mode,
 
   const currentModelLabel = MODELS.find(m => m.value === model)?.label || 'Opus 4.6';
   const isPlan = mode === 'plan';
+  const needsAuth = authStatus?.authenticated !== true;
+
+  if (needsAuth) {
+    return (
+      <div className="bg-gray-950 border-t border-gray-700 shrink-0">
+        <div className="flex flex-col items-center justify-center gap-2 px-4 py-5">
+          <p className="text-sm text-gray-500">Link your Claude account to start coding</p>
+          <button
+            onClick={onOpenAuthDialog}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+          >
+            Link Claude Account
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="bg-gray-950 border-t border-gray-700 shrink-0">

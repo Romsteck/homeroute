@@ -1,7 +1,5 @@
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -18,6 +16,10 @@ const STUDIO_USER: &str = "studio";
 const STUDIO_HOME: &str = "/home/studio";
 const MAX_FILE_PREVIEW_BYTES: u64 = 512_000;
 const MAX_DIR_ENTRIES: usize = 1000;
+
+/// Run credential sync + chmod only once per process lifetime to avoid
+/// triggering Vite's file watcher (inotify IN_ATTRIB) on every prompt.
+static CREDENTIALS_SYNCED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 /// Sync Claude credentials from root to studio user's home.
 /// Studio user is pre-created during container provisioning.
@@ -51,6 +53,25 @@ async fn sync_studio_credentials() {
         .args(["-R", "a+rwX", WORKSPACE_ROOT])
         .output()
         .await;
+
+    // Fix ownership of root's Claude projects directory (old sessions created as root)
+    let root_projects = "/root/.claude/projects";
+    if std::path::Path::new(root_projects).exists() {
+        let _ = tokio::process::Command::new("chown")
+            .args(["-R", &format!("{STUDIO_USER}:{STUDIO_USER}"), root_projects])
+            .output()
+            .await;
+    }
+
+    // Ensure the projects symlink exists (containers provisioned before symlink was added)
+    let studio_projects = format!("{STUDIO_HOME}/.claude/projects");
+    let studio_projects_path = std::path::Path::new(&studio_projects);
+    if !studio_projects_path.exists() && std::path::Path::new(root_projects).exists() {
+        let _ = tokio::process::Command::new("ln")
+            .args(["-sf", root_projects, &studio_projects])
+            .output()
+            .await;
+    }
 }
 
 /// Resolve a client-provided relative path to an absolute path within workspace.
@@ -71,8 +92,8 @@ fn resolve_safe_path(relative: &str) -> Option<PathBuf> {
 }
 
 /// Main WebSocket session loop.
-/// Called from StudioBridge::start_ws_server() after tokio-tungstenite accept_async().
-pub async fn run_ws_session<S>(ws: WebSocketStream<S>, studio: &Arc<StudioBridge>, conn_id: &str)
+/// Called from StudioBridge::start_ws_server() after tokio-tungstenite accept_hdr_async().
+pub async fn run_ws_session<S>(ws: WebSocketStream<S>, studio: &Arc<StudioBridge>, conn_id: &str, user: Option<String>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -139,7 +160,7 @@ where
                 // Kill any active subprocess (from any connection)
                 studio.kill_all_active().await;
                 // Spawn new claude process
-                spawn_claude(studio, conn_id, &prompt, session_id, &mode, model.as_deref(), images, out_tx.clone()).await;
+                spawn_claude(studio, conn_id, &prompt, session_id, &mode, model.as_deref(), images, out_tx.clone(), user.as_deref()).await;
             }
             WsInMessage::Abort => {
                 studio.kill_all_active().await;
@@ -297,6 +318,74 @@ where
                         .await;
                 });
             }
+            WsInMessage::GetAuthStatus => {
+                if let Some(ref username) = user {
+                    match super::credentials::get_auth_status(username).await {
+                        Some(cred) => {
+                            let _ = out_tx.send(WsOutMessage::AuthStatus {
+                                authenticated: true,
+                                method: Some(cred.method),
+                                subscription_type: cred.subscription_type,
+                                expires_at: None,
+                            }).await;
+                        }
+                        None => {
+                            let _ = out_tx.send(WsOutMessage::AuthStatus {
+                                authenticated: false,
+                                method: None,
+                                subscription_type: None,
+                                expires_at: None,
+                            }).await;
+                        }
+                    }
+                } else {
+                    // No user identity — legacy mode, assume authenticated
+                    let _ = out_tx.send(WsOutMessage::AuthStatus {
+                        authenticated: true,
+                        method: Some("legacy".to_string()),
+                        subscription_type: None,
+                        expires_at: None,
+                    }).await;
+                }
+            }
+            WsInMessage::SubmitToken { token } => {
+                if let Some(ref username) = user {
+                    match super::credentials::save_token(username, &token).await {
+                        Ok(()) => {
+                            let _ = out_tx.send(WsOutMessage::AuthStatus {
+                                authenticated: true,
+                                method: Some("token".to_string()),
+                                subscription_type: None,
+                                expires_at: None,
+                            }).await;
+                        }
+                        Err(e) => {
+                            let _ = out_tx.send(WsOutMessage::Error {
+                                message: format!("Failed to save token: {e}"),
+                            }).await;
+                        }
+                    }
+                } else {
+                    let _ = out_tx.send(WsOutMessage::Error {
+                        message: "No user identity available.".to_string(),
+                    }).await;
+                }
+            }
+            WsInMessage::UnlinkAuth => {
+                if let Some(ref username) = user {
+                    let _ = super::credentials::remove_credentials(username).await;
+                    let _ = out_tx.send(WsOutMessage::AuthStatus {
+                        authenticated: false,
+                        method: None,
+                        subscription_type: None,
+                        expires_at: None,
+                    }).await;
+                } else {
+                    let _ = out_tx.send(WsOutMessage::Error {
+                        message: "No user identity available.".to_string(),
+                    }).await;
+                }
+            }
         }
     }
 
@@ -350,9 +439,33 @@ async fn spawn_claude(
     model: Option<&str>,
     images: Option<Vec<ImageAttachment>>,
     out_tx: mpsc::Sender<WsOutMessage>,
+    user: Option<&str>,
 ) {
-    // Sync credentials to studio user (pre-created during provisioning)
-    sync_studio_credentials().await;
+    // Per-user credential setup (if user identity is available)
+    if let Some(username) = user {
+        match super::credentials::get_auth_status(username).await {
+            Some(cred) if cred.method == "token" && cred.token.is_some() => {
+                // Token method: will pass CLAUDE_CODE_OAUTH_TOKEN env var below
+                // Ensure hasCompletedOnboarding
+                let claude_json = format!("{STUDIO_HOME}/.claude.json");
+                if !std::path::Path::new(&claude_json).exists() {
+                    let _ = tokio::fs::write(&claude_json, r#"{"hasCompletedOnboarding":true}"#).await;
+                }
+            }
+            _ => {
+                let _ = out_tx.send(WsOutMessage::Error {
+                    message: "No Claude credentials configured. Use the auth panel to link your Claude account.".to_string(),
+                }).await;
+                return;
+            }
+        }
+    } else {
+        // Legacy fallback: no user identity, use shared credentials
+        if CREDENTIALS_SYNCED.get().is_none() {
+            sync_studio_credentials().await;
+            let _ = CREDENTIALS_SYNCED.set(());
+        }
+    }
 
     // Save any attached images to temp files
     let image_paths = if let Some(imgs) = &images {
@@ -427,8 +540,20 @@ async fn spawn_claude(
         .arg("--")
         .arg("env")
         .arg(format!("HOME={STUDIO_HOME}"))
-        .arg(format!("PATH={full_path}"))
-        .arg("claude")
+        .arg(format!("PATH={full_path}"));
+
+    // Add token env var if user is using token auth method
+    if let Some(username) = user {
+        if let Some(cred) = super::credentials::get_auth_status(username).await {
+            if cred.method == "token" {
+                if let Some(ref token) = cred.token {
+                    cmd.arg(format!("CLAUDE_CODE_OAUTH_TOKEN={}", token));
+                }
+            }
+        }
+    }
+
+    cmd.arg("claude")
         .args(&claude_args);
 
     cmd.current_dir("/root/workspace");

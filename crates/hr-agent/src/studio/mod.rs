@@ -3,12 +3,13 @@ pub mod static_files;
 pub mod handler;
 pub mod websocket;
 pub mod sessions;
+pub mod credentials;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
-use tokio_tungstenite::accept_async;
+use tokio_tungstenite::tungstenite::handshake::server::{Request, Response, ErrorResponse};
 use tracing::{debug, error, info, warn};
 
 use types::WsOutMessage;
@@ -135,16 +136,27 @@ impl StudioBridge {
                 let conn_id = uuid::Uuid::new_v4().to_string();
 
                 tokio::spawn(async move {
-                    let ws = match accept_async(stream).await {
+                    let user = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+                    let user_clone = user.clone();
+                    let callback = move |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
+                        if let Some(val) = req.headers().get("x-forwarded-user") {
+                            if let Ok(s) = val.to_str() {
+                                *user_clone.lock().unwrap() = Some(s.to_string());
+                            }
+                        }
+                        Ok(resp)
+                    };
+                    let ws = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
                         Ok(ws) => ws,
                         Err(e) => {
                             error!("Studio WS handshake failed from {}: {e}", addr);
                             return;
                         }
                     };
+                    let user = user.lock().unwrap().take();
 
-                    info!("Studio WebSocket connected: {}", conn_id);
-                    websocket::run_ws_session(ws, &studio, &conn_id).await;
+                    info!("Studio WebSocket connected: {} (user: {:?})", conn_id, user);
+                    websocket::run_ws_session(ws, &studio, &conn_id, user).await;
                     info!("Studio WebSocket disconnected: {}", conn_id);
                     // Don't kill active process on disconnect — let it finish
                     // so the response is saved and other clients keep receiving the stream.

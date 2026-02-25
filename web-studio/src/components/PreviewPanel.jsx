@@ -1,6 +1,6 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, memo } from 'react';
 
-export default function PreviewPanel({ slug, domain, mode = 'full' }) {
+export default memo(function PreviewPanel({ slug, domain, mode = 'full' }) {
   const [iframeKey, setIframeKey] = useState(0);
   const [loading, setLoading] = useState(true);
   const [env, setEnv] = useState(() => {
@@ -117,7 +117,7 @@ export default function PreviewPanel({ slug, domain, mode = 'full' }) {
       </div>
     </div>
   );
-}
+});
 
 function LoadingOverlay() {
   return (
