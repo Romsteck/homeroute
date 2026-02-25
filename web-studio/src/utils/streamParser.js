@@ -1,18 +1,14 @@
 /**
- * Walk backward through messages to find the last tool_use without a status
- * and annotate it with 'success' or 'error' based on the tool_result.
- */
-/**
  * Walk backward through messages to find the last tool_use or ask_user_question
  * without a status and annotate it with 'success' or 'error'.
- * Returns the annotated message type so callers can react (e.g. hide tool_result).
+ * Returns { type, hidden } so callers can decide if tool_result should be hidden.
  */
 function annotateLastToolUse(messages, isError) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if ((m.type === 'tool_use' || m.type === 'ask_user_question') && !m.status) {
       messages[i] = { ...m, status: isError ? 'error' : 'success' };
-      return m.type;
+      return { type: m.type, hidden: m.hidden || false };
     }
   }
   return null;
@@ -66,10 +62,28 @@ export function updateMessagesFromStream(messages, event) {
           }
           // AskUserQuestion gets a special message type for interactive rendering
           if (block.name === 'AskUserQuestion') {
+            const questions = block.input?.questions || [];
+            // Dedup: skip if previous message has identical questions
+            const prev = next[next.length - 1];
+            if (prev?.type === 'ask_user_question' &&
+                JSON.stringify(prev.questions) === JSON.stringify(questions)) {
+              // Update tool_use_id for annotation tracking
+              next[next.length - 1] = { ...prev, tool_use_id: block.id };
+            } else {
+              next.push({
+                type: 'ask_user_question',
+                questions,
+                tool_use_id: block.id,
+              });
+            }
+          } else if (block.name === 'TodoWrite') {
+            // TodoWrite is hidden — TodoPanel already displays todos
             next.push({
-              type: 'ask_user_question',
-              questions: block.input?.questions || [],
+              type: 'tool_use',
+              tool: 'TodoWrite',
+              input: block.input,
               tool_use_id: block.id,
+              hidden: true,
             });
           } else {
             next.push({
@@ -83,12 +97,12 @@ export function updateMessagesFromStream(messages, event) {
           const text = Array.isArray(block.content)
             ? block.content.map(c => c.text || '').join('\n')
             : (typeof block.content === 'string' ? block.content : '');
-          const annotatedType = annotateLastToolUse(next, block.is_error || false);
+          const annotated = annotateLastToolUse(next, block.is_error || false);
           next.push({
             type: 'tool_result',
             content: text,
             is_error: block.is_error || false,
-            hidden: annotatedType === 'ask_user_question',
+            hidden: annotated?.type === 'ask_user_question' || annotated?.hidden || false,
           });
         }
       }
@@ -108,12 +122,12 @@ export function updateMessagesFromStream(messages, event) {
     const text = Array.isArray(event.content)
       ? event.content.map(c => c.text || '').join('\n')
       : (typeof event.content === 'string' ? event.content : JSON.stringify(event.content || ''));
-    const annotatedType = annotateLastToolUse(next, event.is_error || false);
+    const annotated = annotateLastToolUse(next, event.is_error || false);
     next.push({
       type: 'tool_result',
       content: text,
       is_error: event.is_error || false,
-      hidden: annotatedType === 'ask_user_question',
+      hidden: annotated?.type === 'ask_user_question' || annotated?.hidden || false,
     });
     return next;
   }

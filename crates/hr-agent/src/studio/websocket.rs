@@ -528,7 +528,7 @@ async fn spawn_claude(
     // Plan mode: restrict to read-only tools. Both modes use bypassPermissions (headless).
     if mode == "plan" {
         claude_args.push("--allowedTools".to_string());
-        claude_args.push("Read,Glob,Grep,WebSearch,WebFetch".to_string());
+        claude_args.push("Read,Glob,Grep,WebSearch,WebFetch,AskUserQuestion,TodoWrite".to_string());
     }
     claude_args.push("--permission-mode".to_string());
     claude_args.push("bypassPermissions".to_string());
