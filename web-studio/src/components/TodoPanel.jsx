@@ -28,15 +28,89 @@ const statusConfig = {
   },
 };
 
+function groupIntoPhases(todos) {
+  const groups = [];
+  let currentGroup = { phase: null, todos: [] };
+
+  for (const todo of todos) {
+    if (todo.content && todo.content.startsWith('▸ Phase')) {
+      if (currentGroup.phase || currentGroup.todos.length > 0) {
+        groups.push(currentGroup);
+      }
+      currentGroup = { phase: todo, todos: [] };
+    } else {
+      currentGroup.todos.push(todo);
+    }
+  }
+  if (currentGroup.phase || currentGroup.todos.length > 0) {
+    groups.push(currentGroup);
+  }
+  return groups;
+}
+
+function TodoItem({ todo }) {
+  const cfg = statusConfig[todo.status] || statusConfig.pending;
+  return (
+    <div className="flex items-center gap-2.5 py-0.5">
+      <span className="flex-shrink-0">{cfg.icon}</span>
+      <span className={`text-sm truncate ${cfg.text}`}>
+        {todo.status === 'in_progress'
+          ? (todo.activeForm || todo.content)
+          : todo.content}
+      </span>
+    </div>
+  );
+}
+
+function PhaseHeader({ phase }) {
+  const phaseName = phase.content.replace(/^▸\s*/, '');
+  const statusColor = phase.status === 'completed'
+    ? 'text-green-500'
+    : phase.status === 'in_progress'
+      ? 'text-purple-400'
+      : 'text-gray-600';
+
+  return (
+    <div className={`flex items-center gap-2 text-sm font-medium ${statusColor}`}>
+      <span className="text-xs">▸</span>
+      <span>{phaseName}</span>
+    </div>
+  );
+}
+
+function PhaseProgress({ todos }) {
+  const completed = todos.filter(t => t.status === 'completed').length;
+  const total = todos.length;
+  if (total === 0) return null;
+  const allDone = completed === total;
+
+  return (
+    <div className="flex items-center gap-2 ml-5">
+      <span className="text-xs text-gray-600">{completed}/{total}</span>
+      <div className="w-16 h-1 bg-gray-800 rounded-full overflow-hidden">
+        <div
+          className={`h-full transition-all duration-300 rounded-full ${allDone ? 'bg-green-600' : 'bg-purple-600/60'}`}
+          style={{ width: `${(completed / total) * 100}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
 export default function TodoPanel({ todos }) {
   const [collapsed, setCollapsed] = useState(false);
 
   if (!todos || todos.length === 0) return null;
 
-  const completed = todos.filter(t => t.status === 'completed').length;
-  const total = todos.length;
+  const groups = groupIntoPhases(todos);
+  const hasPhases = groups.some(g => g.phase !== null);
+
+  // Count only real tasks (exclude phase headers)
+  const realTodos = todos.filter(t => !t.content?.startsWith('▸ Phase'));
+  const completed = realTodos.filter(t => t.status === 'completed').length;
+  const total = realTodos.length;
   const allDone = completed === total;
-  const activeTask = todos.find(t => t.status === 'in_progress');
+  const activeTask = realTodos.find(t => t.status === 'in_progress');
 
   return (
     <div className={`relative bg-gray-900/80 shadow-lg shadow-black/30 ${allDone ? 'border-b border-green-900/30' : 'border-b border-purple-900/40'}`}>
@@ -74,20 +148,34 @@ export default function TodoPanel({ todos }) {
 
       {/* Todo items */}
       {!collapsed && (
-        <div className="px-4 pb-3 space-y-1">
-          {todos.map((todo, i) => {
-            const cfg = statusConfig[todo.status] || statusConfig.pending;
-            return (
-              <div key={i} className="flex items-center gap-2.5 py-0.5">
-                <span className="flex-shrink-0">{cfg.icon}</span>
-                <span className={`text-sm truncate ${cfg.text}`}>
-                  {todo.status === 'in_progress'
-                    ? (todo.activeForm || todo.content)
-                    : todo.content}
-                </span>
-              </div>
-            );
-          })}
+        <div className="px-4 pb-3">
+          {hasPhases ? (
+            // Phased rendering
+            <div className="space-y-2.5">
+              {groups.map((group, gi) => (
+                <div key={gi}>
+                  {group.phase && (
+                    <div className="mb-1">
+                      <PhaseHeader phase={group.phase} />
+                      <PhaseProgress todos={group.todos} />
+                    </div>
+                  )}
+                  <div className="space-y-0.5 ml-3">
+                    {group.todos.map((todo, ti) => (
+                      <TodoItem key={ti} todo={todo} />
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            // Flat rendering (backward compatible)
+            <div className="space-y-1">
+              {todos.map((todo, i) => (
+                <TodoItem key={i} todo={todo} />
+              ))}
+            </div>
+          )}
         </div>
       )}
 
