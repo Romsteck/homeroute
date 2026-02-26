@@ -147,7 +147,8 @@ function CreateContainerModal({
                 {[
                   { value: 'vite-rust', label: 'Vite + Rust' },
                   { value: 'next-js', label: 'Next.js' },
-                ].map(({ value, label }) => (
+                  { value: 'leptos-rust', label: 'Rust + Leptos' },
+                ].map(({ value, label }, index, arr) => (
                   <button
                     key={value}
                     type="button"
@@ -156,7 +157,7 @@ function CreateContainerModal({
                       form.stack === value
                         ? 'bg-indigo-600 border-indigo-500 text-white'
                         : 'bg-gray-900 text-gray-400 hover:bg-gray-800'
-                    } ${value === 'vite-rust' ? 'rounded-l' : 'rounded-r border-l-0'}`}
+                    } ${index === 0 ? 'rounded-l' : ''} ${index === arr.length - 1 ? 'rounded-r' : ''} ${index > 0 ? 'border-l-0' : ''}`}
                   >
                     {label}
                   </button>

@@ -197,7 +197,7 @@ impl AgentProxy {
             // Dev server port depends on stack: Vite (5173) or Next.js (3000)
             let dev_port = match stack {
                 hr_registry::types::AppStack::ViteRust => 5173,
-                hr_registry::types::AppStack::NextJs => 3000,
+                hr_registry::types::AppStack::NextJs | hr_registry::types::AppStack::LeptosRust => 3000,
             };
             new_routes.insert(
                 format!("dev.{}.{}", slug, base_domain),

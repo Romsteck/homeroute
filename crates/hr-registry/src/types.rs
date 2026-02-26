@@ -28,6 +28,7 @@ pub enum AppStack {
     #[default]
     ViteRust,
     NextJs,
+    LeptosRust,
 }
 
 /// A registered application with its container and agent.
@@ -85,7 +86,9 @@ impl Application {
                     domains.push(format!("code.{}.{}", self.slug, base_domain));
                 }
                 domains.push(format!("dev.{}.{}", self.slug, base_domain));
-                domains.push(format!("devapi.{}.{}", self.slug, base_domain));
+                if self.stack == AppStack::ViteRust {
+                    domains.push(format!("devapi.{}.{}", self.slug, base_domain));
+                }
                 domains.push(format!("studio.{}.{}", self.slug, base_domain));
                 domains
             }
@@ -125,14 +128,13 @@ impl Application {
                             allowed_groups: vec![],
                         });
                     }
-                    AppStack::NextJs => {
+                    AppStack::NextJs | AppStack::LeptosRust => {
                         routes.push(RouteInfo {
                             domain: format!("dev.{}.{}", self.slug, base_domain),
                             target_port: 3000,
                             auth_required: false,
                             allowed_groups: vec![],
                         });
-                        // Next.js gère /api/* en interne — pas de devapi séparé
                     }
                 }
                 routes.push(RouteInfo {
@@ -367,7 +369,7 @@ mod tests {
         assert_eq!(routes[1].domain, "dev.myapp.example.com");
         assert_eq!(routes[2].domain, "devapi.myapp.example.com");
         assert_eq!(routes[3].domain, "studio.myapp.example.com");
-        assert_eq!(routes[3].target_port, 0);
+        assert_eq!(routes[3].target_port, 443);
         assert!(routes[3].auth_required);
     }
 
@@ -383,6 +385,58 @@ mod tests {
     fn test_wildcard_domain() {
         let app = make_test_app(Environment::Development, true);
         assert_eq!(app.wildcard_domain("example.com"), "*.myapp.example.com");
+    }
+
+    fn make_test_app_with_stack(
+        environment: Environment,
+        code_server_enabled: bool,
+        stack: AppStack,
+    ) -> Application {
+        let mut app = make_test_app(environment, code_server_enabled);
+        app.stack = stack;
+        app
+    }
+
+    #[test]
+    fn test_domains_leptos_rust() {
+        let app = make_test_app_with_stack(Environment::Development, true, AppStack::LeptosRust);
+        let domains = app.domains("example.com");
+        // LeptosRust should NOT have devapi
+        assert_eq!(
+            domains,
+            vec![
+                "code.myapp.example.com",
+                "dev.myapp.example.com",
+                "studio.myapp.example.com",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_domains_nextjs() {
+        let app = make_test_app_with_stack(Environment::Development, true, AppStack::NextJs);
+        let domains = app.domains("example.com");
+        // NextJs should NOT have devapi
+        assert_eq!(
+            domains,
+            vec![
+                "code.myapp.example.com",
+                "dev.myapp.example.com",
+                "studio.myapp.example.com",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_routes_leptos_rust() {
+        let app = make_test_app_with_stack(Environment::Development, true, AppStack::LeptosRust);
+        let routes = app.routes("example.com");
+        assert_eq!(routes.len(), 3); // code-server, dev (3000), studio
+        assert_eq!(routes[0].domain, "code.myapp.example.com");
+        assert_eq!(routes[0].target_port, CODE_SERVER_PORT);
+        assert_eq!(routes[1].domain, "dev.myapp.example.com");
+        assert_eq!(routes[1].target_port, 3000);
+        assert_eq!(routes[2].domain, "studio.myapp.example.com");
     }
 
     #[test]

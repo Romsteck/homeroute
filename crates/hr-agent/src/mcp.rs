@@ -1541,7 +1541,7 @@ fn get_studio_tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "todo_save",
-            "description": "Save the current todo list to persistent storage. Call this after every TodoWrite to ensure the todo list survives context compaction.",
+            "description": "Save the current todo list to persistent storage. Call this after every TodoWrite. Supports flat todos or phased structure (use one or the other).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1555,15 +1555,36 @@ fn get_studio_tool_definitions() -> Vec<Value> {
                                 "activeForm": { "type": "string" }
                             }
                         },
-                        "description": "The todo list to save"
+                        "description": "Flat todo list (simple activities without phases)"
+                    },
+                    "phases": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "status": { "type": "string" },
+                                "todos": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "content": { "type": "string" },
+                                            "status": { "type": "string" },
+                                            "activeForm": { "type": "string" }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "description": "Phased todo list (complex activities). Each phase has a name, status, and its own todo list."
                     }
-                },
-                "required": ["todos"]
+                }
             }
         }),
         json!({
             "name": "todo_load",
-            "description": "Load the previously saved todo list from persistent storage. Call this when resuming work or after context compaction to recover your task list.",
+            "description": "Load the previously saved todo list. Returns either a flat JSON array (simple) or a JSON object with a 'phases' key (phased structure).",
             "inputSchema": {
                 "type": "object",
                 "properties": {}
@@ -1637,18 +1658,27 @@ async fn handle_studio_tool_call(tool: &str, args: &Value) -> Result<Value, Stri
 
     match tool {
         "todo_save" => {
-            let empty = json!([]);
-            let todos = args.get("todos").unwrap_or(&empty);
             let path = std::path::Path::new("/root/workspace/.studio-todos.json");
-            let content = serde_json::to_string_pretty(todos)
-                .map_err(|e| format!("Failed to serialize todos: {e}"))?;
+            let (content, msg) = if let Some(phases) = args.get("phases") {
+                let data = json!({"phases": phases});
+                let serialized = serde_json::to_string_pretty(&data)
+                    .map_err(|e| format!("Failed to serialize phases: {e}"))?;
+                let count = phases.as_array().map(|a| a.len()).unwrap_or(0);
+                (serialized, format!("Saved {} phase(s) to persistent storage.", count))
+            } else {
+                let empty = json!([]);
+                let todos = args.get("todos").unwrap_or(&empty);
+                let serialized = serde_json::to_string_pretty(todos)
+                    .map_err(|e| format!("Failed to serialize todos: {e}"))?;
+                let count = todos.as_array().map(|a| a.len()).unwrap_or(0);
+                (serialized, format!("Saved {} todo(s) to persistent storage.", count))
+            };
             std::fs::write(path, &content)
                 .map_err(|e| format!("Failed to write todos file: {e}"))?;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))
                 .map_err(|e| format!("Failed to set permissions: {e}"))?;
-            let count = todos.as_array().map(|a| a.len()).unwrap_or(0);
             Ok(json!({
-                "content": [{ "type": "text", "text": format!("Saved {} todo(s) to persistent storage.", count) }]
+                "content": [{ "type": "text", "text": msg }]
             }))
         }
         "todo_load" => {
