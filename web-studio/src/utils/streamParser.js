@@ -85,6 +85,15 @@ export function updateMessagesFromStream(messages, event) {
               tool_use_id: block.id,
               hidden: true,
             });
+          } else if (block.name === 'EnterPlanMode' || block.name === 'ExitPlanMode') {
+            // Plan mode tools are hidden — PlanComplete UI handles the visual feedback
+            next.push({
+              type: 'tool_use',
+              tool: block.name,
+              input: block.input,
+              tool_use_id: block.id,
+              hidden: true,
+            });
           } else {
             next.push({
               type: 'tool_use',

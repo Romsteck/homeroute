@@ -491,6 +491,13 @@ async fn handle_registry_message(
                     Ok(()) => info!("Updated /root/workspace/.mcp.json"),
                     Err(e) => tracing::debug!("Could not write .mcp.json: {e}"),
                 }
+
+                // Write/update settings.json with MCP tool permissions for plan mode
+                let settings_content = mcp::generate_settings_json(is_dev);
+                match std::fs::write("/home/studio/.claude/settings.json", &settings_content) {
+                    Ok(()) => info!("Updated /home/studio/.claude/settings.json"),
+                    Err(e) => tracing::debug!("Could not write settings.json: {e}"),
+                }
             }
 
             // Update agent proxy route table
