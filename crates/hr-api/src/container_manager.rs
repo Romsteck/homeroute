@@ -902,6 +902,17 @@ WantedBy=multi-user.target
         )
         .await;
 
+        // Phase 8c2: Install cargo-leptos + wasm32 target (if LeptosRust stack)
+        if stack == hr_registry::types::AppStack::LeptosRust {
+            emit("Installation cargo-leptos + wasm32 target...");
+            let _ = NspawnClient::exec_with_retry(
+                container_name,
+                &["source /root/.cargo/env && rustup target add wasm32-unknown-unknown && cargo install cargo-leptos"],
+                3,
+            )
+            .await;
+        }
+
         // Phase 8d: Install Node.js 22
         emit("Installation Node.js 22...");
         let _ = NspawnClient::exec_with_retry(
@@ -984,10 +995,12 @@ WantedBy=multi-user.target
         .await;
         let dev_md_content = match stack {
             hr_registry::types::AppStack::NextJs => render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev-nextjs.md")),
+            hr_registry::types::AppStack::LeptosRust => render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev-leptos.md")),
             hr_registry::types::AppStack::ViteRust => render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev.md")),
         };
         let deploy_md_content = match stack {
             hr_registry::types::AppStack::NextJs => render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy-nextjs.md")),
+            hr_registry::types::AppStack::LeptosRust => render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy-leptos.md")),
             hr_registry::types::AppStack::ViteRust => render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy.md")),
         };
         let _ = tokio::fs::write(
@@ -1280,6 +1293,46 @@ WantedBy=multi-user.target
                 let _ = NspawnClient::exec(
                     container_name,
                     &["systemctl", "enable", "--now", "nextjs-dev"],
+                )
+                .await;
+            }
+            hr_registry::types::AppStack::LeptosRust => {
+                emit("Configuration cargo-leptos-dev.service...");
+                let leptos_unit = r#"[Unit]
+Description=Cargo Leptos Dev Server (SSR + WASM)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/workspace
+ExecStart=/root/.cargo/bin/cargo-leptos watch
+Restart=always
+RestartSec=3
+Environment=HOME=/root
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/root/.cargo/bin
+Environment=LEPTOS_SITE_ADDR=0.0.0.0:3000
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
+"#;
+                let tmp_leptos_unit =
+                    PathBuf::from(format!("/tmp/leptos-unit-v2-{slug}.service"));
+                let _ = tokio::fs::write(&tmp_leptos_unit, leptos_unit).await;
+                let _ = NspawnClient::push_file(
+                    container_name,
+                    &tmp_leptos_unit,
+                    "etc/systemd/system/cargo-leptos-dev.service",
+                    storage,
+                )
+                .await;
+                let _ = tokio::fs::remove_file(&tmp_leptos_unit).await;
+
+                let _ =
+                    NspawnClient::exec(container_name, &["systemctl", "daemon-reload"]).await;
+                let _ = NspawnClient::exec(
+                    container_name,
+                    &["systemctl", "enable", "--now", "cargo-leptos-dev"],
                 )
                 .await;
             }
