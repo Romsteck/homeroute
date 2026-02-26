@@ -60,6 +60,7 @@ crates/
 make deploy          # build tout + systemctl restart homeroute
 make server          # cargo build --release seulement
 make web             # npm run build (web/) seulement
+make agent           # build hr-agent (auto-incrémente version) + copie dans data/agent-binaries/
 make test            # cargo test
 journalctl -u homeroute -f
 curl -s http://localhost:4000/api/health | jq
@@ -70,7 +71,8 @@ systemctl reload homeroute   # hot-reload config proxy (SIGHUP, sans restart)
 
 - **JAMAIS** `cargo run` directement — utiliser `systemctl` et `make deploy`
 - **TOUJOURS** `make deploy` après modification du backend Rust
-- Pour la mise à jour du binaire `hr-agent` dans les containers : utiliser le subagent `agent-updater`
+- **TOUJOURS** `make agent` après modification du crate `hr-agent` (auto-incrémente la version, build, copie le binaire)
+- Pour pousser le binaire `hr-agent` vers les containers : `curl -X POST http://localhost:4000/api/applications/agents/update` ou utiliser le subagent `agent-updater`
 - Exécuter les commandes dans les containers via **`POST /api/applications/{id}/exec`** (pas machinectl)
 - Passer les commandes comme un seul string bash : `command: ["cmd"]`
 

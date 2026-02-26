@@ -609,10 +609,12 @@ fn render_rules(slug: &str, domain: &str, stack: hr_registry::types::AppStack) -
 
     let dev_rules = match stack {
         AppStack::NextJs => include_str!("../../../hr-registry/src/rules/homeroute-dev-nextjs.md"),
+        AppStack::LeptosRust => include_str!("../../../hr-registry/src/rules/homeroute-dev-leptos.md"),
         AppStack::ViteRust => include_str!("../../../hr-registry/src/rules/homeroute-dev.md"),
     };
     let deploy_rules = match stack {
         AppStack::NextJs => include_str!("../../../hr-registry/src/rules/homeroute-deploy-nextjs.md"),
+        AppStack::LeptosRust => include_str!("../../../hr-registry/src/rules/homeroute-deploy-leptos.md"),
         AppStack::ViteRust => include_str!("../../../hr-registry/src/rules/homeroute-deploy.md"),
     };
 
@@ -917,17 +919,26 @@ async fn agent_version() -> impl IntoResponse {
     let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
     let sha256: String = digest.as_ref().iter().map(|b| format!("{:02x}", b)).collect();
 
-    // Version from the binary metadata (or file mtime as fallback)
-    let version = match tokio::fs::metadata(binary_path).await {
-        Ok(m) => {
-            if let Ok(modified) = m.modified() {
-                let dt: chrono::DateTime<chrono::Utc> = modified.into();
-                dt.format("%Y%m%d-%H%M%S").to_string()
-            } else {
-                "unknown".to_string()
+    // Version from version file (written by `make agent`)
+    let version_path = std::path::Path::new("/opt/homeroute/data/agent-binaries/hr-agent.version");
+    let version = if version_path.exists() {
+        tokio::fs::read_to_string(version_path)
+            .await
+            .map(|v| v.trim().to_string())
+            .unwrap_or_else(|_| "unknown".to_string())
+    } else {
+        // Fallback to mtime for backwards compatibility
+        match tokio::fs::metadata(binary_path).await {
+            Ok(m) => {
+                if let Ok(modified) = m.modified() {
+                    let dt: chrono::DateTime<chrono::Utc> = modified.into();
+                    dt.format("%Y%m%d-%H%M%S").to_string()
+                } else {
+                    "unknown".to_string()
+                }
             }
+            Err(_) => "unknown".to_string(),
         }
-        Err(_) => "unknown".to_string(),
     };
 
     Json(serde_json::json!({

@@ -1,7 +1,7 @@
 # HomeRoute Build System
 # Usage: make all, make deploy, make test
 
-.PHONY: server web studio all deploy test clean store
+.PHONY: server web studio all deploy test clean store agent
 
 # Build server binary
 server:
@@ -26,8 +26,24 @@ deploy: all
 test:
 	cd crates && cargo test
 
-# Build Flutter store APK (auto-increments versionCode)
+# Build hr-agent binary (auto-increments version, deploys to containers)
 SHELL := /bin/bash
+agent:
+	@CURRENT=$$(grep '^version' crates/hr-agent/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/') && \
+	MAJOR=$$(echo "$$CURRENT" | cut -d. -f1) && \
+	MINOR=$$(echo "$$CURRENT" | cut -d. -f2) && \
+	PATCH=$$(echo "$$CURRENT" | cut -d. -f3) && \
+	NEW_PATCH=$$((PATCH + 1)) && \
+	NEW_VERSION="$$MAJOR.$$MINOR.$$NEW_PATCH" && \
+	sed -i "s/^version = \"$$CURRENT\"/version = \"$$NEW_VERSION\"/" crates/hr-agent/Cargo.toml && \
+	echo "Building hr-agent v$$NEW_VERSION..." && \
+	cargo build --release -p hr-agent && \
+	cp target/release/hr-agent data/agent-binaries/hr-agent && \
+	echo "$$NEW_VERSION" > data/agent-binaries/hr-agent.version && \
+	echo "hr-agent v$$NEW_VERSION → data/agent-binaries/" && \
+	echo "Run: curl -X POST http://localhost:4000/api/applications/agents/update"
+
+# Build Flutter store APK (auto-increments versionCode)
 store:
 	@cd store_flutter && \
 	CURRENT_CODE=$$(grep 'versionCode' android/app/build.gradle.kts | sed 's/[^0-9]//g') && \
