@@ -13,29 +13,23 @@ Tu es un spécialiste du déploiement de `hr-agent` dans les containers nspawn H
 
 Ce workflow s'applique UNIQUEMENT à `hr-agent`. Pour les autres crates : `make deploy`.
 
-## Workflow (5 étapes — toutes obligatoires)
+## Workflow (4 étapes — toutes obligatoires)
 
-### 1. Build
-
-```bash
-cd /opt/homeroute && cargo build --release -p hr-agent
-```
-
-Vérifier que le build réussit avant de continuer.
-
-### 2. Copie vers la distribution
+### 1. Build + auto-incrément version
 
 ```bash
-cp /opt/homeroute/target/release/hr-agent /opt/homeroute/data/agent-binaries/hr-agent
+cd /opt/homeroute && make agent
 ```
 
-### 3. Déclencher la mise à jour
+Cette commande auto-incrémente la version dans `crates/hr-agent/Cargo.toml`, build le binaire, le copie dans `data/agent-binaries/`, et écrit le fichier de version. Vérifier que le build réussit avant de continuer.
+
+### 2. Déclencher la mise à jour
 
 ```bash
 curl -X POST http://localhost:4000/api/applications/agents/update
 ```
 
-### 4. Vérifier l'état
+### 3. Vérifier l'état
 
 Attendre ~30 secondes puis :
 
@@ -50,7 +44,7 @@ Tous les agents doivent avoir :
 
 Si pas encore `connected` : attendre encore 30s et re-vérifier.
 
-### 5. Corriger les agents défaillants
+### 4. Corriger les agents défaillants
 
 Si un agent reste en `failed_reconnect` après 2 minutes :
 

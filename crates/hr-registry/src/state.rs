@@ -1140,6 +1140,7 @@ impl AgentRegistry {
 
         let deploy_rules = match app.stack {
             AppStack::NextJs => include_str!("rules/homeroute-deploy-nextjs.md"),
+            AppStack::LeptosRust => include_str!("rules/homeroute-deploy-leptos.md"),
             AppStack::ViteRust => include_str!("rules/homeroute-deploy.md"),
         };
 
@@ -1315,14 +1316,21 @@ impl AgentRegistry {
             anyhow::bail!("Agent binary not found at {}", binary_path.display());
         }
 
-        let metadata = std::fs::metadata(binary_path)?;
-        let modified = metadata
-            .modified()
-            .map(|t| {
-                let dt: DateTime<Utc> = t.into();
-                dt.format("%Y%m%d-%H%M%S").to_string()
-            })
-            .unwrap_or_else(|_| "unknown".to_string());
+        // Read version from version file (written by `make agent`)
+        let version_path = Path::new("/opt/homeroute/data/agent-binaries/hr-agent.version");
+        let version = if version_path.exists() {
+            std::fs::read_to_string(version_path)?.trim().to_string()
+        } else {
+            // Fallback to mtime for backwards compatibility
+            let metadata = std::fs::metadata(binary_path)?;
+            metadata
+                .modified()
+                .map(|t| {
+                    let dt: DateTime<Utc> = t.into();
+                    dt.format("%Y%m%d-%H%M%S").to_string()
+                })
+                .unwrap_or_else(|_| "unknown".to_string())
+        };
 
         let mut file = std::fs::File::open(binary_path)?;
         let mut context = Context::new(&SHA256);
@@ -1360,7 +1368,7 @@ impl AgentRegistry {
 
             if let Some(conn) = conns.get(&app.id) {
                 let msg = RegistryMessage::UpdateAvailable {
-                    version: modified.clone(),
+                    version: version.clone(),
                     download_url: download_url.clone(),
                     sha256: sha256.clone(),
                 };
@@ -1377,11 +1385,11 @@ impl AgentRegistry {
                         app_id: app.id.clone(),
                         slug: app.slug.clone(),
                         status: AgentUpdateStatus::Notified,
-                        version: Some(modified.clone()),
+                        version: Some(version.clone()),
                         error: None,
                     });
 
-                    info!(app = app.slug, version = modified, "Update notification sent");
+                    info!(app = app.slug, version = version, "Update notification sent");
                 } else {
                     skipped.push(AgentSkipResult {
                         id: app.id.clone(),
@@ -1401,12 +1409,12 @@ impl AgentRegistry {
         info!(
             notified = notified.len(),
             skipped = skipped.len(),
-            version = modified,
+            version = version,
             "Agent update triggered"
         );
 
         Ok(UpdateBatchResult {
-            version: modified,
+            version,
             sha256,
             agents_notified: notified,
             agents_skipped: skipped,
@@ -1418,9 +1426,15 @@ impl AgentRegistry {
         use ring::digest::{Context, SHA256};
         use std::io::Read;
 
-        // Get expected version from current binary
+        // Get expected version from version file (written by `make agent`)
+        let version_path = Path::new("/opt/homeroute/data/agent-binaries/hr-agent.version");
         let binary_path = Path::new("/opt/homeroute/data/agent-binaries/hr-agent");
-        let expected_version = if binary_path.exists() {
+        let expected_version = if version_path.exists() {
+            std::fs::read_to_string(version_path)
+                .map(|v| v.trim().to_string())
+                .unwrap_or_else(|_| "unknown".to_string())
+        } else if binary_path.exists() {
+            // Fallback to mtime for backwards compatibility
             std::fs::metadata(binary_path)
                 .ok()
                 .and_then(|m| m.modified().ok())
