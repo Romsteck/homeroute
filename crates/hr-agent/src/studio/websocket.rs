@@ -427,11 +427,14 @@ where
             }
             WsInMessage::TerminalStart { session_id, resume_session, model, cols, rows } => {
                 info!("TerminalStart received: session={} cols={} rows={}", session_id, cols, rows);
-                // Check if terminal session already exists for this id (reconnection)
+                // If terminal session already tracked, clean up old PTY reader/writer
+                // but do NOT kill the tmux session — spawn_terminal will re-attach
                 if studio.is_terminal_active(&session_id).await {
-                    // Kill existing terminal to re-attach
                     super::terminal::cleanup_writer(&session_id).await;
-                    studio.kill_terminal(&session_id).await;
+                    // Abort old reader and remove from map (without killing tmux)
+                    if let Some(ts) = studio.terminal_sessions.write().await.remove(&session_id) {
+                        ts.reader_abort.abort();
+                    }
                 }
                 // Check concurrency limit
                 if studio.active_count().await >= studio.max_concurrent {
