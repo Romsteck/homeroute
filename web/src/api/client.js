@@ -66,9 +66,10 @@ export const getCertificatesStatus = () => api.get('/reverseproxy/certificates/s
 export const getRustProxyStatus = () => api.get('/rust-proxy/status');
 
 // Auth - Session (login page)
-export const login = (username, password, remember_me = false) => api.post('/auth/login', { username, password, remember_me });
+export const login = (code, remember_me = false) => api.post('/auth/login', { code, remember_me });
 export const logout = () => api.post('/auth/logout');
 export const getMe = () => api.get('/auth/me');
+export const changeCode = (new_code) => api.post('/auth/change-code', { new_code });
 
 // System Updates
 export const getUpdatesStatus = () => api.get('/updates/status');
@@ -104,24 +105,6 @@ export const getBenchmarkStatus = () => api.get('/energy/benchmark');
 export const startBenchmark = (duration = 60) => api.post('/energy/benchmark/start', { duration });
 export const stopBenchmark = () => api.post('/energy/benchmark/stop');
 
-// Users - Authelia Status
-export const getAutheliaStatus = () => api.get('/users/authelia/status');
-export const getAutheliaInstallInstructions = () => api.get('/users/authelia/install');
-export const bootstrapAdmin = (password) => api.post('/users/authelia/bootstrap', { password });
-
-// Users - CRUD
-export const getUsers = () => api.get('/users');
-export const getUser = (username) => api.get(`/users/${username}`);
-export const createUser = (data) => api.post('/users', data);
-export const updateUser = (username, data) => api.put(`/users/${username}`, data);
-export const deleteUser = (username) => api.delete(`/users/${username}`);
-export const changeUserPassword = (username, password) => api.put(`/users/${username}/password`, { password });
-
-// Users - Groups
-export const getUserGroups = () => api.get('/users/groups');
-export const createUserGroup = (data) => api.post('/users/groups', data);
-export const updateUserGroup = (id, data) => api.put(`/users/groups/${id}`, data);
-export const deleteUserGroup = (id) => api.delete(`/users/groups/${id}`);
 
 export default api;
 

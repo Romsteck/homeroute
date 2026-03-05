@@ -1,11 +1,10 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Shield, Eye, EyeOff, User, Lock, AlertCircle, Loader2 } from 'lucide-react';
+import { Shield, Eye, EyeOff, Lock, AlertCircle, Loader2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 function Login() {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
+  const [code, setCode] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -33,7 +32,7 @@ function Login() {
     setLoading(true);
 
     try {
-      const result = await login(username, password, rememberMe);
+      const result = await login(code, rememberMe);
 
       if (result.success) {
         if (redirectUrl) {
@@ -43,7 +42,7 @@ function Login() {
         }
       }
     } catch (err) {
-      setError(err.message || 'Identifiants invalides');
+      setError(err.message || 'Code invalide');
     } finally {
       setLoading(false);
     }
@@ -72,40 +71,21 @@ function Login() {
               </div>
             )}
 
-            {/* Username */}
+            {/* Code */}
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">
-                Nom d'utilisateur
-              </label>
-              <div className="relative">
-                <User className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
-                <input
-                  type="text"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  className="w-full pl-10 pr-4 py-3 bg-gray-900/50 border border-gray-600  text-white placeholder-gray-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all"
-                  placeholder="Votre identifiant"
-                  autoComplete="username"
-                  autoFocus
-                  required
-                />
-              </div>
-            </div>
-
-            {/* Password */}
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
-                Mot de passe
+                Code d'acces
               </label>
               <div className="relative">
                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
                 <input
                   type={showPassword ? 'text' : 'password'}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
                   className="w-full pl-10 pr-12 py-3 bg-gray-900/50 border border-gray-600  text-white placeholder-gray-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all"
-                  placeholder="Votre mot de passe"
+                  placeholder="Votre code d'acces"
                   autoComplete="current-password"
+                  autoFocus
                   required
                 />
                 <button

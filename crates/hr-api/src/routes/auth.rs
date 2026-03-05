@@ -20,12 +20,12 @@ pub fn router() -> Router<ApiState> {
         .route("/me", get(me))
         .route("/sessions", get(list_sessions))
         .route("/sessions/{id}", delete(revoke_session))
+        .route("/change-code", post(change_code))
 }
 
 #[derive(Deserialize)]
 struct LoginRequest {
-    username: String,
-    password: String,
+    code: String,
     #[serde(default)]
     remember_me: bool,
 }
@@ -83,17 +83,17 @@ async fn login(
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> (axum::http::StatusCode, [(header::HeaderName, String); 1], Json<Value>) {
-    let username = body.username.to_lowercase();
+    let username = "admin";
 
-    if username.is_empty() || body.password.is_empty() {
+    if body.code.is_empty() {
         return (
             axum::http::StatusCode::BAD_REQUEST,
             [(header::SET_COOKIE, String::new())],
-            Json(json!({"success": false, "error": "Nom d'utilisateur et mot de passe requis"})),
+            Json(json!({"success": false, "error": "Code requis"})),
         );
     }
 
-    let user = match state.auth.users.get_with_password(&username) {
+    let user = match state.auth.users.get_with_password(username) {
         Some(u) => u,
         None => {
             return (
@@ -104,15 +104,7 @@ async fn login(
         }
     };
 
-    if user.disabled {
-        return (
-            axum::http::StatusCode::UNAUTHORIZED,
-            [(header::SET_COOKIE, String::new())],
-            Json(json!({"success": false, "error": "Compte desactive"})),
-        );
-    }
-
-    if !hr_auth::users::verify_password(&body.password, &user.password_hash) {
+    if !hr_auth::users::verify_password(&body.code, &user.password_hash) {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
             [(header::SET_COOKIE, String::new())],
@@ -126,7 +118,7 @@ async fn login(
     let ua = headers.get("user-agent").and_then(|v| v.to_str().ok());
 
     let (session_id, expires_at) = match state.auth.sessions.create(
-        &username, ip, ua, body.remember_me,
+        username, ip, ua, body.remember_me,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -139,7 +131,7 @@ async fn login(
         }
     };
 
-    state.auth.users.update_last_login(&username);
+    state.auth.users.update_last_login(username);
 
     let max_age = if body.remember_me { Some(30 * 24 * 60 * 60) } else { None };
     let cookie = build_set_cookie(&session_id, max_age, &headers, &state.auth.base_domain);
@@ -152,8 +144,7 @@ async fn login(
             "user": {
                 "username": user.username,
                 "displayname": user.displayname,
-                "email": user.email,
-                "groups": user.groups
+                "email": user.email
             },
             "expires_at": expires_at
         })),
@@ -255,8 +246,6 @@ async fn me(
         }
     };
 
-    let is_admin = user.groups.contains(&"admins".to_string());
-
     // Refresh cookie domain on every successful /me call
     let remaining_ms = session.expires_at - chrono::Utc::now().timestamp_millis();
     let remaining_secs = (remaining_ms / 1000).max(0);
@@ -269,9 +258,7 @@ async fn me(
             "user": {
                 "username": user.username,
                 "displayName": user.displayname,
-                "email": user.email,
-                "groups": user.groups,
-                "isAdmin": is_admin
+                "email": user.email
             },
             "session": {
                 "created_at": session.created_at,
@@ -357,13 +344,11 @@ struct ForwardCheckQuery {
     host: Option<String>,
     #[serde(default)]
     uri: Option<String>,
-    #[serde(default)]
-    groups: Option<String>,
 }
 
 /// Forward-auth endpoint for agent reverse proxies.
-/// Accepts query params: host, uri, groups (comma-separated) — or X-Forwarded-* headers.
-/// Returns 200 + user/groups on success, 401 + login_url on unauthenticated, 403 on forbidden.
+/// Accepts query params: host, uri — or X-Forwarded-* headers.
+/// Returns 200 + user on success, 401 + login_url on unauthenticated.
 async fn forward_check(
     State(state): State<ApiState>,
     axum::extract::Query(query): axum::extract::Query<ForwardCheckQuery>,
@@ -383,10 +368,6 @@ async fn forward_check(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("https");
 
-    let allowed_groups: Vec<String> = query.groups.as_deref()
-        .map(|g| g.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
-        .unwrap_or_default();
-
     let cookie_value = headers
         .get("cookie")
         .and_then(|v| v.to_str().ok())
@@ -397,16 +378,39 @@ async fn forward_check(
             })
         });
 
-    match check_forward_auth(&state.auth, cookie_value, forwarded_host, forwarded_uri, forwarded_proto, &allowed_groups) {
+    match check_forward_auth(&state.auth, cookie_value, forwarded_host, forwarded_uri, forwarded_proto) {
         ForwardAuthResult::Success { user } => {
-            let groups = user.groups.join(",");
-            (axum::http::StatusCode::OK, Json(json!({"user": user.username, "groups": groups})))
+            (axum::http::StatusCode::OK, Json(json!({"user": user.username})))
         }
         ForwardAuthResult::Unauthorized { login_url } => {
             (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"login_url": login_url})))
         }
-        ForwardAuthResult::Forbidden { message } => {
-            (axum::http::StatusCode::FORBIDDEN, Json(json!({"message": message})))
-        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ChangeCodeRequest {
+    new_code: String,
+}
+
+async fn change_code(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    Json(body): Json<ChangeCodeRequest>,
+) -> (axum::http::StatusCode, Json<Value>) {
+    let session_id = match jar.get("auth_session") {
+        Some(c) => c.value().to_string(),
+        None => return (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"success": false, "error": "Non authentifie"}))),
+    };
+    match state.auth.sessions.validate(&session_id) {
+        Ok(Some(_)) => {},
+        _ => return (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"success": false, "error": "Session expiree"}))),
+    };
+    if body.new_code.len() < 8 {
+        return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"success": false, "error": "Le code doit contenir au moins 8 caracteres"})));
+    }
+    match state.auth.users.change_password("admin", &body.new_code) {
+        Ok(()) => (axum::http::StatusCode::OK, Json(json!({"success": true}))),
+        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"success": false, "error": e}))),
     }
 }

@@ -1,6 +1,5 @@
 pub mod health;
 pub mod auth;
-pub mod users;
 pub mod dns_dhcp;
 pub mod dns;
 pub mod adblock;

@@ -39,7 +39,6 @@ pub fn build_router(state: ApiState) -> Router {
 fn api_routes() -> Router<ApiState> {
     Router::new()
         .nest("/auth", routes::auth::router())
-        .nest("/users", routes::users::router())
         .nest("/dns-dhcp", routes::dns_dhcp::router())
         .nest("/dns", routes::dns::router())
         .nest("/adblock", routes::adblock::router())

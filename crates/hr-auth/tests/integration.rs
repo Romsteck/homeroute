@@ -13,9 +13,6 @@ fn test_load_existing_users() {
     }
 
     let store = UserStore::new(data_dir);
-    let users = store.get_all();
-
-    assert!(!users.is_empty(), "Should have at least one user");
 
     // Vérifier que l'admin existe
     let admin = store.get("admin");
@@ -23,8 +20,6 @@ fn test_load_existing_users() {
 
     let admin = admin.unwrap();
     assert_eq!(admin.username, "admin");
-    assert!(admin.groups.contains(&"admins".to_string()));
-    assert!(!admin.disabled);
 }
 
 /// Vérifie que le hash Argon2id de Node.js est compatible avec notre vérification Rust

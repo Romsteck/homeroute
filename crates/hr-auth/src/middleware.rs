@@ -4,7 +4,7 @@ use axum::{
     extract::{FromRequestParts, Request},
     http::{StatusCode, request::Parts},
     middleware::Next,
-    response::{IntoResponse, Json, Response},
+    response::{Json, Response},
 };
 use axum_extra::extract::CookieJar;
 use serde_json::json;
@@ -23,7 +23,7 @@ where
 {
     type Rejection = (StatusCode, Json<serde_json::Value>);
 
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         // Extraire le cookie de session
         let jar = CookieJar::from_headers(&parts.headers);
         let session_id = jar
@@ -68,39 +68,7 @@ where
             Json(json!({ "success": false, "error": "Utilisateur non trouve" })),
         ))?;
 
-        if user.disabled {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(json!({ "success": false, "error": "Compte desactive" })),
-            ));
-        }
-
         Ok(AuthUser(user))
-    }
-}
-
-/// Extracteur axum : utilisateur admin requis
-#[derive(Debug, Clone)]
-pub struct AdminUser(pub UserInfo);
-
-impl<S> FromRequestParts<S> for AdminUser
-where
-    S: Send + Sync,
-    Arc<AuthService>: FromRequestParts<S, Rejection = std::convert::Infallible>,
-{
-    type Rejection = (StatusCode, Json<serde_json::Value>);
-
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let AuthUser(user) = AuthUser::from_request_parts(parts, state).await?;
-
-        if !user.groups.contains(&"admins".to_string()) {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(json!({ "success": false, "error": "Acces administrateur requis" })),
-            ));
-        }
-
-        Ok(AdminUser(user))
     }
 }
 

@@ -269,22 +269,14 @@ async fn proxy_handler_inner(
                         domain_only,
                         &req_uri,
                         "https",
-                        &app_route.allowed_groups,
                     ) {
                         ForwardAuthResult::Success { user } => {
                             if let Ok(v) = HeaderValue::from_str(&user.username) {
                                 req.headers_mut().insert("X-Forwarded-User", v);
                             }
-                            if let Ok(v) = HeaderValue::from_str(&user.groups.join(",")) {
-                                req.headers_mut().insert("X-Forwarded-Groups", v);
-                            }
                         }
                         ForwardAuthResult::Unauthorized { login_url } => {
                             return Err(ProxyError::AuthRequired(Some(login_url)));
-                        }
-                        ForwardAuthResult::Forbidden { message } => {
-                            warn!("App route auth forbidden for {}: {}", host, message);
-                            return Err(ProxyError::Forbidden);
                         }
                     }
                 }
@@ -446,16 +438,12 @@ async fn proxy_handler_inner(
                     })
                 });
 
-            match check_forward_auth(auth, cookie_value, &host, &req_uri, "https", &[]) {
+            match check_forward_auth(auth, cookie_value, &host, &req_uri, "https") {
                 ForwardAuthResult::Success { user } => {
                     debug!("Auth OK for user: {}", user.username);
                 }
                 ForwardAuthResult::Unauthorized { login_url } => {
                     return Err(ProxyError::AuthRequired(Some(login_url)));
-                }
-                ForwardAuthResult::Forbidden { message } => {
-                    warn!("Auth forbidden: {}", message);
-                    return Err(ProxyError::Forbidden);
                 }
             }
         } else {
