@@ -363,7 +363,7 @@ fn build_request(
     xid: &[u8; 3],
     client_duid: &[u8],
     server_duid: &[u8],
-    iaid: u32,
+    _iaid: u32,
     ia_pd_from_advertise: &[u8],
 ) -> Vec<u8> {
     let mut buf = Vec::with_capacity(256);

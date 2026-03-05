@@ -8,7 +8,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::state::ApiState;
 

@@ -8,7 +8,6 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use hr_dataverse::engine::DataverseEngine;
-use hr_dataverse::schema::DatabaseSchema;
 use hr_registry::protocol::{SchemaColumnInfo, SchemaRelationInfo, SchemaTableInfo};
 
 const DATAVERSE_DIR_PROD: &str = "/opt/app/.dataverse";
@@ -92,18 +91,8 @@ impl LocalDataverse {
         Ok((tables, relations, schema.version, db_size))
     }
 
-    /// Get the database schema.
-    pub async fn get_schema(&self) -> Result<DatabaseSchema> {
-        let engine = self.engine.lock().await;
-        Ok(engine.get_schema()?)
-    }
-
     /// Get the engine (for MCP operations).
     pub fn engine(&self) -> &Arc<Mutex<DataverseEngine>> {
         &self.engine
-    }
-
-    pub fn db_path(&self) -> &Path {
-        &self.db_path
     }
 }

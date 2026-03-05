@@ -5,10 +5,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, RwLock};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use hr_acme::AcmeManager;
 use hr_common::config::EnvConfig;
@@ -26,7 +26,6 @@ use crate::types::{
 struct AppConnections {
     /// Primary tx for sending commands to the agent (from the main agent with IPv4).
     tx: mpsc::Sender<RegistryMessage>,
-    connected_at: DateTime<Utc>,
     last_heartbeat: DateTime<Utc>,
     /// Number of active WebSocket connections for this app_id.
     active_count: usize,
@@ -210,26 +209,6 @@ impl AgentRegistry {
         info!(app = app.slug, container = container_name, "Application created (headless)");
 
         Ok((app, token_clear))
-    }
-
-    /// Set an application's status and persist.
-    async fn set_app_status(&self, app_id: &str, status: AgentStatus) {
-        {
-            let mut state = self.state.write().await;
-            if let Some(app) = state.applications.iter_mut().find(|a| a.id == app_id) {
-                app.status = status;
-            }
-        }
-        let _ = self.persist().await;
-    }
-
-    /// Remove a failed application from state (cleanup after deploy failure).
-    async fn remove_failed_app(&self, app_id: &str) {
-        {
-            let mut state = self.state.write().await;
-            state.applications.retain(|a| a.id != app_id);
-        }
-        let _ = self.persist().await;
     }
 
     /// Update application endpoints/auth. Pushes new config to connected agent.
@@ -423,7 +402,6 @@ impl AgentRegistry {
                     app_id.to_string(),
                     AppConnections {
                         tx: tx.clone(),
-                        connected_at: now,
                         last_heartbeat: now,
                         active_count: 1,
                     },
@@ -1424,9 +1402,6 @@ impl AgentRegistry {
 
     /// Get update status for all agents: whether they're connected with the expected version.
     pub async fn get_update_status(&self) -> Result<UpdateStatusResult> {
-        use ring::digest::{Context, SHA256};
-        use std::io::Read;
-
         // Get expected version from version file (written by `make agent`)
         let version_path = Path::new("/opt/homeroute/data/agent-binaries/hr-agent.version");
         let binary_path = Path::new("/opt/homeroute/data/agent-binaries/hr-agent");

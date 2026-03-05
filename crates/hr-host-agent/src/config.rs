@@ -14,9 +14,6 @@ pub struct Config {
     /// Storage path for nspawn containers (default: /var/lib/machines).
     #[serde(default)]
     pub container_storage_path: Option<String>,
-    /// Container runtime: "lxd" (default) or "nspawn".
-    #[serde(default)]
-    pub container_runtime: Option<String>,
 }
 
 fn default_reconnect() -> u64 {
