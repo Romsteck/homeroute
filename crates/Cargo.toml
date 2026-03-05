@@ -119,3 +119,9 @@ xxhash-rust = { version = "0.8", features = ["xxh32"] }
 
 # Embedded static files
 rust-embed = { version = "8", features = ["compression"] }
+
+# File system watcher
+notify = "7"
+
+# PTY (pseudo-terminal)
+pty-process = { version = "0.4", features = ["async"] }

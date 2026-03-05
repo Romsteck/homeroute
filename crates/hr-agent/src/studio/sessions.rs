@@ -3,7 +3,7 @@ use tracing::{debug, warn};
 
 use super::types::SessionInfo;
 
-const PROJECTS_DIRS: &[&str] = &[
+pub(super) const PROJECTS_DIRS: &[&str] = &[
     "/home/studio/.claude/projects",
     "/root/.claude/projects",
 ];
@@ -61,6 +61,7 @@ pub fn list_sessions() -> Vec<SessionInfo> {
                             last_modified,
                             message_count,
                             summary,
+                            session_type: "agent".to_string(),
                         });
                     }
                 }

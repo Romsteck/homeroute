@@ -18,9 +18,9 @@ export default function useSessionTabs(ws) {
     const oldSid = localStorage.getItem('studio-session-id');
     if (oldSid) {
       localStorage.removeItem('studio-session-id');
-      return [{ id: oldSid, label: 'Chat' }];
+      return [{ id: oldSid, label: 'Chat', sessionType: 'agent' }];
     }
-    return [{ id: null, label: 'New Chat' }];
+    return [{ id: null, label: 'New Chat', sessionType: 'agent' }];
   });
 
   const [activeTabIndex, setActiveTabIndex] = useState(() =>
@@ -60,6 +60,7 @@ export default function useSessionTabs(ws) {
         aborted: false,
         pendingAnswers: {},
         draft: { text: '', images: [] },
+        terminalActive: false,
       });
     }
     return sessionCacheRef.current.get(key);
@@ -209,6 +210,26 @@ export default function useSessionTabs(ws) {
       }
     }));
 
+    // todo_update — from JSONL watcher (independent of stream)
+    unsubs.push(ws.subscribe('todo_update', (data) => {
+      const sessionId = data.session_id || null;
+      const cache = getCache(sessionId);
+      cache.todos = data.todos || [];
+      if (isActiveSession(sessionId)) {
+        setActiveVersion(v => v + 1);
+      }
+    }));
+
+    // terminal_done — mark terminal session as inactive
+    unsubs.push(ws.subscribe('terminal_done', (data) => {
+      const sessionId = data.session_id || null;
+      const cache = getCache(sessionId);
+      cache.terminalActive = false;
+      if (isActiveSession(sessionId)) {
+        setActiveVersion(v => v + 1);
+      }
+    }));
+
     // active_streams — which sessions are currently streaming
     unsubs.push(ws.subscribe('active_streams', (data) => {
       const activeIds = data.session_ids || [];
@@ -243,8 +264,13 @@ export default function useSessionTabs(ws) {
 
   // --- Public methods ---
 
-  const newTab = useCallback(() => {
-    setTabs(prev => [...prev, { id: null, label: 'New Chat' }]);
+  const newTab = useCallback((sessionType = 'agent') => {
+    if (sessionType === 'cli') {
+      const id = crypto.randomUUID();
+      setTabs(prev => [...prev, { id, label: 'Terminal', sessionType: 'cli' }]);
+    } else {
+      setTabs(prev => [...prev, { id: null, label: 'New Chat', sessionType: 'agent' }]);
+    }
     setActiveTabIndex(tabs.length); // will be the new last index
   }, [tabs.length]);
 
@@ -281,7 +307,7 @@ export default function useSessionTabs(ws) {
     setTabs(prev => {
       const updated = prev.filter((_, i) => i !== index);
       if (updated.length === 0) {
-        return [{ id: null, label: 'New Chat' }];
+        return [{ id: null, label: 'New Chat', sessionType: 'agent' }];
       }
       return updated;
     });
@@ -366,7 +392,7 @@ export default function useSessionTabs(ws) {
 
   const getActiveState = useCallback(() => {
     const activeTab = tabs[activeTabIndex];
-    if (!activeTab) return { messages: [], todos: [], isStreaming: false };
+    if (!activeTab) return { messages: [], todos: [], isStreaming: false, sessionType: 'agent' };
     const cache = getCache(activeTab.id);
     return {
       messages: cache.messages,
@@ -374,6 +400,7 @@ export default function useSessionTabs(ws) {
       isStreaming: cache.isStreaming,
       pendingAnswers: cache.pendingAnswers,
       draft: cache.draft,
+      sessionType: activeTab.sessionType || 'agent',
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabs, activeTabIndex, getCache, activeVersion]);
@@ -394,6 +421,7 @@ export default function useSessionTabs(ws) {
     const cache = tab.id ? sessionCacheRef.current.get(tab.id) : sessionCacheRef.current.get('__null__');
     return {
       ...tab,
+      sessionType: tab.sessionType || 'agent',
       isStreaming: cache?.isStreaming || false,
       hasUnread: cache?.hasUnread || false,
     };
