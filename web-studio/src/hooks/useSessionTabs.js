@@ -274,7 +274,7 @@ export default function useSessionTabs(ws) {
     setActiveTabIndex(tabs.length); // will be the new last index
   }, [tabs.length]);
 
-  const openTab = useCallback((sessionId, label) => {
+  const openTab = useCallback((sessionId, label, sessionType) => {
     // If already open, just focus
     const existingIdx = tabs.findIndex(t => t.id === sessionId);
     if (existingIdx !== -1) {
@@ -286,10 +286,13 @@ export default function useSessionTabs(ws) {
       return;
     }
     // Otherwise push new tab and focus
-    const newLabel = label || (sessionId ? sessionId.slice(0, 8) + '...' : 'New Chat');
-    setTabs(prev => [...prev, { id: sessionId, label: newLabel }]);
+    const type = sessionType || 'agent';
+    const newLabel = label || (type === 'cli' ? 'Terminal' : (sessionId ? sessionId.slice(0, 8) + '...' : 'New Chat'));
+    setTabs(prev => [...prev, { id: sessionId, label: newLabel, sessionType: type }]);
     setActiveTabIndex(tabs.length);
-    loadIfNeeded(sessionId);
+    if (type !== 'cli') {
+      loadIfNeeded(sessionId);
+    }
   }, [tabs, getCache, loadIfNeeded]);
 
   const closeTab = useCallback((index) => {

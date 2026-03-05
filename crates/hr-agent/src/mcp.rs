@@ -1697,6 +1697,26 @@ async fn handle_studio_tool_call(tool: &str, args: &Value) -> Result<Value, Stri
                 .map_err(|e| format!("Failed to write todos file: {e}"))?;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))
                 .map_err(|e| format!("Failed to set permissions: {e}"))?;
+
+            // Notify the todo_watcher by writing to /tmp/studio-todos/{session_id}.json
+            // Try env var first, then detect from tmux session name (studio-{uuid})
+            let session_id = std::env::var("STUDIO_SESSION_ID").ok().or_else(|| {
+                std::process::Command::new("tmux")
+                    .args(["display-message", "-p", "#{session_name}"])
+                    .output()
+                    .ok()
+                    .and_then(|o| {
+                        let name = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                        name.strip_prefix("studio-").map(|s| s.to_string())
+                    })
+            });
+            if let Some(sid) = session_id {
+                let notify_dir = std::path::Path::new("/tmp/studio-todos");
+                let _ = std::fs::create_dir_all(notify_dir);
+                let notify_path = notify_dir.join(format!("{}.json", sid));
+                let _ = std::fs::write(&notify_path, &content);
+            }
+
             Ok(json!({
                 "content": [{ "type": "text", "text": msg }]
             }))
