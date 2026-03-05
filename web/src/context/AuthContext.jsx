@@ -41,9 +41,9 @@ export function AuthProvider({ children }) {
     checkAuth();
   }, [checkAuth]);
 
-  const login = useCallback(async (username, password, rememberMe = false) => {
+  const login = useCallback(async (code, rememberMe = false) => {
     try {
-      const res = await apiLogin(username, password, rememberMe);
+      const res = await apiLogin(code, rememberMe);
 
       if (res.data.success) {
         setUser(res.data.user);

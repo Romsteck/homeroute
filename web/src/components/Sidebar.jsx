@@ -1,7 +1,7 @@
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Server, Shield, Globe, Settings,
-  ArrowLeftRight, RefreshCw, Zap, Users, LogOut,
+  ArrowLeftRight, RefreshCw, Zap, LogOut,
   User, HardDrive, Lock, Database, Cloud, Container, Table2,
   Store as StoreIcon, GitBranch
 } from 'lucide-react';
@@ -43,7 +43,6 @@ const navGroups = [
     label: 'Système',
     items: [
       { to: '/hosts', icon: HardDrive, label: 'Hotes' },
-      { to: '/users', icon: Users, label: 'Utilisateurs' },
       { to: '/updates', icon: RefreshCw, label: 'Mises à jour' },
       { to: '/energy', icon: Zap, label: 'Énergie' },
     ],
@@ -103,9 +102,7 @@ function Sidebar() {
                 <p className="text-sm text-gray-300 truncate">
                   {user.displayName || user.username}
                 </p>
-                {user.isAdmin && (
-                  <p className="text-xs text-blue-400">Admin</p>
-                )}
+                <p className="text-xs text-blue-400">Admin</p>
               </div>
             </div>
             <button

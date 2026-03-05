@@ -38,8 +38,6 @@ pub struct UserInfo {
     pub username: String,
     pub displayname: String,
     pub email: String,
-    pub groups: Vec<String>,
-    pub disabled: bool,
     pub created: Option<String>,
     pub last_login: Option<String>,
 }
@@ -51,18 +49,6 @@ pub struct UserWithPassword {
     pub displayname: String,
     pub email: String,
     pub password_hash: String,
-    pub groups: Vec<String>,
-    pub disabled: bool,
-}
-
-/// Résultat d'une opération sur les utilisateurs
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UserOpResult {
-    pub success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user: Option<UserInfo>,
 }
 
 /// Store d'utilisateurs basé sur un fichier YAML
@@ -98,23 +84,6 @@ impl UserStore {
         }
     }
 
-    /// Liste tous les utilisateurs (sans mot de passe)
-    pub fn get_all(&self) -> Vec<UserInfo> {
-        let data = self.load();
-        data.users
-            .iter()
-            .map(|(username, ud)| UserInfo {
-                username: username.clone(),
-                displayname: ud.displayname.clone().unwrap_or_else(|| username.clone()),
-                email: ud.email.clone().unwrap_or_default(),
-                groups: ud.groups.clone(),
-                disabled: ud.disabled,
-                created: ud.created.clone(),
-                last_login: ud.last_login.clone(),
-            })
-            .collect()
-    }
-
     /// Récupère un utilisateur par nom (sans mot de passe)
     pub fn get(&self, username: &str) -> Option<UserInfo> {
         let data = self.load();
@@ -122,8 +91,6 @@ impl UserStore {
             username: username.to_string(),
             displayname: ud.displayname.clone().unwrap_or_else(|| username.to_string()),
             email: ud.email.clone().unwrap_or_default(),
-            groups: ud.groups.clone(),
-            disabled: ud.disabled,
             created: ud.created.clone(),
             last_login: ud.last_login.clone(),
         })
@@ -138,138 +105,8 @@ impl UserStore {
                 displayname: ud.displayname.clone().unwrap_or_else(|| username.to_string()),
                 email: ud.email.clone().unwrap_or_default(),
                 password_hash: pw.clone(),
-                groups: ud.groups.clone(),
-                disabled: ud.disabled,
             })
         })
-    }
-
-    /// Crée un nouvel utilisateur
-    pub fn create(
-        &self,
-        username: &str,
-        password: &str,
-        displayname: Option<&str>,
-        email: Option<&str>,
-        groups: Vec<String>,
-    ) -> UserOpResult {
-        let mut data = self.load();
-
-        if data.users.contains_key(username) {
-            return UserOpResult {
-                success: false,
-                error: Some("Utilisateur deja existant".to_string()),
-                user: None,
-            };
-        }
-
-        // Valider le nom d'utilisateur
-        let re_valid = username.len() >= 3
-            && username.len() <= 32
-            && username
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
-        if !re_valid {
-            return UserOpResult {
-                success: false,
-                error: Some(
-                    "Nom d'utilisateur invalide (3-32 caracteres, lettres, chiffres, _ ou -)"
-                        .to_string(),
-                ),
-                user: None,
-            };
-        }
-
-        if password.len() < 8 {
-            return UserOpResult {
-                success: false,
-                error: Some("Le mot de passe doit contenir au moins 8 caracteres".to_string()),
-                user: None,
-            };
-        }
-
-        let hashed = match hash_password(password) {
-            Ok(h) => h,
-            Err(_) => {
-                return UserOpResult {
-                    success: false,
-                    error: Some("Erreur de hachage du mot de passe".to_string()),
-                    user: None,
-                }
-            }
-        };
-
-        let now = chrono::Utc::now().to_rfc3339();
-        data.users.insert(
-            username.to_string(),
-            UserData {
-                displayname: Some(
-                    displayname
-                        .unwrap_or(username)
-                        .to_string(),
-                ),
-                email: Some(email.unwrap_or("").to_string()),
-                password: Some(hashed),
-                groups,
-                disabled: false,
-                created: Some(now),
-                last_login: None,
-            },
-        );
-
-        if !self.save(&data) {
-            return UserOpResult {
-                success: false,
-                error: Some("Erreur lors de la sauvegarde".to_string()),
-                user: None,
-            };
-        }
-
-        UserOpResult {
-            success: true,
-            error: None,
-            user: self.get(username),
-        }
-    }
-
-    /// Met à jour un utilisateur existant
-    pub fn update(&self, username: &str, updates: &UserUpdates) -> UserOpResult {
-        let mut data = self.load();
-
-        let Some(user) = data.users.get_mut(username) else {
-            return UserOpResult {
-                success: false,
-                error: Some("Utilisateur non trouve".to_string()),
-                user: None,
-            };
-        };
-
-        if let Some(ref dn) = updates.displayname {
-            user.displayname = Some(dn.clone());
-        }
-        if let Some(ref email) = updates.email {
-            user.email = Some(email.clone());
-        }
-        if let Some(ref groups) = updates.groups {
-            user.groups = groups.clone();
-        }
-        if let Some(disabled) = updates.disabled {
-            user.disabled = disabled;
-        }
-
-        if !self.save(&data) {
-            return UserOpResult {
-                success: false,
-                error: Some("Erreur lors de la sauvegarde".to_string()),
-                user: None,
-            };
-        }
-
-        UserOpResult {
-            success: true,
-            error: None,
-            user: self.get(username),
-        }
     }
 
     /// Met à jour le timestamp de dernière connexion
@@ -284,94 +121,27 @@ impl UserStore {
     }
 
     /// Change le mot de passe d'un utilisateur
-    pub fn change_password(&self, username: &str, new_password: &str) -> UserOpResult {
+    pub fn change_password(&self, username: &str, new_password: &str) -> Result<(), String> {
         if new_password.len() < 8 {
-            return UserOpResult {
-                success: false,
-                error: Some("Le mot de passe doit contenir au moins 8 caracteres".to_string()),
-                user: None,
-            };
+            return Err("Le mot de passe doit contenir au moins 8 caracteres".to_string());
         }
 
         let mut data = self.load();
         let Some(user) = data.users.get_mut(username) else {
-            return UserOpResult {
-                success: false,
-                error: Some("Utilisateur non trouve".to_string()),
-                user: None,
-            };
+            return Err("Utilisateur non trouve".to_string());
         };
 
-        let hashed = match hash_password(new_password) {
-            Ok(h) => h,
-            Err(_) => {
-                return UserOpResult {
-                    success: false,
-                    error: Some("Erreur de hachage du mot de passe".to_string()),
-                    user: None,
-                }
-            }
-        };
+        let hashed = hash_password(new_password)
+            .map_err(|_| "Erreur de hachage du mot de passe".to_string())?;
 
         user.password = Some(hashed);
 
         if !self.save(&data) {
-            return UserOpResult {
-                success: false,
-                error: Some("Erreur lors de la sauvegarde".to_string()),
-                user: None,
-            };
+            return Err("Erreur lors de la sauvegarde".to_string());
         }
 
-        UserOpResult {
-            success: true,
-            error: None,
-            user: None,
-        }
+        Ok(())
     }
-
-    /// Supprime un utilisateur
-    pub fn delete(&self, username: &str) -> UserOpResult {
-        let mut data = self.load();
-
-        if data.users.remove(username).is_none() {
-            return UserOpResult {
-                success: false,
-                error: Some("Utilisateur non trouve".to_string()),
-                user: None,
-            };
-        }
-
-        if !self.save(&data) {
-            return UserOpResult {
-                success: false,
-                error: Some("Erreur lors de la sauvegarde".to_string()),
-                user: None,
-            };
-        }
-
-        UserOpResult {
-            success: true,
-            error: None,
-            user: None,
-        }
-    }
-
-    /// Vérifie si un utilisateur est admin
-    pub fn is_admin(&self, username: &str) -> bool {
-        self.get(username)
-            .map(|u| u.groups.contains(&"admins".to_string()))
-            .unwrap_or(false)
-    }
-}
-
-/// Mises à jour partielles d'un utilisateur
-#[derive(Debug, Clone, Deserialize)]
-pub struct UserUpdates {
-    pub displayname: Option<String>,
-    pub email: Option<String>,
-    pub groups: Option<Vec<String>>,
-    pub disabled: Option<bool>,
 }
 
 /// Hash un mot de passe avec Argon2id (mêmes paramètres que le backend Node.js)

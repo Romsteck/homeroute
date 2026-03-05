@@ -23,7 +23,6 @@ import {
 } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
-import GroupBadge from '../components/GroupBadge';
 import PageHeader from '../components/PageHeader';
 import Section from '../components/Section';
 import {
@@ -39,14 +38,12 @@ import {
   reloadProxy,
   getCertificatesStatus,
   getRustProxyStatus,
-  getUserGroups
 } from '../api/client';
 
 function ReverseProxy() {
   const [config, setConfig] = useState(null);
   const [status, setStatus] = useState(null);
   const [hosts, setHosts] = useState([]);
-  const [userGroups, setUserGroups] = useState([]);
   const [rustProxy, setRustProxy] = useState(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState(null);
@@ -139,13 +136,12 @@ Verification rapide (sans les details utilisateur).
 
   async function fetchData() {
     try {
-      const [configRes, statusRes, hostsRes, certsRes, rustRes, groupsRes] = await Promise.all([
+      const [configRes, statusRes, hostsRes, certsRes, rustRes] = await Promise.all([
         getReverseProxyConfig(),
         getReverseProxyStatus(),
         getReverseProxyHosts(),
         getCertificatesStatus(),
         getRustProxyStatus().catch(() => ({ data: { success: false } })),
-        getUserGroups().catch(() => ({ data: { success: false } }))
       ]);
 
       if (configRes.data.success) {
@@ -161,7 +157,6 @@ Verification rapide (sans les details utilisateur).
       }
       if (certsRes.data.success) setCertStatuses(certsRes.data.certificates || {});
       if (rustRes.data.success) setRustProxy(rustRes.data);
-      if (groupsRes.data?.success) setUserGroups(groupsRes.data.groups || []);
     } catch (error) {
       console.error('Error:', error);
       setMessage({ type: 'error', text: 'Erreur de chargement' });

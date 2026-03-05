@@ -8,7 +8,6 @@ import Ddns from './pages/Ddns';
 import ReverseProxy from './pages/ReverseProxy';
 import Updates from './pages/Updates';
 import Energy from './pages/Energy';
-import Users from './pages/Users';
 import Hosts from './pages/Hosts';
 import Certificates from './pages/Certificates';
 import Dataverse from './pages/Dataverse';
@@ -98,7 +97,6 @@ function AppRoutes() {
               <Route path="/adblock" element={<Adblock />} />
               <Route path="/ddns" element={<Ddns />} />
               <Route path="/reverseproxy" element={<ReverseProxy />} />
-              <Route path="/users" element={<Users />} />
               <Route path="/updates" element={<Updates />} />
               <Route path="/energy" element={<Energy />} />
               <Route path="/hosts" element={<Hosts />} />

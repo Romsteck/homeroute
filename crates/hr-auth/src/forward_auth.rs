@@ -12,10 +12,6 @@ pub enum ForwardAuthResult {
     Unauthorized {
         login_url: String,
     },
-    /// Authentifié mais accès refusé (groupes insuffisants)
-    Forbidden {
-        message: String,
-    },
 }
 
 /// Headers à injecter dans la réponse en cas de succès
@@ -23,7 +19,6 @@ pub struct ForwardAuthHeaders {
     pub remote_user: String,
     pub remote_email: String,
     pub remote_name: String,
-    pub remote_groups: String,
 }
 
 impl From<&UserInfo> for ForwardAuthHeaders {
@@ -32,7 +27,6 @@ impl From<&UserInfo> for ForwardAuthHeaders {
             remote_user: user.username.clone(),
             remote_email: user.email.clone(),
             remote_name: user.displayname.clone(),
-            remote_groups: user.groups.join(","),
         }
     }
 }
@@ -46,7 +40,6 @@ pub fn check_forward_auth(
     forwarded_host: &str,
     forwarded_uri: &str,
     forwarded_proto: &str,
-    allowed_groups: &[String],
 ) -> ForwardAuthResult {
     let original_url = format!("{}://{}{}", forwarded_proto, forwarded_host, forwarded_uri);
     let login_url = format!(
@@ -70,25 +63,6 @@ pub fn check_forward_auth(
     let Some(user) = auth.users.get(&session.user_id) else {
         return ForwardAuthResult::Unauthorized { login_url };
     };
-
-    // Vérifier que le compte n'est pas désactivé
-    if user.disabled {
-        return ForwardAuthResult::Forbidden {
-            message: "Account disabled".to_string(),
-        };
-    }
-
-    // Vérifier les groupes d'accès
-    let is_admin = user.groups.contains(&"admins".to_string());
-
-    if !is_admin && !allowed_groups.is_empty() {
-        let has_access = allowed_groups.iter().any(|g| user.groups.contains(g));
-        if !has_access {
-            return ForwardAuthResult::Forbidden {
-                message: "Access denied: insufficient group permissions".to_string(),
-            };
-        }
-    }
 
     ForwardAuthResult::Success { user }
 }
