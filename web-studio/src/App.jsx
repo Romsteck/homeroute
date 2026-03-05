@@ -10,7 +10,6 @@ import TodoPanel from './components/TodoPanel';
 import PreviewPanel from './components/PreviewPanel';
 import FilesPanel from './components/FilesPanel';
 import DocsPanel from './components/DocsPanel';
-import StatusBar from './components/StatusBar';
 import AuthDialog from './components/AuthDialog';
 
 function getAppInfo() {
@@ -56,7 +55,7 @@ export default function App() {
         connected={ws.connected}
         sessions={ws.sessions}
         currentSessionId={sessionManager.activeSessionId}
-        onSelectSession={(id, label) => sessionManager.openTab(id, label)}
+        onSelectSession={(id, label, sessionType) => sessionManager.openTab(id, label, sessionType)}
         onNewSession={sessionManager.newTab}
         onDeleteSession={ws.deleteSession}
         authStatus={auth.authStatus}
@@ -70,7 +69,6 @@ export default function App() {
           activeIndex={sessionManager.activeTabIndex}
           onSwitch={sessionManager.switchTab}
           onClose={sessionManager.closeTab}
-          onNew={sessionManager.newTab}
         />
       )}
 
@@ -125,12 +123,6 @@ export default function App() {
         {activeTab === 'docs' && <DocsPanel sendRaw={ws.sendRaw} subscribe={ws.subscribe} connected={ws.connected} />}
       </div>
 
-      <StatusBar
-        connected={ws.connected}
-        sessionId={sessionManager.activeSessionId}
-        isStreaming={activeState.isStreaming}
-        activeCount={sessionManager.activeStreamCount}
-      />
 
       {auth.showAuthDialog && (
         <AuthDialog

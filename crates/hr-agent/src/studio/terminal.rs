@@ -120,6 +120,9 @@ pub async fn spawn_terminal(
             env_prefix.push(' ');
         }
 
+        // Pass studio session ID so MCP tools can broadcast todos to the right tab
+        env_prefix.push_str(&format!("STUDIO_SESSION_ID={} ", session_id));
+
         // Add token env var if user is using token auth
         if let Some(username) = user {
             if let Some(cred) = super::credentials::get_auth_status(username).await {

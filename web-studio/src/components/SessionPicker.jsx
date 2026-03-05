@@ -33,6 +33,7 @@ export default function SessionPicker({ sessions, currentSessionId, onSelect, on
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [hoveredId, setHoveredId] = useState(null);
+  const [choosingId, setChoosingId] = useState(null);
   const dropdownRef = useRef(null);
   const searchRef = useRef(null);
 
@@ -70,10 +71,8 @@ export default function SessionPicker({ sessions, currentSessionId, onSelect, on
   const groups = groupSessionsByDate(filtered);
 
   const handleSelect = useCallback((id) => {
-    onSelect(id);
-    setOpen(false);
-    setSearch('');
-  }, [onSelect]);
+    setChoosingId(choosingId === id ? null : id);
+  }, [choosingId]);
 
   const handleNew = useCallback(() => {
     onNew();
@@ -93,6 +92,7 @@ export default function SessionPicker({ sessions, currentSessionId, onSelect, on
           const isSelected = id === currentSessionId;
           const isHovered = id === hoveredId;
           const displayName = s.summary || (id ? id.slice(0, 8) + '...' : 'New Chat');
+          const isChoosing = choosingId === id;
           return (
             <div
               key={id}
@@ -123,7 +123,28 @@ export default function SessionPicker({ sessions, currentSessionId, onSelect, on
                   </span>
                 </div>
               </div>
-              {onDelete && (
+              {/* Open mode choice buttons */}
+              {isChoosing && (
+                <div className="flex gap-2 mt-1.5 ml-5" onClick={(e) => e.stopPropagation()}>
+                  <button
+                    onClick={() => { onSelect(id, displayName, 'agent'); setOpen(false); setSearch(''); setChoosingId(null); }}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-indigo-600/20 text-indigo-400 text-xs hover:bg-indigo-600/30 transition-colors"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                    </svg>
+                    Open in Agent
+                  </button>
+                  <button
+                    onClick={() => { onSelect(id, displayName, 'cli'); setOpen(false); setSearch(''); setChoosingId(null); }}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-emerald-600/20 text-emerald-400 text-xs hover:bg-emerald-600/30 transition-colors"
+                  >
+                    <span className="font-mono text-[10px] font-bold">{'>_'}</span>
+                    Resume in Terminal
+                  </button>
+                </div>
+              )}
+              {onDelete && !isChoosing && (
                 <button
                   onClick={(e) => {
                     e.stopPropagation();

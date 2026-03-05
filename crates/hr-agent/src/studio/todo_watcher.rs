@@ -11,9 +11,12 @@ use tracing::{debug, error, info, warn};
 use super::StudioBridge;
 use super::types::WsOutMessage;
 
+/// Directory where MCP todo_save writes per-session notification files.
+const STUDIO_TODOS_DIR: &str = "/tmp/studio-todos";
+
 /// Start the JSONL todo watcher.
-/// Watches all PROJECTS_DIRS for .jsonl file modifications and broadcasts
-/// TodoUpdate messages when a TodoWrite block is detected.
+/// Watches PROJECTS_DIRS for .jsonl modifications (agent mode) and
+/// /tmp/studio-todos/ for .json notifications (CLI terminal mode).
 pub fn start(studio: Arc<StudioBridge>) {
     tokio::spawn(async move {
         if let Err(e) = run_watcher(studio).await {
@@ -39,7 +42,7 @@ async fn run_watcher(studio: Arc<StudioBridge>) -> anyhow::Result<()> {
         notify::Config::default().with_poll_interval(Duration::from_secs(2)),
     )?;
 
-    // Watch all known project directories
+    // Watch all known project directories (for agent-mode JSONL files)
     for dir in super::sessions::PROJECTS_DIRS {
         let path = std::path::Path::new(dir);
         if path.is_dir() {
@@ -49,6 +52,15 @@ async fn run_watcher(studio: Arc<StudioBridge>) -> anyhow::Result<()> {
                 info!("Todo watcher: watching {}", dir);
             }
         }
+    }
+
+    // Watch /tmp/studio-todos/ for CLI terminal mode notifications
+    let notify_dir = std::path::Path::new(STUDIO_TODOS_DIR);
+    let _ = std::fs::create_dir_all(notify_dir);
+    if let Err(e) = watcher.watch(notify_dir, RecursiveMode::NonRecursive) {
+        warn!("Failed to watch {}: {e}", STUDIO_TODOS_DIR);
+    } else {
+        info!("Todo watcher: watching {}", STUDIO_TODOS_DIR);
     }
 
     // Debounce: track last processed time per file
@@ -65,8 +77,14 @@ async fn run_watcher(studio: Arc<StudioBridge>) -> anyhow::Result<()> {
                 }
 
                 for path in &event.paths {
-                    // Only process .jsonl files
-                    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    let ext = path.extension().and_then(|e| e.to_str());
+
+                    // Determine if this is a JSONL (agent mode) or JSON (CLI notification)
+                    let is_jsonl = ext == Some("jsonl");
+                    let is_cli_notification = ext == Some("json")
+                        && path.parent().and_then(|p| p.to_str()) == Some(STUDIO_TODOS_DIR);
+
+                    if !is_jsonl && !is_cli_notification {
                         continue;
                     }
 
@@ -85,17 +103,23 @@ async fn run_watcher(studio: Arc<StudioBridge>) -> anyhow::Result<()> {
                         None => continue,
                     };
 
-                    // Parse the last TodoWrite block from the file
-                    match extract_last_todos(path) {
-                        Some(todos) => {
-                            debug!("Todo update for session {}: {} todos", session_id, todos.len());
+                    if is_cli_notification {
+                        // CLI mode: parse the JSON file directly as todos
+                        if let Some(todos) = parse_studio_todos_file(path) {
+                            debug!("CLI todo update for session {}: {} items", session_id, todos.len());
                             studio.broadcast_all(&WsOutMessage::TodoUpdate {
                                 session_id,
                                 todos,
                             }).await;
                         }
-                        None => {
-                            // No TodoWrite found — skip
+                    } else {
+                        // Agent mode: parse JSONL for last TodoWrite block
+                        if let Some(todos) = extract_last_todos(path) {
+                            debug!("Todo update for session {}: {} todos", session_id, todos.len());
+                            studio.broadcast_all(&WsOutMessage::TodoUpdate {
+                                session_id,
+                                todos,
+                            }).await;
                         }
                     }
                 }
@@ -110,6 +134,46 @@ async fn run_watcher(studio: Arc<StudioBridge>) -> anyhow::Result<()> {
     // Keep watcher alive (moved into this scope)
     drop(watcher);
     Ok(())
+}
+
+/// Parse /tmp/studio-todos/{session_id}.json — can be flat array or phased object.
+fn parse_studio_todos_file(path: &PathBuf) -> Option<Vec<serde_json::Value>> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    // Phased structure: {"phases": [...]}
+    if let Some(phases) = val.get("phases").and_then(|p| p.as_array()) {
+        // Flatten phases into a single todo list for the frontend
+        let mut todos = Vec::new();
+        for phase in phases {
+            let name = phase.get("name").and_then(|n| n.as_str()).unwrap_or("Phase");
+            let status = phase.get("status").and_then(|s| s.as_str()).unwrap_or("pending");
+            if let Some(phase_todos) = phase.get("todos").and_then(|t| t.as_array()) {
+                for todo in phase_todos {
+                    let mut t = todo.clone();
+                    // Prefix content with phase name for context
+                    if let Some(obj) = t.as_object_mut() {
+                        let content = obj.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                        obj.insert("content".to_string(), serde_json::json!(format!("[{}] {}", name, content)));
+                    }
+                    todos.push(t);
+                }
+            } else {
+                // Phase itself as a todo item
+                todos.push(serde_json::json!({
+                    "content": name,
+                    "status": status,
+                    "activeForm": name,
+                }));
+            }
+        }
+        Some(todos)
+    } else if let Some(arr) = val.as_array() {
+        // Flat todo array
+        Some(arr.clone())
+    } else {
+        None
+    }
 }
 
 /// Extract the last TodoWrite todos from a JSONL file by reading from the end.

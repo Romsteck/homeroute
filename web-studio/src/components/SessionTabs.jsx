@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import React from 'react';
 
 function TypeIcon({ sessionType, className = '' }) {
   if (sessionType === 'cli') {
@@ -17,22 +17,7 @@ function TypeIcon({ sessionType, className = '' }) {
   );
 }
 
-export default function SessionTabs({ tabs, activeIndex, onSwitch, onClose, onNew }) {
-  const [dropdownOpen, setDropdownOpen] = useState(false);
-  const dropdownRef = useRef(null);
-
-  // Close dropdown on click outside
-  useEffect(() => {
-    if (!dropdownOpen) return;
-    const handler = (e) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
-        setDropdownOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [dropdownOpen]);
-
+export default function SessionTabs({ tabs, activeIndex, onSwitch, onClose }) {
   return (
     <div className="h-9 bg-gray-900 border-b border-gray-800 flex items-center px-2 gap-0.5 shrink-0">
       {/* Scrollable tabs area */}
@@ -77,44 +62,6 @@ export default function SessionTabs({ tabs, activeIndex, onSwitch, onClose, onNe
             </button>
           );
         })}
-      </div>
-      {/* New tab dropdown — outside scrollable area so it's never clipped */}
-      <div className="relative shrink-0" ref={dropdownRef}>
-        <button
-          onClick={() => setDropdownOpen(!dropdownOpen)}
-          className="flex items-center justify-center w-7 h-7 rounded-md text-gray-600 hover:text-gray-300 hover:bg-gray-800/50 transition-colors"
-          title="New tab"
-        >
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-          </svg>
-        </button>
-        {dropdownOpen && (
-          <div className="absolute top-full right-0 mt-1 w-36 bg-gray-800 border border-gray-700 rounded-lg shadow-xl shadow-black/40 overflow-hidden z-50">
-            <button
-              onClick={() => {
-                onNew('agent');
-                setDropdownOpen(false);
-              }}
-              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-gray-300 hover:bg-gray-700 transition-colors"
-            >
-              <svg className="w-3.5 h-3.5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-              </svg>
-              Agent
-            </button>
-            <button
-              onClick={() => {
-                onNew('cli');
-                setDropdownOpen(false);
-              }}
-              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-gray-300 hover:bg-gray-700 transition-colors"
-            >
-              <span className="text-emerald-400 font-mono text-[11px] font-bold w-3.5 text-center">{'>_'}</span>
-              Terminal
-            </button>
-          </div>
-        )}
       </div>
     </div>
   );
