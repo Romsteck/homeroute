@@ -422,8 +422,10 @@ impl ContainerManager {
             }
         }
 
-        // Remove from registry
-        let _ = self.registry.remove_application(id).await;
+        // Remove from registry (also deletes ACME cert, Cloudflare DNS, cleans linked_app_id)
+        if let Err(e) = self.registry.remove_application(id).await {
+            warn!(id, error = %e, "Failed to remove application from registry");
+        }
 
         // Remove from V2 state
         {
@@ -931,10 +933,10 @@ WantedBy=multi-user.target
         )
         .await;
 
-        // Phase 8f: Grant studio user read access to dev tools (nvm, cargo, rustup)
+        // Phase 8f: Transfer cargo/rustup ownership to studio, grant read access to nvm
         let _ = NspawnClient::exec_with_retry(
             container_name,
-            &["chmod -R a+rX /root/.nvm /root/.cargo /root/.rustup 2>/dev/null; true"],
+            &["chown -R studio:studio /root/.cargo /root/.rustup 2>/dev/null; chmod -R a+rX /root/.nvm 2>/dev/null; true"],
             3,
         )
         .await;
@@ -1050,7 +1052,7 @@ WantedBy=multi-user.target
         emit("Configuration de code-server...");
         let _ = NspawnClient::exec(
             container_name,
-            &["mkdir", "-p", "/root/.config/code-server"],
+            &["mkdir", "-p", "/home/studio/.config/code-server"],
         )
         .await;
         let cs_config = "bind-addr: 0.0.0.0:13337\nauth: none\ncert: false\n";
@@ -1059,7 +1061,7 @@ WantedBy=multi-user.target
         let _ = NspawnClient::push_file(
             container_name,
             &tmp_cs,
-            "root/.config/code-server/config.yaml",
+            "home/studio/.config/code-server/config.yaml",
             storage,
         )
         .await;
@@ -1068,7 +1070,7 @@ WantedBy=multi-user.target
         // VS Code settings
         let _ = NspawnClient::exec(
             container_name,
-            &["mkdir", "-p", "/root/.local/share/code-server/User"],
+            &["mkdir", "-p", "/home/studio/.local/share/code-server/User"],
         )
         .await;
         let cs_settings = r#"{
@@ -1084,11 +1086,12 @@ WantedBy=multi-user.target
         let _ = NspawnClient::push_file(
             container_name,
             &tmp_settings,
-            "root/.local/share/code-server/User/settings.json",
+            "home/studio/.local/share/code-server/User/settings.json",
             storage,
         )
         .await;
         let _ = tokio::fs::remove_file(&tmp_settings).await;
+        let _ = NspawnClient::exec(container_name, &["chown -R studio:studio /home/studio/.config /home/studio/.local"]).await;
 
         // code-server systemd unit
         let cs_unit = r#"[Unit]
@@ -1097,10 +1100,12 @@ After=network.target
 
 [Service]
 Type=simple
+User=studio
+Group=studio
 ExecStart=/usr/local/bin/code-server --bind-addr 0.0.0.0:13337 /root/workspace
 Restart=always
 RestartSec=5
-Environment=HOME=/root
+Environment=HOME=/home/studio
 KillMode=control-group
 KillSignal=SIGTERM
 TimeoutStopSec=10
@@ -1149,9 +1154,11 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+User=studio
+Group=studio
 ExecStart=/usr/local/bin/update-claude-ext.sh
 RemainAfterExit=true
-Environment=HOME=/root
+Environment=HOME=/home/studio
 
 [Install]
 WantedBy=multi-user.target
@@ -1189,6 +1196,14 @@ WantedBy=multi-user.target
         )
         .await;
 
+        // Phase 12c: Transfer workspace ownership to studio
+        emit("Attribution workspace a studio...");
+        let _ = NspawnClient::exec(
+            container_name,
+            &["chown -R studio:studio /root/workspace 2>/dev/null; mkdir -p /home/studio/.npm && chown -R studio:studio /home/studio/.npm; true"],
+        )
+        .await;
+
         // Phase 13-14: Dev server systemd units (stack-dependent)
         match stack {
             hr_registry::types::AppStack::ViteRust => {
@@ -1199,11 +1214,14 @@ After=network.target
 
 [Service]
 Type=simple
+User=studio
+Group=studio
 WorkingDirectory=/root/workspace/frontend
-ExecStart=/usr/bin/npx vite --host 0.0.0.0 --port 5173
+ExecStart=/bin/bash -lc "npx vite --host 0.0.0.0 --port 5173"
 Restart=always
 RestartSec=3
-Environment=HOME=/root
+Environment=HOME=/home/studio
+Environment=NPM_CONFIG_CACHE=/home/studio/.npm
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:/root/.cargo/bin
 
 [Install]
@@ -1227,11 +1245,15 @@ After=network.target
 
 [Service]
 Type=simple
+User=studio
+Group=studio
 WorkingDirectory=/root/workspace
 ExecStart=/root/.cargo/bin/cargo-watch -x run
 Restart=always
 RestartSec=3
-Environment=HOME=/root
+Environment=HOME=/home/studio
+Environment=CARGO_HOME=/root/.cargo
+Environment=RUSTUP_HOME=/root/.rustup
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:/root/.cargo/bin
 Environment=RUST_LOG=info
 
@@ -1266,11 +1288,14 @@ After=network.target
 
 [Service]
 Type=simple
+User=studio
+Group=studio
 WorkingDirectory=/root/workspace
-ExecStart=/usr/bin/npx next dev --hostname 0.0.0.0 --port 3000
+ExecStart=/bin/bash -lc "npx next dev --hostname 0.0.0.0 --port 3000"
 Restart=always
 RestartSec=3
-Environment=HOME=/root
+Environment=HOME=/home/studio
+Environment=NPM_CONFIG_CACHE=/home/studio/.npm
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 
 [Install]
@@ -1304,11 +1329,15 @@ After=network.target
 
 [Service]
 Type=simple
+User=studio
+Group=studio
 WorkingDirectory=/root/workspace
 ExecStart=/root/.cargo/bin/cargo-leptos watch
 Restart=always
 RestartSec=3
-Environment=HOME=/root
+Environment=HOME=/home/studio
+Environment=CARGO_HOME=/root/.cargo
+Environment=RUSTUP_HOME=/root/.rustup
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:/root/.cargo/bin
 Environment=LEPTOS_SITE_ADDR=0.0.0.0:3000
 Environment=RUST_LOG=info

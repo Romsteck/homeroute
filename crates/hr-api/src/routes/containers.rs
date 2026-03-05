@@ -94,6 +94,20 @@ async fn delete_container(
             .into_response();
     };
 
+    // Clean up proxy routes and local DNS records before removing the container
+    if let Some(ref registry) = state.registry {
+        let apps = registry.list_applications().await;
+        if let Some(app) = apps.iter().find(|a| a.id == id) {
+            let base_domain = &state.env.base_domain;
+            for domain in app.domains(base_domain) {
+                state.proxy.remove_app_route(&domain);
+            }
+            if let Some(ip) = app.ipv4_address {
+                super::applications::remove_agent_dns_records(&state.dns, &ip.to_string()).await;
+            }
+        }
+    }
+
     match mgr.remove_container(&id).await {
         Ok(true) => Json(serde_json::json!({"success": true})).into_response(),
         Ok(false) => (
