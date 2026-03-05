@@ -1149,6 +1149,7 @@ impl AgentRegistry {
             ("homeroute-dataverse.md".to_string(), render(include_str!("rules/homeroute-dataverse.md"))),
             ("homeroute-store.md".to_string(), render(include_str!("rules/homeroute-store.md"))),
             ("homeroute-studio-todos.md".to_string(), render(include_str!("rules/homeroute-studio-todos.md"))),
+            ("homeroute-docs.md".to_string(), render(include_str!("rules/homeroute-docs.md"))),
         ];
 
         let _ = conn.tx.send(RegistryMessage::UpdateRules { rules }).await;

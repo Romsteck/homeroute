@@ -69,6 +69,14 @@ async fn main() -> Result<()> {
         return mcp::run_studio_mcp_server().await;
     }
 
+    if args.len() > 1 && args[1] == "mcp-docs" {
+        tracing_subscriber::fmt()
+            .with_env_filter("warn")
+            .with_writer(std::io::stderr)
+            .init();
+        return mcp::run_docs_mcp_server().await;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

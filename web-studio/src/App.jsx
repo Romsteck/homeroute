@@ -7,6 +7,7 @@ import SessionTabs from './components/SessionTabs';
 import ChatPanel from './components/ChatPanel';
 import PreviewPanel from './components/PreviewPanel';
 import FilesPanel from './components/FilesPanel';
+import DocsPanel from './components/DocsPanel';
 import StatusBar from './components/StatusBar';
 import AuthDialog from './components/AuthDialog';
 
@@ -100,6 +101,7 @@ export default function App() {
         </div>
         {/* Files tab - only mounted when active */}
         {activeTab === 'files' && <FilesPanel sendRaw={ws.sendRaw} subscribe={ws.subscribe} connected={ws.connected} />}
+        {activeTab === 'docs' && <DocsPanel sendRaw={ws.sendRaw} subscribe={ws.subscribe} connected={ws.connected} />}
       </div>
 
       <StatusBar
