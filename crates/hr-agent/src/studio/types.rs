@@ -54,6 +54,24 @@ pub enum WsInMessage {
     ConsoleLogs {
         logs: Vec<ConsoleLogEntry>,
     },
+    TerminalStart {
+        session_id: String,
+        #[serde(default)]
+        resume_session: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        cols: u16,
+        rows: u16,
+    },
+    TerminalData {
+        session_id: String,
+        data: String, // base64
+    },
+    TerminalResize {
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 fn default_limit() -> usize {
@@ -90,11 +108,6 @@ pub enum WsOutMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
     },
-    Busy {
-        message: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        session_id: Option<String>,
-    },
     ActiveStreams {
         session_ids: Vec<String>,
     },
@@ -116,6 +129,17 @@ pub enum WsOutMessage {
         subscription_type: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         expires_at: Option<u64>,
+    },
+    TodoUpdate {
+        session_id: String,
+        todos: Vec<serde_json::Value>,
+    },
+    TerminalData {
+        session_id: String,
+        data: String, // base64
+    },
+    TerminalDone {
+        session_id: String,
     },
 }
 
@@ -151,4 +175,11 @@ pub struct SessionInfo {
     pub message_count: usize,
     /// First user message summary (truncated)
     pub summary: String,
+    #[serde(default = "default_session_type")]
+    pub session_type: String,
+}
+
+#[allow(dead_code)] // Used by serde(default)
+fn default_session_type() -> String {
+    "agent".to_string()
 }

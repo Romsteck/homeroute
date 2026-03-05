@@ -5,6 +5,8 @@ import useClaudeAuth from './hooks/useClaudeAuth';
 import Header from './components/Header';
 import SessionTabs from './components/SessionTabs';
 import ChatPanel from './components/ChatPanel';
+import TerminalView from './components/TerminalView';
+import TodoPanel from './components/TodoPanel';
 import PreviewPanel from './components/PreviewPanel';
 import FilesPanel from './components/FilesPanel';
 import DocsPanel from './components/DocsPanel';
@@ -75,21 +77,33 @@ export default function App() {
       <div className="flex flex-1 min-h-0">
         {/* Studio tab - always mounted, hidden when inactive */}
         <div className="flex flex-1 min-h-0" style={{display: activeTab === 'studio' ? 'flex' : 'none'}}>
-          <div className="w-[30%] min-w-[300px] flex flex-col border-r border-gray-800">
-            <ChatPanel
-              key={sessionManager.activeSessionId || `new-${sessionManager.activeTabIndex}`}
-              messages={activeState.messages}
-              isStreaming={activeState.isStreaming}
-              onSend={sessionManager.sendPrompt}
-              onAbort={sessionManager.abortActiveSession}
-              connected={ws.connected}
-              todos={activeState.todos}
-              authStatus={auth.authStatus}
-              onOpenAuthDialog={auth.openAuthDialog}
-              pendingAnswersRef={sessionManager.pendingAnswersRef}
-              draft={activeState.draft}
-              onDraftChange={sessionManager.updateDraft}
-            />
+          <div className="w-[30%] min-w-[300px] flex flex-col border-r border-gray-800 min-h-0">
+            {activeState.sessionType === 'cli' ? (
+              <>
+                <TodoPanel todos={activeState.todos} />
+                <TerminalView
+                  key={sessionManager.activeSessionId}
+                  sessionId={sessionManager.activeSessionId}
+                  ws={ws}
+                  isActive={activeTab === 'studio'}
+                />
+              </>
+            ) : (
+              <ChatPanel
+                key={sessionManager.activeSessionId || `new-${sessionManager.activeTabIndex}`}
+                messages={activeState.messages}
+                isStreaming={activeState.isStreaming}
+                onSend={sessionManager.sendPrompt}
+                onAbort={sessionManager.abortActiveSession}
+                connected={ws.connected}
+                todos={activeState.todos}
+                authStatus={auth.authStatus}
+                onOpenAuthDialog={auth.openAuthDialog}
+                pendingAnswersRef={sessionManager.pendingAnswersRef}
+                draft={activeState.draft}
+                onDraftChange={sessionManager.updateDraft}
+              />
+            )}
           </div>
           <div className="flex-1 flex flex-col min-w-0">
             <PreviewPanel slug={appInfo.slug} domain={appInfo.domain} mode="split" sendRaw={ws.sendRaw} />

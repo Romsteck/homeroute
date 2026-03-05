@@ -1,6 +1,6 @@
 [package]
 name = "hr-agent"
-version = "0.2.6"
+version = "0.2.20"
 edition.workspace = true
 
 [[bin]]
@@ -33,3 +33,5 @@ http-body-util = { workspace = true }
 bytes = { workspace = true }
 base64 = { workspace = true }
 rust-embed = { workspace = true }
+notify = { workspace = true }
+libc = "0.2"
