@@ -1076,7 +1076,7 @@ async fn add_agent_dns_records(
 }
 
 /// Remove all local DNS records pointing to a specific IPv4 address.
-async fn remove_agent_dns_records(dns: &hr_dns::SharedDnsState, ipv4: &str) {
+pub(crate) async fn remove_agent_dns_records(dns: &hr_dns::SharedDnsState, ipv4: &str) {
     let mut dns_state = dns.write().await;
     dns_state.remove_static_records_by_value(ipv4);
     info!(ipv4, "Removed local DNS records for agent IP");
