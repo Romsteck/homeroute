@@ -78,17 +78,8 @@ export default function App() {
         {/* Studio tab - always mounted, hidden when inactive */}
         <div className="flex flex-1 min-h-0" style={{display: activeTab === 'studio' ? 'flex' : 'none'}}>
           <div className="w-[30%] min-w-[300px] flex flex-col border-r border-gray-800 min-h-0">
-            {activeState.sessionType === 'cli' ? (
-              <>
-                <TodoPanel todos={activeState.todos} />
-                <TerminalView
-                  key={sessionManager.activeSessionId}
-                  sessionId={sessionManager.activeSessionId}
-                  ws={ws}
-                  isActive={activeTab === 'studio'}
-                />
-              </>
-            ) : (
+            {/* Agent chat panel — visible when active tab is agent type */}
+            {activeState.sessionType !== 'cli' && (
               <ChatPanel
                 key={sessionManager.activeSessionId || `new-${sessionManager.activeTabIndex}`}
                 messages={activeState.messages}
@@ -104,6 +95,22 @@ export default function App() {
                 onDraftChange={sessionManager.updateDraft}
               />
             )}
+            {/* CLI terminal views — kept mounted, hidden when not active */}
+            {sessionManager.tabs
+              .map((tab, idx) => tab.sessionType === 'cli' && tab.id ? (
+                <div
+                  key={tab.id}
+                  className="flex flex-col flex-1 min-h-0"
+                  style={{ display: idx === sessionManager.activeTabIndex && activeTab === 'studio' ? 'flex' : 'none' }}
+                >
+                  <TodoPanel todos={idx === sessionManager.activeTabIndex ? activeState.todos : []} />
+                  <TerminalView
+                    sessionId={tab.id}
+                    ws={ws}
+                    isActive={idx === sessionManager.activeTabIndex && activeTab === 'studio'}
+                  />
+                </div>
+              ) : null)}
           </div>
           <div className="flex-1 flex flex-col min-w-0">
             <PreviewPanel slug={appInfo.slug} domain={appInfo.domain} mode="split" sendRaw={ws.sendRaw} />
