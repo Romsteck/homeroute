@@ -262,11 +262,6 @@ async fn current_mode() -> Json<Value> {
     Json(json!({"success": true, "mode": mode, "governor": governor}))
 }
 
-#[derive(Deserialize)]
-struct ApplyModeParams {
-    mode: String,
-}
-
 async fn apply_mode(axum::extract::Path(mode): axum::extract::Path<String>) -> Json<Value> {
     let (governor, epp, max_pct) = match mode.as_str() {
         "economy" => ("powersave", "power", 60u32),

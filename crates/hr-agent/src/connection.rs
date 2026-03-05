@@ -4,7 +4,7 @@ use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use hr_registry::protocol::{AgentMessage, RegistryMessage};
 

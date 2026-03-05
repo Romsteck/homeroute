@@ -15,8 +15,6 @@ pub enum ServicePriority {
     Critical,
     /// API, IPv6 RA — restart avec backoff, max 10 retries
     Important,
-    /// Analytics, DDNS, monitoring — restart lent, max 3 retries
-    Background,
 }
 
 impl ServicePriority {
@@ -24,7 +22,6 @@ impl ServicePriority {
         match self {
             Self::Critical => u32::MAX,
             Self::Important => 10,
-            Self::Background => 3,
         }
     }
 
@@ -32,7 +29,6 @@ impl ServicePriority {
         match self {
             Self::Critical => Duration::from_millis(100 * retry as u64),
             Self::Important => Duration::from_secs(retry as u64),
-            Self::Background => Duration::from_secs(5 * retry as u64),
         }
     }
 
@@ -40,7 +36,6 @@ impl ServicePriority {
         match self {
             Self::Critical => ServicePriorityLevel::Critical,
             Self::Important => ServicePriorityLevel::Important,
-            Self::Background => ServicePriorityLevel::Background,
         }
     }
 }

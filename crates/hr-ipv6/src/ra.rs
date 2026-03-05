@@ -176,7 +176,7 @@ pub async fn run_ra_sender(
 
     info!("RA sender: sending every {}s to ff02::1", interval_secs);
 
-    let mut last_gua: Option<PrefixInfo> = None;
+    let mut last_gua: Option<PrefixInfo>;
     let lan_iface = config.interface.clone();
 
     // Assign GUA to LAN if prefix already available at startup

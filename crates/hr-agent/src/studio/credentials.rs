@@ -38,11 +38,6 @@ fn user_meta_path(username: &str) -> PathBuf {
     user_claude_dir(username).join("user-auth.json")
 }
 
-/// Check if a user has valid credentials stored.
-pub async fn has_credentials(username: &str) -> bool {
-    get_auth_status(username).await.is_some()
-}
-
 /// Read the user's credential metadata, returning None if not found or invalid.
 pub async fn get_auth_status(username: &str) -> Option<UserCredentials> {
     let meta = user_meta_path(username);
