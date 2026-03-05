@@ -38,6 +38,13 @@ export default function DocsPanel({ sendRaw, subscribe, connected }) {
     return unsub;
   }, [subscribe, sendRaw, requestDocs]);
 
+  // Re-fetch when connection is (re)established (with delay to ensure WS is ready)
+  useEffect(() => {
+    if (!connected) return;
+    const t = setTimeout(requestDocs, 300);
+    return () => clearTimeout(t);
+  }, [connected, requestDocs]);
+
   // Auto-refresh every 30s
   useEffect(() => {
     refreshTimerRef.current = setInterval(requestDocs, 30000);
