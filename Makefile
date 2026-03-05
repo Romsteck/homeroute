@@ -37,8 +37,8 @@ agent:
 	NEW_VERSION="$$MAJOR.$$MINOR.$$NEW_PATCH" && \
 	sed -i "s/^version = \"$$CURRENT\"/version = \"$$NEW_VERSION\"/" crates/hr-agent/Cargo.toml && \
 	echo "Building hr-agent v$$NEW_VERSION..." && \
-	cargo build --release -p hr-agent && \
-	cp target/release/hr-agent data/agent-binaries/hr-agent && \
+	cd crates && cargo build --release -p hr-agent && cd .. && \
+	cp crates/target/release/hr-agent data/agent-binaries/hr-agent && \
 	echo "$$NEW_VERSION" > data/agent-binaries/hr-agent.version && \
 	echo "hr-agent v$$NEW_VERSION → data/agent-binaries/" && \
 	echo "Run: curl -X POST http://localhost:4000/api/applications/agents/update"

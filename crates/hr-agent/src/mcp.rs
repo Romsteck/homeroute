@@ -1394,6 +1394,19 @@ pub fn generate_mcp_json(is_dev: bool) -> String {
         }),
     );
 
+    let docs_tools: Vec<String> = get_docs_tool_definitions()
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect();
+    servers.insert(
+        "docs".to_string(),
+        json!({
+            "command": "/usr/local/bin/hr-agent",
+            "args": ["mcp-docs"],
+            "autoApprove": docs_tools
+        }),
+    );
+
     serde_json::to_string_pretty(&json!({ "mcpServers": servers })).unwrap()
 }
 
@@ -1429,6 +1442,13 @@ pub fn generate_settings_json(is_dev: bool) -> String {
     for t in get_studio_tool_definitions() {
         if let Some(name) = t.get("name").and_then(|n| n.as_str()) {
             allow.push(format!("mcp__studio__{name}"));
+        }
+    }
+
+    // Docs tools
+    for t in get_docs_tool_definitions() {
+        if let Some(name) = t.get("name").and_then(|n| n.as_str()) {
+            allow.push(format!("mcp__docs__{name}"));
         }
     }
 
@@ -3631,5 +3651,483 @@ WantedBy=multi-user.target"#;
         }
 
         _ => Err(format!("Unknown deploy tool: {}", tool)),
+    }
+}
+
+// ── Docs MCP Server ────────────────────────────────────────────────────
+
+pub async fn run_docs_mcp_server() -> Result<()> {
+    info!("Starting MCP Docs server");
+
+    let stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    let stdout = io::stdout();
+
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = stdin.lines();
+
+    while let Some(line) = lines.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let request: JsonRpcRequest = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(e) => {
+                let resp = JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: Value::Null,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32700,
+                        message: format!("Parse error: {}", e),
+                        data: None,
+                    }),
+                };
+                writeln!(&stdout, "{}", serde_json::to_string(&resp)?)?;
+                continue;
+            }
+        };
+
+        let id = request.id.clone().unwrap_or(Value::Null);
+
+        let result = match request.method.as_str() {
+            "initialize" => Ok(json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "hr-docs",
+                    "version": "0.1.0"
+                },
+                "instructions": "Documentation tools for app screens and flows. Always call get_docs before modifying documentation to understand the current state."
+            })),
+            "notifications/initialized" => {
+                continue;
+            }
+            "tools/list" => {
+                let tools = get_docs_tool_definitions();
+                Ok(json!({ "tools": tools }))
+            }
+            "tools/call" => {
+                let tool_name = request
+                    .params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let arguments = request
+                    .params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or(json!({}));
+                handle_docs_tool_call(tool_name, &arguments).await
+            }
+            _ => Err(format!("Method not found: {}", request.method)),
+        };
+
+        let resp = match result {
+            Ok(value) => JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: Some(value),
+                error: None,
+            },
+            Err(e) => JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32603,
+                    message: e,
+                    data: None,
+                }),
+            },
+        };
+
+        writeln!(&stdout, "{}", serde_json::to_string(&resp)?)?;
+        stdout.lock().flush()?;
+    }
+
+    Ok(())
+}
+
+fn get_docs_tool_definitions() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "get_docs",
+            "description": "Read the app documentation. Returns all docs or a specific section.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "section": {
+                        "type": "string",
+                        "enum": ["all", "app", "screens", "flows"],
+                        "description": "Section to retrieve (default: all)"
+                    }
+                }
+            }
+        }),
+        json!({
+            "name": "update_app_info",
+            "description": "Update the app overview information. Only provided fields are updated.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "App name" },
+                    "description": { "type": "string", "description": "Short tagline (1 sentence)" },
+                    "business_context": { "type": "string", "description": "Paragraph explaining the problem solved and value" },
+                    "target_users": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of target user personas"
+                    }
+                }
+            }
+        }),
+        json!({
+            "name": "upsert_screen",
+            "description": "Create or update a screen. If a screen with the given id exists, only provided fields are updated. Otherwise a new screen is created.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Unique screen identifier" },
+                    "name": { "type": "string", "description": "Screen display name" },
+                    "path": { "type": "string", "description": "Route path (e.g. /dashboard)" },
+                    "description": { "type": "string", "description": "User-oriented description of the screen" },
+                    "features": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of user-facing features"
+                    },
+                    "related_tables": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Dataverse tables used by this screen"
+                    },
+                    "related_flows": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Flow IDs related to this screen"
+                    }
+                },
+                "required": ["id"]
+            }
+        }),
+        json!({
+            "name": "delete_screen",
+            "description": "Delete a screen by id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Screen id to delete" }
+                },
+                "required": ["id"]
+            }
+        }),
+        json!({
+            "name": "upsert_flow",
+            "description": "Create or update a user flow. Metadata (name, description) is merged; steps are replaced entirely if provided.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Unique flow identifier" },
+                    "name": { "type": "string", "description": "Flow display name" },
+                    "description": { "type": "string", "description": "Flow description" },
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "label": { "type": "string" },
+                                "type": {
+                                    "type": "string",
+                                    "enum": ["state", "action", "decision"]
+                                },
+                                "next": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Next step IDs (for state/action)"
+                                },
+                                "outcomes": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": { "type": "string" },
+                                            "next": { "type": "string" }
+                                        }
+                                    },
+                                    "description": "Decision outcomes (for decision type)"
+                                }
+                            }
+                        },
+                        "description": "Flow steps (replaces all existing steps if provided)"
+                    }
+                },
+                "required": ["id"]
+            }
+        }),
+        json!({
+            "name": "delete_flow",
+            "description": "Delete a flow by id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Flow id to delete" }
+                },
+                "required": ["id"]
+            }
+        }),
+        json!({
+            "name": "list_screens",
+            "description": "List all screens (summary: id, name, path).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+        json!({
+            "name": "list_flows",
+            "description": "List all flows (summary: id, name, step_count).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+    ]
+}
+
+const DOCS_PATH: &str = "/root/workspace/docs.json";
+
+fn load_docs() -> Value {
+    match std::fs::read_to_string(DOCS_PATH) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| default_docs()),
+        Err(_) => default_docs(),
+    }
+}
+
+fn default_docs() -> Value {
+    json!({
+        "version": 0,
+        "updated_at": "",
+        "app": {
+            "name": "",
+            "description": "",
+            "business_context": "",
+            "target_users": []
+        },
+        "screens": [],
+        "flows": []
+    })
+}
+
+/// Decode literal `\uXXXX` sequences in strings within a JSON Value tree.
+/// Claude Code sometimes sends unicode escapes as literal backslash sequences
+/// (e.g. `\\u00e9` instead of `é`), which end up double-escaped in the file.
+fn decode_unicode_escapes(val: &mut Value) {
+    match val {
+        Value::String(s) => {
+            if s.contains("\\u") {
+                let mut result = String::with_capacity(s.len());
+                let mut chars = s.chars();
+                while let Some(c) = chars.next() {
+                    if c == '\\' {
+                        // Peek at next char
+                        let mut tmp = chars.clone();
+                        if tmp.next() == Some('u') {
+                            let hex: String = tmp.by_ref().take(4).collect();
+                            if hex.len() == 4 && hex.chars().all(|h| h.is_ascii_hexdigit()) {
+                                if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                                    if let Some(ch) = char::from_u32(code) {
+                                        result.push(ch);
+                                        // Advance the real iterator past 'u' + 4 hex digits
+                                        chars.next(); // 'u'
+                                        for _ in 0..4 { chars.next(); }
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                        result.push(c);
+                    } else {
+                        result.push(c);
+                    }
+                }
+                *s = result;
+            }
+        }
+        Value::Array(arr) => arr.iter_mut().for_each(decode_unicode_escapes),
+        Value::Object(map) => map.values_mut().for_each(decode_unicode_escapes),
+        _ => {}
+    }
+}
+
+fn save_docs(docs: &mut Value) -> std::result::Result<(), String> {
+    // Decode any literal \uXXXX sequences before saving
+    decode_unicode_escapes(docs);
+
+    // Increment version
+    let version = docs.get("version").and_then(|v| v.as_u64()).unwrap_or(0) + 1;
+    docs["version"] = json!(version);
+
+    // Set updated_at with ISO timestamp
+    let now = chrono::Utc::now().to_rfc3339();
+    docs["updated_at"] = json!(now);
+
+    let content = serde_json::to_string_pretty(docs).map_err(|e| e.to_string())?;
+
+    // Ensure parent directory exists
+    if let Some(parent) = std::path::Path::new(DOCS_PATH).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    std::fs::write(DOCS_PATH, &content).map_err(|e| e.to_string())?;
+    std::fs::set_permissions(DOCS_PATH, std::fs::Permissions::from_mode(0o644))
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+async fn handle_docs_tool_call(tool: &str, args: &Value) -> std::result::Result<Value, String> {
+    let text_result = |text: String| -> Value {
+        json!({ "content": [{ "type": "text", "text": text }] })
+    };
+
+    match tool {
+        "get_docs" => {
+            let docs = load_docs();
+            let section = args.get("section").and_then(|v| v.as_str()).unwrap_or("all");
+            let result = match section {
+                "app" => json!({ "app": docs["app"] }),
+                "screens" => json!({ "screens": docs["screens"] }),
+                "flows" => json!({ "flows": docs["flows"] }),
+                _ => docs,
+            };
+            Ok(text_result(serde_json::to_string_pretty(&result).unwrap()))
+        }
+
+        "update_app_info" => {
+            let mut docs = load_docs();
+            if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
+                docs["app"]["name"] = json!(name);
+            }
+            if let Some(desc) = args.get("description").and_then(|v| v.as_str()) {
+                docs["app"]["description"] = json!(desc);
+            }
+            if let Some(ctx) = args.get("business_context").and_then(|v| v.as_str()) {
+                docs["app"]["business_context"] = json!(ctx);
+            }
+            if let Some(users) = args.get("target_users").and_then(|v| v.as_array()) {
+                docs["app"]["target_users"] = json!(users);
+            }
+            save_docs(&mut docs)?;
+            Ok(text_result("App info updated.".to_string()))
+        }
+
+        "upsert_screen" => {
+            let id = args.get("id").and_then(|v| v.as_str())
+                .ok_or("Missing required field: id")?;
+            let mut docs = load_docs();
+            let screens = docs["screens"].as_array_mut()
+                .ok_or("Invalid screens array")?;
+
+            if let Some(existing) = screens.iter_mut().find(|s| s.get("id").and_then(|v| v.as_str()) == Some(id)) {
+                // Merge: only overwrite provided fields
+                if let Some(v) = args.get("name") { existing["name"] = v.clone(); }
+                if let Some(v) = args.get("path") { existing["path"] = v.clone(); }
+                if let Some(v) = args.get("description") { existing["description"] = v.clone(); }
+                if let Some(v) = args.get("features") { existing["features"] = v.clone(); }
+                if let Some(v) = args.get("related_tables") { existing["related_tables"] = v.clone(); }
+                if let Some(v) = args.get("related_flows") { existing["related_flows"] = v.clone(); }
+            } else {
+                // Create new screen
+                screens.push(json!({
+                    "id": id,
+                    "name": args.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                    "path": args.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+                    "description": args.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                    "features": args.get("features").cloned().unwrap_or(json!([])),
+                    "related_tables": args.get("related_tables").cloned().unwrap_or(json!([])),
+                    "related_flows": args.get("related_flows").cloned().unwrap_or(json!([]))
+                }));
+            }
+            save_docs(&mut docs)?;
+            Ok(text_result(format!("Screen '{}' upserted.", id)))
+        }
+
+        "delete_screen" => {
+            let id = args.get("id").and_then(|v| v.as_str())
+                .ok_or("Missing required field: id")?;
+            let mut docs = load_docs();
+            if let Some(screens) = docs["screens"].as_array_mut() {
+                screens.retain(|s| s.get("id").and_then(|v| v.as_str()) != Some(id));
+            }
+            save_docs(&mut docs)?;
+            Ok(text_result(format!("Screen '{}' deleted.", id)))
+        }
+
+        "upsert_flow" => {
+            let id = args.get("id").and_then(|v| v.as_str())
+                .ok_or("Missing required field: id")?;
+            let mut docs = load_docs();
+            let flows = docs["flows"].as_array_mut()
+                .ok_or("Invalid flows array")?;
+
+            if let Some(existing) = flows.iter_mut().find(|f| f.get("id").and_then(|v| v.as_str()) == Some(id)) {
+                // Merge metadata
+                if let Some(v) = args.get("name") { existing["name"] = v.clone(); }
+                if let Some(v) = args.get("description") { existing["description"] = v.clone(); }
+                // Replace steps entirely if provided
+                if let Some(v) = args.get("steps") { existing["steps"] = v.clone(); }
+            } else {
+                // Create new flow
+                flows.push(json!({
+                    "id": id,
+                    "name": args.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                    "description": args.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                    "steps": args.get("steps").cloned().unwrap_or(json!([]))
+                }));
+            }
+            save_docs(&mut docs)?;
+            Ok(text_result(format!("Flow '{}' upserted.", id)))
+        }
+
+        "delete_flow" => {
+            let id = args.get("id").and_then(|v| v.as_str())
+                .ok_or("Missing required field: id")?;
+            let mut docs = load_docs();
+            if let Some(flows) = docs["flows"].as_array_mut() {
+                flows.retain(|f| f.get("id").and_then(|v| v.as_str()) != Some(id));
+            }
+            save_docs(&mut docs)?;
+            Ok(text_result(format!("Flow '{}' deleted.", id)))
+        }
+
+        "list_screens" => {
+            let docs = load_docs();
+            let screens = docs["screens"].as_array()
+                .map(|arr| arr.iter().map(|s| json!({
+                    "id": s.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                    "name": s.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                    "path": s.get("path").and_then(|v| v.as_str()).unwrap_or("")
+                })).collect::<Vec<_>>())
+                .unwrap_or_default();
+            Ok(text_result(serde_json::to_string_pretty(&screens).unwrap()))
+        }
+
+        "list_flows" => {
+            let docs = load_docs();
+            let flows = docs["flows"].as_array()
+                .map(|arr| arr.iter().map(|f| json!({
+                    "id": f.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                    "name": f.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                    "step_count": f.get("steps").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0)
+                })).collect::<Vec<_>>())
+                .unwrap_or_default();
+            Ok(text_result(serde_json::to_string_pretty(&flows).unwrap()))
+        }
+
+        _ => Err(format!("Unknown docs tool: {}", tool)),
     }
 }
