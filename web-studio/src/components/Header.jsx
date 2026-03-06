@@ -1,5 +1,3 @@
-import { useState, useRef, useEffect } from 'react';
-import { createPortal } from 'react-dom';
 import SessionPicker from './SessionPicker';
 
 export default function Header({
@@ -18,75 +16,25 @@ export default function Header({
   const tabs = [
     { id: 'studio', label: 'Studio', icon: StudioIcon },
     { id: 'preview', label: 'Preview', icon: PreviewIcon },
+    { id: 'code', label: 'Code Server', icon: CodeIcon },
     { id: 'files', label: 'Files', icon: FilesIcon },
     { id: 'docs', label: 'Docs', icon: DocsIcon },
   ];
-
-  const [newMenuOpen, setNewMenuOpen] = useState(false);
-  const newMenuRef = useRef(null);
-
-  useEffect(() => {
-    if (!newMenuOpen) return;
-    const handler = (e) => {
-      if (newMenuRef.current && !newMenuRef.current.contains(e.target)) {
-        // Also check if click is inside the portal dropdown
-        const portal = document.getElementById('new-menu-portal');
-        if (portal && portal.contains(e.target)) return;
-        setNewMenuOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [newMenuOpen]);
 
   return (
     <header className="h-12 bg-gray-900/80 backdrop-blur border-b border-gray-800 flex items-center justify-between px-4 shrink-0">
       {/* Left: New button + Session picker + title */}
       <div className="flex items-center gap-2">
-        <div className="relative" ref={newMenuRef}>
-          <button
-            onClick={() => setNewMenuOpen(!newMenuOpen)}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors"
-            title="New session"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-            </svg>
-            New
-            <svg className={`w-3 h-3 transition-transform ${newMenuOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-            </svg>
-          </button>
-          {newMenuOpen && createPortal(
-            <div
-              id="new-menu-portal"
-              className="fixed w-40 bg-gray-800 border border-gray-700 rounded-lg shadow-xl shadow-black/40 overflow-hidden"
-              style={{
-                zIndex: 99999,
-                top: (newMenuRef.current?.getBoundingClientRect().bottom ?? 48) + 4,
-                left: newMenuRef.current?.getBoundingClientRect().left ?? 0,
-              }}
-            >
-              <button
-                onClick={() => { onNewSession('agent'); setNewMenuOpen(false); }}
-                className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-gray-300 hover:bg-gray-700 transition-colors"
-              >
-                <svg className="w-3.5 h-3.5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                </svg>
-                Agent
-              </button>
-              <button
-                onClick={() => { onNewSession('cli'); setNewMenuOpen(false); }}
-                className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-gray-300 hover:bg-gray-700 transition-colors"
-              >
-                <span className="text-emerald-400 font-mono text-[11px] font-bold w-3.5 text-center">{'>_'}</span>
-                Terminal
-              </button>
-            </div>,
-            document.body
-          )}
-        </div>
+        <button
+          onClick={() => onNewSession('agent')}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors"
+          title="New session"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+          </svg>
+          New
+        </button>
         <SessionPicker
           sessions={sessions}
           currentSessionId={currentSessionId}
@@ -177,6 +125,14 @@ function FilesIcon({ className }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
+    </svg>
+  );
+}
+
+function CodeIcon({ className }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" />
     </svg>
   );
 }

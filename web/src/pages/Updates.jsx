@@ -1,566 +1,373 @@
 import { useState, useEffect, useRef } from 'react';
-import { RefreshCw, Package, AlertTriangle, Server, Shield, CheckCircle, Play, Square, ChevronDown, ChevronUp, Download } from 'lucide-react';
+import { RefreshCw, Package, Shield, Server, Monitor, Loader2, Clock, CheckCircle, AlertTriangle, ArrowUp } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
-import StatusBadge from '../components/StatusBadge';
 import ConfirmModal from '../components/ConfirmModal';
 import PageHeader from '../components/PageHeader';
+import TargetUpdateCard from '../components/TargetUpdateCard';
 import {
-  getUpdatesStatus,
-  getLastUpdatesCheck,
-  checkForUpdates,
-  cancelUpdatesCheck,
-  getUpgradeStatus,
-  runAptUpgrade,
-  runAptFullUpgrade,
-  runSnapRefresh,
-  cancelUpgrade
+  scanAllUpdates,
+  getScanResults,
+  upgradeTarget,
+  getUpdateHistory,
 } from '../api/client';
 import useWebSocket from '../hooks/useWebSocket';
 
 function Updates() {
   const [loading, setLoading] = useState(true);
-  const [running, setRunning] = useState(false);
-  const [cancelling, setCancelling] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [targets, setTargets] = useState({});
+  const [upgradeStates, setUpgradeStates] = useState({});
+  const [history, setHistory] = useState([]);
   const [message, setMessage] = useState(null);
-  const [currentPhase, setCurrentPhase] = useState(null);
-  const [liveOutput, setLiveOutput] = useState([]);
-  const [showOutput, setShowOutput] = useState(false);
-  const outputRef = useRef(null);
-  const upgradeOutputRef = useRef(null);
+  const [confirmModal, setConfirmModal] = useState(null);
 
-  // Results state
-  const [lastCheck, setLastCheck] = useState(null);
-  const [aptPackages, setAptPackages] = useState([]);
-  const [snapPackages, setSnapPackages] = useState([]);
-  const [needrestart, setNeedrestart] = useState(null);
-  const [summary, setSummary] = useState(null);
-
-  // Upgrade state
-  const [upgrading, setUpgrading] = useState(false);
-  const [upgradeType, setUpgradeType] = useState(null);
-  const [upgradeOutput, setUpgradeOutput] = useState([]);
-  const [showUpgradeOutput, setShowUpgradeOutput] = useState(true);
-
-  // Confirm modal
-  const [confirmModal, setConfirmModal] = useState({ show: false, type: null });
-
+  // WebSocket events
   useWebSocket({
-    'updates:started': () => {
-      setRunning(true);
-      setLiveOutput([]);
-      setCurrentPhase(null);
+    'updates:scan:started': () => {
+      setScanning(true);
       setMessage(null);
     },
-    'updates:phase': (data) => {
-      setCurrentPhase(data);
-    },
-    'updates:output': (data) => {
-      setLiveOutput(prev => [...prev.slice(-100), data.line]);
-    },
-    'updates:apt-complete': (data) => {
-      setAptPackages(data.packages || []);
-    },
-    'updates:snap-complete': (data) => {
-      setSnapPackages(data.snaps || []);
-    },
-    'updates:needrestart-complete': (data) => {
-      setNeedrestart(data);
-    },
-    'updates:complete': (data) => {
-      setRunning(false);
-      setCurrentPhase(null);
-      setSummary(data.summary);
-      setLastCheck(new Date().toISOString());
-      if (data.success) {
-        setMessage({ type: 'success', text: `Verification terminee en ${Math.round(data.duration / 1000)}s` });
+    'updates:scan:target': (data) => {
+      if (data.target) {
+        setTargets(prev => ({ ...prev, [data.target.id]: data.target }));
       }
     },
-    'updates:cancelled': () => {
-      setRunning(false);
-      setCurrentPhase(null);
-      setCancelling(false);
-      setMessage({ type: 'warning', text: 'Verification annulee' });
+    'updates:scan:complete': () => {
+      setScanning(false);
+      setMessage({ type: 'success', text: 'Scan terminé' });
+      setTimeout(() => setMessage(null), 3000);
     },
-    'updates:error': (data) => {
-      setRunning(false);
-      setCurrentPhase(null);
-      setMessage({ type: 'error', text: data.error });
+    'updates:upgrade-target:started': (data) => {
+      setUpgradeStates(prev => ({
+        ...prev,
+        [data.targetId]: {
+          ...prev[data.targetId],
+          [data.category]: { running: true, output: [] }
+        }
+      }));
     },
-    'updates:upgrade-started': (data) => {
-      setUpgrading(true);
-      setUpgradeType(data.type);
-      setUpgradeOutput([]);
-      setShowUpgradeOutput(true);
-      setMessage(null);
+    'updates:upgrade-target:output': (data) => {
+      setUpgradeStates(prev => {
+        const targetState = prev[data.targetId] || {};
+        const catState = targetState[data.category] || { running: true, output: [] };
+        return {
+          ...prev,
+          [data.targetId]: {
+            ...targetState,
+            [data.category]: {
+              ...catState,
+              output: [...catState.output.slice(-100), data.line]
+            }
+          }
+        };
+      });
     },
-    'updates:upgrade-output': (data) => {
-      setUpgradeOutput(prev => [...prev.slice(-200), data.line]);
-    },
-    'updates:upgrade-complete': (data) => {
-      setUpgrading(false);
-      if (data.success) {
-        setMessage({ type: 'success', text: `Mise a jour ${data.type} terminee en ${Math.round(data.duration / 1000)}s` });
-        fetchInitialData();
-      } else {
-        setMessage({ type: 'error', text: data.error || 'Erreur lors de la mise a jour' });
-      }
-    },
-    'updates:upgrade-cancelled': () => {
-      setUpgrading(false);
-      setCancelling(false);
-      setMessage({ type: 'warning', text: 'Mise a jour annulee' });
+    'updates:upgrade-target:complete': (data) => {
+      setUpgradeStates(prev => {
+        const targetState = prev[data.targetId] || {};
+        return {
+          ...prev,
+          [data.targetId]: {
+            ...targetState,
+            [data.category]: { running: false, output: targetState[data.category]?.output || [] }
+          }
+        };
+      });
+      setMessage({
+        type: data.success ? 'success' : 'error',
+        text: data.success
+          ? `Mise à jour terminée (${data.category})`
+          : `Échec : ${data.error || 'Erreur inconnue'}`
+      });
+      // Refresh results and history
+      getScanResults().then(r => {
+        if (r.data.targets) setTargets(r.data.targets);
+      }).catch(() => {});
+      getUpdateHistory().then(r => {
+        if (r.data.entries) setHistory(r.data.entries);
+      }).catch(() => {});
     },
   });
 
-  // Auto-scroll live output
+  // Initial load
   useEffect(() => {
-    if (outputRef.current) {
-      outputRef.current.scrollTop = outputRef.current.scrollHeight;
-    }
-  }, [liveOutput]);
-
-  // Auto-scroll upgrade output
-  useEffect(() => {
-    if (upgradeOutputRef.current) {
-      upgradeOutputRef.current.scrollTop = upgradeOutputRef.current.scrollHeight;
-    }
-  }, [upgradeOutput]);
-
-  // Initial data fetch
-  useEffect(() => {
-    fetchInitialData();
+    Promise.all([
+      getScanResults().catch(() => ({ data: { targets: {} } })),
+      getUpdateHistory().catch(() => ({ data: { entries: [] } })),
+    ]).then(([scanRes, histRes]) => {
+      if (scanRes.data.targets) setTargets(scanRes.data.targets);
+      if (histRes.data.entries) setHistory(histRes.data.entries);
+      setLoading(false);
+    });
   }, []);
 
-  async function fetchInitialData() {
+  const handleScan = async () => {
     try {
-      // Check if a check is already running
-      const statusRes = await getUpdatesStatus();
-      if (statusRes.data.running) {
-        setRunning(true);
-      }
-
-      // Check if upgrade is running
-      const upgradeRes = await getUpgradeStatus();
-      if (upgradeRes.data.running) {
-        setUpgrading(true);
-      }
-
-      // Get last check results
-      const lastRes = await getLastUpdatesCheck();
-      if (lastRes.data.success && lastRes.data.result) {
-        const result = lastRes.data.result;
-        setLastCheck(result.timestamp);
-        setAptPackages(result.apt?.packages || []);
-        setSnapPackages(result.snap?.packages || []);
-        setNeedrestart(result.needrestart || null);
-        setSummary(result.summary || null);
-      }
-    } catch (error) {
-      console.error('Error fetching initial data:', error);
-    } finally {
-      setLoading(false);
+      setScanning(true);
+      setTargets({});
+      await scanAllUpdates();
+    } catch (e) {
+      setScanning(false);
+      setMessage({ type: 'error', text: 'Erreur lors du scan' });
     }
-  }
+  };
 
-  async function handleCheck() {
-    setMessage(null);
-    setLiveOutput([]);
+  const handleUpgrade = (targetId, category) => {
+    const target = targets[targetId];
+    const categoryLabels = {
+      apt: 'OS (APT)',
+      claude_cli: 'Claude Code',
+      code_server: 'code-server',
+      claude_ext: 'Extension Claude',
+      hr_agent: 'Agent',
+    };
+    setConfirmModal({
+      targetId,
+      category,
+      title: `Mettre à jour ${categoryLabels[category] || category}`,
+      message: `Voulez-vous mettre à jour ${categoryLabels[category] || category} sur ${target?.name || targetId} ?`,
+    });
+  };
+
+  const confirmUpgrade = async () => {
+    if (!confirmModal) return;
+    const { targetId, category } = confirmModal;
+    setConfirmModal(null);
     try {
-      await checkForUpdates();
-    } catch (error) {
-      setMessage({ type: 'error', text: error.response?.data?.error || error.message });
-      setRunning(false);
+      await upgradeTarget(targetId, category);
+    } catch (e) {
+      setMessage({ type: 'error', text: `Erreur : ${e.message}` });
     }
-  }
+  };
 
-  async function handleCancel() {
-    setCancelling(true);
-    try {
-      if (upgrading) {
-        await cancelUpgrade();
-      } else {
-        await cancelUpdatesCheck();
-      }
-    } catch (error) {
-      console.error('Error cancelling:', error);
-      setCancelling(false);
-    }
-  }
+  // Derived stats
+  const targetList = Object.values(targets);
+  const totalOsUpdates = targetList.reduce((s, t) => s + (t.os_upgradable || 0), 0);
+  const totalSecurity = targetList.reduce((s, t) => s + (t.os_security || 0), 0);
+  const agentsOutdated = targetList.filter(t =>
+    t.agent_version && t.agent_version_latest && t.agent_version !== t.agent_version_latest
+  ).length;
+  const claudeOutdated = targetList.filter(t =>
+    t.claude_cli_installed && t.claude_cli_latest && t.claude_cli_installed !== t.claude_cli_latest
+  ).length;
 
-  async function handleUpgrade(type) {
-    setConfirmModal({ show: false, type: null });
-    setMessage(null);
-    setUpgradeOutput([]);
-
-    try {
-      switch (type) {
-        case 'apt':
-          await runAptUpgrade();
-          break;
-        case 'apt-full':
-          await runAptFullUpgrade();
-          break;
-        case 'snap':
-          await runSnapRefresh();
-          break;
-      }
-    } catch (error) {
-      setMessage({ type: 'error', text: error.response?.data?.error || error.message });
-      setUpgrading(false);
-    }
-  }
-
-  function formatDate(isoString) {
-    if (!isoString) return '-';
-    return new Date(isoString).toLocaleString('fr-FR');
-  }
-
-  function getUpgradeDescription(type) {
-    switch (type) {
-      case 'apt':
-        return 'Cette action va executer "apt upgrade" pour mettre a jour tous les paquets APT disponibles. Les paquets existants ne seront pas supprimes.';
-      case 'apt-full':
-        return 'Cette action va executer "apt full-upgrade". Contrairement a upgrade, cette commande peut supprimer des paquets si necessaire pour resoudre des conflits.';
-      case 'snap':
-        return 'Cette action va executer "snap refresh" pour mettre a jour tous les snaps installes.';
-      default:
-        return '';
-    }
-  }
-
-  function getUpgradeTitle(type) {
-    switch (type) {
-      case 'apt':
-        return 'APT Upgrade';
-      case 'apt-full':
-        return 'APT Full-Upgrade';
-      case 'snap':
-        return 'Snap Refresh';
-      default:
-        return 'Mise a jour';
-    }
-  }
+  const mainHost = targets['main'];
+  const remoteHosts = targetList.filter(t => t.target_type === 'remote_host');
+  const devContainers = targetList.filter(t => t.target_type === 'container' && t.environment === 'development');
+  const prodContainers = targetList.filter(t => t.target_type === 'container' && t.environment === 'production');
 
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-400"></div>
+        <div className="animate-spin h-12 w-12 border-b-2 border-blue-400" />
       </div>
     );
   }
 
-  const securityCount = aptPackages.filter(p => p.isSecurity).length;
-  const isRunningAny = running || upgrading;
-
   return (
-    <div>
-      <PageHeader title="Mises a jour systeme" icon={Package}>
-        {isRunningAny ? (
-          <Button
-            variant="danger"
-            onClick={handleCancel}
-            loading={cancelling}
-            icon={Square}
-          >
-            Annuler
-          </Button>
-        ) : (
-          <Button
-            variant="primary"
-            onClick={handleCheck}
-            icon={Play}
-          >
-            Verifier les mises a jour
-          </Button>
-        )}
+    <div className="flex flex-col h-full overflow-y-auto">
+      <PageHeader title="Mises à jour" icon={RefreshCw}>
+        <Button
+          variant="primary"
+          onClick={handleScan}
+          disabled={scanning}
+        >
+          {scanning ? (
+            <><Loader2 className="w-4 h-4 animate-spin mr-2" /> Scan en cours...</>
+          ) : (
+            <><RefreshCw className="w-4 h-4 mr-2" /> Scanner tout</>
+          )}
+        </Button>
       </PageHeader>
 
-      {message && (
-        <div className={`p-3 ${
-          message.type === 'success' ? 'bg-green-500/20 text-green-400' :
-          message.type === 'error' ? 'bg-red-500/20 text-red-400' :
-          'bg-yellow-500/20 text-yellow-400'
-        }`}>
-          {message.text}
-        </div>
-      )}
+      <div className="p-6 space-y-6">
+        {/* Message banner */}
+        {message && (
+          <div className={`p-3 text-sm ${
+            message.type === 'success' ? 'bg-green-500/20 text-green-400' :
+            message.type === 'error' ? 'bg-red-500/20 text-red-400' :
+            'bg-yellow-500/20 text-yellow-400'
+          }`}>
+            {message.text}
+          </div>
+        )}
 
-      {/* Check Progress Section */}
-      {running && (
-        <Card title="Verification en cours" icon={RefreshCw}>
-          <div className="space-y-4">
-            {currentPhase && (
-              <div className="flex items-center gap-2">
-                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-400"></div>
-                <span className="text-blue-400">{currentPhase.message}</span>
-              </div>
-            )}
-
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setShowOutput(!showOutput)}
-                className="flex items-center gap-1 text-sm text-gray-400 hover:text-white"
-              >
-                {showOutput ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                {showOutput ? 'Masquer' : 'Afficher'} la sortie
-              </button>
+        {/* Scanning indicator */}
+        {scanning && (
+          <Card title="Scan en cours" icon={Loader2}>
+            <div className="flex items-center gap-3 text-blue-400">
+              <Loader2 className="w-5 h-5 animate-spin" />
+              <span className="text-sm">Interrogation de tous les hôtes et containers...</span>
             </div>
+          </Card>
+        )}
 
-            {showOutput && liveOutput.length > 0 && (
-              <div
-                ref={outputRef}
-                className="bg-gray-900 p-3 font-mono text-xs h-48 overflow-y-auto"
-              >
-                {liveOutput.map((line, i) => (
-                  <div key={i} className="text-gray-400">{line}</div>
-                ))}
-              </div>
-            )}
+        {/* Summary stats */}
+        {targetList.length > 0 && (
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-px bg-gray-700">
+            <StatCard icon={Package} label="MàJ OS" value={totalOsUpdates} color={totalOsUpdates > 0 ? 'text-orange-400' : 'text-green-400'} />
+            <StatCard icon={Shield} label="Sécurité" value={totalSecurity} color={totalSecurity > 0 ? 'text-red-400' : 'text-green-400'} />
+            <StatCard icon={Server} label="Agents outdated" value={agentsOutdated} color={agentsOutdated > 0 ? 'text-orange-400' : 'text-green-400'} />
+            <StatCard icon={Monitor} label="Claude outdated" value={claudeOutdated} color={claudeOutdated > 0 ? 'text-orange-400' : 'text-green-400'} />
           </div>
-        </Card>
-      )}
+        )}
 
-      {/* Upgrade Progress Section */}
-      {upgrading && (
-        <Card title={`Mise a jour en cours: ${getUpgradeTitle(upgradeType)}`} icon={Download}>
-          <div className="space-y-4">
-            <div className="flex items-center gap-2">
-              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-green-400"></div>
-              <span className="text-green-400">Installation en cours...</span>
-            </div>
+        {/* Main host */}
+        {mainHost && (
+          <Section title="Hôte principal">
+            <TargetUpdateCard
+              target={mainHost}
+              upgradeState={upgradeStates['main'] || {}}
+              onUpgrade={handleUpgrade}
+            />
+          </Section>
+        )}
 
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setShowUpgradeOutput(!showUpgradeOutput)}
-                className="flex items-center gap-1 text-sm text-gray-400 hover:text-white"
-              >
-                {showUpgradeOutput ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                {showUpgradeOutput ? 'Masquer' : 'Afficher'} la sortie
-              </button>
-            </div>
-
-            {showUpgradeOutput && upgradeOutput.length > 0 && (
-              <div
-                ref={upgradeOutputRef}
-                className="bg-gray-900 p-3 font-mono text-xs h-64 overflow-y-auto"
-              >
-                {upgradeOutput.map((line, i) => (
-                  <div key={i} className="text-gray-400">{line}</div>
-                ))}
-              </div>
-            )}
-          </div>
-        </Card>
-      )}
-
-      {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-px">
-        {/* Total Updates */}
-        <Card title="Total mises a jour" icon={Package}>
-          <div className="text-3xl font-bold text-blue-400">
-            {aptPackages.length + snapPackages.length}
-          </div>
-          <p className="text-sm text-gray-400">paquets disponibles</p>
-          {lastCheck && (
-            <p className="text-xs text-gray-500 mt-2">
-              Derniere verification: {formatDate(lastCheck)}
-            </p>
-          )}
-        </Card>
-
-        {/* Security Updates */}
-        <Card title="Securite" icon={Shield}>
-          <div className={`text-3xl font-bold ${securityCount > 0 ? 'text-red-400' : 'text-green-400'}`}>
-            {securityCount}
-          </div>
-          <p className="text-sm text-gray-400">
-            {securityCount > 0 ? 'mises a jour critiques' : 'systeme a jour'}
-          </p>
-        </Card>
-
-        {/* Services Restart */}
-        <Card title="Services" icon={Server}>
-          {needrestart?.kernelRebootNeeded ? (
-            <>
-              <div className="text-3xl font-bold text-red-400">
-                <AlertTriangle className="w-8 h-8" />
-              </div>
-              <p className="text-sm text-red-400">Redemarrage requis</p>
-            </>
-          ) : needrestart?.services?.length > 0 ? (
-            <>
-              <div className="text-3xl font-bold text-yellow-400">
-                {needrestart.services.length}
-              </div>
-              <p className="text-sm text-gray-400">services a redemarrer</p>
-            </>
-          ) : (
-            <>
-              <div className="text-3xl font-bold text-green-400">
-                <CheckCircle className="w-8 h-8" />
-              </div>
-              <p className="text-sm text-gray-400">Aucun redemarrage requis</p>
-            </>
-          )}
-        </Card>
-      </div>
-
-      {/* APT Packages */}
-      {aptPackages.length > 0 && (
-        <Card
-          title={`Paquets APT (${aptPackages.length})`}
-          icon={Package}
-          actions={
-            <div className="flex gap-2">
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={() => setConfirmModal({ show: true, type: 'apt' })}
-                disabled={isRunningAny}
-                icon={Download}
-              >
-                Upgrade
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => setConfirmModal({ show: true, type: 'apt-full' })}
-                disabled={isRunningAny}
-              >
-                Full-Upgrade
-              </Button>
-            </div>
-          }
-        >
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-gray-400 border-b border-gray-700">
-                  <th className="pb-2">Paquet</th>
-                  <th className="pb-2">Version actuelle</th>
-                  <th className="pb-2">Nouvelle version</th>
-                  <th className="pb-2">Type</th>
-                </tr>
-              </thead>
-              <tbody>
-                {aptPackages.map((pkg, i) => (
-                  <tr key={i} className="border-b border-gray-700/50">
-                    <td className="py-2 font-mono">{pkg.name}</td>
-                    <td className="py-2 font-mono text-gray-400 text-xs">{pkg.currentVersion}</td>
-                    <td className="py-2 font-mono text-blue-400 text-xs">{pkg.newVersion}</td>
-                    <td className="py-2">
-                      {pkg.isSecurity ? (
-                        <StatusBadge status="down">Securite</StatusBadge>
-                      ) : (
-                        <StatusBadge status="active">Normal</StatusBadge>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-      )}
-
-      {/* Snap Packages */}
-      {snapPackages.length > 0 && (
-        <Card
-          title={`Snaps (${snapPackages.length})`}
-          icon={Package}
-          actions={
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() => setConfirmModal({ show: true, type: 'snap' })}
-              disabled={isRunningAny}
-              icon={Download}
-            >
-              Refresh
-            </Button>
-          }
-        >
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-gray-400 border-b border-gray-700">
-                  <th className="pb-2">Snap</th>
-                  <th className="pb-2">Nouvelle version</th>
-                  <th className="pb-2">Revision</th>
-                  <th className="pb-2">Editeur</th>
-                </tr>
-              </thead>
-              <tbody>
-                {snapPackages.map((snap, i) => (
-                  <tr key={i} className="border-b border-gray-700/50">
-                    <td className="py-2 font-mono">{snap.name}</td>
-                    <td className="py-2 font-mono text-blue-400">{snap.newVersion}</td>
-                    <td className="py-2 text-gray-400">{snap.revision}</td>
-                    <td className="py-2 text-gray-400">{snap.publisher}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-      )}
-
-      {/* Services needing restart */}
-      {needrestart && (needrestart.kernelRebootNeeded || needrestart.services?.length > 0) && (
-        <Card title="Services a redemarrer" icon={AlertTriangle}>
-          {needrestart.kernelRebootNeeded && (
-            <div className="bg-red-500/20 p-4 mb-4">
-              <div className="flex items-center gap-2 text-red-400 font-semibold">
-                <AlertTriangle className="w-5 h-5" />
-                Redemarrage du systeme requis
-              </div>
-              {needrestart.currentKernel && needrestart.expectedKernel && (
-                <div className="mt-2 text-sm text-gray-400">
-                  <p>Kernel actuel: <span className="font-mono">{needrestart.currentKernel}</span></p>
-                  <p>Kernel attendu: <span className="font-mono text-blue-400">{needrestart.expectedKernel}</span></p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {needrestart.services?.length > 0 && (
+        {/* Remote hosts */}
+        {remoteHosts.length > 0 && (
+          <Section title={`Hôtes distants (${remoteHosts.length})`}>
             <div className="space-y-2">
-              <p className="text-sm text-gray-400 mb-3">
-                Les services suivants doivent etre redemarres pour appliquer les mises a jour:
-              </p>
-              {needrestart.services.map((service, i) => (
-                <div key={i} className="flex items-center gap-2 p-2 bg-gray-800">
-                  <Server className="w-4 h-4 text-yellow-400" />
-                  <span className="font-mono text-sm">{service}</span>
-                </div>
+              {remoteHosts.map(t => (
+                <TargetUpdateCard
+                  key={t.id}
+                  target={t}
+                  upgradeState={upgradeStates[t.id] || {}}
+                  onUpgrade={handleUpgrade}
+                />
               ))}
             </div>
-          )}
-        </Card>
-      )}
+          </Section>
+        )}
 
-      {/* Empty state */}
-      {!running && !upgrading && aptPackages.length === 0 && snapPackages.length === 0 && !needrestart && (
-        <Card>
-          <div className="text-center py-8 text-gray-400">
-            <RefreshCw className="w-12 h-12 mx-auto mb-4 opacity-50" />
-            <p>Aucune donnee disponible</p>
-            <p className="text-sm mt-2">Cliquez sur "Verifier les mises a jour" pour commencer</p>
+        {/* DEV containers */}
+        {devContainers.length > 0 && (
+          <Section title={`Containers DEV (${devContainers.length})`}>
+            <div className="space-y-2">
+              {devContainers.map(t => (
+                <TargetUpdateCard
+                  key={t.id}
+                  target={t}
+                  upgradeState={upgradeStates[t.id] || {}}
+                  onUpgrade={handleUpgrade}
+                />
+              ))}
+            </div>
+          </Section>
+        )}
+
+        {/* PROD containers */}
+        {prodContainers.length > 0 && (
+          <Section title={`Containers PROD (${prodContainers.length})`}>
+            <div className="space-y-2">
+              {prodContainers.map(t => (
+                <TargetUpdateCard
+                  key={t.id}
+                  target={t}
+                  upgradeState={upgradeStates[t.id] || {}}
+                  onUpgrade={handleUpgrade}
+                />
+              ))}
+            </div>
+          </Section>
+        )}
+
+        {/* History */}
+        {history.length > 0 && (
+          <Card title="Historique des mises à jour" icon={Clock}>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-gray-400 border-b border-gray-700">
+                    <th className="pb-2 pr-4">Date</th>
+                    <th className="pb-2 pr-4">Cible</th>
+                    <th className="pb-2 pr-4">Catégorie</th>
+                    <th className="pb-2 pr-4">Versions</th>
+                    <th className="pb-2">Statut</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history.slice(0, 20).map((entry) => (
+                    <tr key={entry.id} className="border-b border-gray-700/50">
+                      <td className="py-2 pr-4 text-gray-400">
+                        {new Date(entry.timestamp * 1000).toLocaleString('fr-FR', {
+                          day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+                        })}
+                      </td>
+                      <td className="py-2 pr-4">{entry.target_name}</td>
+                      <td className="py-2 pr-4 font-mono text-xs text-gray-400">{entry.category}</td>
+                      <td className="py-2 pr-4 font-mono text-xs">
+                        {entry.version_before && entry.version_after
+                          ? <>{entry.version_before} <span className="text-gray-500">→</span> {entry.version_after}</>
+                          : <span className="text-gray-500">—</span>
+                        }
+                      </td>
+                      <td className="py-2">
+                        {entry.status === 'success' && (
+                          <span className="text-green-400 flex items-center gap-1 text-xs">
+                            <CheckCircle className="w-3 h-3" /> Succès
+                          </span>
+                        )}
+                        {entry.status === 'failed' && (
+                          <span className="text-red-400 flex items-center gap-1 text-xs" title={entry.error}>
+                            <AlertTriangle className="w-3 h-3" /> Échec
+                          </span>
+                        )}
+                        {entry.status === 'started' && (
+                          <span className="text-blue-400 flex items-center gap-1 text-xs">
+                            <Loader2 className="w-3 h-3 animate-spin" /> En cours
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        )}
+
+        {/* Empty state */}
+        {targetList.length === 0 && !scanning && (
+          <div className="text-center py-12 text-gray-500">
+            <RefreshCw className="w-12 h-12 mx-auto mb-4 opacity-30" />
+            <p>Aucun résultat de scan disponible</p>
+            <p className="text-sm mt-1">Cliquez sur "Scanner tout" pour démarrer</p>
           </div>
-        </Card>
-      )}
+        )}
+      </div>
 
-      {/* Confirmation Modal */}
+      {/* Confirm modal */}
       <ConfirmModal
-        isOpen={confirmModal.show}
-        onClose={() => setConfirmModal({ show: false, type: null })}
-        onConfirm={() => handleUpgrade(confirmModal.type)}
-        title={`Confirmer ${getUpgradeTitle(confirmModal.type)}`}
-        message={getUpgradeDescription(confirmModal.type)}
-        confirmText="Lancer la mise a jour"
+        isOpen={!!confirmModal}
+        onClose={() => setConfirmModal(null)}
+        onConfirm={confirmUpgrade}
+        title={confirmModal?.title || ''}
+        message={confirmModal?.message || ''}
+        confirmText="Mettre à jour"
         variant="warning"
       />
+    </div>
+  );
+}
+
+function StatCard({ icon: Icon, label, value, color }) {
+  return (
+    <div className="bg-gray-800 p-4">
+      <div className="flex items-center gap-2 text-gray-400 text-sm mb-1">
+        <Icon className="w-4 h-4" />
+        {label}
+      </div>
+      <div className={`text-2xl font-bold ${color}`}>{value}</div>
+    </div>
+  );
+}
+
+function Section({ title, children }) {
+  return (
+    <div>
+      <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-2">{title}</h3>
+      {children}
     </div>
   );
 }

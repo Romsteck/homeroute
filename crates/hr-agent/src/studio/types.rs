@@ -54,24 +54,6 @@ pub enum WsInMessage {
     ConsoleLogs {
         logs: Vec<ConsoleLogEntry>,
     },
-    TerminalStart {
-        session_id: String,
-        #[serde(default)]
-        resume_session: Option<String>,
-        #[serde(default)]
-        model: Option<String>,
-        cols: u16,
-        rows: u16,
-    },
-    TerminalData {
-        session_id: String,
-        data: String, // base64
-    },
-    TerminalResize {
-        session_id: String,
-        cols: u16,
-        rows: u16,
-    },
 }
 
 fn default_limit() -> usize {
@@ -134,13 +116,6 @@ pub enum WsOutMessage {
         session_id: String,
         todos: Vec<serde_json::Value>,
     },
-    TerminalData {
-        session_id: String,
-        data: String, // base64
-    },
-    TerminalDone {
-        session_id: String,
-    },
 }
 
 /// Base64-encoded image attachment from the client.
@@ -175,11 +150,4 @@ pub struct SessionInfo {
     pub message_count: usize,
     /// First user message summary (truncated)
     pub summary: String,
-    #[serde(default = "default_session_type")]
-    pub session_type: String,
-}
-
-#[allow(dead_code)] // Used by serde(default)
-fn default_session_type() -> String {
-    "agent".to_string()
 }

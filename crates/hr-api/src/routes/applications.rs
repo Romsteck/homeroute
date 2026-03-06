@@ -1313,6 +1313,48 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
                                     }
                                 }
                             }
+                            Ok(AgentMessage::UpdateScanResult {
+                                os_upgradable, os_security,
+                                claude_cli_installed, claude_cli_latest,
+                                code_server_installed, code_server_latest,
+                                claude_ext_installed, claude_ext_latest,
+                                scan_error,
+                            }) => {
+                                info!(app_id, os_upgradable, os_security, "Agent update scan result");
+                                if let Some(app) = registry.get_application(&app_id).await {
+                                    // Read latest agent version from version file
+                                    let agent_version_latest = std::fs::read_to_string(
+                                        "/opt/homeroute/data/agent-binaries/hr-agent.version"
+                                    ).ok().map(|s| s.trim().to_string());
+
+                                    let target = hr_common::events::UpdateTarget {
+                                        id: app_id.clone(),
+                                        name: app.name.clone(),
+                                        target_type: "container".to_string(),
+                                        environment: Some(format!("{:?}", app.environment).to_lowercase()),
+                                        online: true,
+                                        os_upgradable,
+                                        os_security,
+                                        agent_version: app.agent_version.clone(),
+                                        agent_version_latest,
+                                        claude_cli_installed,
+                                        claude_cli_latest,
+                                        code_server_installed,
+                                        code_server_latest,
+                                        claude_ext_installed,
+                                        claude_ext_latest,
+                                        scan_error,
+                                        scanned_at: chrono::Utc::now().to_rfc3339(),
+                                    };
+                                    registry.scan_results.write().await.insert(app_id.clone(), target.clone());
+                                    let _ = state.events.update_scan.send(
+                                        hr_common::events::UpdateScanEvent::TargetScanned {
+                                            scan_id: String::new(),
+                                            target,
+                                        }
+                                    );
+                                }
+                            }
                             Err(e) => {
                                 warn!(app_id, "Invalid agent message: {e}");
                             }

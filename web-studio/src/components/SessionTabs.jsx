@@ -1,22 +1,3 @@
-import React from 'react';
-
-function TypeIcon({ sessionType, className = '' }) {
-  if (sessionType === 'cli') {
-    // Terminal icon >_
-    return (
-      <span className={`text-emerald-400 font-mono text-[10px] leading-none font-bold shrink-0 ${className}`}>
-        {'>_'}
-      </span>
-    );
-  }
-  // Agent chat bubble icon
-  return (
-    <svg className={`w-3 h-3 text-indigo-400 shrink-0 ${className}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-    </svg>
-  );
-}
-
 export default function SessionTabs({ tabs, activeIndex, onSwitch, onClose }) {
   return (
     <div className="h-9 bg-gray-900 border-b border-gray-800 flex items-center px-2 gap-0.5 shrink-0">
@@ -34,8 +15,10 @@ export default function SessionTabs({ tabs, activeIndex, onSwitch, onClose }) {
                   : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'
               }`}
             >
-              {/* Session type icon */}
-              <TypeIcon sessionType={tab.sessionType} />
+              {/* Agent icon */}
+              <svg className="w-3 h-3 text-indigo-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+              </svg>
               {/* Streaming indicator (background tab) */}
               {tab.isStreaming && !isActive && (
                 <span className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-pulse shrink-0" />

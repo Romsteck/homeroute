@@ -12,7 +12,7 @@ use tracing::{info, warn};
 
 use hr_acme::AcmeManager;
 use hr_common::config::EnvConfig;
-use hr_common::events::{AgentMetricsEvent, AgentStatusEvent, AgentUpdateEvent, AgentUpdateStatus, EventBus, HostPowerEvent, HostPowerState, PowerAction, WakeResult};
+use hr_common::events::{AgentMetricsEvent, AgentStatusEvent, AgentUpdateEvent, AgentUpdateStatus, EventBus, HostPowerEvent, HostPowerState, PowerAction, UpdateTarget, WakeResult};
 use crate::protocol::{AgentMetrics, ContainerInfo, HostMetrics, HostRegistryMessage, NetworkInterfaceInfo, RegistryMessage};
 use crate::types::{
     AgentNotifyResult, AgentSkipResult, AgentStatus, AgentUpdateStatusInfo,
@@ -85,6 +85,8 @@ pub struct AgentRegistry {
     terminal_sessions: Arc<RwLock<HashMap<String, mpsc::Sender<Vec<u8>>>>>,
     /// Dataverse query signals: maps request_id → oneshot sender for query results.
     dataverse_query_signals: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>>>>,
+    /// Cached update scan results per target.
+    pub scan_results: Arc<RwLock<HashMap<String, UpdateTarget>>>,
 }
 
 impl AgentRegistry {
@@ -124,6 +126,7 @@ impl AgentRegistry {
             acme: RwLock::new(None),
             terminal_sessions: Arc::new(RwLock::new(HashMap::new())),
             dataverse_query_signals: Arc::new(RwLock::new(HashMap::new())),
+            scan_results: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -1610,6 +1613,32 @@ impl AgentRegistry {
         tokio::fs::write(&tmp, &json).await?;
         tokio::fs::rename(&tmp, &self.state_path).await?;
         Ok(())
+    }
+
+    // ── Unified Update Scan ────────────────────────────────────────
+
+    /// Broadcast RunUpdateScan to all connected agents and host-agents.
+    /// Returns count of targets notified.
+    pub async fn trigger_update_scan(&self) -> usize {
+        let mut count = 0;
+
+        // Send to all container agents
+        let conns = self.connections.read().await;
+        for (_app_id, conn) in conns.iter() {
+            let _ = conn.tx.send(RegistryMessage::RunUpdateScan).await;
+            count += 1;
+        }
+        drop(conns);
+
+        // Send to all host-agents
+        let host_conns = self.host_connections.read().await;
+        for (_host_id, conn) in host_conns.iter() {
+            let _ = conn.tx.send(OutgoingHostMessage::Text(HostRegistryMessage::RunUpdateScan)).await;
+            count += 1;
+        }
+
+        info!(count, "Triggered update scan for all targets");
+        count
     }
 }
 

@@ -1671,6 +1671,154 @@ fn get_studio_tool_definitions() -> Vec<Value> {
     ]
 }
 
+/// Take a screenshot using puppeteer-core via Node.js CDP protocol.
+/// Falls back to installing Chrome + puppeteer-core if not present.
+async fn puppeteer_screenshot(
+    url: &str,
+    screenshot_path: &str,
+    width: u64,
+    height: u64,
+    wait_ms: u64,
+) -> Result<Value, String> {
+    use base64::Engine;
+
+    // Ensure Chrome is installed
+    let candidates = ["chromium-browser", "chromium", "google-chrome-stable"];
+    let mut chrome_bin = String::new();
+    for candidate in &candidates {
+        let check = tokio::process::Command::new("which")
+            .arg(candidate)
+            .output()
+            .await;
+        if check.map(|o| o.status.success()).unwrap_or(false) {
+            chrome_bin = candidate.to_string();
+            break;
+        }
+    }
+
+    if chrome_bin.is_empty() {
+        let install_script = r#"
+            apt-get update -qq 2>/dev/null
+            apt-get install -y -qq wget gnupg 2>/dev/null
+            wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+            apt-get install -y -qq /tmp/chrome.deb 2>/dev/null || (apt-get -f install -y -qq 2>/dev/null && apt-get install -y -qq /tmp/chrome.deb 2>/dev/null)
+            rm -f /tmp/chrome.deb
+        "#;
+        let install = tokio::process::Command::new("bash")
+            .args(["-c", install_script])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to install Chrome: {e}"))?;
+
+        let check = tokio::process::Command::new("which")
+            .arg("google-chrome-stable")
+            .output()
+            .await;
+        if check.map(|o| o.status.success()).unwrap_or(false) {
+            chrome_bin = "google-chrome-stable".to_string();
+        } else {
+            let stderr = String::from_utf8_lossy(&install.stderr);
+            return Ok(json!({
+                "content": [{ "type": "text", "text": format!("ERROR: Failed to install Chrome.\n{}", stderr.chars().take(500).collect::<String>()) }]
+            }));
+        }
+    }
+
+    // Ensure puppeteer-core is installed globally
+    let check_pup = tokio::process::Command::new("node")
+        .args(["-e", "require.resolve('puppeteer-core', {paths: [require('child_process').execSync('npm root -g').toString().trim()]})"])
+        .output()
+        .await;
+    if !check_pup.map(|o| o.status.success()).unwrap_or(false) {
+        let install = tokio::process::Command::new("bash")
+            .args(["-c", "PUPPETEER_SKIP_DOWNLOAD=1 npm install -g puppeteer-core 2>&1"])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to install puppeteer-core: {e}"))?;
+        if !install.status.success() {
+            let stderr = String::from_utf8_lossy(&install.stderr);
+            return Ok(json!({
+                "content": [{ "type": "text", "text": format!("ERROR: Failed to install puppeteer-core.\n{}", stderr.chars().take(500).collect::<String>()) }]
+            }));
+        }
+    }
+
+    // Write Node.js script to temp file — parameters passed via process.argv
+    let script_path = "/tmp/_puppeteer_screenshot.cjs";
+    let node_script = r#"const puppeteer = require('puppeteer-core');
+const [,, chromeBin, url, outPath, w, h, waitMs] = process.argv;
+(async () => {
+    const browser = await puppeteer.launch({
+        executablePath: chromeBin,
+        headless: 'new',
+        args: ['--no-sandbox', '--disable-gpu', '--disable-software-rasterizer', '--disable-dev-shm-usage']
+    });
+    const page = await browser.newPage();
+    await page.setViewport({ width: parseInt(w), height: parseInt(h) });
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: Math.max(parseInt(waitMs) + 10000, 15000) });
+    await new Promise(r => setTimeout(r, Math.min(parseInt(waitMs), 5000)));
+    await page.screenshot({ path: outPath });
+    await browser.close();
+})().catch(e => { console.error(e.message); process.exit(1); });
+"#;
+
+    tokio::fs::write(script_path, node_script)
+        .await
+        .map_err(|e| format!("Failed to write screenshot script: {e}"))?;
+
+    // Get NODE_PATH for global modules
+    let npm_root = tokio::process::Command::new("npm")
+        .args(["root", "-g"])
+        .output()
+        .await
+        .ok()
+        .and_then(|o| if o.status.success() {
+            String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
+        } else { None })
+        .unwrap_or_default();
+
+    let output = tokio::process::Command::new("timeout")
+        .args(["30", "node", script_path,
+            &chrome_bin, url, screenshot_path,
+            &width.to_string(), &height.to_string(), &wait_ms.to_string()])
+        .env("NODE_PATH", &npm_root)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run puppeteer screenshot: {e}"))?;
+
+    let _ = tokio::fs::remove_file(script_path).await;
+
+    if !std::path::Path::new(screenshot_path).exists() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Ok(json!({
+            "content": [{ "type": "text", "text": format!(
+                "ERROR: Screenshot failed.\nstdout: {}\nstderr: {}",
+                stdout.chars().take(500).collect::<String>(),
+                stderr.chars().take(500).collect::<String>()
+            ) }]
+        }));
+    }
+
+    let screenshot_data = tokio::fs::read(screenshot_path)
+        .await
+        .map_err(|e| format!("Failed to read screenshot: {e}"))?;
+    let _ = tokio::fs::remove_file(screenshot_path).await;
+
+    let base64_data = base64::engine::general_purpose::STANDARD.encode(&screenshot_data);
+
+    Ok(json!({
+        "content": [{
+            "type": "image",
+            "data": base64_data,
+            "mimeType": "image/png"
+        }, {
+            "type": "text",
+            "text": format!("Screenshot captured: {}x{} pixels, {} bytes, URL: {}", width, height, screenshot_data.len(), url)
+        }]
+    }))
+}
+
 async fn handle_studio_tool_call(tool: &str, args: &Value) -> Result<Value, String> {
     let text_result = |text: String| -> Value {
         json!({ "content": [{ "type": "text", "text": text }] })
@@ -1733,8 +1881,6 @@ async fn handle_studio_tool_call(tool: &str, args: &Value) -> Result<Value, Stri
         }
 
         "browser_screenshot" => {
-            use base64::Engine;
-
             let url = args.get("url")
                 .and_then(|v| v.as_str())
                 .unwrap_or("http://localhost:5173");
@@ -1748,92 +1894,7 @@ async fn handle_studio_tool_call(tool: &str, args: &Value) -> Result<Value, Stri
                 .and_then(|v| v.as_u64())
                 .unwrap_or(2000);
 
-            // Find chromium/chrome binary, install if not present
-            let candidates = ["chromium-browser", "chromium", "google-chrome-stable"];
-            let mut chromium_bin = String::new();
-            for candidate in &candidates {
-                let check = tokio::process::Command::new("which")
-                    .arg(candidate)
-                    .output()
-                    .await;
-                if check.map(|o| o.status.success()).unwrap_or(false) {
-                    chromium_bin = candidate.to_string();
-                    break;
-                }
-            }
-
-            if chromium_bin.is_empty() {
-                let install_script = r#"
-                    apt-get update -qq 2>/dev/null
-                    apt-get install -y -qq wget gnupg 2>/dev/null
-                    wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-                    apt-get install -y -qq /tmp/chrome.deb 2>/dev/null || (apt-get -f install -y -qq 2>/dev/null && apt-get install -y -qq /tmp/chrome.deb 2>/dev/null)
-                    rm -f /tmp/chrome.deb
-                "#;
-                let install = tokio::process::Command::new("bash")
-                    .args(["-c", install_script])
-                    .output()
-                    .await
-                    .map_err(|e| format!("Failed to install Chrome: {e}"))?;
-
-                let check = tokio::process::Command::new("which")
-                    .arg("google-chrome-stable")
-                    .output()
-                    .await;
-                if check.map(|o| o.status.success()).unwrap_or(false) {
-                    chromium_bin = "google-chrome-stable".to_string();
-                } else {
-                    let stderr = String::from_utf8_lossy(&install.stderr);
-                    return Ok(text_result(format!(
-                        "ERROR: Failed to install Chrome.\n{}",
-                        stderr.chars().take(500).collect::<String>()
-                    )));
-                }
-            }
-
-            let screenshot_path = "/tmp/studio-screenshot.png";
-            let window_size = format!("--window-size={},{}", width, height);
-
-            let output = tokio::process::Command::new(&chromium_bin)
-                .args([
-                    "--headless",
-                    "--no-sandbox",
-                    "--disable-gpu",
-                    "--disable-software-rasterizer",
-                    &window_size,
-                    &format!("--screenshot={}", screenshot_path),
-                    &format!("--virtual-time-budget={}", wait_ms),
-                    url,
-                ])
-                .output()
-                .await
-                .map_err(|e| format!("Failed to run chromium: {e}"))?;
-
-            if !std::path::Path::new(screenshot_path).exists() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Ok(text_result(format!(
-                    "ERROR: Screenshot failed.\nChromium stderr: {}",
-                    stderr.chars().take(1000).collect::<String>()
-                )));
-            }
-
-            let screenshot_data = tokio::fs::read(screenshot_path)
-                .await
-                .map_err(|e| format!("Failed to read screenshot: {e}"))?;
-            let _ = tokio::fs::remove_file(screenshot_path).await;
-
-            let base64_data = base64::engine::general_purpose::STANDARD.encode(&screenshot_data);
-
-            Ok(json!({
-                "content": [{
-                    "type": "image",
-                    "data": base64_data,
-                    "mimeType": "image/png"
-                }, {
-                    "type": "text",
-                    "text": format!("Screenshot captured: {}x{} pixels, {} bytes, URL: {}", width, height, screenshot_data.len(), url)
-                }]
-            }))
+            return puppeteer_screenshot(url, "/tmp/studio-screenshot.png", width, height, wait_ms).await;
         }
 
         "browser_console_logs" => {
@@ -3479,8 +3540,6 @@ WantedBy=multi-user.target"#;
         }
 
         "dev_test_browser" => {
-            use base64::Engine;
-
             let url = args.get("url")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing required parameter: url")?;
@@ -3494,97 +3553,7 @@ WantedBy=multi-user.target"#;
                 .and_then(|v| v.as_u64())
                 .unwrap_or(2000);
 
-            // Find chromium/chrome binary, install if not present
-            let candidates = ["chromium-browser", "chromium", "google-chrome-stable"];
-            let mut chromium_bin = String::new();
-            for candidate in &candidates {
-                let check = tokio::process::Command::new("which")
-                    .arg(candidate)
-                    .output()
-                    .await;
-                if check.map(|o| o.status.success()).unwrap_or(false) {
-                    chromium_bin = candidate.to_string();
-                    break;
-                }
-            }
-
-            if chromium_bin.is_empty() {
-                // Install Google Chrome (works on Ubuntu 24.04 without snap)
-                let install_script = r#"
-                    apt-get update -qq 2>/dev/null
-                    apt-get install -y -qq wget gnupg 2>/dev/null
-                    wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-                    apt-get install -y -qq /tmp/chrome.deb 2>/dev/null || (apt-get -f install -y -qq 2>/dev/null && apt-get install -y -qq /tmp/chrome.deb 2>/dev/null)
-                    rm -f /tmp/chrome.deb
-                "#;
-                let install = tokio::process::Command::new("bash")
-                    .args(["-c", install_script])
-                    .output()
-                    .await
-                    .map_err(|e| format!("Failed to install Chrome: {e}"))?;
-
-                // Verify installation
-                let check = tokio::process::Command::new("which")
-                    .arg("google-chrome-stable")
-                    .output()
-                    .await;
-                if check.map(|o| o.status.success()).unwrap_or(false) {
-                    chromium_bin = "google-chrome-stable".to_string();
-                } else {
-                    let stderr = String::from_utf8_lossy(&install.stderr);
-                    return Ok(text_result(format!(
-                        "ERROR: Failed to install Chrome.\n{}",
-                        stderr.chars().take(500).collect::<String>()
-                    )));
-                }
-            }
-
-            let screenshot_path = "/tmp/screenshot.png";
-            let window_size = format!("--window-size={},{}", width, height);
-
-            // Run chromium headless to take screenshot
-            let output = tokio::process::Command::new(&chromium_bin)
-                .args([
-                    "--headless",
-                    "--no-sandbox",
-                    "--disable-gpu",
-                    "--disable-software-rasterizer",
-                    &window_size,
-                    &format!("--screenshot={}", screenshot_path),
-                    &format!("--virtual-time-budget={}", wait_ms),
-                    url,
-                ])
-                .output()
-                .await
-                .map_err(|e| format!("Failed to run chromium: {e}"))?;
-
-            if !std::path::Path::new(screenshot_path).exists() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Ok(text_result(format!(
-                    "ERROR: Screenshot failed.\nChromium stderr: {}",
-                    stderr.chars().take(1000).collect::<String>()
-                )));
-            }
-
-            // Read screenshot and encode as base64
-            let screenshot_data = tokio::fs::read(screenshot_path)
-                .await
-                .map_err(|e| format!("Failed to read screenshot: {e}"))?;
-            let _ = tokio::fs::remove_file(screenshot_path).await;
-
-            let base64_data = base64::engine::general_purpose::STANDARD.encode(&screenshot_data);
-
-            // Return as image content per MCP protocol
-            Ok(json!({
-                "content": [{
-                    "type": "image",
-                    "data": base64_data,
-                    "mimeType": "image/png"
-                }, {
-                    "type": "text",
-                    "text": format!("Screenshot captured: {}x{} pixels, {} bytes, URL: {}", width, height, screenshot_data.len(), url)
-                }]
-            }))
+            return puppeteer_screenshot(url, "/tmp/screenshot.png", width, height, wait_ms).await;
         }
 
         "prod_push" => {

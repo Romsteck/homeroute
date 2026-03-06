@@ -26,6 +26,11 @@ pub fn router() -> Router<ApiState> {
         .route("/upgrade/apt-full", post(upgrade_apt_full))
         .route("/upgrade/snap", post(upgrade_snap))
         .route("/upgrade/cancel", post(cancel_upgrade))
+        // Unified update scan endpoints
+        .route("/scan-all", post(scan_all))
+        .route("/scan-all/results", get(scan_all_results))
+        .route("/upgrade-target", post(upgrade_target))
+        .route("/history", get(update_history))
 }
 
 const LAST_CHECK_PATH: &str = "/var/lib/server-dashboard/last-update-check.json";
@@ -387,4 +392,282 @@ fn parse_needrestart(output: &str) -> Value {
         "kernelRebootNeeded": kernel_reboot,
         "services": services
     })
+}
+
+// ── Unified Update Scan ────────────────────────────────────────
+
+async fn scan_all(State(state): State<ApiState>) -> Json<Value> {
+    let scan_id = uuid::Uuid::new_v4().to_string();
+
+    // Emit scan started event
+    let _ = state.events.update_scan.send(
+        hr_common::events::UpdateScanEvent::ScanStarted { scan_id: scan_id.clone() }
+    );
+
+    let mut targets_count: usize = 0;
+
+    // 1. Scan main host (reuse existing apt-check logic)
+    let scan_id_clone = scan_id.clone();
+    let events = state.events.clone();
+    let registry_opt = state.registry.clone();
+    tokio::spawn(async move {
+        let (os_upgradable, os_security, scan_error) = scan_main_host_apt().await;
+        let target = hr_common::events::UpdateTarget {
+            id: "main".to_string(),
+            name: "Hôte principal".to_string(),
+            target_type: "main_host".to_string(),
+            environment: None,
+            online: true,
+            os_upgradable,
+            os_security,
+            agent_version: None,
+            agent_version_latest: None,
+            claude_cli_installed: None,
+            claude_cli_latest: None,
+            code_server_installed: None,
+            code_server_latest: None,
+            claude_ext_installed: None,
+            claude_ext_latest: None,
+            scan_error,
+            scanned_at: chrono::Utc::now().to_rfc3339(),
+        };
+        if let Some(reg) = &registry_opt {
+            reg.scan_results.write().await.insert("main".to_string(), target.clone());
+        }
+        let _ = events.update_scan.send(
+            hr_common::events::UpdateScanEvent::TargetScanned {
+                scan_id: scan_id_clone.clone(),
+                target,
+            }
+        );
+
+        // 2. Fan-out to agents and host-agents
+        if let Some(reg) = &registry_opt {
+            reg.trigger_update_scan().await;
+        }
+
+        // 3. After timeout, emit ScanComplete
+        tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+        let _ = events.update_scan.send(
+            hr_common::events::UpdateScanEvent::ScanComplete { scan_id: scan_id_clone }
+        );
+    });
+
+    if let Some(ref reg) = state.registry {
+        targets_count = reg.trigger_update_scan().await + 1; // +1 for main host
+    }
+
+    Json(json!({
+        "success": true,
+        "scan_id": scan_id,
+        "targets_count": targets_count
+    }))
+}
+
+async fn scan_main_host_apt() -> (u32, u32, Option<String>) {
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::process::Command::new("bash")
+            .args(["-c", "/usr/lib/update-notifier/apt-check 2>&1"])
+            .output(),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(output)) => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let text = text.trim();
+            if let Some((total, security)) = text.split_once(';') {
+                (
+                    total.parse().unwrap_or(0),
+                    security.parse().unwrap_or(0),
+                    None,
+                )
+            } else {
+                (0, 0, Some(format!("apt-check unexpected: {text}")))
+            }
+        }
+        Ok(Err(e)) => (0, 0, Some(format!("apt-check error: {e}"))),
+        Err(_) => (0, 0, Some("apt-check timed out".into())),
+    }
+}
+
+async fn scan_all_results(State(state): State<ApiState>) -> Json<Value> {
+    let targets = if let Some(ref reg) = state.registry {
+        let results = reg.scan_results.read().await;
+        serde_json::to_value(&*results).unwrap_or(json!({}))
+    } else {
+        json!({})
+    };
+
+    Json(json!({
+        "success": true,
+        "targets": targets
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct UpgradeTargetRequest {
+    target_id: String,
+    category: String,
+}
+
+async fn upgrade_target(
+    State(state): State<ApiState>,
+    Json(req): Json<UpgradeTargetRequest>,
+) -> Json<Value> {
+    let registry = match &state.registry {
+        Some(r) => r,
+        None => return Json(json!({"success": false, "error": "Registry not available"})),
+    };
+
+    // Log the upgrade start
+    let _ = state.update_log.insert(
+        &req.target_id, &req.target_id, &req.category,
+        None, "started", None,
+    );
+
+    let _ = state.events.update_scan.send(
+        hr_common::events::UpdateScanEvent::UpgradeStarted {
+            target_id: req.target_id.clone(),
+            category: req.category.clone(),
+        }
+    );
+
+    if req.target_id == "main" && req.category == "apt" {
+        // Main host APT upgrade — reuse existing logic
+        let events = state.events.clone();
+        let update_log = state.update_log.clone();
+        tokio::spawn(async move {
+            let result = tokio::process::Command::new("bash")
+                .args(["-c", "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"])
+                .output()
+                .await;
+            let (success, error) = match result {
+                Ok(out) if out.status.success() => (true, None),
+                Ok(out) => (false, Some(String::from_utf8_lossy(&out.stderr).to_string())),
+                Err(e) => (false, Some(e.to_string())),
+            };
+            let _ = events.update_scan.send(
+                hr_common::events::UpdateScanEvent::UpgradeComplete {
+                    target_id: "main".to_string(),
+                    category: "apt".to_string(),
+                    success,
+                    error: error.clone(),
+                }
+            );
+            let _ = update_log.update_status("main", "apt", if success { "success" } else { "failed" }, error.as_deref());
+        });
+    } else {
+        // Container agent — send RunUpgrade via registry
+        let category = req.category.clone();
+        let target_id = req.target_id.clone();
+        let _ = registry.send_to_agent(&target_id, hr_registry::protocol::RegistryMessage::RunUpgrade { category }).await;
+    }
+
+    Json(json!({"success": true}))
+}
+
+async fn update_history(State(state): State<ApiState>) -> Json<Value> {
+    let entries = state.update_log.list(50);
+    Json(json!({
+        "success": true,
+        "entries": entries
+    }))
+}
+
+// ── Update Audit Log ───────────────────────────────────────────
+
+pub struct UpdateAuditLog {
+    conn: std::sync::Mutex<rusqlite::Connection>,
+}
+
+impl UpdateAuditLog {
+    pub fn new(data_dir: &std::path::Path) -> anyhow::Result<Self> {
+        let db_path = data_dir.join("updates.db");
+        let conn = rusqlite::Connection::open(db_path)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS update_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                target_id TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                version_before TEXT,
+                version_after TEXT,
+                status TEXT NOT NULL DEFAULT 'started',
+                error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_update_log_ts ON update_history(timestamp DESC);",
+        )?;
+        Ok(Self {
+            conn: std::sync::Mutex::new(conn),
+        })
+    }
+
+    pub fn insert(
+        &self,
+        target_id: &str,
+        target_name: &str,
+        category: &str,
+        version_before: Option<&str>,
+        status: &str,
+        error: Option<&str>,
+    ) -> Option<i64> {
+        let conn = self.conn.lock().ok()?;
+        let ts = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO update_history (timestamp, target_id, target_name, category, version_before, status, error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![ts, target_id, target_name, category, version_before, status, error],
+        )
+        .ok()?;
+        Some(conn.last_insert_rowid())
+    }
+
+    pub fn update_status(&self, target_id: &str, category: &str, status: &str, error: Option<&str>) {
+        if let Ok(conn) = self.conn.lock() {
+            let _ = conn.execute(
+                "UPDATE update_history SET status = ?1, error = ?2
+                 WHERE id = (SELECT id FROM update_history WHERE target_id = ?3 AND category = ?4 ORDER BY timestamp DESC LIMIT 1)",
+                rusqlite::params![status, error, target_id, category],
+            );
+        }
+    }
+
+    pub fn list(&self, limit: u32) -> Vec<Value> {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT id, timestamp, target_id, target_name, category, version_before, version_after, status, error
+             FROM update_history ORDER BY timestamp DESC LIMIT ?1",
+        ) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+
+        let rows = stmt
+            .query_map(rusqlite::params![limit], |row| {
+                Ok(json!({
+                    "id": row.get::<_, i64>(0)?,
+                    "timestamp": row.get::<_, i64>(1)?,
+                    "target_id": row.get::<_, String>(2)?,
+                    "target_name": row.get::<_, String>(3)?,
+                    "category": row.get::<_, String>(4)?,
+                    "version_before": row.get::<_, Option<String>>(5)?,
+                    "version_after": row.get::<_, Option<String>>(6)?,
+                    "status": row.get::<_, String>(7)?,
+                    "error": row.get::<_, Option<String>>(8)?,
+                }))
+            })
+            .ok();
+
+        match rows {
+            Some(iter) => iter.filter_map(|r| r.ok()).collect(),
+            None => vec![],
+        }
+    }
 }
