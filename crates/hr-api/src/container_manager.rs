@@ -895,6 +895,15 @@ WantedBy=multi-user.target
         )
         .await;
 
+        // Phase 8b5: Enable passwordless su for studio user (wheel group + PAM)
+        emit("Configuration su sans mot de passe pour studio...");
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["groupadd -f wheel && usermod -aG wheel studio && sed -i 's/^# auth       sufficient pam_wheel.so trust$/auth       sufficient pam_wheel.so trust/' /etc/pam.d/su"],
+            3,
+        )
+        .await;
+
         // Phase 8c: Install Rust toolchain + cargo-watch
         emit("Installation Rust toolchain + cargo-watch...");
         let _ = NspawnClient::exec_with_retry(
