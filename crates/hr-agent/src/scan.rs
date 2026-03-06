@@ -58,11 +58,20 @@ pub async fn run_scan(is_dev: bool) -> ScanResult {
 }
 
 async fn scan_apt() -> (u32, u32, Option<String>) {
+    // Try apt-check first, fall back to `apt list --upgradable`
+    let script = r#"
+if [ -x /usr/lib/update-notifier/apt-check ]; then
+    /usr/lib/update-notifier/apt-check 2>&1
+else
+    apt-get update -qq 2>/dev/null
+    COUNT=$(apt list --upgradable 2>/dev/null | grep -c upgradable || true)
+    SEC=$(apt list --upgradable 2>/dev/null | grep -i '\-security' | grep -c upgradable || true)
+    echo "${COUNT};${SEC}"
+fi
+"#;
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        Command::new("bash")
-            .args(["-c", "/usr/lib/update-notifier/apt-check 2>&1"])
-            .output(),
+        std::time::Duration::from_secs(60),
+        Command::new("bash").args(["-c", script]).output(),
     )
     .await;
 
@@ -76,17 +85,17 @@ async fn scan_apt() -> (u32, u32, Option<String>) {
                 let s = security.parse().unwrap_or(0);
                 (t, s, None)
             } else {
-                debug!(output = %text, "apt-check unexpected format");
-                (0, 0, Some(format!("apt-check unexpected: {text}")))
+                debug!(output = %text, "apt scan unexpected format");
+                (0, 0, Some(format!("apt scan unexpected: {text}")))
             }
         }
         Ok(Err(e)) => {
-            warn!("apt-check failed: {e}");
-            (0, 0, Some(format!("apt-check error: {e}")))
+            warn!("apt scan failed: {e}");
+            (0, 0, Some(format!("apt scan error: {e}")))
         }
         Err(_) => {
-            warn!("apt-check timed out");
-            (0, 0, Some("apt-check timed out".into()))
+            warn!("apt scan timed out");
+            (0, 0, Some("apt scan timed out".into()))
         }
     }
 }

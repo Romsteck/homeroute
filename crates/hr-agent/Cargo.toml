@@ -1,6 +1,6 @@
 [package]
 name = "hr-agent"
-version = "0.2.41"
+version = "0.2.48"
 edition.workspace = true
 
 [[bin]]

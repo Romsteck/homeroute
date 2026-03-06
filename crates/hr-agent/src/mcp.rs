@@ -1682,8 +1682,8 @@ async fn puppeteer_screenshot(
 ) -> Result<Value, String> {
     use base64::Engine;
 
-    // Ensure Chrome is installed
-    let candidates = ["chromium-browser", "chromium", "google-chrome-stable"];
+    // Find Chrome binary (installed at container startup by hr-agent root process)
+    let candidates = ["google-chrome-stable", "chromium-browser", "chromium"];
     let mut chrome_bin = String::new();
     for candidate in &candidates {
         let check = tokio::process::Command::new("which")
@@ -1697,50 +1697,9 @@ async fn puppeteer_screenshot(
     }
 
     if chrome_bin.is_empty() {
-        let install_script = r#"
-            apt-get update -qq 2>/dev/null
-            apt-get install -y -qq wget gnupg 2>/dev/null
-            wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-            apt-get install -y -qq /tmp/chrome.deb 2>/dev/null || (apt-get -f install -y -qq 2>/dev/null && apt-get install -y -qq /tmp/chrome.deb 2>/dev/null)
-            rm -f /tmp/chrome.deb
-        "#;
-        let install = tokio::process::Command::new("bash")
-            .args(["-c", install_script])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to install Chrome: {e}"))?;
-
-        let check = tokio::process::Command::new("which")
-            .arg("google-chrome-stable")
-            .output()
-            .await;
-        if check.map(|o| o.status.success()).unwrap_or(false) {
-            chrome_bin = "google-chrome-stable".to_string();
-        } else {
-            let stderr = String::from_utf8_lossy(&install.stderr);
-            return Ok(json!({
-                "content": [{ "type": "text", "text": format!("ERROR: Failed to install Chrome.\n{}", stderr.chars().take(500).collect::<String>()) }]
-            }));
-        }
-    }
-
-    // Ensure puppeteer-core is installed globally
-    let check_pup = tokio::process::Command::new("node")
-        .args(["-e", "require.resolve('puppeteer-core', {paths: [require('child_process').execSync('npm root -g').toString().trim()]})"])
-        .output()
-        .await;
-    if !check_pup.map(|o| o.status.success()).unwrap_or(false) {
-        let install = tokio::process::Command::new("bash")
-            .args(["-c", "PUPPETEER_SKIP_DOWNLOAD=1 npm install -g puppeteer-core 2>&1"])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to install puppeteer-core: {e}"))?;
-        if !install.status.success() {
-            let stderr = String::from_utf8_lossy(&install.stderr);
-            return Ok(json!({
-                "content": [{ "type": "text", "text": format!("ERROR: Failed to install puppeteer-core.\n{}", stderr.chars().take(500).collect::<String>()) }]
-            }));
-        }
+        return Ok(json!({
+            "content": [{ "type": "text", "text": "ERROR: Chrome is not installed. It should be auto-installed at container startup. Try restarting the hr-agent service." }]
+        }));
     }
 
     // Write Node.js script to temp file — parameters passed via process.argv

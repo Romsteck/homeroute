@@ -53,11 +53,6 @@ export default function App() {
         activeTab={activeTab}
         onTabChange={handleTabChange}
         connected={ws.connected}
-        sessions={ws.sessions}
-        currentSessionId={sessionManager.activeSessionId}
-        onSelectSession={(id, label, sessionType) => sessionManager.openTab(id, label, sessionType)}
-        onNewSession={sessionManager.newTab}
-        onDeleteSession={ws.deleteSession}
         authStatus={auth.authStatus}
         onOpenAuthDialog={auth.openAuthDialog}
       />
@@ -69,6 +64,11 @@ export default function App() {
           activeIndex={sessionManager.activeTabIndex}
           onSwitch={sessionManager.switchTab}
           onClose={sessionManager.closeTab}
+          onNew={sessionManager.newTab}
+          sessions={ws.sessions}
+          currentSessionId={sessionManager.activeSessionId}
+          onSelectSession={(id, label, sessionType) => sessionManager.openTab(id, label, sessionType)}
+          onDeleteSession={ws.deleteSession}
         />
       )}
 

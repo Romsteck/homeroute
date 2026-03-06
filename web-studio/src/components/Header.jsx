@@ -1,15 +1,8 @@
-import SessionPicker from './SessionPicker';
-
 export default function Header({
   appName,
   activeTab,
   onTabChange,
   connected,
-  sessions,
-  currentSessionId,
-  onSelectSession,
-  onNewSession,
-  onDeleteSession,
   authStatus,
   onOpenAuthDialog,
 }) {
@@ -23,30 +16,8 @@ export default function Header({
 
   return (
     <header className="h-12 bg-gray-900/80 backdrop-blur border-b border-gray-800 flex items-center justify-between px-4 shrink-0">
-      {/* Left: New button + Session picker + title */}
+      {/* Left: title */}
       <div className="flex items-center gap-2">
-        <button
-          onClick={() => onNewSession('agent')}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors"
-          title="New session"
-        >
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-          </svg>
-          New
-        </button>
-        <SessionPicker
-          sessions={sessions}
-          currentSessionId={currentSessionId}
-          onSelect={(id, label, sessionType) => {
-            const session = sessions.find(s => (s.session_id || s.id) === id);
-            const displayLabel = label || session?.summary || (id ? id.slice(0, 8) + '...' : 'New Chat');
-            onSelectSession(id, displayLabel, sessionType);
-          }}
-          onNew={onNewSession}
-          onDelete={onDeleteSession}
-        />
-        <div className="h-5 w-px bg-gray-800" />
         <span className="text-sm text-gray-400 font-medium">
           Studio <span className="text-gray-600">&mdash;</span> <span className="text-gray-300">{appName}</span>
         </span>

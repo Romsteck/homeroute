@@ -518,6 +518,40 @@ async fn handle_registry_message(
                 }
             }
 
+            // Ensure Chrome + puppeteer-core are installed (dev containers only, runs as root)
+            if is_dev {
+                tokio::spawn(async {
+                    // Chrome
+                    let has_chrome = tokio::process::Command::new("which")
+                        .arg("google-chrome-stable")
+                        .output().await
+                        .map(|o| o.status.success()).unwrap_or(false);
+                    if !has_chrome {
+                        info!("Installing Google Chrome for browser screenshot MCP tools...");
+                        let _ = tokio::process::Command::new("bash")
+                            .args(["-c", r#"
+                                apt-get update -qq 2>/dev/null
+                                apt-get install -y -qq wget 2>/dev/null
+                                wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+                                apt-get install -y -qq /tmp/chrome.deb 2>/dev/null || (apt-get -f install -y -qq 2>/dev/null && apt-get install -y -qq /tmp/chrome.deb 2>/dev/null)
+                                rm -f /tmp/chrome.deb
+                            "#])
+                            .output().await;
+                    }
+                    // puppeteer-core (for studio user's node)
+                    let has_pup = tokio::process::Command::new("node")
+                        .args(["-e", "require.resolve('puppeteer-core', {paths: [require('child_process').execSync('npm root -g').toString().trim()]})"])
+                        .output().await
+                        .map(|o| o.status.success()).unwrap_or(false);
+                    if !has_pup {
+                        info!("Installing puppeteer-core globally for browser MCP tools...");
+                        let _ = tokio::process::Command::new("bash")
+                            .args(["-c", "PUPPETEER_SKIP_DOWNLOAD=1 npm install -g puppeteer-core 2>&1"])
+                            .output().await;
+                    }
+                });
+            }
+
             // Update agent proxy route table
             agent_proxy.update_routes(
                 &base_domain,
