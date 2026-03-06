@@ -295,17 +295,24 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                     // 1. Close container tar stdin
                                     let _ = import.tar_stdin.shutdown().await;
 
-                                    // 2. Wait for container tar to finish
+                                    // 2. Wait for container tar to finish and capture stderr
+                                    let tar_stderr = import.tar_child.stderr.take();
                                     let status = import.tar_child.wait().await;
+                                    let stderr_text = if let Some(mut stderr) = tar_stderr {
+                                        use tokio::io::AsyncReadExt;
+                                        let mut buf = Vec::new();
+                                        let _ = stderr.read_to_end(&mut buf).await;
+                                        String::from_utf8_lossy(&buf).to_string()
+                                    } else { String::new() };
                                     match &status {
                                         Ok(s) if s.success() => {
                                             info!(transfer_id = %transfer_id, "Nspawn container tar extraction succeeded");
                                         }
                                         Ok(s) => {
-                                            error!(transfer_id = %transfer_id, "Nspawn container tar extraction failed: {}", s);
+                                            error!(transfer_id = %transfer_id, %stderr_text, "Nspawn container tar extraction failed: {}", s);
                                             let _ = tx.send(OutgoingWsMessage::Text(HostAgentMessage::ImportFailed {
                                                 transfer_id: transfer_id.clone(),
-                                                error: format!("Container tar extraction failed: {}", s),
+                                                error: format!("Container tar extraction failed: {} stderr: {}", s, stderr_text),
                                             })).await;
                                             active_nspawn_imports.remove(&transfer_id);
                                             continue;
@@ -393,14 +400,22 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                     } else {
                                         // No workspace phase (prod container) -- close container tar
                                         let _ = import.tar_stdin.shutdown().await;
+                                        let tar_stderr = import.tar_child.stderr.take();
                                         match import.tar_child.wait().await {
                                             Ok(s) if s.success() => {
                                                 info!(transfer_id = %transfer_id, "Nspawn container tar extraction succeeded");
                                             }
                                             Ok(s) => {
+                                                let stderr_text = if let Some(mut stderr) = tar_stderr {
+                                                    use tokio::io::AsyncReadExt;
+                                                    let mut buf = Vec::new();
+                                                    let _ = stderr.read_to_end(&mut buf).await;
+                                                    String::from_utf8_lossy(&buf).to_string()
+                                                } else { String::new() };
+                                                error!(transfer_id = %transfer_id, %stderr_text, "Nspawn prod container tar extraction failed: {}", s);
                                                 let _ = tx.send(OutgoingWsMessage::Text(HostAgentMessage::ImportFailed {
                                                     transfer_id: transfer_id.clone(),
-                                                    error: format!("Container tar extraction failed: {}", s),
+                                                    error: format!("Container tar extraction failed: {} stderr: {}", s, stderr_text),
                                                 })).await;
                                                 continue;
                                             }
@@ -716,6 +731,18 @@ async fn run_connection(config: &Config) -> Result<(), String> {
 
                                 let rootfs_dir = format!("{}/{}", storage_path, container_name);
 
+                                // Clean up any leftover rootfs from a previous failed import.
+                                // Rename (instant) then background-delete to avoid blocking heartbeats.
+                                let old_path = format!("{}.old.{}", rootfs_dir, std::process::id());
+                                if tokio::fs::rename(&rootfs_dir, &old_path).await.is_ok() {
+                                    tokio::spawn(async move {
+                                        let _ = tokio::process::Command::new("bash")
+                                            .args(["-c", &format!("chattr -R -i '{}' 2>/dev/null; rm -rf '{}'", old_path, old_path)])
+                                            .output()
+                                            .await;
+                                    });
+                                }
+
                                 // Create target directory
                                 if let Err(e) = tokio::fs::create_dir_all(&rootfs_dir).await {
                                     error!("Failed to create rootfs dir: {}", e);
@@ -727,7 +754,7 @@ async fn run_connection(config: &Config) -> Result<(), String> {
 
                                 // Spawn tar to extract incoming rootfs data
                                 match tokio::process::Command::new("tar")
-                                    .args(["xf", "-", "--numeric-owner", "--xattrs", "--xattrs-include=*", "-C", &rootfs_dir])
+                                    .args(["xf", "-", "--numeric-owner", "--xattrs", "--xattrs-include=*", "--overwrite", "-C", &rootfs_dir])
                                     .stdin(std::process::Stdio::piped())
                                     .stdout(std::process::Stdio::null())
                                     .stderr(std::process::Stdio::piped())
