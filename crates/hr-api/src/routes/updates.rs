@@ -442,12 +442,32 @@ async fn scan_all(State(state): State<ApiState>) -> Json<Value> {
         );
 
         // 2. Fan-out to agents and host-agents
-        if let Some(reg) = &registry_opt {
-            reg.trigger_update_scan().await;
-        }
+        let expected = if let Some(reg) = &registry_opt {
+            reg.trigger_update_scan().await
+        } else {
+            0
+        };
 
-        // 3. After timeout, emit ScanComplete
-        tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+        // 3. Wait for all targets to report (or timeout after 90s)
+        // We already counted main host as 1, so total = expected + 1
+        let total_expected = expected + 1;
+        let mut received = 1_usize; // main host already scanned above
+        let mut rx = events.update_scan.subscribe();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
+        loop {
+            let remaining = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(hr_common::events::UpdateScanEvent::TargetScanned { .. })) => {
+                    received += 1;
+                    if received >= total_expected {
+                        break;
+                    }
+                }
+                Ok(Ok(_)) => {} // ignore other events
+                Ok(Err(_)) => break, // channel closed
+                Err(_) => break, // timeout
+            }
+        }
         let _ = events.update_scan.send(
             hr_common::events::UpdateScanEvent::ScanComplete { scan_id: scan_id_clone }
         );

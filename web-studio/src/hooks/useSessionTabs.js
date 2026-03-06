@@ -288,6 +288,10 @@ export default function useSessionTabs(ws) {
       }
     }
 
+    // Clear the cache for the closed tab
+    const cacheKey = tab.id || '__null__';
+    sessionCacheRef.current.delete(cacheKey);
+
     setTabs(prev => {
       const updated = prev.filter((_, i) => i !== index);
       if (updated.length === 0) {

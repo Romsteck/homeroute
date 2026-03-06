@@ -1,6 +1,38 @@
-export default function SessionTabs({ tabs, activeIndex, onSwitch, onClose }) {
+import SessionPicker from './SessionPicker';
+
+export default function SessionTabs({
+  tabs,
+  activeIndex,
+  onSwitch,
+  onClose,
+  onNew,
+  sessions,
+  currentSessionId,
+  onSelectSession,
+  onDeleteSession,
+}) {
   return (
     <div className="h-9 bg-gray-900 border-b border-gray-800 flex items-center px-2 gap-0.5 shrink-0">
+      {/* New button */}
+      <button
+        onClick={() => onNew('agent')}
+        className="flex items-center gap-1 px-2 h-7 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors shrink-0 mr-0.5"
+        title="New session"
+      >
+        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+        </svg>
+        New
+      </button>
+      {/* Session picker */}
+      <SessionPicker
+        sessions={sessions}
+        currentSessionId={currentSessionId}
+        onSelect={onSelectSession}
+        onNew={onNew}
+        onDelete={onDeleteSession}
+      />
+      <div className="h-5 w-px bg-gray-800 mx-1 shrink-0" />
       {/* Scrollable tabs area */}
       <div className="flex-1 flex items-center gap-0.5 overflow-x-auto min-w-0">
         {tabs.map((tab, index) => {
@@ -29,19 +61,17 @@ export default function SessionTabs({ tabs, activeIndex, onSwitch, onClose }) {
               )}
               <span className="truncate">{tab.label}</span>
               {/* Close button */}
-              {tabs.length > 1 && (
-                <span
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onClose(index);
-                  }}
-                  className="ml-0.5 w-4 h-4 flex items-center justify-center rounded text-gray-600 hover:text-gray-300 hover:bg-gray-700 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
-                >
-                  <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </span>
-              )}
+              <span
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onClose(index);
+                }}
+                className="ml-0.5 w-4 h-4 flex items-center justify-center rounded text-gray-600 hover:text-gray-300 hover:bg-gray-700 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+              >
+                <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </span>
             </button>
           );
         })}
