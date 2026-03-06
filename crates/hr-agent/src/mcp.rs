@@ -1683,6 +1683,7 @@ async fn puppeteer_screenshot(
     use base64::Engine;
 
     // Find Chrome binary (installed at container startup by hr-agent root process)
+    // Resolve Chrome binary to absolute path (puppeteer requires it)
     let candidates = ["google-chrome-stable", "chromium-browser", "chromium"];
     let mut chrome_bin = String::new();
     for candidate in &candidates {
@@ -1690,9 +1691,11 @@ async fn puppeteer_screenshot(
             .arg(candidate)
             .output()
             .await;
-        if check.map(|o| o.status.success()).unwrap_or(false) {
-            chrome_bin = candidate.to_string();
-            break;
+        if let Ok(output) = check {
+            if output.status.success() {
+                chrome_bin = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                break;
+            }
         }
     }
 
