@@ -1,10 +1,10 @@
-import { useState, useEffect, useRef } from 'react';
-import { RefreshCw, Package, Shield, Server, Monitor, Loader2, Clock, CheckCircle, AlertTriangle, ArrowUp } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { RefreshCw, Package, Shield, Server, Monitor, Loader2, Clock, CheckCircle, AlertTriangle } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
 import ConfirmModal from '../components/ConfirmModal';
 import PageHeader from '../components/PageHeader';
-import TargetUpdateCard from '../components/TargetUpdateCard';
+import { UpdateTableHead, UpdateTableRow } from '../components/TargetUpdateCard';
 import {
   scanAllUpdates,
   getScanResults,
@@ -80,7 +80,6 @@ function Updates() {
           ? `Mise à jour terminée (${data.category})`
           : `Échec : ${data.error || 'Erreur inconnue'}`
       });
-      // Refresh results and history
       getScanResults().then(r => {
         if (r.data.targets) setTargets(r.data.targets);
       }).catch(() => {});
@@ -193,16 +192,6 @@ function Updates() {
           </div>
         )}
 
-        {/* Scanning indicator */}
-        {scanning && (
-          <Card title="Scan en cours" icon={Loader2}>
-            <div className="flex items-center gap-3 text-blue-400">
-              <Loader2 className="w-5 h-5 animate-spin" />
-              <span className="text-sm">Interrogation de tous les hôtes et containers...</span>
-            </div>
-          </Card>
-        )}
-
         {/* Summary stats */}
         {targetList.length > 0 && (
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-px bg-gray-700">
@@ -213,29 +202,49 @@ function Updates() {
           </div>
         )}
 
+        {/* Scanning indicator */}
+        {scanning && (
+          <div className="flex items-center gap-3 text-blue-400 py-2">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            <span className="text-sm">Interrogation de tous les hôtes et containers...</span>
+          </div>
+        )}
+
         {/* Main host */}
         {mainHost && (
           <Section title="Hôte principal">
-            <TargetUpdateCard
-              target={mainHost}
-              upgradeState={upgradeStates['main'] || {}}
-              onUpgrade={handleUpgrade}
-            />
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <UpdateTableHead />
+                <tbody>
+                  <UpdateTableRow
+                    target={mainHost}
+                    upgradeState={upgradeStates['main'] || {}}
+                    onUpgrade={handleUpgrade}
+                  />
+                </tbody>
+              </table>
+            </div>
           </Section>
         )}
 
         {/* Remote hosts */}
         {remoteHosts.length > 0 && (
           <Section title={`Hôtes distants (${remoteHosts.length})`}>
-            <div className="space-y-2">
-              {remoteHosts.map(t => (
-                <TargetUpdateCard
-                  key={t.id}
-                  target={t}
-                  upgradeState={upgradeStates[t.id] || {}}
-                  onUpgrade={handleUpgrade}
-                />
-              ))}
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <UpdateTableHead />
+                <tbody>
+                  {remoteHosts.map(t => (
+                    <UpdateTableRow
+                      key={t.id}
+                      target={t}
+                      upgradeState={upgradeStates[t.id] || {}}
+                      onUpgrade={handleUpgrade}
+                    />
+                  ))}
+                </tbody>
+              </table>
             </div>
           </Section>
         )}
@@ -243,15 +252,21 @@ function Updates() {
         {/* DEV containers */}
         {devContainers.length > 0 && (
           <Section title={`Containers DEV (${devContainers.length})`}>
-            <div className="space-y-2">
-              {devContainers.map(t => (
-                <TargetUpdateCard
-                  key={t.id}
-                  target={t}
-                  upgradeState={upgradeStates[t.id] || {}}
-                  onUpgrade={handleUpgrade}
-                />
-              ))}
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <UpdateTableHead showDevCols />
+                <tbody>
+                  {devContainers.map(t => (
+                    <UpdateTableRow
+                      key={t.id}
+                      target={t}
+                      upgradeState={upgradeStates[t.id] || {}}
+                      onUpgrade={handleUpgrade}
+                      showDevCols
+                    />
+                  ))}
+                </tbody>
+              </table>
             </div>
           </Section>
         )}
@@ -259,15 +274,20 @@ function Updates() {
         {/* PROD containers */}
         {prodContainers.length > 0 && (
           <Section title={`Containers PROD (${prodContainers.length})`}>
-            <div className="space-y-2">
-              {prodContainers.map(t => (
-                <TargetUpdateCard
-                  key={t.id}
-                  target={t}
-                  upgradeState={upgradeStates[t.id] || {}}
-                  onUpgrade={handleUpgrade}
-                />
-              ))}
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <UpdateTableHead />
+                <tbody>
+                  {prodContainers.map(t => (
+                    <UpdateTableRow
+                      key={t.id}
+                      target={t}
+                      upgradeState={upgradeStates[t.id] || {}}
+                      onUpgrade={handleUpgrade}
+                    />
+                  ))}
+                </tbody>
+              </table>
             </div>
           </Section>
         )}
@@ -367,7 +387,9 @@ function Section({ title, children }) {
   return (
     <div>
       <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-2">{title}</h3>
-      {children}
+      <div className="bg-gray-800 border border-gray-700">
+        {children}
+      </div>
     </div>
   );
 }
