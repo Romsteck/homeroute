@@ -167,7 +167,7 @@ pub enum RegistryMessage {
         /// Whether code-server is enabled.
         #[serde(default)]
         code_server_enabled: bool,
-        /// Technology stack (vite-rust or next-js).
+        /// Technology stack (leptos-rust or next-js).
         #[serde(default)]
         stack: AppStack,
     },

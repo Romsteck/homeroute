@@ -404,7 +404,7 @@ async fn start_deploy_mcp() -> Result<()> {
 
     // Read the Config message to get the environment and stack
     let mut environment = hr_registry::types::Environment::Development;
-    let mut stack = hr_registry::types::AppStack::ViteRust;
+    let mut stack = hr_registry::types::AppStack::LeptosRust;
     if let Ok(Some(Ok(msg))) = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         ws_stream.next(),
@@ -496,7 +496,7 @@ async fn handle_registry_message(
     msg: RegistryMessage,
 ) {
     match msg {
-        RegistryMessage::Config { base_domain, slug, frontend, environment, code_server_enabled, stack, .. } => {
+        RegistryMessage::Config { base_domain, slug, frontend, environment, code_server_enabled, .. } => {
             info!("Received config from HomeRoute");
 
             // Write/update .mcp.json for MCP tool discovery
@@ -559,7 +559,6 @@ async fn handle_registry_message(
                 frontend.as_ref(),
                 environment,
                 code_server_enabled,
-                stack,
             );
 
             // On first Config: pull certs and start the HTTPS proxy
@@ -592,7 +591,7 @@ async fn handle_registry_message(
                             allowed_groups: vec![],
                         });
                     }
-                    // Vite dev server (HMR) — API is proxied through Vite, no separate devapi route
+                    // Dev server route
                     routes.push(AgentRoute {
                         domain: format!("dev.{}.{}", slug, base_domain),
                         target_port: 443,
