@@ -203,3 +203,10 @@ export const downloadStoreRelease = (slug, version) => {
   a.click();
   document.body.removeChild(a);
 };
+
+// Unified Updates
+export const scanAllUpdates = () => api.post('/updates/scan-all');
+export const getScanResults = () => api.get('/updates/scan-all/results');
+export const upgradeTarget = (targetId, category) =>
+  api.post('/updates/upgrade-target', { target_id: targetId, category }, { timeout: 1800000 });
+export const getUpdateHistory = (limit = 50) => api.get('/updates/history', { params: { limit } });

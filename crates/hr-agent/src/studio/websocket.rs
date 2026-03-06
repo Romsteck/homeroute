@@ -6,7 +6,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_tungstenite::WebSocketStream;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use super::types::{FileEntry, ImageAttachment, WsInMessage, WsOutMessage};
 use super::StudioBridge;
@@ -164,13 +164,6 @@ where
             }
             WsInMessage::ListSessions => {
                 let mut sessions = super::sessions::list_sessions();
-                // Merge active terminal sessions that don't have JSONL files yet
-                let terminal_sessions = super::terminal::list_terminal_sessions(studio).await;
-                for ts in terminal_sessions {
-                    if !sessions.iter().any(|s| s.session_id == ts.session_id) {
-                        sessions.push(ts);
-                    }
-                }
                 sessions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
                 let _ = out_tx.send(WsOutMessage::Sessions { sessions }).await;
             }
@@ -424,57 +417,6 @@ where
                         let _ = tokio::fs::write(log_path, content).await;
                     }
                 });
-            }
-            WsInMessage::TerminalStart { session_id, resume_session, model, cols, rows } => {
-                info!("TerminalStart received: session={} cols={} rows={}", session_id, cols, rows);
-                // If terminal session already tracked, clean up old PTY reader/writer
-                // but do NOT kill the tmux session — spawn_terminal will re-attach
-                if studio.is_terminal_active(&session_id).await {
-                    super::terminal::cleanup_writer(&session_id).await;
-                    // Abort old reader and remove from map (without killing tmux)
-                    if let Some(ts) = studio.terminal_sessions.write().await.remove(&session_id) {
-                        ts.reader_abort.abort();
-                    }
-                }
-                // Check concurrency limit
-                if studio.active_count().await >= studio.max_concurrent {
-                    let _ = out_tx.send(WsOutMessage::Error {
-                        message: format!("Maximum concurrent sessions ({}) reached", studio.max_concurrent),
-                        session_id: Some(session_id),
-                    }).await;
-                } else {
-                    match super::terminal::spawn_terminal(
-                        studio,
-                        &session_id,
-                        resume_session.as_deref(),
-                        model.as_deref(),
-                        cols,
-                        rows,
-                        user.as_deref(),
-                        out_tx.clone(),
-                    ).await {
-                        Ok(()) => {
-                            debug!("Terminal session started: {}", session_id);
-                        }
-                        Err(e) => {
-                            error!("Failed to start terminal session {}: {}", session_id, e);
-                            let _ = out_tx.send(WsOutMessage::Error {
-                                message: e,
-                                session_id: Some(session_id),
-                            }).await;
-                        }
-                    }
-                }
-            }
-            WsInMessage::TerminalData { session_id, data } => {
-                if let Err(e) = super::terminal::write_input(&session_id, &data).await {
-                    warn!("Terminal write error for {}: {}", session_id, e);
-                }
-            }
-            WsInMessage::TerminalResize { session_id, cols, rows } => {
-                if let Err(e) = super::terminal::resize(&session_id, cols, rows, studio).await {
-                    warn!("Terminal resize error for {}: {}", session_id, e);
-                }
             }
         }
     }

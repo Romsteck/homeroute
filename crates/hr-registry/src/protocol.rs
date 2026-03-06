@@ -75,6 +75,26 @@ pub enum AgentMessage {
     GetDataverseSchemas {
         request_id: String,
     },
+    /// Agent reports update scan results.
+    #[serde(rename = "update_scan_result")]
+    UpdateScanResult {
+        os_upgradable: u32,
+        os_security: u32,
+        #[serde(default)]
+        claude_cli_installed: Option<String>,
+        #[serde(default)]
+        claude_cli_latest: Option<String>,
+        #[serde(default)]
+        code_server_installed: Option<String>,
+        #[serde(default)]
+        code_server_latest: Option<String>,
+        #[serde(default)]
+        claude_ext_installed: Option<String>,
+        #[serde(default)]
+        claude_ext_latest: Option<String>,
+        #[serde(default)]
+        scan_error: Option<String>,
+    },
 }
 
 /// A route published by an agent for reverse proxy registration.
@@ -181,6 +201,14 @@ pub enum RegistryMessage {
     UpdateRules {
         /// Vec of (filename, content) pairs, e.g. [("homeroute-deploy.md", "# Deploy...")]
         rules: Vec<(String, String)>,
+    },
+    /// Registry asks agent to run an update scan.
+    #[serde(rename = "run_update_scan")]
+    RunUpdateScan,
+    /// Registry asks agent to perform a specific upgrade.
+    #[serde(rename = "run_upgrade")]
+    RunUpgrade {
+        category: String,
     },
 }
 
@@ -332,6 +360,13 @@ pub enum HostAgentMessage {
         session_id: String,
         exit_code: Option<i32>,
     },
+    /// Host agent reports OS update scan results.
+    UpdateScanResult {
+        os_upgradable: u32,
+        os_security: u32,
+        #[serde(default)]
+        scan_error: Option<String>,
+    },
 }
 
 /// Nspawn container info reported by host-agent.
@@ -480,6 +515,12 @@ pub enum HostRegistryMessage {
     /// Close a terminal session.
     TerminalClose {
         session_id: String,
+    },
+    /// Registry asks host-agent to run an OS update scan.
+    RunUpdateScan,
+    /// Registry asks host-agent to run an APT upgrade.
+    RunAptUpgrade {
+        full_upgrade: bool,
     },
 }
 

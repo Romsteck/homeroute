@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "hr-agent"
-version = "0.2.29"
+version = "0.2.41"
 dependencies = [
  "anyhow",
  "base64",
@@ -768,7 +768,6 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "libc",
  "notify",
  "reqwest",
  "ring",
@@ -812,6 +811,7 @@ dependencies = [
  "ipnet",
  "reqwest",
  "ring",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

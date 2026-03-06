@@ -597,6 +597,11 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Management API (Important) ────────────────────────────────────
 
+    let update_log = std::sync::Arc::new(
+        hr_api::routes::updates::UpdateAuditLog::new(std::path::Path::new("/opt/homeroute/data"))
+            .expect("Failed to open update audit log"),
+    );
+
     let api_state = hr_api::state::ApiState {
         auth: auth.clone(),
         acme: acme.clone(),
@@ -621,6 +626,7 @@ async fn main() -> anyhow::Result<()> {
         cloud_relay_status: cloud_relay_status.clone(),
         cloud_relay_enabled: cloud_relay_enabled_tx,
         cloud_relay_cmd_tx: Some(cloud_relay_cmd_tx),
+        update_log,
     };
 
     let api_router = hr_api::build_router(api_state);

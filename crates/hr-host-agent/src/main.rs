@@ -900,6 +900,74 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                     let _ = session.kill_tx.send(());
                                 }
                             }
+                            Ok(HostRegistryMessage::RunUpdateScan) => {
+                                info!("Update scan requested");
+                                let tx_scan = tx.clone();
+                                tokio::spawn(async move {
+                                    let (os_upgradable, os_security, scan_error) = {
+                                        let result = tokio::time::timeout(
+                                            std::time::Duration::from_secs(30),
+                                            tokio::process::Command::new("bash")
+                                                .args(["-c", "/usr/lib/update-notifier/apt-check 2>&1"])
+                                                .output(),
+                                        ).await;
+                                        match result {
+                                            Ok(Ok(output)) => {
+                                                let text = String::from_utf8_lossy(&output.stdout);
+                                                let text = text.trim();
+                                                if let Some((total, security)) = text.split_once(';') {
+                                                    (total.parse().unwrap_or(0u32), security.parse().unwrap_or(0u32), None)
+                                                } else {
+                                                    (0u32, 0u32, Some(format!("apt-check unexpected: {text}")))
+                                                }
+                                            }
+                                            Ok(Err(e)) => (0, 0, Some(format!("apt-check error: {e}"))),
+                                            Err(_) => (0, 0, Some("apt-check timed out".into())),
+                                        }
+                                    };
+                                    let _ = tx_scan.send(OutgoingWsMessage::Text(
+                                        HostAgentMessage::UpdateScanResult { os_upgradable, os_security, scan_error }
+                                    )).await;
+                                });
+                            }
+                            Ok(HostRegistryMessage::RunAptUpgrade { full_upgrade }) => {
+                                info!(full_upgrade, "APT upgrade requested");
+                                let tx_up = tx.clone();
+                                tokio::spawn(async move {
+                                    let cmd = if full_upgrade {
+                                        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y"
+                                    } else {
+                                        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
+                                    };
+                                    let _ = tokio::process::Command::new("bash")
+                                        .args(["-c", cmd])
+                                        .output()
+                                        .await;
+                                    // Re-scan after upgrade
+                                    let result = tokio::time::timeout(
+                                        std::time::Duration::from_secs(30),
+                                        tokio::process::Command::new("bash")
+                                            .args(["-c", "/usr/lib/update-notifier/apt-check 2>&1"])
+                                            .output(),
+                                    ).await;
+                                    let (os_upgradable, os_security, scan_error) = match result {
+                                        Ok(Ok(output)) => {
+                                            let text = String::from_utf8_lossy(&output.stdout);
+                                            let text = text.trim().to_string();
+                                            if let Some((total, security)) = text.split_once(';') {
+                                                (total.parse().unwrap_or(0u32), security.parse().unwrap_or(0u32), None)
+                                            } else {
+                                                (0u32, 0u32, Some(format!("apt-check unexpected: {text}")))
+                                            }
+                                        }
+                                        Ok(Err(e)) => (0, 0, Some(format!("apt-check error: {e}"))),
+                                        Err(_) => (0, 0, Some("apt-check timed out".into())),
+                                    };
+                                    let _ = tx_up.send(OutgoingWsMessage::Text(
+                                        HostAgentMessage::UpdateScanResult { os_upgradable, os_security, scan_error }
+                                    )).await;
+                                });
+                            }
                             Ok(HostRegistryMessage::AuthResult { .. }) => {
                                 // Already handled during auth phase
                             }

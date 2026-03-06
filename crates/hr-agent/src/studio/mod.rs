@@ -5,8 +5,6 @@ pub mod websocket;
 pub mod sessions;
 pub mod credentials;
 pub mod todo_watcher;
-pub mod terminal;
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -21,8 +19,6 @@ pub const STUDIO_WS_PORT: u16 = 3839;
 pub struct StudioBridge {
     /// Active Claude processes, keyed by session_id.
     pub active_processes: RwLock<HashMap<String, ClaudeProcess>>,
-    /// Active terminal (PTY/tmux) sessions, keyed by session_id.
-    pub terminal_sessions: RwLock<HashMap<String, TerminalSession>>,
     /// All connected WebSocket clients, keyed by connection ID.
     connections: RwLock<HashMap<String, mpsc::Sender<WsOutMessage>>>,
     /// Per-session stream buffers for replaying events to late joiners.
@@ -36,17 +32,10 @@ pub struct ClaudeProcess {
     pub reader_abort: tokio::task::AbortHandle,
 }
 
-pub struct TerminalSession {
-    pub tmux_name: String,
-    pub reader_abort: tokio::task::AbortHandle,
-    pub created_at: u64,
-}
-
 impl StudioBridge {
     pub fn new() -> Self {
         Self {
             active_processes: RwLock::new(HashMap::new()),
-            terminal_sessions: RwLock::new(HashMap::new()),
             connections: RwLock::new(HashMap::new()),
             stream_buffers: RwLock::new(HashMap::new()),
             max_concurrent: 3,
@@ -125,9 +114,9 @@ impl StudioBridge {
         self.stream_buffers.write().await.clear();
     }
 
-    /// Number of currently active sessions (agent + terminal).
+    /// Number of currently active sessions.
     pub async fn active_count(&self) -> usize {
-        self.active_processes.read().await.len() + self.terminal_sessions.read().await.len()
+        self.active_processes.read().await.len()
     }
 
     /// Check if a specific session is currently active.
@@ -138,24 +127,6 @@ impl StudioBridge {
     /// Get all active session IDs.
     pub async fn active_session_ids(&self) -> Vec<String> {
         self.active_processes.read().await.keys().cloned().collect()
-    }
-
-    /// Kill a terminal session by session_id.
-    pub async fn kill_terminal(&self, session_id: &str) {
-        if let Some(ts) = self.terminal_sessions.write().await.remove(session_id) {
-            ts.reader_abort.abort();
-            // Must run tmux as studio user to access studio's tmux server
-            let _ = tokio::process::Command::new("runuser")
-                .args(["-u", "studio", "--", "tmux", "kill-session", "-t", &ts.tmux_name])
-                .output()
-                .await;
-            debug!("Killed terminal session {} (tmux: {})", session_id, ts.tmux_name);
-        }
-    }
-
-    /// Check if a terminal session is active.
-    pub async fn is_terminal_active(&self, session_id: &str) -> bool {
-        self.terminal_sessions.read().await.contains_key(session_id)
     }
 
     /// Start the Studio WebSocket server on a local port.

@@ -5,9 +5,9 @@ import useClaudeAuth from './hooks/useClaudeAuth';
 import Header from './components/Header';
 import SessionTabs from './components/SessionTabs';
 import ChatPanel from './components/ChatPanel';
-import TerminalView from './components/TerminalView';
 import TodoPanel from './components/TodoPanel';
 import PreviewPanel from './components/PreviewPanel';
+import CodeServerPanel from './components/CodeServerPanel';
 import FilesPanel from './components/FilesPanel';
 import DocsPanel from './components/DocsPanel';
 import AuthDialog from './components/AuthDialog';
@@ -76,9 +76,8 @@ export default function App() {
         {/* Studio tab - always mounted, hidden when inactive */}
         <div className="flex flex-1 min-h-0" style={{display: activeTab === 'studio' ? 'flex' : 'none'}}>
           <div className="w-[30%] min-w-[300px] flex flex-col border-r border-gray-800 min-h-0">
-            {/* Agent chat panel — visible when active tab is agent type */}
-            {activeState.sessionType !== 'cli' && (
-              <ChatPanel
+            {/* Agent chat panel */}
+            <ChatPanel
                 key={sessionManager.activeSessionId || `new-${sessionManager.activeTabIndex}`}
                 messages={activeState.messages}
                 isStreaming={activeState.isStreaming}
@@ -92,23 +91,6 @@ export default function App() {
                 draft={activeState.draft}
                 onDraftChange={sessionManager.updateDraft}
               />
-            )}
-            {/* CLI terminal views — kept mounted, hidden when not active */}
-            {sessionManager.tabs
-              .map((tab, idx) => tab.sessionType === 'cli' && tab.id ? (
-                <div
-                  key={tab.id}
-                  className="flex flex-col flex-1 min-h-0"
-                  style={{ display: idx === sessionManager.activeTabIndex && activeTab === 'studio' ? 'flex' : 'none' }}
-                >
-                  <TodoPanel todos={idx === sessionManager.activeTabIndex ? activeState.todos : []} />
-                  <TerminalView
-                    sessionId={tab.id}
-                    ws={ws}
-                    isActive={idx === sessionManager.activeTabIndex && activeTab === 'studio'}
-                  />
-                </div>
-              ) : null)}
           </div>
           <div className="flex-1 flex flex-col min-w-0">
             <PreviewPanel slug={appInfo.slug} domain={appInfo.domain} mode="split" sendRaw={ws.sendRaw} />
@@ -117,6 +99,10 @@ export default function App() {
         {/* Preview tab - always mounted, hidden when inactive */}
         <div className="flex-1" style={{display: activeTab === 'preview' ? 'flex' : 'none'}}>
           <PreviewPanel slug={appInfo.slug} domain={appInfo.domain} mode="full" sendRaw={ws.sendRaw} />
+        </div>
+        {/* Code Server tab - always mounted, hidden when inactive (preserve IDE state) */}
+        <div className="flex-1" style={{display: activeTab === 'code' ? 'flex' : 'none'}}>
+          <CodeServerPanel slug={appInfo.slug} domain={appInfo.domain} />
         </div>
         {/* Files tab - only mounted when active */}
         {activeTab === 'files' && <FilesPanel sendRaw={ws.sendRaw} subscribe={ws.subscribe} connected={ws.connected} />}

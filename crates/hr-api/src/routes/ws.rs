@@ -36,6 +36,7 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut host_metrics_rx = state.events.host_metrics.subscribe();
     let mut host_power_rx = state.events.host_power.subscribe();
     let mut cloud_relay_rx = state.events.cloud_relay.subscribe();
+    let mut update_scan_rx = state.events.update_scan.subscribe();
 
     // Send current active migrations so reconnecting clients get up-to-date state
     {
@@ -333,6 +334,48 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("WebSocket cloud_relay lagged by {}", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // Unified update scan events
+            result = update_scan_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        use hr_common::events::UpdateScanEvent;
+                        let msg = match &event {
+                            UpdateScanEvent::ScanStarted { scan_id } => json!({
+                                "type": "updates:scan:started",
+                                "data": { "scanId": scan_id }
+                            }),
+                            UpdateScanEvent::TargetScanned { scan_id, target } => json!({
+                                "type": "updates:scan:target",
+                                "data": { "scanId": scan_id, "target": target }
+                            }),
+                            UpdateScanEvent::ScanComplete { scan_id } => json!({
+                                "type": "updates:scan:complete",
+                                "data": { "scanId": scan_id }
+                            }),
+                            UpdateScanEvent::UpgradeStarted { target_id, category } => json!({
+                                "type": "updates:upgrade-target:started",
+                                "data": { "targetId": target_id, "category": category }
+                            }),
+                            UpdateScanEvent::UpgradeOutput { target_id, line } => json!({
+                                "type": "updates:upgrade-target:output",
+                                "data": { "targetId": target_id, "line": line }
+                            }),
+                            UpdateScanEvent::UpgradeComplete { target_id, category, success, error } => json!({
+                                "type": "updates:upgrade-target:complete",
+                                "data": { "targetId": target_id, "category": category, "success": success, "error": error }
+                            }),
+                        };
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("WebSocket update_scan lagged by {}", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

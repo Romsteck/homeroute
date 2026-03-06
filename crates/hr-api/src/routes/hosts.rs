@@ -1021,7 +1021,7 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
 
     // Register connection
     let (tx, mut rx) = mpsc::channel::<hr_registry::OutgoingHostMessage>(512);
-    registry.on_host_connected(host_id.clone(), host_name.clone(), tx, version).await;
+    registry.on_host_connected(host_id.clone(), host_name.clone(), tx, version.clone()).await;
 
     // Mark host online
     update_host_status(&host_id, "online", &state.events.host_status).await;
@@ -1340,6 +1340,35 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                                 HostAgentMessage::Auth { .. } => {}
                                 HostAgentMessage::NspawnContainerList(_) => {
                                     // TODO: track nspawn containers separately if needed
+                                }
+                                HostAgentMessage::UpdateScanResult { os_upgradable, os_security, scan_error } => {
+                                    tracing::info!(host_id = %host_id, os_upgradable, os_security, "Host update scan result");
+                                    let target = hr_common::events::UpdateTarget {
+                                        id: host_id.clone(),
+                                        name: host_name.clone(),
+                                        target_type: "remote_host".to_string(),
+                                        environment: None,
+                                        online: true,
+                                        os_upgradable,
+                                        os_security,
+                                        agent_version: Some(version.clone()),
+                                        agent_version_latest: None, // host-agent version tracking TBD
+                                        claude_cli_installed: None,
+                                        claude_cli_latest: None,
+                                        code_server_installed: None,
+                                        code_server_latest: None,
+                                        claude_ext_installed: None,
+                                        claude_ext_latest: None,
+                                        scan_error,
+                                        scanned_at: chrono::Utc::now().to_rfc3339(),
+                                    };
+                                    registry.scan_results.write().await.insert(host_id.clone(), target.clone());
+                                    let _ = state.events.update_scan.send(
+                                        hr_common::events::UpdateScanEvent::TargetScanned {
+                                            scan_id: String::new(),
+                                            target,
+                                        }
+                                    );
                                 }
                             }
                         }

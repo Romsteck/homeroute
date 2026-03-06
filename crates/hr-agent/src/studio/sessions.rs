@@ -61,7 +61,6 @@ pub fn list_sessions() -> Vec<SessionInfo> {
                             last_modified,
                             message_count,
                             summary,
-                            session_type: "agent".to_string(),
                         });
                     }
                 }

@@ -29,6 +29,8 @@ pub struct EventBus {
     pub cloud_relay: broadcast::Sender<CloudRelayEvent>,
     /// Certificate ready events (ACME → main for dynamic TLS loading)
     pub cert_ready: broadcast::Sender<CertReadyEvent>,
+    /// Unified update scan events (registry → websocket)
+    pub update_scan: broadcast::Sender<UpdateScanEvent>,
 }
 
 impl EventBus {
@@ -47,6 +49,7 @@ impl EventBus {
             host_power: broadcast::channel(64).0,
             cloud_relay: broadcast::channel(64).0,
             cert_ready: broadcast::channel(16).0,
+            update_scan: broadcast::channel(256).0,
         }
     }
 }
@@ -297,6 +300,68 @@ pub struct CertReadyEvent {
     pub wildcard_domain: String,
     pub cert_path: String,
     pub key_path: String,
+}
+
+/// Unified update scan event (scan progress + upgrade progress).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum UpdateScanEvent {
+    ScanStarted {
+        scan_id: String,
+    },
+    TargetScanned {
+        scan_id: String,
+        target: UpdateTarget,
+    },
+    ScanComplete {
+        scan_id: String,
+    },
+    UpgradeStarted {
+        target_id: String,
+        category: String,
+    },
+    UpgradeOutput {
+        target_id: String,
+        line: String,
+    },
+    UpgradeComplete {
+        target_id: String,
+        category: String,
+        success: bool,
+        error: Option<String>,
+    },
+}
+
+/// Unified update target — represents one scannable host or container.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateTarget {
+    pub id: String,
+    pub name: String,
+    pub target_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    pub online: bool,
+    pub os_upgradable: u32,
+    pub os_security: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_version_latest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_cli_installed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_cli_latest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_server_installed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_server_latest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_ext_installed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_ext_latest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_error: Option<String>,
+    pub scanned_at: String,
 }
 
 /// Command sent from the API to the tunnel client (e.g. push binary update).

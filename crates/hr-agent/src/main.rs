@@ -4,10 +4,13 @@ mod dataverse;
 mod mcp;
 mod metrics;
 mod proxy;
+mod scan;
 mod studio;
 mod update;
+mod upgrade;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -116,6 +119,9 @@ async fn main() -> Result<()> {
     let agent_proxy: Arc<proxy::AgentProxy> = Arc::new(proxy::AgentProxy::new(&cfg));
     let mut proxy_started = false;
 
+    // Shared flag for environment (set when Config is received)
+    let is_dev_flag = Arc::new(AtomicBool::new(true)); // default to dev
+
     // Reconnection loop with exponential backoff
     let mut backoff = INITIAL_BACKOFF_SECS;
 
@@ -222,6 +228,7 @@ async fn main() -> Result<()> {
                                 &schema_signals,
                                 &agent_proxy,
                                 &mut proxy_started,
+                                &is_dev_flag,
                                 msg
                             ).await;
                         }
@@ -246,6 +253,7 @@ async fn main() -> Result<()> {
                 &schema_signals,
                 &agent_proxy,
                 &mut proxy_started,
+                &is_dev_flag,
                 msg
             ).await;
         }
@@ -484,6 +492,7 @@ async fn handle_registry_message(
     schema_signals: &SchemaQuerySignals,
     agent_proxy: &Arc<proxy::AgentProxy>,
     proxy_started: &mut bool,
+    is_dev_flag: &Arc<AtomicBool>,
     msg: RegistryMessage,
 ) {
     match msg {
@@ -492,6 +501,7 @@ async fn handle_registry_message(
 
             // Write/update .mcp.json for MCP tool discovery
             let is_dev = matches!(environment, hr_registry::types::Environment::Development);
+            is_dev_flag.store(is_dev, Ordering::Relaxed);
             let workspace = std::path::Path::new("/root/workspace");
             if workspace.is_dir() {
                 let content = mcp::generate_mcp_json(is_dev);
@@ -648,6 +658,48 @@ async fn handle_registry_message(
                     Err(e) => error!(filename = %filename, error = %e, "Failed to write rule file"),
                 }
             }
+        }
+
+        RegistryMessage::RunUpdateScan => {
+            info!("Update scan requested");
+            let tx = outbound_tx.clone();
+            let is_dev = is_dev_flag.load(Ordering::Relaxed);
+            tokio::spawn(async move {
+                let r = scan::run_scan(is_dev).await;
+                let _ = tx.send(AgentMessage::UpdateScanResult {
+                    os_upgradable: r.os_upgradable,
+                    os_security: r.os_security,
+                    claude_cli_installed: r.claude_cli_installed,
+                    claude_cli_latest: r.claude_cli_latest,
+                    code_server_installed: r.code_server_installed,
+                    code_server_latest: r.code_server_latest,
+                    claude_ext_installed: r.claude_ext_installed,
+                    claude_ext_latest: r.claude_ext_latest,
+                    scan_error: r.scan_error,
+                }).await;
+            });
+        }
+
+        RegistryMessage::RunUpgrade { category } => {
+            info!(category = %category, "Upgrade requested");
+            let tx = outbound_tx.clone();
+            let is_dev = is_dev_flag.load(Ordering::Relaxed);
+            tokio::spawn(async move {
+                let _result = upgrade::run_upgrade(&category).await;
+                // After upgrade, re-scan and report updated state
+                let r = scan::run_scan(is_dev).await;
+                let _ = tx.send(AgentMessage::UpdateScanResult {
+                    os_upgradable: r.os_upgradable,
+                    os_security: r.os_security,
+                    claude_cli_installed: r.claude_cli_installed,
+                    claude_cli_latest: r.claude_cli_latest,
+                    code_server_installed: r.code_server_installed,
+                    code_server_latest: r.code_server_latest,
+                    claude_ext_installed: r.claude_ext_installed,
+                    claude_ext_latest: r.claude_ext_latest,
+                    scan_error: r.scan_error,
+                }).await;
+            });
         }
 
     }

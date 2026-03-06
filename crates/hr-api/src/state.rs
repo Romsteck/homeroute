@@ -122,6 +122,9 @@ pub struct ApiState {
     /// Channel to send commands to the tunnel client (e.g. push binary update).
     pub cloud_relay_cmd_tx: Option<tokio::sync::mpsc::Sender<CloudRelayCommand>>,
 
+    /// Update audit log.
+    pub update_log: Arc<crate::routes::updates::UpdateAuditLog>,
+
     /// Path to dns-dhcp-config.json
     pub dns_dhcp_config_path: PathBuf,
     /// Path to rust-proxy-config.json
