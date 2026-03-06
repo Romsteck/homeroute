@@ -25,9 +25,8 @@ impl Default for Environment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppStack {
-    #[default]
-    ViteRust,
     NextJs,
+    #[default]
     LeptosRust,
 }
 
@@ -65,7 +64,7 @@ pub struct Application {
     #[serde(default = "default_true")]
     pub code_server_enabled: bool,
 
-    /// Stack technologique du container (vite-rust par défaut).
+    /// Stack technologique du container (leptos-rust par défaut).
     #[serde(default)]
     pub stack: AppStack,
 
@@ -86,9 +85,6 @@ impl Application {
                     domains.push(format!("code.{}.{}", self.slug, base_domain));
                 }
                 domains.push(format!("dev.{}.{}", self.slug, base_domain));
-                if self.stack == AppStack::ViteRust {
-                    domains.push(format!("devapi.{}.{}", self.slug, base_domain));
-                }
                 domains.push(format!("studio.{}.{}", self.slug, base_domain));
                 domains
             }
@@ -113,30 +109,12 @@ impl Application {
                         allowed_groups: vec![],
                     });
                 }
-                match self.stack {
-                    AppStack::ViteRust => {
-                        routes.push(RouteInfo {
-                            domain: format!("dev.{}.{}", self.slug, base_domain),
-                            target_port: 5173,
-                            auth_required: false,
-                            allowed_groups: vec![],
-                        });
-                        routes.push(RouteInfo {
-                            domain: format!("devapi.{}.{}", self.slug, base_domain),
-                            target_port: 3000,
-                            auth_required: false,
-                            allowed_groups: vec![],
-                        });
-                    }
-                    AppStack::NextJs | AppStack::LeptosRust => {
-                        routes.push(RouteInfo {
-                            domain: format!("dev.{}.{}", self.slug, base_domain),
-                            target_port: 3000,
-                            auth_required: false,
-                            allowed_groups: vec![],
-                        });
-                    }
-                }
+                routes.push(RouteInfo {
+                    domain: format!("dev.{}.{}", self.slug, base_domain),
+                    target_port: 3000,
+                    auth_required: false,
+                    allowed_groups: vec![],
+                });
                 routes.push(RouteInfo {
                     domain: format!("studio.{}.{}", self.slug, base_domain),
                     target_port: 443,
@@ -333,7 +311,7 @@ mod tests {
                 local_only: false,
             },
             code_server_enabled,
-            stack: AppStack::ViteRust,
+            stack: AppStack::LeptosRust,
             metrics: None,
         }
     }
@@ -343,7 +321,7 @@ mod tests {
         // Dev with code-server
         let app = make_test_app(Environment::Development, true);
         let domains = app.domains("example.com");
-        assert_eq!(domains, vec!["code.myapp.example.com", "dev.myapp.example.com", "devapi.myapp.example.com", "studio.myapp.example.com"]);
+        assert_eq!(domains, vec!["code.myapp.example.com", "dev.myapp.example.com", "studio.myapp.example.com"]);
 
         // Prod
         let app = make_test_app(Environment::Production, true);
@@ -355,22 +333,21 @@ mod tests {
     fn test_domains_no_code_server() {
         let app = make_test_app(Environment::Development, false);
         let domains = app.domains("example.com");
-        assert_eq!(domains, vec!["dev.myapp.example.com", "devapi.myapp.example.com", "studio.myapp.example.com"]);
+        assert_eq!(domains, vec!["dev.myapp.example.com", "studio.myapp.example.com"]);
     }
 
     #[test]
     fn test_routes_code_server() {
         let app = make_test_app(Environment::Development, true);
         let routes = app.routes("example.com");
-        assert_eq!(routes.len(), 4);
+        assert_eq!(routes.len(), 3);
         assert_eq!(routes[0].domain, "code.myapp.example.com");
         assert_eq!(routes[0].target_port, CODE_SERVER_PORT);
         assert!(routes[0].auth_required);
         assert_eq!(routes[1].domain, "dev.myapp.example.com");
-        assert_eq!(routes[2].domain, "devapi.myapp.example.com");
-        assert_eq!(routes[3].domain, "studio.myapp.example.com");
-        assert_eq!(routes[3].target_port, 443);
-        assert!(routes[3].auth_required);
+        assert_eq!(routes[2].domain, "studio.myapp.example.com");
+        assert_eq!(routes[2].target_port, 443);
+        assert!(routes[2].auth_required);
     }
 
     #[test]

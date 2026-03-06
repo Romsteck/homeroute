@@ -162,7 +162,6 @@ impl AgentProxy {
         frontend: Option<&hr_registry::types::FrontendEndpoint>,
         environment: hr_registry::types::Environment,
         code_server_enabled: bool,
-        stack: hr_registry::types::AppStack,
     ) {
         let mut new_routes = HashMap::new();
         if let Some(fe) = frontend {
@@ -194,11 +193,7 @@ impl AgentProxy {
             );
         }
         if environment == hr_registry::types::Environment::Development {
-            // Dev server port depends on stack: Vite (5173) or Next.js (3000)
-            let dev_port = match stack {
-                hr_registry::types::AppStack::ViteRust => 5173,
-                hr_registry::types::AppStack::NextJs | hr_registry::types::AppStack::LeptosRust => 3000,
-            };
+            let dev_port = 3000;
             new_routes.insert(
                 format!("dev.{}.{}", slug, base_domain),
                 LocalRoute {

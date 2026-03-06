@@ -610,12 +610,10 @@ fn render_rules(slug: &str, domain: &str, stack: hr_registry::types::AppStack) -
     let dev_rules = match stack {
         AppStack::NextJs => include_str!("../../../hr-registry/src/rules/homeroute-dev-nextjs.md"),
         AppStack::LeptosRust => include_str!("../../../hr-registry/src/rules/homeroute-dev-leptos.md"),
-        AppStack::ViteRust => include_str!("../../../hr-registry/src/rules/homeroute-dev.md"),
     };
     let deploy_rules = match stack {
         AppStack::NextJs => include_str!("../../../hr-registry/src/rules/homeroute-deploy-nextjs.md"),
         AppStack::LeptosRust => include_str!("../../../hr-registry/src/rules/homeroute-deploy-leptos.md"),
-        AppStack::ViteRust => include_str!("../../../hr-registry/src/rules/homeroute-deploy.md"),
     };
 
     vec![

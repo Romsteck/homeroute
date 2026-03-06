@@ -1007,12 +1007,10 @@ WantedBy=multi-user.target
         let dev_md_content = match stack {
             hr_registry::types::AppStack::NextJs => render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev-nextjs.md")),
             hr_registry::types::AppStack::LeptosRust => render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev-leptos.md")),
-            hr_registry::types::AppStack::ViteRust => render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev.md")),
         };
         let deploy_md_content = match stack {
             hr_registry::types::AppStack::NextJs => render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy-nextjs.md")),
             hr_registry::types::AppStack::LeptosRust => render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy-leptos.md")),
-            hr_registry::types::AppStack::ViteRust => render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy.md")),
         };
         let _ = tokio::fs::write(
             rules_dir.join("homeroute-deploy.md"),
@@ -1215,80 +1213,6 @@ WantedBy=multi-user.target
 
         // Phase 13-14: Dev server systemd units (stack-dependent)
         match stack {
-            hr_registry::types::AppStack::ViteRust => {
-                emit("Configuration vite-dev.service...");
-                let vite_unit = r#"[Unit]
-Description=Vite Dev Server (HMR)
-After=network.target
-
-[Service]
-Type=simple
-User=studio
-Group=studio
-WorkingDirectory=/root/workspace/frontend
-ExecStart=/bin/bash -lc "npx vite --host 0.0.0.0 --port 5173"
-Restart=always
-RestartSec=3
-Environment=HOME=/home/studio
-Environment=NPM_CONFIG_CACHE=/home/studio/.npm
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:/root/.cargo/bin
-
-[Install]
-WantedBy=multi-user.target
-"#;
-                let tmp_vite_unit = PathBuf::from(format!("/tmp/vite-unit-v2-{slug}.service"));
-                let _ = tokio::fs::write(&tmp_vite_unit, vite_unit).await;
-                let _ = NspawnClient::push_file(
-                    container_name,
-                    &tmp_vite_unit,
-                    "etc/systemd/system/vite-dev.service",
-                    storage,
-                )
-                .await;
-                let _ = tokio::fs::remove_file(&tmp_vite_unit).await;
-
-                emit("Configuration cargo-dev.service...");
-                let cargo_unit = r#"[Unit]
-Description=Cargo Watch Dev Server
-After=network.target
-
-[Service]
-Type=simple
-User=studio
-Group=studio
-WorkingDirectory=/root/workspace
-ExecStart=/root/.cargo/bin/cargo-watch -x run
-Restart=always
-RestartSec=3
-Environment=HOME=/home/studio
-Environment=CARGO_HOME=/root/.cargo
-Environment=RUSTUP_HOME=/root/.rustup
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:/root/.cargo/bin
-Environment=RUST_LOG=info
-
-[Install]
-WantedBy=multi-user.target
-"#;
-                let tmp_cargo_unit =
-                    PathBuf::from(format!("/tmp/cargo-unit-v2-{slug}.service"));
-                let _ = tokio::fs::write(&tmp_cargo_unit, cargo_unit).await;
-                let _ = NspawnClient::push_file(
-                    container_name,
-                    &tmp_cargo_unit,
-                    "etc/systemd/system/cargo-dev.service",
-                    storage,
-                )
-                .await;
-                let _ = tokio::fs::remove_file(&tmp_cargo_unit).await;
-
-                let _ =
-                    NspawnClient::exec(container_name, &["systemctl", "daemon-reload"]).await;
-                let _ = NspawnClient::exec(
-                    container_name,
-                    &["systemctl", "enable", "--now", "vite-dev", "cargo-dev"],
-                )
-                .await;
-            }
             hr_registry::types::AppStack::NextJs => {
                 emit("Configuration nextjs-dev.service...");
                 let nextjs_unit = r#"[Unit]

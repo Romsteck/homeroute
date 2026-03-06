@@ -24,7 +24,7 @@ function CreateContainerModal({
     frontend: { auth_required: true, allowed_groups: [], local_only: false },
     code_server_enabled: isPaired ? (initialEnvironment !== 'production') : true,
     linked_app_id: initialLinkedAppId || '',
-    stack: 'vite-rust',
+    stack: 'leptos-rust',
   });
 
   const isDev = form.environment === 'development';
@@ -145,7 +145,6 @@ function CreateContainerModal({
               <label className="block text-sm text-gray-400 mb-1">Stack</label>
               <div className="flex gap-0">
                 {[
-                  { value: 'vite-rust', label: 'Vite + Rust' },
                   { value: 'next-js', label: 'Next.js' },
                   { value: 'leptos-rust', label: 'Rust + Leptos' },
                 ].map(({ value, label }, index, arr) => (

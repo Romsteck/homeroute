@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "hr-agent"
-version = "0.2.49"
+version = "0.2.52"
 dependencies = [
  "anyhow",
  "base64",

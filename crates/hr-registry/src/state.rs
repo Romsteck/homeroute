@@ -1122,7 +1122,6 @@ impl AgentRegistry {
         let deploy_rules = match app.stack {
             AppStack::NextJs => include_str!("rules/homeroute-deploy-nextjs.md"),
             AppStack::LeptosRust => include_str!("rules/homeroute-deploy-leptos.md"),
-            AppStack::ViteRust => include_str!("rules/homeroute-deploy.md"),
         };
 
         let rules = vec![
