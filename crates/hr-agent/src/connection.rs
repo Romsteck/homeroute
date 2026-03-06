@@ -191,6 +191,74 @@ pub async fn run_connection(
     Ok(())
 }
 
+/// Ensure network interfaces are UP before attempting to connect.
+/// After a container restart, macvlan interfaces (mv-*) can remain DOWN
+/// with qdisc noop, preventing any network connectivity.
+/// This brings them up so systemd-networkd can assign an IP via DHCP.
+pub async fn ensure_network_up(interface: &str) {
+    let output = match tokio::process::Command::new("ip")
+        .args(["-o", "link", "show"])
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut brought_up = false;
+
+    for line in stdout.lines() {
+        // Format: "2: mv-enp9s0@if3: <BROADCAST,MULTICAST> ..."
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let Some(iface_raw) = parts.get(1) else { continue };
+        let iface = iface_raw.trim_end_matches(':').split('@').next().unwrap_or(iface_raw);
+
+        if iface == "lo" {
+            continue;
+        }
+
+        // Check if this is the configured interface, or a mv-*/host0/eth0 interface
+        let dominated = iface == interface
+            || iface.starts_with("mv-")
+            || iface.starts_with("host")
+            || iface.starts_with("eth");
+        if !dominated {
+            continue;
+        }
+
+        // Check if the interface is DOWN (flags don't contain UP or LOWER_UP)
+        let flags = parts.get(2).unwrap_or(&"");
+        if flags.contains("UP") {
+            continue;
+        }
+
+        info!(iface, "Network interface is DOWN, bringing it up");
+        let result = tokio::process::Command::new("ip")
+            .args(["link", "set", iface, "up"])
+            .output()
+            .await;
+        match result {
+            Ok(o) if o.status.success() => {
+                info!(iface, "Interface brought UP successfully");
+                brought_up = true;
+            }
+            Ok(o) => {
+                warn!(iface, stderr = %String::from_utf8_lossy(&o.stderr), "Failed to bring interface up");
+            }
+            Err(e) => {
+                warn!(iface, error = %e, "Failed to run ip link set up");
+            }
+        }
+    }
+
+    // Wait for DHCP to assign an address
+    if brought_up {
+        info!("Waiting for DHCP lease after bringing interface up...");
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+}
+
 /// Detect the IPv4 address on the given interface (for local DNS A records).
 /// Falls back to scanning all interfaces if the configured one has no IP
 /// (e.g. after migration where the interface name changes from host0 to mv-*).

@@ -131,6 +131,9 @@ async fn main() -> Result<()> {
 
         info!(backoff_secs = backoff, "Connecting to HomeRoute...");
 
+        // Ensure network interfaces are UP (fixes macvlan DOWN after container restart)
+        connection::ensure_network_up(&cfg.interface).await;
+
         // Spawn the WebSocket connection in a task so we can process messages concurrently
         let cfg_clone = cfg.clone();
         let mut conn_handle = tokio::spawn(async move {
