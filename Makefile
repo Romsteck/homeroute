@@ -55,9 +55,12 @@ all: studio netcore edge orchestrator server web
 
 # Deploy locally (only works on prod server itself)
 deploy: check-not-prod all
+	cp systemd/*.service /etc/systemd/system/ && systemctl daemon-reload
+	systemctl restart hr-edge
+	systemctl restart hr-orchestrator
 	systemctl restart homeroute
 
-# Deploy to production from dev server (does NOT restart hr-netcore)
+# Deploy to production from dev server (restarts hr-edge + hr-orchestrator + homeroute, NOT hr-netcore)
 deploy-prod: check-prod all
 	@echo "Deploying to production ($(PROD_HOST))..."
 	rsync -az --info=progress2 crates/target/release/homeroute $(PROD_HOST):$(PROD_DIR)/crates/target/release/homeroute
@@ -67,11 +70,12 @@ deploy-prod: check-prod all
 	rsync -az --delete web/dist/ $(PROD_HOST):$(PROD_DIR)/web/dist/
 	rsync -az --delete web-studio/dist/ $(PROD_HOST):$(PROD_DIR)/web-studio/dist/
 	rsync -az systemd/ $(PROD_HOST):$(PROD_DIR)/systemd/
-	ssh $(PROD_HOST) 'systemctl restart homeroute'
-	@sleep 2
+	ssh $(PROD_HOST) 'cp $(PROD_DIR)/systemd/*.service /etc/systemd/system/ && systemctl daemon-reload'
+	ssh $(PROD_HOST) 'systemctl restart hr-edge && systemctl restart hr-orchestrator && systemctl restart homeroute'
+	@sleep 3
 	@curl -sf $(PROD_API)/api/health | python3 -m json.tool \
 		&& echo "✓ Deploy OK" \
-		|| (echo "⛔ Health check FAILED — check logs: ssh $(PROD_HOST) journalctl -u homeroute -n 50" && exit 1)
+		|| (echo "⛔ Health check FAILED — check logs: ssh $(PROD_HOST) 'journalctl -u homeroute -u hr-edge -u hr-orchestrator -n 50'" && exit 1)
 
 # Deploy hr-edge separately (Proxy/TLS/ACME/Auth/Tunnel)
 deploy-edge: check-prod edge
@@ -103,13 +107,13 @@ test:
 
 # Build hr-agent binary (auto-increments version)
 agent:
-	@CURRENT=$$(grep '^version' crates/hr-agent/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/') && \
+	@CURRENT=$$(grep '^version' crates/agents/hr-agent/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/') && \
 	MAJOR=$$(echo "$$CURRENT" | cut -d. -f1) && \
 	MINOR=$$(echo "$$CURRENT" | cut -d. -f2) && \
 	PATCH=$$(echo "$$CURRENT" | cut -d. -f3) && \
 	NEW_PATCH=$$((PATCH + 1)) && \
 	NEW_VERSION="$$MAJOR.$$MINOR.$$NEW_PATCH" && \
-	sed -i "s/^version = \"$$CURRENT\"/version = \"$$NEW_VERSION\"/" crates/hr-agent/Cargo.toml && \
+	sed -i "s/^version = \"$$CURRENT\"/version = \"$$NEW_VERSION\"/" crates/agents/hr-agent/Cargo.toml && \
 	echo "Building hr-agent v$$NEW_VERSION..." && \
 	cd crates && cargo build --release -p hr-agent && cd .. && \
 	cp crates/target/release/hr-agent data/agent-binaries/hr-agent && \

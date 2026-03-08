@@ -377,7 +377,7 @@ async fn handle_agent_message(
                 .ok()
                 .map(|s| s.trim().to_string());
 
-                let target = hr_common::events::UpdateTarget {
+                let mut target = hr_common::events::UpdateTarget {
                     id: app_id.to_string(),
                     name: app.name.clone(),
                     target_type: "container".to_string(),
@@ -396,6 +396,8 @@ async fn handle_agent_message(
                     scan_error,
                     scanned_at: chrono::Utc::now().to_rfc3339(),
                 };
+                // Fill missing *_latest from server-side cache (avoids GitHub rate limits)
+                registry.fill_latest_versions(&mut target).await;
                 registry
                     .scan_results
                     .write()
