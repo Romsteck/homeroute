@@ -145,14 +145,24 @@ async fn list_hosts(State(state): State<ApiState>) -> Json<Value> {
     let mut hosts = data.get("hosts").cloned().unwrap_or(json!([]));
 
     // Override status based on live host connections via IPC
-    let connections = match state.orchestrator.request(&OrchestratorRequest::ListHostConnections).await {
-        Ok(r) if r.ok => r.data.unwrap_or(json!({})),
-        _ => json!({}),
+    // IPC returns a JSON array of connection objects; build a map keyed by host_id
+    let conn_map: std::collections::HashMap<String, serde_json::Value> = match state.orchestrator.request(&OrchestratorRequest::ListHostConnections).await {
+        Ok(r) if r.ok => {
+            r.data.unwrap_or(json!([]))
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .filter_map(|c| {
+                    c.get("host_id").and_then(|id| id.as_str()).map(|id| (id.to_string(), c.clone()))
+                })
+                .collect()
+        }
+        _ => std::collections::HashMap::new(),
     };
     if let Some(arr) = hosts.as_array_mut() {
         for host in arr.iter_mut() {
             if let Some(id) = host.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()) {
-                let conn_data = connections.get(&id);
+                let conn_data = conn_map.get(&id);
                 let connected = conn_data.is_some();
                 if !connected && host.get("status").and_then(|s| s.as_str()) == Some("online") {
                     host["status"] = json!("offline");
@@ -162,8 +172,16 @@ async fn list_hosts(State(state): State<ApiState>) -> Json<Value> {
                     if let Some(power_state) = conn.get("power_state") {
                         host["power_state"] = power_state.clone();
                     }
-                    if let Some(metrics) = conn.get("metrics") {
-                        host["metrics"] = metrics.clone();
+                    if let Some(m) = conn.get("metrics") {
+                        // Convert snake_case keys from Rust struct to camelCase for frontend
+                        host["metrics"] = json!({
+                            "cpuPercent": m.get("cpu_percent").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                            "memoryUsedBytes": m.get("memory_used_bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+                            "memoryTotalBytes": m.get("memory_total_bytes").and_then(|v| v.as_u64()).unwrap_or(1),
+                            "diskUsedBytes": m.get("disk_used_bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+                            "diskTotalBytes": m.get("disk_total_bytes").and_then(|v| v.as_u64()).unwrap_or(1),
+                            "loadAvg": m.get("load_avg").cloned().unwrap_or(json!([0.0, 0.0, 0.0])),
+                        });
                     }
                 }
             }
