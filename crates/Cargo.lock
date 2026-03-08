@@ -697,6 +697,7 @@ dependencies = [
  "hr-auth",
  "hr-common",
  "hr-ipc",
+ "rustls",
  "tokio",
  "tracing",
  "tracing-subscriber",

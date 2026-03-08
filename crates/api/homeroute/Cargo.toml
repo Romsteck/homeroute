@@ -14,6 +14,7 @@ hr-acme = { path = "../../edge/hr-acme" }
 hr-ipc = { path = "../../shared/hr-ipc" }
 hr-api = { path = "../hr-api" }
 
+rustls = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
