@@ -2,17 +2,21 @@
 
 ## Architecture
 
-HomeRoute est un **binaire Rust unifié** gérant tous les services réseau.
+HomeRoute utilise **deux binaires** pour isoler les services réseau critiques :
 
+- **`hr-netcore`** : DNS, DHCP, Adblock, IPv6 — ne redémarre quasi jamais
+- **`homeroute`** : API, Proxy HTTPS, Auth, ACME, Containers, Cloud relay — redémarre à chaque deploy
+- **Communication** : IPC Unix socket (`/run/hr-netcore.sock`, JSON-line)
 - **Frontend** : React/Vite dans `web/` — fichiers statiques servis par Rust
-- **Backend** : Cargo workspace dans `crates/` — un seul binaire `homeroute`
-- **Service** : `homeroute.service` (systemd)
+- **Services** : `hr-netcore.service` + `homeroute.service` (systemd)
 
 ### Cargo Workspace
 
 ```
 crates/
-├── homeroute/       # Binaire principal (supervisor)
+├── homeroute/       # Binaire API/Proxy (supervisor)
+├── hr-netcore/      # Binaire réseau (DNS/DHCP/Adblock/IPv6)
+├── hr-ipc/          # Protocole IPC Unix socket (partagé)
 ├── hr-common/       # Types partagés, config, EventBus
 ├── hr-auth/         # Auth (SQLite sessions, YAML users, Argon2id)
 ├── hr-proxy/        # Reverse proxy HTTPS (TLS/SNI, WebSocket)
@@ -42,37 +46,61 @@ crates/
 
 ## Ports
 
-| Port | Service |
-|------|---------|
-| 443 | HTTPS reverse proxy (hr-proxy) |
-| 80 | HTTP→HTTPS redirect |
-| 53 | DNS (hr-dns) |
-| 67 | DHCP (hr-dhcp) |
-| 4000 | API management (hr-api) |
+| Port | Service | Binaire |
+|------|---------|---------|
+| 443 | HTTPS reverse proxy (hr-proxy) | homeroute |
+| 80 | HTTP→HTTPS redirect | homeroute |
+| 4000 | API management (hr-api) | homeroute |
+| 53 | DNS (hr-dns) | hr-netcore |
+| 67 | DHCP (hr-dhcp) | hr-netcore |
 
 ## Cloudflare
 
 ⚠️ **JAMAIS désactiver le mode proxied** — convertit IPv6 → IPv4 pour clients externes. Sauf en mode Cloud Gateway.
 
+## Infrastructure
+
+| Rôle | Host | IP | Usage |
+|------|------|----|-------|
+| **DEV** | cloudmaster | 10.0.0.10 | Build, tests, développement |
+| **PROD** | — | 10.0.0.254 | Exécution de HomeRoute |
+
+⚠️ **JAMAIS** démarrer homeroute sur le serveur de dev. Aucun service ne doit y tourner.
+
 ## Commandes
 
 ```bash
-make deploy          # build tout + systemctl restart homeroute
-make server          # cargo build --release seulement
+# Build (sûr sur dev)
+make server          # cargo build --release -p homeroute
+make netcore         # cargo build --release -p hr-netcore
 make web             # npm run build (web/) seulement
-make agent           # build hr-agent (auto-incrémente version) + copie dans data/agent-binaries/
+make agent           # build hr-agent (auto-incrémente version)
 make test            # cargo test
-journalctl -u homeroute -f
-curl -s http://localhost:4000/api/health | jq
-systemctl reload homeroute   # hot-reload config proxy (SIGHUP, sans restart)
+
+# Déploiement vers la production (depuis dev)
+make deploy-prod     # build all + rsync + restart homeroute (PAS hr-netcore) + health check
+make deploy-netcore  # build + rsync + restart hr-netcore (rare, seulement si DNS/DHCP change)
+make agent-prod      # push hr-agent vers les containers de prod
+
+# Déploiement local (UNIQUEMENT sur le serveur de prod lui-même)
+make deploy          # build all + systemctl restart (bloqué sur dev)
+
+# Monitoring prod (via SSH)
+ssh root@10.0.0.254 'journalctl -u homeroute -f'
+ssh root@10.0.0.254 'journalctl -u hr-netcore -f'
+curl -s http://10.0.0.254:4000/api/health | jq
+ssh root@10.0.0.254 'systemctl reload homeroute'   # hot-reload proxy config (SIGHUP)
+ssh root@10.0.0.254 'systemctl reload hr-netcore'  # hot-reload DNS/DHCP/Adblock config (SIGHUP)
 ```
 
 ## Règles obligatoires
 
-- **JAMAIS** `cargo run` directement — utiliser `systemctl` et `make deploy`
-- **TOUJOURS** `make deploy` après modification du backend Rust
-- **TOUJOURS** `make agent` après modification du crate `hr-agent` (auto-incrémente la version, build, copie le binaire)
-- Pour pousser le binaire `hr-agent` vers les containers : `curl -X POST http://localhost:4000/api/applications/agents/update` ou utiliser le subagent `agent-updater`
+- **JAMAIS** `cargo run` directement — utiliser `make deploy-prod` depuis dev
+- **JAMAIS** `make deploy` sur le serveur de dev (bloqué par sécurité)
+- **JAMAIS** `systemctl start/restart homeroute` sur le serveur de dev
+- **TOUJOURS** `make deploy-prod` après modification du backend Rust (depuis dev) — ne restart que homeroute, DNS reste up
+- **TOUJOURS** `make deploy-netcore` si modification de hr-dns, hr-dhcp, hr-ipv6, hr-adblock, hr-netcore ou hr-ipc
+- **TOUJOURS** `make agent && make agent-prod` après modification du crate `hr-agent`
 - Exécuter les commandes dans les containers via **`POST /api/applications/{id}/exec`** (pas machinectl)
 - Passer les commandes comme un seul string bash : `command: ["cmd"]`
 

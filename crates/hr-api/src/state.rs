@@ -1,11 +1,9 @@
-use hr_adblock::AdblockEngine;
 use hr_auth::AuthService;
 use hr_acme::AcmeManager;
 use hr_common::config::EnvConfig;
 use hr_common::events::{CloudRelayCommand, CloudRelayStatus, EventBus, MigrationPhase};
 use hr_common::service_registry::SharedServiceRegistry;
-use hr_dns::SharedDnsState;
-use hr_dhcp::SharedDhcpState;
+use hr_ipc::NetcoreClient;
 use hr_git::GitService;
 
 use hr_proxy::{ProxyState, TlsManager};
@@ -89,9 +87,7 @@ pub struct ApiState {
     pub acme: Arc<AcmeManager>,
     pub proxy: Arc<ProxyState>,
     pub tls_manager: Arc<TlsManager>,
-    pub dns: SharedDnsState,
-    pub dhcp: SharedDhcpState,
-    pub adblock: Arc<RwLock<AdblockEngine>>,
+    pub netcore: Arc<NetcoreClient>,
     pub events: Arc<EventBus>,
     pub env: Arc<EnvConfig>,
     pub service_registry: SharedServiceRegistry,

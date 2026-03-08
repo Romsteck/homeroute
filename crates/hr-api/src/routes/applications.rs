@@ -18,7 +18,7 @@ use hr_registry::protocol::{AgentMessage, HostRegistryMessage, RegistryMessage};
 use hr_registry::types::TriggerUpdateRequest;
 use hr_common::events::{MigrationPhase, MigrationProgressEvent};
 use hr_acme::types::WildcardType;
-use hr_dns::config::StaticRecord;
+use hr_ipc::NetcoreClient;
 
 use crate::state::{ApiState, MigrationState};
 
@@ -1039,45 +1039,38 @@ async fn agent_certs(
 
 // ── DNS record helpers for agent lifecycle ───────────────────
 
-/// Add local DNS A records for an agent, based on environment:
-/// - Development: `*.{slug}.{base}` → IPv4 (covers dev.{slug} and code.{slug})
-/// - Production: `{slug}.{base}` → IPv4
+/// Add local DNS A records for an agent via IPC, based on environment:
+/// - Development: `*.{slug}.{base}` -> IPv4 (covers dev.{slug} and code.{slug})
+/// - Production: `{slug}.{base}` -> IPv4
 async fn add_agent_dns_records(
-    dns: &hr_dns::SharedDnsState,
+    netcore: &NetcoreClient,
     slug: &str,
     base_domain: &str,
     ipv4: &str,
     environment: hr_registry::types::Environment,
 ) {
-    let mut dns_state = dns.write().await;
-    match environment {
+    let (name, record_type) = match environment {
         hr_registry::types::Environment::Development => {
-            // Wildcard covers dev.{slug}.{base} and code.{slug}.{base}
-            dns_state.add_static_record(StaticRecord {
-                name: format!("*.{}.{}", slug, base_domain),
-                record_type: "A".to_string(),
-                value: ipv4.to_string(),
-                ttl: 60,
-            });
+            (format!("*.{}.{}", slug, base_domain), "A".to_string())
         }
         hr_registry::types::Environment::Production => {
-            // Bare domain for prod
-            dns_state.add_static_record(StaticRecord {
-                name: format!("{}.{}", slug, base_domain),
-                record_type: "A".to_string(),
-                value: ipv4.to_string(),
-                ttl: 60,
-            });
+            (format!("{}.{}", slug, base_domain), "A".to_string())
         }
+    };
+    if let Err(e) = netcore.dns_add_static_record(name, record_type, ipv4.to_string(), 60).await {
+        warn!(slug, ipv4, error = %e, "Failed to add DNS record via IPC");
+    } else {
+        info!(slug, ipv4, ?environment, "Added local DNS A records for agent");
     }
-    info!(slug, ipv4, ?environment, "Added local DNS A records for agent");
 }
 
-/// Remove all local DNS records pointing to a specific IPv4 address.
-pub(crate) async fn remove_agent_dns_records(dns: &hr_dns::SharedDnsState, ipv4: &str) {
-    let mut dns_state = dns.write().await;
-    dns_state.remove_static_records_by_value(ipv4);
-    info!(ipv4, "Removed local DNS records for agent IP");
+/// Remove all local DNS records pointing to a specific IPv4 address via IPC.
+pub(crate) async fn remove_agent_dns_records(netcore: &NetcoreClient, ipv4: &str) {
+    if let Err(e) = netcore.dns_remove_static_records_by_value(ipv4).await {
+        warn!(ipv4, error = %e, "Failed to remove DNS records via IPC");
+    } else {
+        info!(ipv4, "Removed local DNS records for agent IP");
+    }
 }
 
 // ── WebSocket handler for agent connections ─────────────────
@@ -1274,13 +1267,13 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
                                 // Remove old DNS records for previous IP
                                 if let Some(app) = registry.get_application(&app_id).await {
                                     if let Some(old_ip) = app.ipv4_address {
-                                        remove_agent_dns_records(&state.dns, &old_ip.to_string()).await;
+                                        remove_agent_dns_records(&state.netcore, &old_ip.to_string()).await;
                                     }
                                 }
                                 registry.handle_ip_update(&app_id, &ipv4_address).await;
                                 // Add new DNS records for updated IP
                                 if let Some(app) = registry.get_application(&app_id).await {
-                                    add_agent_dns_records(&state.dns, &app.slug, &state.env.base_domain, &ipv4_address, app.environment).await;
+                                    add_agent_dns_records(&state.netcore, &app.slug, &state.env.base_domain, &ipv4_address, app.environment).await;
                                 }
                             }
                             Ok(AgentMessage::PublishRoutes { routes }) => {
@@ -1307,7 +1300,7 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
                                         }
                                         // Add local DNS A records for direct local access
                                         let ip_str = target_ip.to_string();
-                                        add_agent_dns_records(&state.dns, &app.slug, base_domain, &ip_str, app.environment).await;
+                                        add_agent_dns_records(&state.netcore, &app.slug, base_domain, &ip_str, app.environment).await;
                                     }
                                 }
                             }
@@ -1376,7 +1369,7 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
             }
             // Remove local DNS A records for this agent
             if let Some(ip) = app.ipv4_address {
-                remove_agent_dns_records(&state.dns, &ip.to_string()).await;
+                remove_agent_dns_records(&state.netcore, &ip.to_string()).await;
             }
         }
         info!(app_id, "Agent WebSocket closed (last connection, routes + DNS removed)");

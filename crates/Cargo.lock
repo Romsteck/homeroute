@@ -694,15 +694,12 @@ dependencies = [
  "axum",
  "bytes",
  "hr-acme",
- "hr-adblock",
  "hr-api",
  "hr-auth",
  "hr-common",
  "hr-container",
- "hr-dhcp",
- "hr-dns",
  "hr-git",
- "hr-ipv6",
+ "hr-ipc",
  "hr-proxy",
  "hr-registry",
  "hr-tunnel",
@@ -797,14 +794,11 @@ dependencies = [
  "chrono",
  "hex",
  "hr-acme",
- "hr-adblock",
  "hr-auth",
  "hr-common",
  "hr-container",
- "hr-dhcp",
- "hr-dns",
  "hr-git",
- "hr-ipv6",
+ "hr-ipc",
  "hr-proxy",
  "hr-registry",
  "hr-tunnel",
@@ -967,6 +961,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hr-ipc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hr-common",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "hr-ipv6"
 version = "0.1.0"
 dependencies = [
@@ -977,6 +983,27 @@ dependencies = [
  "socket2 0.5.10",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "hr-netcore"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hr-adblock",
+ "hr-common",
+ "hr-dhcp",
+ "hr-dns",
+ "hr-ipc",
+ "hr-ipv6",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "signal-hook-tokio",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,0 +1,28 @@
+[Unit]
+Description=HomeRoute - Unified Network Manager
+After=network-online.target hr-netcore.service
+Wants=network-online.target hr-netcore.service
+
+[Service]
+Type=simple
+ExecStart=/opt/homeroute/crates/target/release/homeroute
+ExecReload=/bin/kill -HUP $MAINPID
+WorkingDirectory=/opt/homeroute
+EnvironmentFile=/opt/homeroute/.env
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=homeroute
+
+# Capabilities: bind to ports 80/443 only (DNS/DHCP moved to hr-netcore)
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+# Security hardening
+ProtectSystem=strict
+ReadWritePaths=/var/lib/server-dashboard /opt/homeroute/data /data /var/log/homeroute /var/log/rust-proxy /var/log/rust-dns-dhcp /opt/homeroute/.env /root/snap /tmp /var/lib/machines /etc/systemd/nspawn
+ReadOnlyPaths=/opt/homeroute/crates/target /opt/homeroute/target/site /opt/homeroute/web/dist /snap /var/snap/lxd
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target

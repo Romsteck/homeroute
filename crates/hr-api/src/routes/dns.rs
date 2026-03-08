@@ -16,24 +16,33 @@ pub fn router() -> Router<ApiState> {
 }
 
 async fn cache_stats(State(state): State<ApiState>) -> Json<Value> {
-    let dns = state.dns.read().await;
-    let cache_size = dns.dns_cache.len().await;
-    Json(json!({
-        "success": true,
-        "cache_size": cache_size,
-        "adblock_enabled": dns.adblock_enabled
-    }))
+    match state.netcore.dns_cache_stats().await {
+        Ok(stats) => Json(json!({
+            "success": true,
+            "cache_size": stats.cache_size,
+            "adblock_enabled": stats.adblock_enabled
+        })),
+        Err(_) => Json(json!({
+            "success": false,
+            "error": "Network core unavailable"
+        })),
+    }
 }
 
 async fn status(State(state): State<ApiState>) -> Json<Value> {
-    let dns = state.dns.read().await;
-    Json(json!({
-        "success": true,
-        "active": true,
-        "port": dns.config.port,
-        "upstream_servers": dns.config.upstream_servers,
-        "cache_size": dns.config.cache_size,
-        "local_domain": dns.config.local_domain,
-        "adblock_enabled": dns.adblock_enabled
-    }))
+    match state.netcore.dns_status().await {
+        Ok(s) => Json(json!({
+            "success": true,
+            "active": s.active,
+            "port": s.port,
+            "upstream_servers": s.upstream_servers,
+            "cache_size": s.cache_size,
+            "local_domain": s.local_domain,
+            "adblock_enabled": s.adblock_enabled
+        })),
+        Err(_) => Json(json!({
+            "success": false,
+            "error": "Network core unavailable"
+        })),
+    }
 }

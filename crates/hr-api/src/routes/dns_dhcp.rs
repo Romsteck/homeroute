@@ -15,59 +15,33 @@ pub fn router() -> Router<ApiState> {
         .route("/leases", get(get_leases))
 }
 
-async fn status() -> Json<Value> {
-    // In the unified binary, the DNS/DHCP service is always running
-    Json(json!({
-        "success": true,
-        "active": true,
-        "service": "integrated"
-    }))
+async fn status(State(state): State<ApiState>) -> Json<Value> {
+    match state.netcore.service_status().await {
+        Ok(services) => {
+            let active = services.iter().any(|s| s.name == "dns" && s.state == "Running");
+            Json(json!({
+                "success": true,
+                "active": active,
+                "service": "hr-netcore"
+            }))
+        }
+        Err(_) => Json(json!({
+            "success": false,
+            "active": false,
+            "error": "Network core unavailable"
+        })),
+    }
 }
 
 async fn reload(State(state): State<ApiState>) -> Json<Value> {
-    // Reload DNS/DHCP config from file and apply
-    let config_path = &state.dns_dhcp_config_path;
-    let content = match tokio::fs::read_to_string(config_path).await {
-        Ok(c) => c,
-        Err(e) => {
-            return Json(json!({"success": false, "error": format!("Failed to read config: {}", e)}));
-        }
-    };
-
-    let combined: Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            return Json(json!({"success": false, "error": format!("Invalid config: {}", e)}));
-        }
-    };
-
-    // Reload DNS config
-    if let Ok(dns_config) = serde_json::from_value::<hr_dns::DnsConfig>(
-        combined.get("dns").cloned().unwrap_or(json!({})),
-    ) {
-        let mut dns = state.dns.write().await;
-        dns.config = dns_config;
+    match state.netcore.reload_config().await {
+        Ok(resp) if resp.ok => Json(json!({"success": true})),
+        Ok(resp) => Json(json!({
+            "success": false,
+            "error": resp.error.unwrap_or_else(|| "Unknown error".into())
+        })),
+        Err(_) => Json(json!({"success": false, "error": "Network core unavailable"})),
     }
-
-    // Reload DHCP config
-    if let Ok(dhcp_config) = serde_json::from_value::<hr_dhcp::DhcpConfig>(
-        combined.get("dhcp").cloned().unwrap_or(json!({})),
-    ) {
-        let mut dhcp = state.dhcp.write().await;
-        dhcp.config = dhcp_config;
-    }
-
-    // Reload adblock config
-    if let Some(adblock_val) = combined.get("adblock") {
-        if let Ok(adblock_config) =
-            serde_json::from_value::<hr_adblock::config::AdblockConfig>(adblock_val.clone())
-        {
-            let mut engine = state.adblock.write().await;
-            engine.set_whitelist(adblock_config.whitelist);
-        }
-    }
-
-    Json(json!({"success": true}))
 }
 
 async fn get_config(State(state): State<ApiState>) -> Json<Value> {
@@ -75,13 +49,14 @@ async fn get_config(State(state): State<ApiState>) -> Json<Value> {
     match tokio::fs::read_to_string(config_path).await {
         Ok(content) => match serde_json::from_str::<Value>(&content) {
             Ok(mut config) => {
-                // Merge in-memory DNS static records (added at runtime by agent connections)
-                let dns_state = state.dns.read().await;
-                if let Some(dns_obj) = config.get_mut("dns").and_then(|d| d.as_object_mut()) {
-                    dns_obj.insert(
-                        "static_records".to_string(),
-                        serde_json::to_value(&dns_state.config.static_records).unwrap_or_default(),
-                    );
+                // Merge runtime DNS static records from hr-netcore
+                if let Ok(static_data) = state.netcore.dns_static_records().await {
+                    if let Some(dns_obj) = config.get_mut("dns").and_then(|d| d.as_object_mut()) {
+                        dns_obj.insert(
+                            "static_records".to_string(),
+                            serde_json::to_value(&static_data.records).unwrap_or_default(),
+                        );
+                    }
                 }
                 Json(json!({"success": true, "config": config}))
             }
@@ -113,44 +88,27 @@ async fn update_config(
         return Json(json!({"success": false, "error": format!("Rename failed: {}", e)}));
     }
 
-    // Apply config by reloading
+    // Tell hr-netcore to reload config from disk
     reload(State(state)).await
 }
 
 async fn get_leases(State(state): State<ApiState>) -> Json<Value> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    // Get DHCPv4 leases
-    let dhcpv4_leases: Vec<(u64, String, String, Option<String>, Option<String>)> = {
-        let mut dhcp = state.dhcp.write().await;
-        let purged = dhcp.lease_store.purge_expired();
-        if purged > 0 {
-            tracing::info!("Purged {} expired DHCPv4 leases", purged);
-            let _ = dhcp.lease_store.save_to_file();
+    match state.netcore.dhcp_leases().await {
+        Ok(leases) => {
+            let result: Vec<serde_json::Value> = leases
+                .iter()
+                .map(|l| {
+                    json!({
+                        "expiry": l.expiry,
+                        "mac": l.mac,
+                        "ip": l.ip,
+                        "hostname": l.hostname,
+                        "client_id": l.client_id,
+                    })
+                })
+                .collect();
+            Json(json!({"success": true, "leases": result}))
         }
-        dhcp.lease_store
-            .all_leases()
-            .iter()
-            .filter(|l| l.expiry > now)
-            .map(|l| (l.expiry, l.mac.clone(), l.ip.to_string(), l.hostname.clone(), l.client_id.clone()))
-            .collect()
-    };
-
-    let result: Vec<serde_json::Value> = dhcpv4_leases
-        .iter()
-        .map(|(expiry, mac, ip, hostname, client_id)| {
-            json!({
-                "expiry": expiry,
-                "mac": mac,
-                "ip": ip,
-                "hostname": hostname,
-                "client_id": client_id,
-            })
-        })
-        .collect();
-
-    Json(json!({"success": true, "leases": result}))
+        Err(_) => Json(json!({"success": false, "error": "Network core unavailable"})),
+    }
 }
