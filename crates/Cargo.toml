@@ -1,26 +1,34 @@
 [workspace]
 resolver = "2"
 members = [
-    "homeroute",
-    "hr-common",
-    "hr-auth",
-    "hr-acme",
-    "hr-proxy",
-    "hr-dns",
-    "hr-dhcp",
-    "hr-ipv6",
-    "hr-adblock",
-    "hr-api",
-    "hr-container",
-    "hr-registry",
-    "hr-agent",
-    "hr-host-agent",
-    "hr-dataverse",
-    "hr-tunnel",
-    "hr-cloud-relay",
-    "hr-git",
-    "hr-ipc",
-    "hr-netcore",
+    # shared
+    "shared/hr-common",
+    "shared/hr-ipc",
+    # edge (443, 80)
+    "edge/hr-edge",
+    "edge/hr-proxy",
+    "edge/hr-acme",
+    "edge/hr-auth",
+    "edge/hr-tunnel",
+    # netcore (53, 67)
+    "netcore/hr-netcore",
+    "netcore/hr-dns",
+    "netcore/hr-dhcp",
+    "netcore/hr-adblock",
+    "netcore/hr-ipv6",
+    # orchestrator (4001)
+    "orchestrator/hr-orchestrator",
+    "orchestrator/hr-registry",
+    "orchestrator/hr-container",
+    "orchestrator/hr-git",
+    "orchestrator/hr-dataverse",
+    # api (4000)
+    "api/homeroute",
+    "api/hr-api",
+    # agents
+    "agents/hr-agent",
+    "agents/hr-host-agent",
+    "agents/hr-cloud-relay",
 ]
 
 [workspace.package]
@@ -108,7 +116,7 @@ instant-acme = "0.7"
 base64 = "0.22"
 
 # Dataverse
-hr-dataverse = { path = "hr-dataverse" }
+hr-dataverse = { path = "orchestrator/hr-dataverse" }
 
 # QUIC
 quinn = "0.11"

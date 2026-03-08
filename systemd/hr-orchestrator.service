@@ -1,0 +1,24 @@
+[Unit]
+Description=HomeRoute Orchestrator (Containers + Registry + Git + Agents)
+After=network.target hr-edge.service
+Wants=hr-edge.service
+
+[Service]
+Type=simple
+ExecStart=/opt/homeroute/crates/target/release/hr-orchestrator
+WorkingDirectory=/opt/homeroute
+EnvironmentFile=/opt/homeroute/.env
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hr-orchestrator
+
+# Security hardening
+ProtectSystem=strict
+ReadWritePaths=/var/lib/server-dashboard /var/lib/machines /etc/systemd/nspawn /opt/homeroute/data /run /tmp /data
+ReadOnlyPaths=/opt/homeroute/crates/target
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target
