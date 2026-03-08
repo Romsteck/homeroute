@@ -433,7 +433,9 @@ async fn terminal_ws(
 
 async fn handle_terminal_ws(state: ApiState, container_id: String, mut socket: WebSocket) {
     let Some(ref mgr) = state.container_manager else {
-        let _ = socket.send(Message::Close(None)).await;
+        // Thin shell mode: proxy to hr-orchestrator
+        let path = format!("/containers/{container_id}/terminal");
+        super::ws_proxy::proxy_ws_to_orchestrator(socket, &path).await;
         return;
     };
 

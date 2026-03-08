@@ -929,7 +929,8 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
     let registry = match &state.registry {
         Some(r) => r.clone(),
         None => {
-            tracing::warn!("Host agent WS: no registry available");
+            // Thin shell mode: proxy to hr-orchestrator
+            super::ws_proxy::proxy_ws_to_orchestrator(socket, "/host-agents/ws").await;
             return;
         }
     };

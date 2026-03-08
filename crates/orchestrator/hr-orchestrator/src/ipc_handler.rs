@@ -620,18 +620,16 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 }
             }
             OrchestratorRequest::DataverseGetSchema { app_id } => {
-                // Return cached schema from scan_results or ask agent
-                // For now, check if we have cached scan data
-                let results = self.registry.scan_results.read().await;
-                if let Some(_target) = results.get(&app_id) {
-                    IpcResponse::ok_data(&*results)
-                } else {
-                    IpcResponse::err("No cached schema for this application. Agent must report schema first.")
+                let schemas = self.registry.dataverse_schemas.read().await;
+                match schemas.get(&app_id) {
+                    Some(schema) => IpcResponse::ok_data(schema),
+                    None => IpcResponse::err("No cached schema for this application"),
                 }
             }
             OrchestratorRequest::DataverseOverview => {
-                let results = self.registry.scan_results.read().await;
-                IpcResponse::ok_data(&*results)
+                let schemas = self.registry.dataverse_schemas.read().await;
+                let apps: Vec<serde_json::Value> = schemas.values().cloned().collect();
+                IpcResponse::ok_data(serde_json::json!({ "apps": apps }))
             }
 
             // ── Host operations ──────────────────────────────────
@@ -677,6 +675,17 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
             OrchestratorRequest::GetScanResults => {
                 let results = self.registry.scan_results.read().await;
                 IpcResponse::ok_data(&*results)
+            }
+            OrchestratorRequest::StoreScanResult { target } => {
+                if let (Some(id), Ok(t)) = (
+                    target.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    serde_json::from_value::<hr_common::events::UpdateTarget>(target),
+                ) {
+                    self.registry.scan_results.write().await.insert(id, t);
+                    IpcResponse::ok_empty()
+                } else {
+                    IpcResponse::err("invalid target")
+                }
             }
         }
     }

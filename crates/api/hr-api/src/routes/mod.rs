@@ -20,3 +20,4 @@ pub mod dataverse;
 pub mod cloud_relay;
 pub mod store;
 pub mod git;
+pub mod ws_proxy;

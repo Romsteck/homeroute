@@ -832,7 +832,8 @@ async fn agent_ws(
 
 async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
     let Some(registry) = &state.registry else {
-        let _ = socket.send(Message::Close(None)).await;
+        // Thin shell mode: proxy to hr-orchestrator
+        super::ws_proxy::proxy_ws_to_orchestrator(socket, "/agents/ws").await;
         return;
     };
     let registry = registry.clone();

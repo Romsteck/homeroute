@@ -26,6 +26,9 @@ const ORCHESTRATOR_WS_PORT: u16 = 4001;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Install rustls crypto provider (ring)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(

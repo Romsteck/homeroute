@@ -78,6 +78,7 @@ pub enum OrchestratorRequest {
     // ── Updates scan ─────────────────────────────────────────
     ScanUpdates,
     GetScanResults,
+    StoreScanResult { target: serde_json::Value },
 }
 
 // ── OrchestratorClient ───────────────────────────────────────

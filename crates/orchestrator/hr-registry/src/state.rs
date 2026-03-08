@@ -87,6 +87,19 @@ pub struct AgentRegistry {
     dataverse_query_signals: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>>>>,
     /// Cached update scan results per target.
     pub scan_results: Arc<RwLock<HashMap<String, UpdateTarget>>>,
+    /// Cached latest versions (fetched server-side to avoid GitHub rate limits).
+    pub latest_versions: Arc<RwLock<LatestVersionsCache>>,
+    /// Cached Dataverse schemas keyed by app_id (populated by agent SchemaMetadata messages).
+    pub dataverse_schemas: Arc<RwLock<HashMap<String, serde_json::Value>>>,
+}
+
+/// Server-side cache for latest tool versions (avoids GitHub API rate limits from agents).
+#[derive(Debug, Default)]
+pub struct LatestVersionsCache {
+    pub code_server: Option<String>,
+    pub claude_cli: Option<String>,
+    pub claude_ext: Option<String>,
+    pub fetched_at: Option<std::time::Instant>,
 }
 
 impl AgentRegistry {
@@ -127,6 +140,8 @@ impl AgentRegistry {
             terminal_sessions: Arc::new(RwLock::new(HashMap::new())),
             dataverse_query_signals: Arc::new(RwLock::new(HashMap::new())),
             scan_results: Arc::new(RwLock::new(HashMap::new())),
+            latest_versions: Arc::new(RwLock::new(LatestVersionsCache::default())),
+            dataverse_schemas: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -1189,14 +1204,14 @@ impl AgentRegistry {
         tables: Vec<crate::protocol::SchemaTableInfo>,
         relations: Vec<crate::protocol::SchemaRelationInfo>,
         version: u64,
-        _db_size_bytes: u64,
+        db_size_bytes: u64,
     ) {
-        // Look up the app slug
-        let slug = {
+        // Look up the app slug and environment
+        let (slug, environment) = {
             let state = self.state.read().await;
             state.applications.iter()
                 .find(|a| a.id == app_id)
-                .map(|a| a.slug.clone())
+                .map(|a| (a.slug.clone(), a.environment))
                 .unwrap_or_default()
         };
 
@@ -1213,11 +1228,39 @@ impl AgentRegistry {
 
         let _ = self.events.dataverse_schema.send(DataverseSchemaEvent {
             app_id: app_id.to_string(),
-            slug,
+            slug: slug.clone(),
             tables: table_summaries,
             relations_count: relations.len(),
             version,
         });
+
+        // Cache schema for IPC overview/get_schema queries
+        let cached = serde_json::json!({
+            "appId": app_id,
+            "slug": slug,
+            "environment": environment,
+            "tables": tables.iter().map(|t| serde_json::json!({
+                "name": t.name,
+                "slug": t.slug,
+                "columns": t.columns.iter().map(|c| serde_json::json!({
+                    "name": c.name,
+                    "fieldType": c.field_type,
+                    "required": c.required,
+                    "unique": c.unique,
+                })).collect::<Vec<_>>(),
+                "rowsCount": t.row_count,
+            })).collect::<Vec<_>>(),
+            "relations": relations.iter().map(|r| serde_json::json!({
+                "fromTable": r.from_table,
+                "fromColumn": r.from_column,
+                "toTable": r.to_table,
+                "toColumn": r.to_column,
+                "relationType": r.relation_type,
+            })).collect::<Vec<_>>(),
+            "version": version,
+            "dbSizeBytes": db_size_bytes,
+        });
+        self.dataverse_schemas.write().await.insert(app_id.to_string(), cached);
     }
 
     /// Proxy a Dataverse query to an agent and wait for the result.
@@ -1617,8 +1660,12 @@ impl AgentRegistry {
     // ── Unified Update Scan ────────────────────────────────────────
 
     /// Broadcast RunUpdateScan to all connected agents and host-agents.
+    /// Also refreshes the server-side latest versions cache.
     /// Returns count of targets notified.
     pub async fn trigger_update_scan(&self) -> usize {
+        // Refresh latest versions server-side (1 request instead of N agents)
+        self.refresh_latest_versions().await;
+
         let mut count = 0;
 
         // Send to all container agents
@@ -1639,6 +1686,78 @@ impl AgentRegistry {
         info!(count, "Triggered update scan for all targets");
         count
     }
+
+    /// Fetch latest versions from external APIs (server-side, avoids agent rate limits).
+    async fn refresh_latest_versions(&self) {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_default();
+
+        // Use redirect URL to avoid GitHub API rate limits
+        let cs_fut = async {
+            let resp = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(10))
+                .build().ok()?
+                .get("https://github.com/coder/code-server/releases/latest")
+                .header("User-Agent", "hr-orchestrator")
+                .send().await.ok()?;
+            let loc = resp.headers().get("location")?.to_str().ok()?;
+            let tag = loc.rsplit('/').next()?;
+            Some(tag.strip_prefix('v').unwrap_or(tag).to_string())
+        };
+        let ext_fut = fetch_latest_version(&client, "https://open-vsx.org/api/Anthropic/claude-code/latest", |j| {
+            j.get("version")?.as_str().map(|s| s.to_string())
+        });
+        let cli_fut = async {
+            let resp = client.get("https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest")
+                .send().await.ok()?;
+            let t = resp.text().await.ok()?.trim().to_string();
+            if t.is_empty() || t.len() > 20 { None } else { Some(t) }
+        };
+        let (cs, ext, cli) = tokio::join!(cs_fut, ext_fut, cli_fut);
+
+        let mut cache = self.latest_versions.write().await;
+        if cs.is_some() { cache.code_server = cs; }
+        if cli.is_some() { cache.claude_cli = cli; }
+        if ext.is_some() { cache.claude_ext = ext; }
+        cache.fetched_at = Some(std::time::Instant::now());
+        info!(
+            code_server = ?cache.code_server,
+            claude_cli = ?cache.claude_cli,
+            claude_ext = ?cache.claude_ext,
+            "Refreshed latest versions cache"
+        );
+    }
+
+    /// Fill missing `*_latest` fields on an UpdateTarget from server-side cache.
+    pub async fn fill_latest_versions(&self, target: &mut UpdateTarget) {
+        let cache = self.latest_versions.read().await;
+        if target.code_server_installed.is_some() && target.code_server_latest.is_none() {
+            target.code_server_latest = cache.code_server.clone();
+        }
+        if target.claude_cli_installed.is_some() && target.claude_cli_latest.is_none() {
+            target.claude_cli_latest = cache.claude_cli.clone();
+        }
+        if target.claude_ext_installed.is_some() && target.claude_ext_latest.is_none() {
+            target.claude_ext_latest = cache.claude_ext.clone();
+        }
+    }
+}
+
+async fn fetch_latest_version(
+    client: &reqwest::Client,
+    url: &str,
+    extract: impl FnOnce(&serde_json::Value) -> Option<String>,
+) -> Option<String> {
+    let resp = client.get(url)
+        .header("User-Agent", "hr-orchestrator")
+        .send()
+        .await
+        .ok()?;
+    let json: serde_json::Value = resp.json().await.ok()?;
+    extract(&json)
 }
 
 // ── Token helpers ───────────────────────────────────────────────

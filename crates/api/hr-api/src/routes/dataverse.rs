@@ -57,7 +57,19 @@ async fn proxy_query(state: &ApiState, app_id: &str, query: serde_json::Value) -
     }
 }
 
-// ── Existing read-only routes ─────────────────────────────────
+// ── Schema routes (delegate to hr-orchestrator via IPC) ───────
+
+async fn ipc_get_schema(state: &ApiState, app_id: &str) -> Result<serde_json::Value, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    let req = OrchestratorRequest::DataverseGetSchema { app_id: app_id.to_string() };
+    match state.orchestrator.request(&req).await {
+        Ok(r) if r.ok => Ok(r.data.unwrap_or(json!(null))),
+        Ok(r) => {
+            let msg = r.error.unwrap_or_else(|| "Unknown error".to_string());
+            Err((axum::http::StatusCode::NOT_FOUND, Json(json!({"error": msg}))))
+        }
+        Err(e) => Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": format!("IPC error: {e}")})))),
+    }
+}
 
 async fn overview(
     State(state): State<ApiState>,
@@ -81,26 +93,12 @@ async fn app_schema(
     State(state): State<ApiState>,
     Path(app_id): Path<String>,
 ) -> impl IntoResponse {
-    match state.orchestrator.request(&OrchestratorRequest::DataverseGetSchema { app_id: app_id.clone() }).await {
-        Ok(r) if r.ok => {
-            let data = r.data.unwrap_or(json!(null));
-            Json(json!({
-                "data": data,
-                "meta": { "app_id": app_id }
-            })).into_response()
-        }
-        Ok(r) => {
-            let msg = r.error.unwrap_or_else(|| "Unknown error".to_string());
-            let status = if msg.contains("not found") || msg.contains("No schema") {
-                axum::http::StatusCode::NOT_FOUND
-            } else {
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR
-            };
-            (status, Json(json!({"error": msg}))).into_response()
-        }
-        Err(e) => {
-            (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": format!("IPC error: {e}")}))).into_response()
-        }
+    match ipc_get_schema(&state, &app_id).await {
+        Ok(schema) => Json(json!({
+            "data": schema,
+            "meta": { "app_id": app_id }
+        })).into_response(),
+        Err(resp) => resp.into_response(),
     }
 }
 
@@ -108,22 +106,15 @@ async fn app_tables(
     State(state): State<ApiState>,
     Path(app_id): Path<String>,
 ) -> impl IntoResponse {
-    match state.orchestrator.request(&OrchestratorRequest::DataverseGetSchema { app_id: app_id.clone() }).await {
-        Ok(r) if r.ok => {
-            let data = r.data.unwrap_or(json!(null));
-            let tables = data.get("tables").cloned().unwrap_or(json!([]));
+    match ipc_get_schema(&state, &app_id).await {
+        Ok(schema) => {
+            let tables = schema.get("tables").cloned().unwrap_or(json!([]));
             Json(json!({
                 "tables": tables,
                 "meta": { "app_id": app_id }
             })).into_response()
         }
-        Ok(r) => {
-            let msg = r.error.unwrap_or_else(|| "No schema data for this application".to_string());
-            (axum::http::StatusCode::NOT_FOUND, Json(json!({"error": msg}))).into_response()
-        }
-        Err(e) => {
-            (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": format!("IPC error: {e}")}))).into_response()
-        }
+        Err(resp) => resp.into_response(),
     }
 }
 
@@ -131,30 +122,21 @@ async fn app_table(
     State(state): State<ApiState>,
     Path((app_id, table_name)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    match state.orchestrator.request(&OrchestratorRequest::DataverseGetSchema { app_id: app_id.clone() }).await {
-        Ok(r) if r.ok => {
-            let data = r.data.unwrap_or(json!(null));
-            let tables = data.get("tables").and_then(|t| t.as_array());
-            match tables {
-                Some(tables) => {
-                    match tables.iter().find(|t| t.get("name").and_then(|n| n.as_str()) == Some(&table_name)) {
-                        Some(table) => Json(json!({
-                            "table": table,
-                            "meta": { "app_id": app_id }
-                        })).into_response(),
-                        None => (axum::http::StatusCode::NOT_FOUND, Json(json!({"error": format!("Table '{}' not found", table_name)}))).into_response(),
-                    }
-                }
-                None => (axum::http::StatusCode::NOT_FOUND, Json(json!({"error": "No schema data for this application"}))).into_response(),
+    match ipc_get_schema(&state, &app_id).await {
+        Ok(schema) => {
+            let tables = schema.get("tables").and_then(|t| t.as_array());
+            let found = tables.and_then(|arr| {
+                arr.iter().find(|t| t.get("name").and_then(|n| n.as_str()) == Some(&table_name))
+            });
+            match found {
+                Some(table) => Json(json!({
+                    "table": table,
+                    "meta": { "app_id": app_id }
+                })).into_response(),
+                None => (axum::http::StatusCode::NOT_FOUND, Json(json!({"error": format!("Table '{}' not found", table_name)}))).into_response(),
             }
         }
-        Ok(r) => {
-            let msg = r.error.unwrap_or_else(|| "No schema data for this application".to_string());
-            (axum::http::StatusCode::NOT_FOUND, Json(json!({"error": msg}))).into_response()
-        }
-        Err(e) => {
-            (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": format!("IPC error: {e}")}))).into_response()
-        }
+        Err(resp) => resp.into_response(),
     }
 }
 
@@ -162,22 +144,15 @@ async fn app_relations(
     State(state): State<ApiState>,
     Path(app_id): Path<String>,
 ) -> impl IntoResponse {
-    match state.orchestrator.request(&OrchestratorRequest::DataverseGetSchema { app_id: app_id.clone() }).await {
-        Ok(r) if r.ok => {
-            let data = r.data.unwrap_or(json!(null));
-            let relations = data.get("relations").cloned().unwrap_or(json!([]));
+    match ipc_get_schema(&state, &app_id).await {
+        Ok(schema) => {
+            let relations = schema.get("relations").cloned().unwrap_or(json!([]));
             Json(json!({
                 "relations": relations,
                 "meta": { "app_id": app_id }
             })).into_response()
         }
-        Ok(r) => {
-            let msg = r.error.unwrap_or_else(|| "No schema data for this application".to_string());
-            (axum::http::StatusCode::NOT_FOUND, Json(json!({"error": msg}))).into_response()
-        }
-        Err(e) => {
-            (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": format!("IPC error: {e}")}))).into_response()
-        }
+        Err(resp) => resp.into_response(),
     }
 }
 
@@ -185,35 +160,26 @@ async fn app_stats(
     State(state): State<ApiState>,
     Path(app_id): Path<String>,
 ) -> impl IntoResponse {
-    match state.orchestrator.request(&OrchestratorRequest::DataverseGetSchema { app_id: app_id.clone() }).await {
-        Ok(r) if r.ok => {
-            let data = r.data.unwrap_or(json!(null));
-            // Extract stats from schema data
-            let tables = data.get("tables").and_then(|t| t.as_array());
-            let total_rows: u64 = tables.map(|ts| {
-                ts.iter().filter_map(|t| t.get("row_count").and_then(|r| r.as_u64())).sum()
+    match ipc_get_schema(&state, &app_id).await {
+        Ok(schema) => {
+            let tables = schema.get("tables").and_then(|t| t.as_array());
+            let tables_count = tables.map(|a| a.len()).unwrap_or(0);
+            let total_rows: u64 = tables.map(|arr| {
+                arr.iter().filter_map(|t| t.get("rowsCount").and_then(|v| v.as_u64())).sum()
             }).unwrap_or(0);
-            let tables_count = tables.map(|ts| ts.len()).unwrap_or(0);
-            let relations_count = data.get("relations").and_then(|r| r.as_array()).map(|a| a.len()).unwrap_or(0);
-            let db_size_bytes = data.get("db_size_bytes").and_then(|d| d.as_u64()).unwrap_or(0);
-            let version = data.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
-            let last_updated = data.get("last_updated").and_then(|l| l.as_str()).unwrap_or("");
+            let relations_count = schema.get("relations").and_then(|r| r.as_array()).map(|a| a.len()).unwrap_or(0);
+            let db_size_bytes = schema.get("dbSizeBytes").and_then(|v| v.as_u64()).unwrap_or(0);
+            let version = schema.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
             Json(json!({
                 "dbSizeBytes": db_size_bytes,
                 "tablesCount": tables_count,
                 "relationsCount": relations_count,
                 "totalRows": total_rows,
                 "version": version,
-                "meta": { "app_id": app_id, "last_updated": last_updated }
+                "meta": { "app_id": app_id }
             })).into_response()
         }
-        Ok(r) => {
-            let msg = r.error.unwrap_or_else(|| "No schema data for this application".to_string());
-            (axum::http::StatusCode::NOT_FOUND, Json(json!({"error": msg}))).into_response()
-        }
-        Err(e) => {
-            (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": format!("IPC error: {e}")}))).into_response()
-        }
+        Err(resp) => resp.into_response(),
     }
 }
 
@@ -248,7 +214,7 @@ async fn query_rows(
         .unwrap_or_default();
 
     let query = json!({
-        "type": "query_rows",
+        "action": "query_rows",
         "table_name": table_name,
         "filters": filters,
         "limit": params.limit,
@@ -270,7 +236,7 @@ async fn insert_rows(
     Json(body): Json<InsertBody>,
 ) -> impl IntoResponse {
     let query = json!({
-        "type": "insert_rows",
+        "action": "insert_rows",
         "table_name": table_name,
         "rows": body.rows,
     });
@@ -289,7 +255,7 @@ async fn update_rows(
     Json(body): Json<UpdateBody>,
 ) -> impl IntoResponse {
     let query = json!({
-        "type": "update_rows",
+        "action": "update_rows",
         "table_name": table_name,
         "updates": body.updates,
         "filters": body.filters,
@@ -308,7 +274,7 @@ async fn delete_rows(
     Json(body): Json<DeleteBody>,
 ) -> impl IntoResponse {
     let query = json!({
-        "type": "delete_rows",
+        "action": "delete_rows",
         "table_name": table_name,
         "filters": body.filters,
     });
@@ -325,7 +291,7 @@ async fn count_rows(
         .unwrap_or_default();
 
     let query = json!({
-        "type": "count_rows",
+        "action": "count_rows",
         "table_name": table_name,
         "filters": filters,
     });
@@ -336,7 +302,7 @@ async fn app_migrations(
     State(state): State<ApiState>,
     Path(app_id): Path<String>,
 ) -> impl IntoResponse {
-    let query = json!({ "type": "get_migrations" });
+    let query = json!({ "action": "get_migrations" });
     proxy_query(&state, &app_id, query).await.into_response()
 }
 
