@@ -103,7 +103,7 @@ async fn delete_container(
                 state.proxy.remove_app_route(&domain);
             }
             if let Some(ip) = app.ipv4_address {
-                super::applications::remove_agent_dns_records(&state.dns, &ip.to_string()).await;
+                super::applications::remove_agent_dns_records(&state.netcore, &ip.to_string()).await;
             }
         }
     }

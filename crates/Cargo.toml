@@ -19,6 +19,8 @@ members = [
     "hr-tunnel",
     "hr-cloud-relay",
     "hr-git",
+    "hr-ipc",
+    "hr-netcore",
 ]
 
 [workspace.package]

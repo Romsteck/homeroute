@@ -1,11 +1,38 @@
 # HomeRoute Build System
 # Usage: make all, make deploy, make test
+# DEV server: cloudmaster (10.0.0.10) — build only
+# PROD server: 10.0.0.254 — runs homeroute
 
-.PHONY: server web studio all deploy test clean store agent
+PROD_HOST := root@10.0.0.254
+PROD_DIR  := /opt/homeroute
+PROD_API  := http://10.0.0.254:4000
 
-# Build server binary
+.PHONY: server netcore web studio all deploy deploy-prod deploy-netcore test clean store agent agent-prod check-prod check-not-prod
+
+SHELL := /bin/bash
+
+# Safety: block local deploy on dev server
+check-not-prod:
+	@if systemctl is-active --quiet homeroute 2>/dev/null; then \
+		echo "OK: homeroute is running locally, assuming production server."; \
+	else \
+		echo "⛔ homeroute is NOT running locally. Use 'make deploy-prod' to deploy to production." && exit 1; \
+	fi
+
+# Safety: verify prod is reachable
+check-prod:
+	@echo "Checking production server..."
+	@ssh -o ConnectTimeout=5 -o BatchMode=yes $(PROD_HOST) 'systemctl is-active homeroute' > /dev/null 2>&1 \
+		|| (echo "⛔ Cannot reach production server or homeroute is not running" && exit 1)
+	@echo "✓ Production server OK"
+
+# Build hr-netcore binary (DNS/DHCP/Adblock/IPv6)
+netcore:
+	cd crates && cargo build --release -p hr-netcore
+
+# Build server binary (API/Proxy/Auth/etc.)
 server:
-	cd crates && cargo build --release
+	cd crates && cargo build --release -p homeroute
 
 # Build Vite React frontend
 web:
@@ -15,19 +42,39 @@ web:
 studio:
 	cd web-studio && npm install --silent && npm run build
 
-# Full build (studio + server + frontend)
-all: studio server web
+# Full build (studio + netcore + server + frontend)
+all: studio netcore server web
 
-# Deploy (build + restart service)
-deploy: all
+# Deploy locally (only works on prod server itself)
+deploy: check-not-prod all
 	systemctl restart homeroute
+
+# Deploy to production from dev server (does NOT restart hr-netcore)
+deploy-prod: check-prod all
+	@echo "Deploying to production ($(PROD_HOST))..."
+	rsync -az --info=progress2 crates/target/release/homeroute $(PROD_HOST):$(PROD_DIR)/crates/target/release/homeroute
+	rsync -az --info=progress2 crates/target/release/hr-netcore $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-netcore
+	rsync -az --delete web/dist/ $(PROD_HOST):$(PROD_DIR)/web/dist/
+	rsync -az --delete web-studio/dist/ $(PROD_HOST):$(PROD_DIR)/web-studio/dist/
+	ssh $(PROD_HOST) 'systemctl restart homeroute'
+	@sleep 2
+	@curl -sf $(PROD_API)/api/health | python3 -m json.tool \
+		&& echo "✓ Deploy OK" \
+		|| (echo "⛔ Health check FAILED — check logs: ssh $(PROD_HOST) journalctl -u homeroute -n 50" && exit 1)
+
+# Deploy hr-netcore separately (rare — only when DNS/DHCP/Adblock/IPv6 code changes)
+deploy-netcore: check-prod netcore
+	@echo "Deploying hr-netcore to production..."
+	rsync -az --info=progress2 crates/target/release/hr-netcore $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-netcore
+	ssh $(PROD_HOST) 'systemctl restart hr-netcore'
+	@sleep 1
+	@echo "✓ hr-netcore deployed"
 
 # Run tests
 test:
 	cd crates && cargo test
 
-# Build hr-agent binary (auto-increments version, deploys to containers)
-SHELL := /bin/bash
+# Build hr-agent binary (auto-increments version)
 agent:
 	@CURRENT=$$(grep '^version' crates/hr-agent/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/') && \
 	MAJOR=$$(echo "$$CURRENT" | cut -d. -f1) && \
@@ -41,7 +88,15 @@ agent:
 	cp crates/target/release/hr-agent data/agent-binaries/hr-agent && \
 	echo "$$NEW_VERSION" > data/agent-binaries/hr-agent.version && \
 	echo "hr-agent v$$NEW_VERSION → data/agent-binaries/" && \
-	echo "Run: curl -X POST http://localhost:4000/api/applications/agents/update"
+	echo "Run: make agent-prod   (to push to production containers)"
+
+# Deploy hr-agent to production containers
+agent-prod: check-prod
+	@echo "Pushing hr-agent to production..."
+	rsync -az data/agent-binaries/ $(PROD_HOST):$(PROD_DIR)/data/agent-binaries/
+	ssh $(PROD_HOST) 'curl -sf -X POST http://localhost:4000/api/applications/agents/update' \
+		&& echo "✓ Agent update triggered on production" \
+		|| echo "⛔ Agent update failed"
 
 # Build Flutter store APK (auto-increments versionCode)
 store:
