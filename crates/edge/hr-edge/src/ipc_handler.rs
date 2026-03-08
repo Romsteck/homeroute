@@ -1,0 +1,264 @@
+use std::sync::Arc;
+
+use hr_ipc::edge::EdgeRequest;
+use hr_ipc::server::IpcHandler;
+use hr_ipc::types::IpcResponse;
+
+pub struct EdgeHandler {
+    pub auth: Arc<hr_auth::AuthService>,
+    pub acme: Arc<hr_acme::AcmeManager>,
+    pub proxy: Arc<hr_proxy::ProxyState>,
+    pub tls_manager: Arc<hr_proxy::TlsManager>,
+    pub cloud_relay_status: Arc<tokio::sync::RwLock<Option<crate::CloudRelayInfo>>>,
+    pub cloud_relay_enabled: tokio::sync::watch::Sender<bool>,
+    pub cloud_relay_cmd_tx: Option<tokio::sync::mpsc::Sender<hr_common::events::CloudRelayCommand>>,
+    pub env: Arc<hr_common::config::EnvConfig>,
+}
+
+impl IpcHandler<EdgeRequest, IpcResponse> for EdgeHandler {
+    async fn handle(&self, request: EdgeRequest) -> IpcResponse {
+        match request {
+            // ── Route management ──────────────────────────────────
+            EdgeRequest::SetAppRoute {
+                domain,
+                app_id,
+                host_id,
+                target_ip,
+                target_port,
+                auth_required,
+                allowed_groups,
+                local_only,
+            } => {
+                let ip: std::net::Ipv4Addr = match target_ip.parse() {
+                    Ok(ip) => ip,
+                    Err(e) => return IpcResponse::err(format!("Invalid IP: {}", e)),
+                };
+                self.proxy.set_app_route(
+                    domain,
+                    hr_proxy::AppRoute {
+                        app_id,
+                        host_id,
+                        target_ip: ip,
+                        target_port,
+                        auth_required,
+                        allowed_groups,
+                        local_only,
+                    },
+                );
+                IpcResponse::ok_empty()
+            }
+            EdgeRequest::RemoveAppRoute { domain } => {
+                self.proxy.remove_app_route(&domain);
+                IpcResponse::ok_empty()
+            }
+            EdgeRequest::ListAppRoutes => {
+                IpcResponse::ok_data(self.proxy.config().routes)
+            }
+
+            // ── Proxy config ──────────────────────────────────────
+            EdgeRequest::ReloadConfig => {
+                match hr_proxy::ProxyConfig::load_from_file(&self.env.proxy_config_path) {
+                    Ok(new_config) => {
+                        if let Err(e) = self.tls_manager.reload_certificates(&new_config.routes) {
+                            return IpcResponse::err(format!("TLS reload failed: {}", e));
+                        }
+                        self.proxy.reload_config(new_config);
+                        IpcResponse::ok_empty()
+                    }
+                    Err(e) => IpcResponse::err(format!("Config reload failed: {}", e)),
+                }
+            }
+            EdgeRequest::GetProxyConfig => {
+                IpcResponse::ok_data(self.proxy.config())
+            }
+            EdgeRequest::SaveProxyConfig { config } => {
+                match serde_json::to_string_pretty(&config) {
+                    Ok(json) => {
+                        if let Err(e) = std::fs::write(&self.env.proxy_config_path, &json) {
+                            return IpcResponse::err(format!("Failed to write config: {}", e));
+                        }
+                        // Trigger reload after save
+                        match hr_proxy::ProxyConfig::load_from_file(&self.env.proxy_config_path) {
+                            Ok(new_config) => {
+                                if let Err(e) =
+                                    self.tls_manager.reload_certificates(&new_config.routes)
+                                {
+                                    return IpcResponse::err(format!(
+                                        "TLS reload failed: {}",
+                                        e
+                                    ));
+                                }
+                                self.proxy.reload_config(new_config);
+                                IpcResponse::ok_empty()
+                            }
+                            Err(e) => {
+                                IpcResponse::err(format!("Config reload failed: {}", e))
+                            }
+                        }
+                    }
+                    Err(e) => IpcResponse::err(format!("Invalid config JSON: {}", e)),
+                }
+            }
+
+            // ── ACME ──────────────────────────────────────────────
+            EdgeRequest::AcmeStatus => IpcResponse::ok_data(serde_json::json!({
+                "initialized": self.acme.is_initialized(),
+            })),
+            EdgeRequest::AcmeListCertificates => match self.acme.list_certificates() {
+                Ok(certs) => IpcResponse::ok_data(certs),
+                Err(e) => IpcResponse::err(format!("{}", e)),
+            },
+            EdgeRequest::AcmeRequestAppWildcard { slug } => {
+                match self.acme.request_app_wildcard(&slug).await {
+                    Ok(cert) => IpcResponse::ok_data(cert),
+                    Err(e) => IpcResponse::err(format!("{}", e)),
+                }
+            }
+            EdgeRequest::AcmeRenewAll => {
+                IpcResponse::ok_data("renewal triggered")
+            }
+
+            // ── Auth ──────────────────────────────────────────────
+            EdgeRequest::AuthLogin {
+                username,
+                password,
+                client_ip,
+            } => {
+                // Look up user with password hash, then verify
+                match self.auth.users.get_with_password(&username) {
+                    Some(user) => {
+                        if hr_auth::users::verify_password(&password, &user.password_hash) {
+                            self.auth.users.update_last_login(&username);
+                            match self.auth.sessions.create(
+                                &username,
+                                Some(&client_ip),
+                                None,
+                                false,
+                            ) {
+                                Ok((token, expires_at)) => {
+                                    IpcResponse::ok_data(serde_json::json!({
+                                        "token": token,
+                                        "expires_at": expires_at,
+                                        "username": username,
+                                    }))
+                                }
+                                Err(e) => {
+                                    IpcResponse::err(format!("Session creation failed: {}", e))
+                                }
+                            }
+                        } else {
+                            IpcResponse::err("Invalid credentials")
+                        }
+                    }
+                    None => IpcResponse::err("Invalid credentials"),
+                }
+            }
+            EdgeRequest::AuthLogout { session_token } => {
+                let _ = self.auth.sessions.delete(&session_token);
+                IpcResponse::ok_empty()
+            }
+            EdgeRequest::AuthValidateSession { session_token } => {
+                match self.auth.sessions.validate(&session_token) {
+                    Ok(Some(session)) => IpcResponse::ok_data(session),
+                    Ok(None) => IpcResponse::err("Invalid session"),
+                    Err(e) => IpcResponse::err(format!("Session lookup failed: {}", e)),
+                }
+            }
+            EdgeRequest::AuthListSessions => {
+                // SessionStore does not have list_all; not implemented yet
+                IpcResponse::err("Not implemented: list sessions")
+            }
+            EdgeRequest::AuthListUsers => {
+                // UserStore does not have a list method; not implemented yet
+                IpcResponse::err("Not implemented: list users")
+            }
+            EdgeRequest::AuthCreateUser {
+                username: _,
+                password: _,
+                groups: _,
+            } => {
+                // UserStore does not have a create method; not implemented yet
+                IpcResponse::err("Not implemented: create user")
+            }
+            EdgeRequest::AuthDeleteUser { username: _ } => {
+                // UserStore does not have a delete method; not implemented yet
+                IpcResponse::err("Not implemented: delete user")
+            }
+            EdgeRequest::AuthChangePassword {
+                username,
+                old_password,
+                new_password,
+            } => {
+                // Verify old password first
+                match self.auth.users.get_with_password(&username) {
+                    Some(user) => {
+                        if hr_auth::users::verify_password(&old_password, &user.password_hash) {
+                            match self.auth.users.change_password(&username, &new_password) {
+                                Ok(()) => IpcResponse::ok_empty(),
+                                Err(e) => IpcResponse::err(e),
+                            }
+                        } else {
+                            IpcResponse::err("Invalid current password")
+                        }
+                    }
+                    None => IpcResponse::err("User not found"),
+                }
+            }
+
+            // ── Cloud relay ───────────────────────────────────────
+            EdgeRequest::CloudRelayStatus => {
+                let status = self.cloud_relay_status.read().await;
+                match status.as_ref() {
+                    Some(info) => IpcResponse::ok_data(serde_json::json!({
+                        "enabled": true,
+                        "status": info.status.to_string(),
+                        "vps_ipv4": info.vps_ipv4,
+                        "latency_ms": info.latency_ms,
+                        "active_streams": info.active_streams,
+                    })),
+                    None => IpcResponse::ok_data(serde_json::json!({
+                        "enabled": *self.cloud_relay_enabled.borrow(),
+                        "status": "disconnected",
+                    })),
+                }
+            }
+            EdgeRequest::CloudRelayEnable => {
+                let _ = self.cloud_relay_enabled.send(true);
+                IpcResponse::ok_empty()
+            }
+            EdgeRequest::CloudRelayDisable => {
+                let _ = self.cloud_relay_enabled.send(false);
+                IpcResponse::ok_empty()
+            }
+            EdgeRequest::CloudRelayPushBinary { path, sha256 } => {
+                if let Some(tx) = &self.cloud_relay_cmd_tx {
+                    let binary_data = match std::fs::read(&path) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            return IpcResponse::err(format!("Failed to read binary: {}", e))
+                        }
+                    };
+                    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                    if tx
+                        .send(hr_common::events::CloudRelayCommand::PushBinaryUpdate {
+                            binary_data,
+                            sha256,
+                            response_tx: resp_tx,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return IpcResponse::err("Tunnel not connected");
+                    }
+                    match resp_rx.await {
+                        Ok(Ok(msg)) => IpcResponse::ok_data(msg),
+                        Ok(Err(e)) => IpcResponse::err(e),
+                        Err(_) => IpcResponse::err("No response from tunnel"),
+                    }
+                } else {
+                    IpcResponse::err("Cloud relay not configured")
+                }
+            }
+        }
+    }
+}

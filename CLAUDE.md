@@ -2,36 +2,73 @@
 
 ## Architecture
 
-HomeRoute utilise **deux binaires** pour isoler les services réseau critiques :
+HomeRoute utilise **4 binaires** communiquant via IPC Unix sockets :
+
+```
+hr-edge (443, 80)                hr-orchestrator (4001)
+  ├─ hr-proxy (reverse proxy)      ├─ hr-registry (agents)
+  ├─ hr-acme (Let's Encrypt)       ├─ hr-container (nspawn)
+  ├─ hr-auth (sessions)            ├─ hr-git (bare repos)
+  └─ hr-tunnel (QUIC client)       └─ WebSocket agents/hosts
+         │                                │
+         └──────── IPC ───────────────────┘
+                     │
+                 homeroute (4000)         hr-netcore (53, 67)
+                   ├─ hr-api (REST)        ├─ hr-dns
+                   ├─ WebSocket events     ├─ hr-dhcp
+                   └─ SPA web/dist         ├─ hr-adblock
+                                           └─ hr-ipv6
+```
 
 - **`hr-netcore`** : DNS, DHCP, Adblock, IPv6 — ne redémarre quasi jamais
-- **`homeroute`** : API, Proxy HTTPS, Auth, ACME, Containers, Cloud relay — redémarre à chaque deploy
-- **Communication** : IPC Unix socket (`/run/hr-netcore.sock`, JSON-line)
+- **`hr-edge`** : Reverse proxy HTTPS, TLS/ACME, Auth, Cloud relay tunnel — restart rare
+- **`hr-orchestrator`** : Containers nspawn, Agent registry, Git, WebSocket agents/hosts — restart modéré
+- **`homeroute`** : API REST thin shell, WebSocket events frontend, SPA — restart fréquent (zéro impact proxy)
+- **Communication** : IPC Unix sockets (`/run/hr-{service}.sock`, JSON-line)
 - **Frontend** : React/Vite dans `web/` — fichiers statiques servis par Rust
-- **Services** : `hr-netcore.service` + `homeroute.service` (systemd)
+- **Services** : `hr-netcore.service` + `hr-edge.service` + `hr-orchestrator.service` + `homeroute.service`
 
 ### Cargo Workspace
 
 ```
 crates/
-├── homeroute/       # Binaire API/Proxy (supervisor)
-├── hr-netcore/      # Binaire réseau (DNS/DHCP/Adblock/IPv6)
-├── hr-ipc/          # Protocole IPC Unix socket (partagé)
-├── hr-common/       # Types partagés, config, EventBus
-├── hr-auth/         # Auth (SQLite sessions, YAML users, Argon2id)
-├── hr-proxy/        # Reverse proxy HTTPS (TLS/SNI, WebSocket)
-├── hr-dns/          # DNS (UDP/TCP port 53, cache, upstream)
-├── hr-dhcp/         # DHCP (DHCPv4, leases, DORA)
-├── hr-ipv6/         # IPv6 RA + DHCPv6 stateless
-├── hr-adblock/      # Adblock (FxHashSet, sources, whitelist)
-├── hr-acme/         # ACME Let's Encrypt (DNS-01 Cloudflare)
-├── hr-firewall/     # Firewall IPv6 (nftables)
-├── hr-container/    # Containers systemd-nspawn
-├── hr-registry/     # Registry applications/agents
-├── hr-agent/        # Agent binaire dans les containers nspawn
-├── hr-host-agent/   # Agent hôte
-└── hr-api/          # API HTTP (axum, /api/*, WebSocket)
+├── shared/                    # Fondations partagées
+│   ├── hr-common/             #   types, config, EventBus, supervisor
+│   └── hr-ipc/                #   transport Unix socket, protocoles IPC
+├── edge/                      # Service hr-edge (443, 80)
+│   ├── hr-edge/               #   binaire
+│   ├── hr-proxy/              #   reverse proxy HTTPS, SNI, WebSocket
+│   ├── hr-acme/               #   ACME Let's Encrypt (DNS-01 Cloudflare)
+│   ├── hr-auth/               #   sessions SQLite, Argon2id
+│   └── hr-tunnel/             #   client QUIC vers cloud relay
+├── netcore/                   # Service hr-netcore (53, 67)
+│   ├── hr-netcore/            #   binaire
+│   ├── hr-dns/                #   DNS UDP/TCP, cache, upstream
+│   ├── hr-dhcp/               #   DHCPv4, leases, DORA
+│   ├── hr-adblock/            #   FxHashSet, sources, whitelist
+│   └── hr-ipv6/               #   RA + DHCPv6 stateless
+├── orchestrator/              # Service hr-orchestrator (4001)
+│   ├── hr-orchestrator/       #   binaire
+│   ├── hr-registry/           #   applications, agents WebSocket
+│   ├── hr-container/          #   systemd-nspawn lifecycle
+│   ├── hr-git/                #   bare repos, Smart HTTP
+│   └── hr-dataverse/          #   schémas + requêtes SQLite agents
+├── api/                       # Service homeroute (4000)
+│   ├── homeroute/             #   binaire (thin shell)
+│   └── hr-api/                #   routes axum, WebSocket events
+└── agents/                    # Binaires autonomes
+    ├── hr-agent/              #   agent dans containers nspawn
+    ├── hr-host-agent/         #   agent hôte distant
+    └── hr-cloud-relay/        #   serveur QUIC relay (VPS)
 ```
+
+### IPC Sockets
+
+| Socket | Protocole | Propriétaire |
+|--------|-----------|-------------|
+| `/run/hr-netcore.sock` | `IpcRequest` / `IpcResponse` | hr-netcore |
+| `/run/hr-edge.sock` | `EdgeRequest` / `IpcResponse` | hr-edge |
+| `/run/hr-orchestrator.sock` | `OrchestratorRequest` / `IpcResponse` | hr-orchestrator |
 
 ## Stockage
 
@@ -39,20 +76,23 @@ crates/
 |---------|--------|
 | Sessions SQLite | `/opt/homeroute/data/auth.db` |
 | Users YAML | `/opt/homeroute/data/users.yml` |
-| Hosts JSON | `/opt/homeroute/data/hosts.json` |
+| Hosts JSON | `/data/hosts.json` |
 | Config proxy/DNS/DHCP | `/var/lib/server-dashboard/*.json` |
 | Certificats ACME | `/var/lib/server-dashboard/acme/` |
+| Agent registry | `/var/lib/server-dashboard/agent-registry.json` |
+| Containers V2 | `/var/lib/server-dashboard/containers-v2.json` |
 | Env config | `/opt/homeroute/.env` |
 
 ## Ports
 
 | Port | Service | Binaire |
 |------|---------|---------|
-| 443 | HTTPS reverse proxy (hr-proxy) | homeroute |
-| 80 | HTTP→HTTPS redirect | homeroute |
-| 4000 | API management (hr-api) | homeroute |
-| 53 | DNS (hr-dns) | hr-netcore |
-| 67 | DHCP (hr-dhcp) | hr-netcore |
+| 443 | HTTPS reverse proxy | hr-edge |
+| 80 | HTTP→HTTPS redirect | hr-edge |
+| 4000 | API management REST | homeroute |
+| 4001 | Orchestrator (WebSocket agents/hosts) | hr-orchestrator |
+| 53 | DNS | hr-netcore |
+| 67 | DHCP | hr-netcore |
 
 ## Cloudflare
 
@@ -72,25 +112,29 @@ crates/
 ```bash
 # Build (sûr sur dev)
 make server          # cargo build --release -p homeroute
+make edge            # cargo build --release -p hr-edge
+make orchestrator    # cargo build --release -p hr-orchestrator
 make netcore         # cargo build --release -p hr-netcore
 make web             # npm run build (web/) seulement
 make agent           # build hr-agent (auto-incrémente version)
 make test            # cargo test
 
 # Déploiement vers la production (depuis dev)
-make deploy-prod     # build all + rsync + restart homeroute (PAS hr-netcore) + health check
-make deploy-netcore  # build + rsync + restart hr-netcore (rare, seulement si DNS/DHCP change)
-make agent-prod      # push hr-agent vers les containers de prod
+make deploy-prod         # build all + rsync + restart homeroute + health check
+make deploy-edge         # build + rsync + restart hr-edge seul
+make deploy-orchestrator # build + rsync + restart hr-orchestrator seul
+make deploy-netcore      # build + rsync + restart hr-netcore (rare)
+make agent-prod          # push hr-agent vers les containers de prod
 
 # Déploiement local (UNIQUEMENT sur le serveur de prod lui-même)
 make deploy          # build all + systemctl restart (bloqué sur dev)
 
 # Monitoring prod (via SSH)
-ssh root@10.0.0.254 'journalctl -u homeroute -f'
+ssh root@10.0.0.254 'journalctl -u homeroute -u hr-edge -u hr-orchestrator -f'
 ssh root@10.0.0.254 'journalctl -u hr-netcore -f'
 curl -s http://10.0.0.254:4000/api/health | jq
-ssh root@10.0.0.254 'systemctl reload homeroute'   # hot-reload proxy config (SIGHUP)
-ssh root@10.0.0.254 'systemctl reload hr-netcore'  # hot-reload DNS/DHCP/Adblock config (SIGHUP)
+ssh root@10.0.0.254 'systemctl reload hr-edge'      # hot-reload proxy config (SIGHUP)
+ssh root@10.0.0.254 'systemctl reload hr-netcore'    # hot-reload DNS/DHCP/Adblock (SIGHUP)
 ```
 
 ## Règles obligatoires
@@ -98,8 +142,10 @@ ssh root@10.0.0.254 'systemctl reload hr-netcore'  # hot-reload DNS/DHCP/Adblock
 - **JAMAIS** `cargo run` directement — utiliser `make deploy-prod` depuis dev
 - **JAMAIS** `make deploy` sur le serveur de dev (bloqué par sécurité)
 - **JAMAIS** `systemctl start/restart homeroute` sur le serveur de dev
-- **TOUJOURS** `make deploy-prod` après modification du backend Rust (depuis dev) — ne restart que homeroute, DNS reste up
-- **TOUJOURS** `make deploy-netcore` si modification de hr-dns, hr-dhcp, hr-ipv6, hr-adblock, hr-netcore ou hr-ipc
+- **TOUJOURS** `make deploy-prod` après modification du backend Rust (depuis dev)
+- **TOUJOURS** `make deploy-edge` si modification de hr-proxy, hr-acme, hr-auth, hr-tunnel, hr-edge
+- **TOUJOURS** `make deploy-orchestrator` si modification de hr-registry, hr-container, hr-git, hr-orchestrator
+- **TOUJOURS** `make deploy-netcore` si modification de hr-dns, hr-dhcp, hr-ipv6, hr-adblock, hr-netcore
 - **TOUJOURS** `make agent && make agent-prod` après modification du crate `hr-agent`
 - Exécuter les commandes dans les containers via **`POST /api/applications/{id}/exec`** (pas machinectl)
 - Passer les commandes comme un seul string bash : `command: ["cmd"]`

@@ -1,0 +1,28 @@
+[package]
+name = "homeroute"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "homeroute"
+path = "src/main.rs"
+
+[dependencies]
+hr-common = { path = "../../shared/hr-common" }
+hr-auth = { path = "../../edge/hr-auth" }
+hr-acme = { path = "../../edge/hr-acme" }
+hr-ipc = { path = "../../shared/hr-ipc" }
+hr-api = { path = "../hr-api" }
+
+hr-registry = { path = "../../orchestrator/hr-registry" }
+hr-container = { path = "../../orchestrator/hr-container" }
+hr-git = { path = "../../orchestrator/hr-git" }
+
+uuid = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -7,7 +7,7 @@ PROD_HOST := root@10.0.0.254
 PROD_DIR  := /opt/homeroute
 PROD_API  := http://10.0.0.254:4000
 
-.PHONY: server netcore web studio all deploy deploy-prod deploy-netcore test clean store agent agent-prod check-prod check-not-prod
+.PHONY: server netcore edge orchestrator web studio all deploy deploy-prod deploy-netcore deploy-edge deploy-orchestrator test clean store agent agent-prod check-prod check-not-prod
 
 SHELL := /bin/bash
 
@@ -30,6 +30,14 @@ check-prod:
 netcore:
 	cd crates && cargo build --release -p hr-netcore
 
+# Build hr-edge binary (Proxy/TLS/ACME/Auth/Tunnel)
+edge:
+	cd crates && cargo build --release -p hr-edge
+
+# Build hr-orchestrator binary (Containers/Registry/Git)
+orchestrator:
+	cd crates && cargo build --release -p hr-orchestrator
+
 # Build server binary (API/Proxy/Auth/etc.)
 server:
 	cd crates && cargo build --release -p homeroute
@@ -42,8 +50,8 @@ web:
 studio:
 	cd web-studio && npm install --silent && npm run build
 
-# Full build (studio + netcore + server + frontend)
-all: studio netcore server web
+# Full build (studio + netcore + edge + orchestrator + server + frontend)
+all: studio netcore edge orchestrator server web
 
 # Deploy locally (only works on prod server itself)
 deploy: check-not-prod all
@@ -53,14 +61,33 @@ deploy: check-not-prod all
 deploy-prod: check-prod all
 	@echo "Deploying to production ($(PROD_HOST))..."
 	rsync -az --info=progress2 crates/target/release/homeroute $(PROD_HOST):$(PROD_DIR)/crates/target/release/homeroute
+	rsync -az --info=progress2 crates/target/release/hr-edge $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-edge
+	rsync -az --info=progress2 crates/target/release/hr-orchestrator $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-orchestrator
 	rsync -az --info=progress2 crates/target/release/hr-netcore $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-netcore
 	rsync -az --delete web/dist/ $(PROD_HOST):$(PROD_DIR)/web/dist/
 	rsync -az --delete web-studio/dist/ $(PROD_HOST):$(PROD_DIR)/web-studio/dist/
+	rsync -az systemd/ $(PROD_HOST):$(PROD_DIR)/systemd/
 	ssh $(PROD_HOST) 'systemctl restart homeroute'
 	@sleep 2
 	@curl -sf $(PROD_API)/api/health | python3 -m json.tool \
 		&& echo "✓ Deploy OK" \
 		|| (echo "⛔ Health check FAILED — check logs: ssh $(PROD_HOST) journalctl -u homeroute -n 50" && exit 1)
+
+# Deploy hr-edge separately (Proxy/TLS/ACME/Auth/Tunnel)
+deploy-edge: check-prod edge
+	@echo "Deploying hr-edge to production..."
+	rsync -az --info=progress2 crates/target/release/hr-edge $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-edge
+	ssh $(PROD_HOST) 'systemctl restart hr-edge'
+	@sleep 2
+	@echo "✓ hr-edge deployed"
+
+# Deploy hr-orchestrator separately (Containers/Registry/Git)
+deploy-orchestrator: check-prod orchestrator
+	@echo "Deploying hr-orchestrator to production..."
+	rsync -az --info=progress2 crates/target/release/hr-orchestrator $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-orchestrator
+	ssh $(PROD_HOST) 'systemctl restart hr-orchestrator'
+	@sleep 2
+	@echo "✓ hr-orchestrator deployed"
 
 # Deploy hr-netcore separately (rare — only when DNS/DHCP/Adblock/IPv6 code changes)
 deploy-netcore: check-prod netcore

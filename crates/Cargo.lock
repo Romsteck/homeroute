@@ -692,7 +692,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "bytes",
  "hr-acme",
  "hr-api",
  "hr-auth",
@@ -700,21 +699,10 @@ dependencies = [
  "hr-container",
  "hr-git",
  "hr-ipc",
- "hr-proxy",
  "hr-registry",
- "hr-tunnel",
- "http-body-util",
- "hyper",
- "hyper-util",
- "quinn",
- "rustls",
  "serde",
  "serde_json",
- "signal-hook",
- "signal-hook-tokio",
  "tokio",
- "tokio-rustls",
- "tokio-stream",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -929,6 +917,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "hr-edge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "hr-acme",
+ "hr-auth",
+ "hr-common",
+ "hr-ipc",
+ "hr-proxy",
+ "hr-tunnel",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "quinn",
+ "rustls",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "signal-hook-tokio",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "hr-git"
 version = "0.1.0"
 dependencies = [
@@ -1004,6 +1022,28 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "hr-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "hr-acme",
+ "hr-common",
+ "hr-container",
+ "hr-git",
+ "hr-ipc",
+ "hr-registry",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "xxhash-rust",
 ]
 
 [[package]]
