@@ -22,6 +22,11 @@ async fn main() -> anyhow::Result<()> {
 
     info!("HomeRoute starting...");
 
+    // Install rustls crypto provider (needed by ACME/auth)
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     // Load environment config
     let env = EnvConfig::load(None);
     info!("Base domain: {}", env.base_domain);
