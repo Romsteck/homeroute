@@ -364,6 +364,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/agents/ws", axum::routing::get(ws_routes::agent_ws))
         .route("/host-agents/ws", axum::routing::get(ws_routes::host_agent_ws))
+        // Alias: host agents connect via legacy path /api/hosts/agent/ws
+        .route("/api/hosts/agent/ws", axum::routing::get(ws_routes::host_agent_ws))
         .route(
             "/containers/{id}/terminal",
             axum::routing::get(ws_routes::terminal_ws),
