@@ -1,16 +1,14 @@
 use hr_auth::AuthService;
 use hr_acme::{AcmeConfig, AcmeManager};
 use hr_common::config::EnvConfig;
-use hr_common::events::{CertReadyEvent, EventBus};
+use hr_common::events::EventBus;
 use hr_common::service_registry::new_service_registry;
 use hr_common::supervisor::{spawn_supervised, ServicePriority};
 use hr_ipc::{NetcoreClient, EdgeClient};
 use hr_ipc::orchestrator::OrchestratorClient;
-use hr_registry::AgentRegistry;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -28,18 +26,18 @@ async fn main() -> anyhow::Result<()> {
     let env = EnvConfig::load(None);
     info!("Base domain: {}", env.base_domain);
 
-    // Initialize event bus
+    // Initialize event bus (local, for WebSocket events to frontend)
     let events = Arc::new(EventBus::new());
 
     // Initialize service registry
     let service_registry = new_service_registry();
 
-    // Initialize auth service
+    // Initialize auth service (needed for session cookies in hr-api)
     let auth = AuthService::new(&env.auth_data_dir, &env.base_domain)?;
     auth.start_cleanup_task();
     info!("Auth service initialized");
 
-    // Initialize ACME (Let's Encrypt) -- kept for reads (list_certificates, etc.)
+    // Initialize ACME (read-only, for list_certificates in API routes)
     let acme_config = AcmeConfig {
         storage_path: env.acme_storage_path.to_string_lossy().to_string(),
         cf_api_token: env.cf_api_token.clone().unwrap_or_default(),
@@ -58,162 +56,23 @@ async fn main() -> anyhow::Result<()> {
     acme.init().await?;
     info!(
         "ACME manager initialized ({})",
-        if acme.is_initialized() {
-            "account loaded"
-        } else {
-            "new account created"
-        }
+        if acme.is_initialized() { "account loaded" } else { "new account created" }
     );
 
-    // ── IPC client for hr-netcore ────────────────────────────────────────
+    // ── IPC clients ───────────────────────────────────────────────────
 
     let netcore = Arc::new(NetcoreClient::new("/run/hr-netcore.sock"));
     info!("Netcore IPC client configured (socket: {})", netcore.socket_path().display());
 
-    // ── IPC client for hr-edge ──────────────────────────────────────────
-
     let edge = Arc::new(EdgeClient::new("/run/hr-edge.sock"));
     info!("Edge IPC client configured (socket: {})", edge.socket_path().display());
-
-    // ── IPC client for hr-orchestrator ────────────────────────────────────
 
     let orchestrator = Arc::new(OrchestratorClient::new("/run/hr-orchestrator.sock"));
     info!("Orchestrator IPC client configured (socket: {})", orchestrator.socket_path().display());
 
-    // ── Agent Registry ──────────────────────────────────────────────
+    // ── Management API ────────────────────────────────────────────────
 
-    let registry_state_path =
-        PathBuf::from("/var/lib/server-dashboard/agent-registry.json");
-    let registry = Arc::new(AgentRegistry::new(
-        registry_state_path,
-        Arc::new(env.clone()),
-        events.clone(),
-    ));
-
-    // Provide ACME manager to registry for per-app certificate management
-    registry.set_acme(acme.clone()).await;
-
-    // Request per-app wildcard certificates for existing applications that don't have one yet
-    // Certificate requests are sent to hr-edge via IPC; it handles TLS loading internally.
-    {
-        let apps = registry.list_applications().await;
-        let edge_init = edge.clone();
-        let events_init = events.clone();
-        let base_domain_init = env.base_domain.clone();
-        let acme_init = acme.clone();
-        let missing_apps: Vec<_> = apps
-            .iter()
-            .filter(|app| acme_init.get_app_certificate(&app.slug).is_err())
-            .map(|app| app.slug.clone())
-            .collect();
-
-        if !missing_apps.is_empty() {
-            info!(
-                count = missing_apps.len(),
-                "Requesting per-app wildcard certificates for existing applications"
-            );
-            tokio::spawn(async move {
-                for slug in missing_apps {
-                    info!(slug = %slug, "Requesting per-app wildcard certificate via edge IPC");
-                    match edge_init.request(&hr_ipc::edge::EdgeRequest::AcmeRequestAppWildcard {
-                        slug: slug.clone(),
-                    }).await {
-                        Ok(resp) if resp.ok => {
-                            let domain = format!("*.{}.{}", slug, base_domain_init);
-                            // Emit CertReadyEvent so agents get notified
-                            let cert_path = resp.data.as_ref()
-                                .and_then(|d| d.get("cert_path"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string();
-                            let key_path = resp.data.as_ref()
-                                .and_then(|d| d.get("key_path"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string();
-                            let _ = events_init.cert_ready.send(CertReadyEvent {
-                                slug: slug.clone(),
-                                wildcard_domain: domain.clone(),
-                                cert_path,
-                                key_path,
-                            });
-                            info!(slug = %slug, domain = %domain, "Per-app wildcard certificate issued");
-                        }
-                        Ok(resp) => {
-                            warn!(slug = %slug, error = ?resp.error, "Edge returned error for per-app wildcard");
-                        }
-                        Err(e) => {
-                            warn!(slug = %slug, error = %e, "Failed to request per-app wildcard via edge IPC");
-                        }
-                    }
-                    // Stagger requests to avoid Let's Encrypt rate limits
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                }
-            });
-        }
-    }
-
-    // Heartbeat monitor
-    {
-        let reg = registry.clone();
-        tokio::spawn(async move {
-            reg.run_heartbeat_monitor().await;
-        });
-    }
-
-    // Populate app routes for all applications with IPv4 addresses via edge IPC
-    {
-        let apps = registry.list_applications().await;
-        let base_domain = &env.base_domain;
-        for app in &apps {
-            if let Some(ipv4) = app.ipv4_address {
-                for route in app.routes(base_domain) {
-                    if let Err(e) = edge.set_app_route(
-                        route.domain.clone(),
-                        app.id.clone(),
-                        app.host_id.clone(),
-                        ipv4.to_string(),
-                        route.target_port,
-                        route.auth_required,
-                        route.allowed_groups.clone(),
-                        app.frontend.local_only,
-                    ).await {
-                        warn!(domain = route.domain, error = %e, "Failed to set app route via edge IPC at startup");
-                    }
-                }
-            }
-        }
-    }
-
-    info!(
-        "Agent registry initialized ({} applications)",
-        registry.list_applications().await.len()
-    );
-
-    // ── Container V2 Manager (nspawn) ────────────────────────────────
-
-    // ── Git Service ──────────────────────────────────────────────────
-    let git_service = Arc::new(hr_git::GitService::new());
-    if let Err(e) = git_service.init().await {
-        warn!("Failed to initialize git service: {e}");
-    }
-    info!("Git service initialized");
-
-    let container_v2_state_path = PathBuf::from("/var/lib/server-dashboard/containers-v2.json");
-    let container_manager = Arc::new(hr_api::container_manager::ContainerManager::new(
-        container_v2_state_path,
-        Arc::new(env.clone()),
-        events.clone(),
-        registry.clone(),
-        Some(git_service.clone()),
-    ));
-
-    // ── Restore local containers that were running before reboot ──────
-    container_manager.restore_local_containers().await;
-
-    // ── Management API (Important) ────────────────────────────────────
-
-    let update_log = std::sync::Arc::new(
+    let update_log = Arc::new(
         hr_api::routes::updates::UpdateAuditLog::new(std::path::Path::new("/opt/homeroute/data"))
             .expect("Failed to open update audit log"),
     );
@@ -231,9 +90,10 @@ async fn main() -> anyhow::Result<()> {
         reverseproxy_config_path: env.reverseproxy_config_path.clone(),
         service_registry: service_registry.clone(),
 
-        registry: Some(registry.clone()),
-        container_manager: Some(container_manager.clone()),
-        git: Some(git_service.clone()),
+        // These fields are managed by hr-orchestrator; homeroute passes None/empty.
+        registry: None,
+        container_manager: None,
+        git: None,
         migrations: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         renames: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         dataverse_schemas: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
@@ -256,14 +116,13 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // ── Background tasks ───────────────────────────────────────────────
+    // ── Background tasks ────────────────────────────────────────────────
 
     // Local host metrics broadcast (every 2s)
     {
         let events = events.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
-            // Track previous CPU idle/total for delta calculation
             let mut prev: Option<(u64, u64)> = None;
             loop {
                 interval.tick().await;
@@ -286,7 +145,6 @@ async fn main() -> anyhow::Result<()> {
                     _ => 0.0,
                 };
                 prev = cur;
-                // Memory
                 let mem = (|| -> Option<(u64, u64)> {
                     let info = std::fs::read_to_string("/proc/meminfo").ok()?;
                     let parse_kb = |key: &str| -> Option<u64> {
@@ -309,92 +167,10 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // CertReady listener -- notify agents of certificate renewals.
-    // TLS loading is handled by hr-edge internally (no more tls_manager here).
-    {
-        let registry_cert = registry.clone();
-        let mut cert_rx = events.cert_ready.subscribe();
-        tokio::spawn(async move {
-            while let Ok(event) = cert_rx.recv().await {
-                // Notify agents of certificate renewal so they can hot-reload
-                if event.slug.is_empty() {
-                    // Global cert -- notify ALL connected agents
-                    let apps = registry_cert.list_applications().await;
-                    for app in &apps {
-                        if registry_cert.is_agent_connected(&app.id).await {
-                            if let Err(e) = registry_cert
-                                .send_to_agent(
-                                    &app.id,
-                                    hr_registry::RegistryMessage::CertRenewal {
-                                        slug: String::new(),
-                                    },
-                                )
-                                .await
-                            {
-                                warn!(app = %app.slug, error = %e, "Failed to send CertRenewal to agent");
-                            }
-                        }
-                    }
-                    info!("Sent global CertRenewal notification to all connected agents");
-                } else {
-                    // Per-app cert -- notify only the matching agent
-                    let apps = registry_cert.list_applications().await;
-                    if let Some(app) = apps.iter().find(|a| a.slug == event.slug) {
-                        if registry_cert.is_agent_connected(&app.id).await {
-                            if let Err(e) = registry_cert
-                                .send_to_agent(
-                                    &app.id,
-                                    hr_registry::RegistryMessage::CertRenewal {
-                                        slug: event.slug.clone(),
-                                    },
-                                )
-                                .await
-                            {
-                                warn!(slug = %event.slug, error = %e, "Failed to send CertRenewal to agent");
-                            } else {
-                                info!(slug = %event.slug, "Sent CertRenewal notification to agent");
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    }
-
     // Migrate servers.json -> hosts.json if needed
     hr_api::routes::hosts::ensure_hosts_file().await;
 
-    // ── Startup cleanup + periodic maintenance ─────────────────────────
-
-    // Clean up stale migration transfer files from /tmp
-    tokio::spawn(async {
-        if let Ok(mut entries) = tokio::fs::read_dir("/tmp").await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if name_str.ends_with(".tar.gz") && name_str.len() > 40 {
-                    let stem = &name_str[..name_str.len() - 7];
-                    if uuid::Uuid::parse_str(stem).is_ok() {
-                        tracing::info!("Cleaning stale migration file: /tmp/{}", name_str);
-                        let _ = tokio::fs::remove_file(entry.path()).await;
-                    }
-                }
-            }
-        }
-    });
-
-    // Periodic cleanup of stale migration/exec signals
-    {
-        let reg = registry.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
-                reg.cleanup_stale_signals().await;
-            }
-        });
-    }
-
-    // ── Ready ──────────────────────────────────────────────────────────
+    // ── Ready ───────────────────────────────────────────────────────────
 
     info!("HomeRoute started successfully");
     info!("  Auth: OK");
@@ -405,8 +181,8 @@ async fn main() -> anyhow::Result<()> {
     info!("  Events: OK (broadcast bus)");
     info!("  DNS/DHCP/IPv6/Adblock: delegated to hr-netcore (IPC)");
     info!("  Proxy/TLS/ACME-writes/CloudRelay: delegated to hr-edge (IPC)");
+    info!("  Containers/Registry/Git: delegated to hr-orchestrator (IPC)");
     info!("  API: listening on port {}", api_port);
-    info!("  Hosts: status via host-agent WebSocket");
 
     // Wait for shutdown signal
     tokio::signal::ctrl_c().await?;
