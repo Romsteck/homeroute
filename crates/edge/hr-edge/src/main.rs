@@ -158,8 +158,9 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let orchestrator_port = env.orchestrator_port;
     let proxy_state = Arc::new(
-        ProxyState::new(proxy_config.clone(), env.api_port).with_auth(auth.clone()),
+        ProxyState::new(proxy_config.clone(), env.api_port, orchestrator_port).with_auth(auth.clone()),
     );
 
     let https_port = proxy_config.https_port;

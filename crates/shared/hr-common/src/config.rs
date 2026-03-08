@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 pub struct EnvConfig {
     /// Port de l'API interne (inutilisé dans le binaire unifié, gardé pour compat)
     pub api_port: u16,
+    /// Port de l'orchestrateur (WebSocket agents, host-agents, terminal)
+    pub orchestrator_port: u16,
     /// Domaine de base pour tous les sous-domaines
     pub base_domain: String,
     /// Répertoire des données d'auth (sessions, users)
@@ -45,6 +47,7 @@ impl Default for EnvConfig {
     fn default() -> Self {
         Self {
             api_port: 4000,
+            orchestrator_port: 4001,
             base_domain: "localhost".to_string(),
             auth_data_dir: PathBuf::from("/opt/homeroute/data"),
             cf_api_token: None,
@@ -85,6 +88,11 @@ impl EnvConfig {
         if let Ok(v) = std::env::var("API_PORT") {
             if let Ok(port) = v.parse() {
                 config.api_port = port;
+            }
+        }
+        if let Ok(v) = std::env::var("ORCHESTRATOR_PORT") {
+            if let Ok(port) = v.parse() {
+                config.orchestrator_port = port;
             }
         }
         if let Ok(v) = std::env::var("BASE_DOMAIN") {

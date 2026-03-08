@@ -696,16 +696,10 @@ dependencies = [
  "hr-api",
  "hr-auth",
  "hr-common",
- "hr-container",
- "hr-git",
  "hr-ipc",
- "hr-registry",
- "serde",
- "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

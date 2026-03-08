@@ -49,12 +49,14 @@ pub struct ProxyState {
     pub auth: Option<Arc<AuthService>>,
     /// Management API port for proxy.{base_domain} and auth.{base_domain}
     pub management_port: u16,
+    /// Orchestrator port for WebSocket routes (agents, host-agents, terminal)
+    pub orchestrator_port: u16,
     /// Application routes: domain → AppRoute (agent-managed LXC containers).
     app_routes: RwLock<std::collections::HashMap<String, AppRoute>>,
 }
 
 impl ProxyState {
-    pub fn new(config: ProxyConfig, management_port: u16) -> Self {
+    pub fn new(config: ProxyConfig, management_port: u16, orchestrator_port: u16) -> Self {
         let client = Client::builder(TokioExecutor::new()).build_http();
 
         // HTTPS client for re-encrypt to agent backends on port 443.
@@ -75,6 +77,7 @@ impl ProxyState {
             access_logger,
             auth: None,
             management_port,
+            orchestrator_port,
             app_routes: RwLock::new(std::collections::HashMap::new()),
         }
     }
@@ -389,6 +392,82 @@ async fn proxy_handler_inner(
                     return Err(ProxyError::UpstreamError(err_str));
                 }
             }
+        }
+    }
+
+    // Route orchestrator WebSocket paths on management domain to hr-orchestrator
+    if is_management {
+        let req_path = req.uri().path();
+        let orchestrator_rewrite = if req_path == "/api/applications/agents/ws" {
+            Some("/agents/ws".to_string())
+        } else if req_path == "/api/host-agents/ws" {
+            Some("/host-agents/ws".to_string())
+        } else if req_path.starts_with("/api/containers/")
+            && req_path.ends_with("/terminal")
+        {
+            // /api/containers/{id}/terminal -> /containers/{id}/terminal
+            let suffix = req_path.strip_prefix("/api").unwrap_or(req_path);
+            Some(suffix.to_string())
+        } else {
+            None
+        };
+
+        if let Some(rewritten_path) = orchestrator_rewrite {
+            let orchestrator_route = RouteConfig {
+                id: "__orchestrator_ws__".to_string(),
+                domain: domain_only.to_string(),
+                backend: "rust".to_string(),
+                target_host: "localhost".to_string(),
+                target_port: state.orchestrator_port,
+                local_only: false,
+                require_auth: false,
+                enabled: true,
+                cert_id: None,
+            };
+
+            let is_websocket = is_websocket_upgrade(&req);
+
+            if is_websocket {
+                debug!(
+                    "Routing WebSocket {} -> localhost:{}{} (orchestrator)",
+                    req_path, state.orchestrator_port, rewritten_path
+                );
+                let rewritten_uri: Uri = rewritten_path
+                    .parse()
+                    .unwrap_or_else(|_| "/".parse().unwrap());
+                return handle_websocket_upgrade(req, &orchestrator_route, rewritten_uri).await;
+            }
+
+            // Non-WebSocket request to orchestrator path: proxy as regular HTTP
+            let target_url = format!(
+                "http://localhost:{}{}",
+                state.orchestrator_port, rewritten_path
+            );
+            let target_uri: Uri = target_url
+                .parse()
+                .map_err(|e| ProxyError::InvalidUri(format!("{}", e)))?;
+
+            let headers = req.headers_mut();
+            if let Ok(val) = HeaderValue::from_str(&host) {
+                headers.insert("X-Forwarded-Host", val);
+            }
+            headers.insert("X-Forwarded-Proto", HeaderValue::from_static("https"));
+            if let Ok(val) = HeaderValue::from_str(&client_ip.to_string()) {
+                headers.insert("X-Forwarded-For", val.clone());
+                headers.insert("X-Real-IP", val);
+            }
+            headers.remove("connection");
+            headers.remove("upgrade");
+
+            *req.uri_mut() = target_uri;
+
+            let response = state
+                .client
+                .request(req)
+                .await
+                .map_err(|e| ProxyError::UpstreamError(e.to_string()))?;
+
+            return Ok(response.into_response());
         }
     }
 
@@ -967,7 +1046,7 @@ mod tests {
 
     #[test]
     fn test_find_route_by_domain() {
-        let state = ProxyState::new(test_config(), 4000);
+        let state = ProxyState::new(test_config(), 4000, 4001);
         let route = state.find_route("app.example.com");
         assert!(route.is_some());
         assert_eq!(route.unwrap().target_port, 3000);
@@ -975,7 +1054,7 @@ mod tests {
 
     #[test]
     fn test_find_route_strips_port() {
-        let state = ProxyState::new(test_config(), 4000);
+        let state = ProxyState::new(test_config(), 4000, 4001);
         let route = state.find_route("app.example.com:444");
         assert!(route.is_some());
         assert_eq!(route.unwrap().domain, "app.example.com");
@@ -983,13 +1062,13 @@ mod tests {
 
     #[test]
     fn test_find_route_unknown_domain() {
-        let state = ProxyState::new(test_config(), 4000);
+        let state = ProxyState::new(test_config(), 4000, 4001);
         assert!(state.find_route("unknown.example.com").is_none());
     }
 
     #[test]
     fn test_find_route_disabled() {
-        let state = ProxyState::new(test_config(), 4000);
+        let state = ProxyState::new(test_config(), 4000, 4001);
         assert!(state.find_route("disabled.example.com").is_none());
     }
 
@@ -1051,7 +1130,7 @@ mod tests {
     #[test]
     fn test_reload_config() {
         let mut config = test_config();
-        let state = ProxyState::new(config.clone(), 4000);
+        let state = ProxyState::new(config.clone(), 4000, 4001);
         assert!(state.find_route("app.example.com").is_some());
         assert!(state.find_route("new.example.com").is_none());
 
