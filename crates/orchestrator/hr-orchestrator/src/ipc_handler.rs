@@ -12,6 +12,7 @@ use crate::container_manager::{
     ContainerManager, CreateContainerRequest, MigrationState,
     RenameContainerRequest, RenameState, UpdateContainerRequest,
 };
+use hr_common::events::{PowerAction, WakeResult};
 use hr_git::GitService;
 use hr_registry::protocol::{HostRegistryMessage, RegistryMessage};
 use hr_registry::types::UpdateApplicationRequest;
@@ -671,6 +672,39 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 let msg: HostRegistryMessage = match serde_json::from_value(command) {
                     Ok(m) => m,
                     Err(e) => return IpcResponse::err(format!("Invalid host command: {e}")),
+                };
+                match self.registry.send_host_command(&host_id, msg).await {
+                    Ok(()) => IpcResponse::ok_empty(),
+                    Err(e) => IpcResponse::err(e),
+                }
+            }
+            OrchestratorRequest::WakeHost { host_id } => {
+                match self.registry.request_wake_host(&host_id).await {
+                    Ok(result) => {
+                        let action = match result {
+                            WakeResult::WolSent => "wol_sent",
+                            WakeResult::AlreadyOnline => "already_online",
+                            WakeResult::AlreadyWaking => "already_waking",
+                        };
+                        IpcResponse::ok_data(serde_json::json!({"action": action}))
+                    }
+                    Err(e) => IpcResponse::err(e),
+                }
+            }
+            OrchestratorRequest::HostPowerAction { host_id, action } => {
+                let power_action = match action.as_str() {
+                    "shutdown" => PowerAction::Shutdown,
+                    "reboot" => PowerAction::Reboot,
+                    "suspend" => PowerAction::Suspend,
+                    _ => return IpcResponse::err(format!("Unknown power action: {action}")),
+                };
+                if let Err(e) = self.registry.request_power_action(&host_id, power_action).await {
+                    return IpcResponse::err(e);
+                }
+                let msg = match action.as_str() {
+                    "shutdown" => HostRegistryMessage::PowerOff,
+                    "reboot" => HostRegistryMessage::Reboot,
+                    _ => HostRegistryMessage::SuspendHost,
                 };
                 match self.registry.send_host_command(&host_id, msg).await {
                     Ok(()) => IpcResponse::ok_empty(),

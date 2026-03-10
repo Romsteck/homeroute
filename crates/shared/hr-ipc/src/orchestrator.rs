@@ -74,6 +74,8 @@ pub enum OrchestratorRequest {
     IsHostConnected { host_id: String },
     GetHostPowerState { host_id: String },
     SendHostCommand { host_id: String, command: serde_json::Value },
+    WakeHost { host_id: String },
+    HostPowerAction { host_id: String, action: String },
 
     // ── Updates scan ─────────────────────────────────────────
     ScanUpdates,
