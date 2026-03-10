@@ -12,6 +12,7 @@ data/
 
 # Claude Code local settings
 .claude/settings.local.json
+.claude/agent-memory/
 
 # Flutter
 store_flutter/.dart_tool/
