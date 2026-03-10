@@ -161,11 +161,22 @@ async fn handle_agent_ws(state: WsState, mut socket: WebSocket) {
         tokio::select! {
             // Registry -> Agent
             Some(msg) = rx.recv() => {
+                // Log non-trivial messages being forwarded to agent
+                match &msg {
+                    RegistryMessage::RunUpgrade { category } => {
+                        info!(app_id, category, "Forwarding RunUpgrade to agent WebSocket");
+                    }
+                    RegistryMessage::RunUpdateScan => {
+                        info!(app_id, "Forwarding RunUpdateScan to agent WebSocket");
+                    }
+                    _ => {}
+                }
                 let json = match serde_json::to_string(&msg) {
                     Ok(j) => j,
                     Err(_) => continue,
                 };
                 if socket.send(Message::Text(json.into())).await.is_err() {
+                    warn!(app_id, "Failed to forward message to agent WebSocket (send error)");
                     break;
                 }
             }
