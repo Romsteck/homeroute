@@ -7,7 +7,7 @@ PROD_HOST := root@10.0.0.254
 PROD_DIR  := /opt/homeroute
 PROD_API  := http://10.0.0.254:4000
 
-.PHONY: server netcore edge orchestrator web studio all deploy deploy-prod deploy-netcore deploy-edge deploy-orchestrator test clean store agent agent-prod check-prod check-not-prod
+.PHONY: server netcore edge orchestrator web studio all deploy deploy-prod deploy-netcore deploy-edge deploy-orchestrator test clean store agent agent-prod host-agent host-agent-prod check-prod check-not-prod
 
 SHELL := /bin/bash
 
@@ -128,6 +128,30 @@ agent-prod: check-prod
 	ssh $(PROD_HOST) 'curl -sf -X POST http://localhost:4000/api/applications/agents/update' \
 		&& echo "✓ Agent update triggered on production" \
 		|| echo "⛔ Agent update failed"
+
+# Build hr-host-agent binary (auto-increments version)
+host-agent:
+	@CURRENT=$$(grep '^version' crates/agents/hr-host-agent/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/') && \
+	MAJOR=$$(echo "$$CURRENT" | cut -d. -f1) && \
+	MINOR=$$(echo "$$CURRENT" | cut -d. -f2) && \
+	PATCH=$$(echo "$$CURRENT" | cut -d. -f3) && \
+	NEW_PATCH=$$((PATCH + 1)) && \
+	NEW_VERSION="$$MAJOR.$$MINOR.$$NEW_PATCH" && \
+	sed -i "s/^version = \"$$CURRENT\"/version = \"$$NEW_VERSION\"/" crates/agents/hr-host-agent/Cargo.toml && \
+	echo "Building hr-host-agent v$$NEW_VERSION..." && \
+	cd crates && cargo build --release -p hr-host-agent
+
+# Deploy hr-host-agent to local host (CloudMaster) + restart
+host-agent-prod:
+	@VERSION=$$(grep '^version' crates/agents/hr-host-agent/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/') && \
+	echo "Deploying hr-host-agent v$$VERSION..." && \
+	systemctl stop hr-host-agent && \
+	cp crates/target/release/hr-host-agent /usr/local/bin/hr-host-agent && \
+	systemctl start hr-host-agent && \
+	sleep 1 && \
+	systemctl is-active --quiet hr-host-agent && \
+	echo "✓ hr-host-agent v$$VERSION deployed and running" || \
+	(echo "⛔ hr-host-agent failed to start" && journalctl -u hr-host-agent -n 10 --no-pager && exit 1)
 
 # Build Flutter store APK (auto-increments versionCode)
 store:

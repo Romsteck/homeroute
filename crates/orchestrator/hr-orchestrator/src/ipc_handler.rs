@@ -116,13 +116,24 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 }
             }
             OrchestratorRequest::SendToAgent { app_id, message } => {
-                let msg: RegistryMessage = match serde_json::from_value(message) {
+                let msg: RegistryMessage = match serde_json::from_value(message.clone()) {
                     Ok(m) => m,
-                    Err(e) => return IpcResponse::err(format!("Invalid message: {e}")),
+                    Err(e) => {
+                        warn!(app_id, error = %e, raw = %message, "SendToAgent: invalid message");
+                        return IpcResponse::err(format!("Invalid message: {e}"));
+                    }
                 };
+                let msg_type = message.get("type").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                info!(app_id = %app_id, msg_type = %msg_type, "IPC SendToAgent dispatching");
                 match self.registry.send_to_agent(&app_id, msg).await {
-                    Ok(()) => IpcResponse::ok_empty(),
-                    Err(e) => IpcResponse::err(format!("Failed to send to agent: {e}")),
+                    Ok(()) => {
+                        info!(app_id = %app_id, msg_type = %msg_type, "IPC SendToAgent delivered");
+                        IpcResponse::ok_empty()
+                    }
+                    Err(e) => {
+                        warn!(app_id = %app_id, error = %e, "IPC SendToAgent failed");
+                        IpcResponse::err(format!("Failed to send to agent: {e}"))
+                    }
                 }
             }
             OrchestratorRequest::TriggerAgentUpdate { agent_ids } => {

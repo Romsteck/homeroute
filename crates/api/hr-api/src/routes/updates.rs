@@ -7,7 +7,7 @@ use hr_common::events::UpdateEvent;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::broadcast;
-use tracing::error;
+use tracing::{error, info, warn};
 
 use hr_ipc::orchestrator::OrchestratorRequest;
 use crate::state::ApiState;
@@ -663,6 +663,7 @@ async fn upgrade_target(
         });
     } else {
         // Container/host agent -- send RunUpgrade via IPC to orchestrator
+        info!(target_id = %req.target_id, category = %req.category, "Sending RunUpgrade to agent via IPC");
         let msg = json!({
             "type": "run_upgrade",
             "category": req.category,
@@ -671,37 +672,45 @@ async fn upgrade_target(
             app_id: req.target_id.clone(),
             message: msg,
         }).await;
-        if send_result.is_err() || send_result.as_ref().map(|r| !r.ok).unwrap_or(false) {
-            let err = send_result.err().map(|e| e.to_string())
-                .unwrap_or_else(|| "Agent non connecté".into());
+
+        // Check for IPC transport error or orchestrator-level error
+        let ipc_err = match &send_result {
+            Err(e) => Some(format!("IPC error: {e}")),
+            Ok(r) if !r.ok => Some(r.error.clone().unwrap_or_else(|| "Agent non connecté".into())),
+            _ => None,
+        };
+        if let Some(err) = ipc_err {
+            warn!(target_id = %req.target_id, category = %req.category, error = %err, "RunUpgrade send failed");
             let _ = state.update_log.update_status(&req.target_id, &req.category, "failed", Some(&err));
             let _ = state.events.update_scan.send(
                 hr_common::events::UpdateScanEvent::UpgradeComplete {
                     target_id: req.target_id,
                     category: req.category,
                     success: false,
-                    error: Some(err),
+                    error: Some(err.clone()),
                 }
             );
-            return Json(json!({"success": false, "error": "Agent non connecté"}));
+            return Json(json!({"success": false, "error": err}));
         }
 
-        // Poll orchestrator scan_results to detect when agent re-scans after upgrade
+        info!(target_id = %req.target_id, category = %req.category, "RunUpgrade sent successfully, starting poll");
+
+        // Poll orchestrator scan_results to detect when agent completes upgrade
         let target_id = req.target_id.clone();
         let category = req.category.clone();
         let events = state.events.clone();
         let orchestrator = state.orchestrator.clone();
         let update_log = state.update_log.clone();
 
-        // Capture current scanned_at to detect change
-        let baseline_scanned_at = match orchestrator.request(&OrchestratorRequest::GetScanResults).await {
+        // Capture the baseline value of the field that should change after upgrade.
+        // This avoids false positives from concurrent scans changing scanned_at.
+        let baseline_value = match orchestrator.request(&OrchestratorRequest::GetScanResults).await {
             Ok(r) => r.data.as_ref()
                 .and_then(|d| d.get(&target_id))
-                .and_then(|t| t.get("scanned_at"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+                .map(|t| extract_upgrade_field(t, &category)),
             _ => None,
         };
+        info!(target_id = %target_id, category = %category, baseline = ?baseline_value, "Captured baseline for polling");
 
         tokio::spawn(async move {
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
@@ -710,22 +719,44 @@ async fn upgrade_target(
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 if let Ok(r) = orchestrator.request(&OrchestratorRequest::GetScanResults).await {
                     if let Some(target) = r.data.as_ref().and_then(|d| d.get(&target_id)) {
-                        let new_scanned_at = target.get("scanned_at")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-                        if new_scanned_at != baseline_scanned_at {
-                            // Agent re-scanned after upgrade — upgrade is done
-                            success = true;
-                            // Relay updated target to frontend
-                            if let Ok(t) = serde_json::from_value::<hr_common::events::UpdateTarget>(target.clone()) {
-                                let _ = events.update_scan.send(
-                                    hr_common::events::UpdateScanEvent::TargetScanned {
-                                        scan_id: String::new(),
-                                        target: t,
-                                    }
+                        let current_value = extract_upgrade_field(target, &category);
+                        if let Some(ref baseline) = baseline_value {
+                            if current_value != *baseline {
+                                info!(
+                                    target_id = %target_id, category = %category,
+                                    before = %baseline, after = %current_value,
+                                    "Upgrade detected via field change"
                                 );
+                                success = true;
+                                // Relay updated target to frontend
+                                if let Ok(t) = serde_json::from_value::<hr_common::events::UpdateTarget>(target.clone()) {
+                                    let _ = events.update_scan.send(
+                                        hr_common::events::UpdateScanEvent::TargetScanned {
+                                            scan_id: String::new(),
+                                            target: t,
+                                        }
+                                    );
+                                }
+                                break;
                             }
-                            break;
+                        } else {
+                            // No baseline (first scan) -- fall back to scanned_at change
+                            let new_scanned_at = target.get("scanned_at")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            if new_scanned_at.is_some() {
+                                info!(target_id = %target_id, "No baseline, using first scan result");
+                                success = true;
+                                if let Ok(t) = serde_json::from_value::<hr_common::events::UpdateTarget>(target.clone()) {
+                                    let _ = events.update_scan.send(
+                                        hr_common::events::UpdateScanEvent::TargetScanned {
+                                            scan_id: String::new(),
+                                            target: t,
+                                        }
+                                    );
+                                }
+                                break;
+                            }
                         }
                     }
                 }
@@ -735,6 +766,9 @@ async fn upgrade_target(
             } else {
                 ("failed", Some("Timeout (600s)"))
             };
+            if !success {
+                warn!(target_id = %target_id, category = %category, "Upgrade polling timed out (600s)");
+            }
             let _ = update_log.update_status(&target_id, &category, status, error);
             let _ = events.update_scan.send(
                 hr_common::events::UpdateScanEvent::UpgradeComplete {
@@ -857,4 +891,26 @@ impl UpdateAuditLog {
             None => vec![],
         }
     }
+}
+
+/// Extract the relevant field value from scan results based on upgrade category.
+/// Returns a string representation for comparison (e.g., "4.108.2" for code_server).
+/// This avoids false positives from concurrent scans that change scanned_at
+/// without actually upgrading anything.
+fn extract_upgrade_field(target: &Value, category: &str) -> String {
+    let field_name = match category {
+        "code_server" => "code_server_installed",
+        "claude_cli" => "claude_cli_installed",
+        "claude_ext" => "claude_ext_installed",
+        "apt" => "os_upgradable",
+        _ => "scanned_at", // fallback for unknown categories
+    };
+    target.get(field_name)
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            Value::Null => "null".to_string(),
+            other => other.to_string(),
+        })
+        .unwrap_or_else(|| "null".to_string())
 }

@@ -20,7 +20,11 @@ pub async fn run_upgrade(category: &str) -> Result<(), String> {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(600),
-        Command::new("bash").args(["-c", cmd]).output(),
+        Command::new("bash")
+            .args(["-c", cmd])
+            .env("HOME", "/root")
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .output(),
     )
     .await;
 
