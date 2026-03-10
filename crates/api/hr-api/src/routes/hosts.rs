@@ -533,11 +533,8 @@ async fn get_host_info(Path(id): Path<String>) -> Json<Value> {
 // ── Power actions ────────────────────────────────────────────────────────
 
 async fn wake(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Value> {
-    // Use IPC SendHostCommand with a wake request
-    let cmd = json!({"type": "wake"});
-    match state.orchestrator.request(&OrchestratorRequest::SendHostCommand {
+    match state.orchestrator.request(&OrchestratorRequest::WakeHost {
         host_id: id.clone(),
-        command: cmd,
     }).await {
         Ok(r) if r.ok => {
             let data = r.data.unwrap_or(json!({}));
@@ -569,10 +566,9 @@ async fn wake(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Val
 }
 
 async fn shutdown_host(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Value> {
-    let cmd = json!({"type": "shutdown"});
-    match state.orchestrator.request(&OrchestratorRequest::SendHostCommand {
+    match state.orchestrator.request(&OrchestratorRequest::HostPowerAction {
         host_id: id.clone(),
-        command: cmd,
+        action: "shutdown".to_string(),
     }).await {
         Ok(r) if r.ok => Json(json!({"success": true, "action": "poweroff", "via": "agent"})),
         _ => {
@@ -588,10 +584,9 @@ async fn shutdown_host(Path(id): Path<String>, State(state): State<ApiState>) ->
 }
 
 async fn reboot_host(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Value> {
-    let cmd = json!({"type": "reboot"});
-    match state.orchestrator.request(&OrchestratorRequest::SendHostCommand {
+    match state.orchestrator.request(&OrchestratorRequest::HostPowerAction {
         host_id: id.clone(),
-        command: cmd,
+        action: "reboot".to_string(),
     }).await {
         Ok(r) if r.ok => Json(json!({"success": true, "action": "reboot", "via": "agent"})),
         _ => {
@@ -615,10 +610,8 @@ struct BulkRequest {
 async fn bulk_wake(State(state): State<ApiState>, Json(body): Json<BulkRequest>) -> Json<Value> {
     let mut results = Vec::new();
     for id in &body.host_ids {
-        let cmd = json!({"type": "wake"});
-        match state.orchestrator.request(&OrchestratorRequest::SendHostCommand {
+        match state.orchestrator.request(&OrchestratorRequest::WakeHost {
             host_id: id.clone(),
-            command: cmd,
         }).await {
             Ok(r) if r.ok => {
                 let data = r.data.clone().unwrap_or(json!({}));
@@ -665,10 +658,9 @@ async fn bulk_shutdown(Json(body): Json<BulkRequest>) -> Json<Value> {
 }
 
 async fn sleep_host(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Value> {
-    let cmd = json!({"type": "suspend"});
-    match state.orchestrator.request(&OrchestratorRequest::SendHostCommand {
+    match state.orchestrator.request(&OrchestratorRequest::HostPowerAction {
         host_id: id.clone(),
-        command: cmd,
+        action: "suspend".to_string(),
     }).await {
         Ok(r) if r.ok => Json(json!({"success": true, "action": "sleep", "via": "agent"})),
         _ => {
