@@ -727,26 +727,36 @@ async fn agent_certs(
     State(state): State<ApiState>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let Some(registry) = &state.registry else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "Registry not available"}))).into_response();
-    };
-
     // Extract Bearer token
     let token = match headers.get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
     {
-        Some(t) => t,
+        Some(t) => t.to_string(),
         None => {
             return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Missing or invalid Authorization header"}))).into_response();
         }
     };
 
-    // Authenticate by token (tries all applications)
-    let (app_id, slug) = match registry.authenticate_by_token(token).await {
-        Some(v) => v,
-        None => {
+    // Authenticate by token via IPC to orchestrator (registry lives there)
+    let (app_id, slug) = match state.orchestrator.request(
+        &hr_ipc::orchestrator::OrchestratorRequest::AuthenticateAgentToken { token },
+    ).await {
+        Ok(resp) if resp.ok => {
+            let data = resp.data.unwrap_or_default();
+            let app_id = data["app_id"].as_str().unwrap_or_default().to_string();
+            let slug = data["slug"].as_str().unwrap_or_default().to_string();
+            if app_id.is_empty() || slug.is_empty() {
+                return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Invalid token"}))).into_response();
+            }
+            (app_id, slug)
+        }
+        Ok(_) => {
             return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Invalid token"}))).into_response();
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to authenticate agent token via IPC");
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "Orchestrator not available"}))).into_response();
         }
     };
 
