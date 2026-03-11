@@ -732,6 +732,17 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                     IpcResponse::err("invalid target")
                 }
             }
+
+            // ── Agent auth ───────────────────────────────────────
+            OrchestratorRequest::AuthenticateAgentToken { token } => {
+                match self.registry.authenticate_by_token(&token).await {
+                    Some((app_id, slug)) => IpcResponse::ok_data(serde_json::json!({
+                        "app_id": app_id,
+                        "slug": slug,
+                    })),
+                    None => IpcResponse::err("Invalid token"),
+                }
+            }
         }
     }
 }

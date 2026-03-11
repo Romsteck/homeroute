@@ -81,6 +81,11 @@ pub enum OrchestratorRequest {
     ScanUpdates,
     GetScanResults,
     StoreScanResult { target: serde_json::Value },
+
+    // ── Agent auth (for hr-api cert distribution) ────────────
+    /// Authenticate an agent by its bearer token.
+    /// Returns {app_id, slug} on success.
+    AuthenticateAgentToken { token: String },
 }
 
 // ── OrchestratorClient ───────────────────────────────────────
