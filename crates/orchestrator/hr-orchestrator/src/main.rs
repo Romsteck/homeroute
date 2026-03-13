@@ -5,6 +5,7 @@
 mod container_manager;
 mod ipc_handler;
 mod mcp;
+mod backup_pipeline;
 mod ws_routes;
 
 use hr_acme::{AcmeConfig, AcmeManager};
@@ -321,12 +322,18 @@ async fn main() -> anyhow::Result<()> {
     let migrations = Arc::new(RwLock::new(HashMap::new()));
     let renames = Arc::new(RwLock::new(HashMap::new()));
 
+    // ── Backup pipeline ──────────────────────────────────────────────────
+    let backup_pipeline = Arc::new(backup_pipeline::BackupPipeline::new());
+    backup_pipeline::spawn_daily_scheduler(backup_pipeline.clone());
+    info!("Backup pipeline initialized (daily at 03:00 UTC)");
+
     let handler = Arc::new(OrchestratorHandler {
         registry: registry.clone(),
         container_manager: container_manager.clone(),
         git: git_service.clone(),
         migrations,
         renames,
+        backup: backup_pipeline.clone(),
     });
 
     let ipc_handle = tokio::spawn({
