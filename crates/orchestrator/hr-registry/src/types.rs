@@ -25,9 +25,8 @@ impl Default for Environment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppStack {
-    NextJs,
     #[default]
-    LeptosRust,
+    NextJs,
 }
 
 /// A registered application with its container and agent.
@@ -64,7 +63,7 @@ pub struct Application {
     #[serde(default = "default_true")]
     pub code_server_enabled: bool,
 
-    /// Stack technologique du container (leptos-rust par défaut).
+    /// Stack technologique du container.
     #[serde(default)]
     pub stack: AppStack,
 
@@ -311,7 +310,7 @@ mod tests {
                 local_only: false,
             },
             code_server_enabled,
-            stack: AppStack::LeptosRust,
+            stack: AppStack::NextJs,
             metrics: None,
         }
     }
@@ -375,21 +374,6 @@ mod tests {
     }
 
     #[test]
-    fn test_domains_leptos_rust() {
-        let app = make_test_app_with_stack(Environment::Development, true, AppStack::LeptosRust);
-        let domains = app.domains("example.com");
-        // LeptosRust should NOT have devapi
-        assert_eq!(
-            domains,
-            vec![
-                "code.myapp.example.com",
-                "dev.myapp.example.com",
-                "studio.myapp.example.com",
-            ]
-        );
-    }
-
-    #[test]
     fn test_domains_nextjs() {
         let app = make_test_app_with_stack(Environment::Development, true, AppStack::NextJs);
         let domains = app.domains("example.com");
@@ -402,18 +386,6 @@ mod tests {
                 "studio.myapp.example.com",
             ]
         );
-    }
-
-    #[test]
-    fn test_routes_leptos_rust() {
-        let app = make_test_app_with_stack(Environment::Development, true, AppStack::LeptosRust);
-        let routes = app.routes("example.com");
-        assert_eq!(routes.len(), 3); // code-server, dev (3000), studio
-        assert_eq!(routes[0].domain, "code.myapp.example.com");
-        assert_eq!(routes[0].target_port, CODE_SERVER_PORT);
-        assert_eq!(routes[1].domain, "dev.myapp.example.com");
-        assert_eq!(routes[1].target_port, 3000);
-        assert_eq!(routes[2].domain, "studio.myapp.example.com");
     }
 
     #[test]

@@ -913,16 +913,6 @@ WantedBy=multi-user.target
         )
         .await;
 
-        // Phase 8c2: Install cargo-leptos + wasm32 target (if LeptosRust stack)
-        if stack == hr_registry::types::AppStack::LeptosRust {
-            emit("Installation cargo-leptos + wasm32 target...");
-            let _ = NspawnClient::exec_with_retry(
-                container_name,
-                &["source /root/.cargo/env && rustup target add wasm32-unknown-unknown && cargo install cargo-leptos"],
-                3,
-            )
-            .await;
-        }
 
         // Phase 8d: Install Node.js 22
         emit("Installation Node.js 22...");
@@ -1004,14 +994,8 @@ WantedBy=multi-user.target
             render_rules(include_str!("../../../orchestrator/hr-registry/src/rules/homeroute-dataverse.md")),
         )
         .await;
-        let dev_md_content = match stack {
-            hr_registry::types::AppStack::NextJs => render_rules(include_str!("../../../orchestrator/hr-registry/src/rules/homeroute-dev-nextjs.md")),
-            hr_registry::types::AppStack::LeptosRust => render_rules(include_str!("../../../orchestrator/hr-registry/src/rules/homeroute-dev-leptos.md")),
-        };
-        let deploy_md_content = match stack {
-            hr_registry::types::AppStack::NextJs => render_rules(include_str!("../../../orchestrator/hr-registry/src/rules/homeroute-deploy-nextjs.md")),
-            hr_registry::types::AppStack::LeptosRust => render_rules(include_str!("../../../orchestrator/hr-registry/src/rules/homeroute-deploy-leptos.md")),
-        };
+        let dev_md_content = render_rules(include_str!("../../../orchestrator/hr-registry/src/rules/homeroute-dev-nextjs.md"));
+        let deploy_md_content = render_rules(include_str!("../../../orchestrator/hr-registry/src/rules/homeroute-deploy-nextjs.md"));
         let _ = tokio::fs::write(
             rules_dir.join("homeroute-deploy.md"),
             deploy_md_content,
@@ -1211,11 +1195,9 @@ WantedBy=multi-user.target
         )
         .await;
 
-        // Phase 13-14: Dev server systemd units (stack-dependent)
-        match stack {
-            hr_registry::types::AppStack::NextJs => {
-                emit("Configuration nextjs-dev.service...");
-                let nextjs_unit = r#"[Unit]
+        // Phase 13-14: Configure nextjs-dev.service
+            emit("Configuration nextjs-dev.service...");
+            let nextjs_unit = r#"[Unit]
 Description=Next.js Dev Server
 After=network.target
 
@@ -1234,71 +1216,25 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 [Install]
 WantedBy=multi-user.target
 "#;
-                let tmp_nextjs_unit =
-                    PathBuf::from(format!("/tmp/nextjs-unit-v2-{slug}.service"));
-                let _ = tokio::fs::write(&tmp_nextjs_unit, nextjs_unit).await;
-                let _ = NspawnClient::push_file(
-                    container_name,
-                    &tmp_nextjs_unit,
-                    "etc/systemd/system/nextjs-dev.service",
-                    storage,
-                )
-                .await;
-                let _ = tokio::fs::remove_file(&tmp_nextjs_unit).await;
+            let tmp_nextjs_unit =
+                PathBuf::from(format!("/tmp/nextjs-unit-v2-{slug}.service"));
+            let _ = tokio::fs::write(&tmp_nextjs_unit, nextjs_unit).await;
+            let _ = NspawnClient::push_file(
+                container_name,
+                &tmp_nextjs_unit,
+                "etc/systemd/system/nextjs-dev.service",
+                storage,
+            )
+            .await;
+            let _ = tokio::fs::remove_file(&tmp_nextjs_unit).await;
 
-                let _ =
-                    NspawnClient::exec(container_name, &["systemctl", "daemon-reload"]).await;
-                let _ = NspawnClient::exec(
-                    container_name,
-                    &["systemctl", "enable", "--now", "nextjs-dev"],
-                )
-                .await;
-            }
-            hr_registry::types::AppStack::LeptosRust => {
-                emit("Configuration cargo-leptos-dev.service...");
-                let leptos_unit = r#"[Unit]
-Description=Cargo Leptos Dev Server (SSR + WASM)
-After=network.target
-
-[Service]
-Type=simple
-User=studio
-Group=studio
-WorkingDirectory=/root/workspace
-ExecStart=/root/.cargo/bin/cargo-leptos watch
-Restart=always
-RestartSec=3
-Environment=HOME=/home/studio
-Environment=CARGO_HOME=/root/.cargo
-Environment=RUSTUP_HOME=/root/.rustup
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:/root/.cargo/bin
-Environment=LEPTOS_SITE_ADDR=0.0.0.0:3000
-Environment=RUST_LOG=info
-
-[Install]
-WantedBy=multi-user.target
-"#;
-                let tmp_leptos_unit =
-                    PathBuf::from(format!("/tmp/leptos-unit-v2-{slug}.service"));
-                let _ = tokio::fs::write(&tmp_leptos_unit, leptos_unit).await;
-                let _ = NspawnClient::push_file(
-                    container_name,
-                    &tmp_leptos_unit,
-                    "etc/systemd/system/cargo-leptos-dev.service",
-                    storage,
-                )
-                .await;
-                let _ = tokio::fs::remove_file(&tmp_leptos_unit).await;
-
-                let _ =
-                    NspawnClient::exec(container_name, &["systemctl", "daemon-reload"]).await;
-                let _ = NspawnClient::exec(
-                    container_name,
-                    &["systemctl", "enable", "--now", "cargo-leptos-dev"],
-                )
-                .await;
-            }
-        }
+            let _ =
+                NspawnClient::exec(container_name, &["systemctl", "daemon-reload"]).await;
+            let _ = NspawnClient::exec(
+                container_name,
+                &["systemctl", "enable", "--now", "nextjs-dev"],
+            )
+            .await;
 
         // Update status to Pending (agent not yet connected)
         self.set_container_status(app_id, ContainerV2Status::Running)
@@ -1472,16 +1408,14 @@ WantedBy=multi-user.target
         )
         .await;
 
-        // Phase 7b: Install Node.js for NextJs stack
-        if stack == hr_registry::types::AppStack::NextJs {
-            emit("Installation Node.js 22 (PROD)...");
-            let _ = NspawnClient::exec_with_retry(
-                container_name,
-                &["curl -4 -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y -qq nodejs"],
-                3,
-            )
-            .await;
-        }
+        // Phase 7b: Install Node.js (NextJs stack)
+        emit("Installation Node.js 22 (PROD)...");
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["curl -4 -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y -qq nodejs"],
+            3,
+        )
+        .await;
 
         // Update status (no workspace for prod containers)
         self.set_container_status(app_id, ContainerV2Status::Running)
