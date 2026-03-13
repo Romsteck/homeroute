@@ -18,12 +18,15 @@ use hr_registry::protocol::{HostRegistryMessage, RegistryMessage};
 use hr_registry::types::UpdateApplicationRequest;
 use hr_registry::AgentRegistry;
 
+use crate::backup_pipeline::BackupPipeline;
+
 pub struct OrchestratorHandler {
     pub registry: Arc<AgentRegistry>,
     pub container_manager: Arc<ContainerManager>,
     pub git: Arc<GitService>,
     pub migrations: Arc<RwLock<HashMap<String, MigrationState>>>,
     pub renames: Arc<RwLock<HashMap<String, RenameState>>>,
+    pub backup: Arc<BackupPipeline>,
 }
 
 impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
@@ -750,6 +753,21 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                     })),
                     None => IpcResponse::err("Invalid token"),
                 }
+            }
+
+            // ── Backup pipeline ───────────────────────────────────
+            OrchestratorRequest::TriggerBackup => {
+                match self.backup.trigger().await {
+                    Ok(()) => IpcResponse::ok_data(serde_json::json!({
+                        "message": "Backup pipeline started",
+                        "status": "running"
+                    })),
+                    Err(e) => IpcResponse::err(e),
+                }
+            }
+            OrchestratorRequest::GetBackupStatus => {
+                let status = self.backup.get_status().await;
+                IpcResponse::ok_data(status)
             }
         }
     }

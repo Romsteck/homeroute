@@ -26,3 +26,4 @@ rustls = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 xxhash-rust = { workspace = true }
+reqwest = { workspace = true }

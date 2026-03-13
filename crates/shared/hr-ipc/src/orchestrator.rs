@@ -82,6 +82,12 @@ pub enum OrchestratorRequest {
     GetScanResults,
     StoreScanResult { target: serde_json::Value },
 
+    // ── Backup pipeline ─────────────────────────────────────
+    /// Trigger the full backup pipeline (WOL → backup → sleep).
+    TriggerBackup,
+    /// Get the current backup pipeline status and last run result.
+    GetBackupStatus,
+
     // ── Agent auth (for hr-api cert distribution) ────────────
     /// Authenticate an agent by its bearer token.
     /// Returns {app_id, slug} on success.
