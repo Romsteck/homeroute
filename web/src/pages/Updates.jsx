@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { RefreshCw, Package, Shield, Server, Monitor, Loader2, Clock, CheckCircle, AlertTriangle } from 'lucide-react';
+import { RefreshCw, Package, Shield, Server, Loader2, Clock, CheckCircle, AlertTriangle } from 'lucide-react';
 import Card from '../components/Card';
 import Button from '../components/Button';
 import ConfirmModal from '../components/ConfirmModal';
@@ -117,7 +117,6 @@ function Updates() {
     const categoryLabels = {
       apt: 'OS (APT)',
       claude_cli: 'Claude Code',
-      code_server: 'code-server',
       claude_ext: 'Extension Claude',
       hr_agent: 'Agent',
     };
@@ -147,13 +146,8 @@ function Updates() {
   const agentsOutdated = targetList.filter(t =>
     t.agent_version && t.agent_version_latest && t.agent_version !== t.agent_version_latest
   ).length;
-  const claudeOutdated = targetList.filter(t =>
-    t.claude_cli_installed && t.claude_cli_latest && t.claude_cli_installed !== t.claude_cli_latest
-  ).length;
-
   const mainHost = targets['main'];
   const remoteHosts = targetList.filter(t => t.target_type === 'remote_host');
-  const devContainers = targetList.filter(t => t.target_type === 'container' && t.environment === 'development');
   const prodContainers = targetList.filter(t => t.target_type === 'container' && t.environment === 'production');
 
   if (loading) {
@@ -194,11 +188,10 @@ function Updates() {
 
         {/* Summary stats */}
         {targetList.length > 0 && (
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-px bg-gray-700">
+          <div className="grid grid-cols-3 gap-px bg-gray-700">
             <StatCard icon={Package} label="MàJ OS" value={totalOsUpdates} color={totalOsUpdates > 0 ? 'text-orange-400' : 'text-green-400'} />
             <StatCard icon={Shield} label="Sécurité" value={totalSecurity} color={totalSecurity > 0 ? 'text-red-400' : 'text-green-400'} />
             <StatCard icon={Server} label="Agents outdated" value={agentsOutdated} color={agentsOutdated > 0 ? 'text-orange-400' : 'text-green-400'} />
-            <StatCard icon={Monitor} label="Claude outdated" value={claudeOutdated} color={claudeOutdated > 0 ? 'text-orange-400' : 'text-green-400'} />
           </div>
         )}
 
@@ -214,7 +207,7 @@ function Updates() {
         {mainHost && (
           <Section title="Hôte principal">
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-sm min-w-[500px]">
                 <UpdateTableHead />
                 <tbody>
                   <UpdateTableRow
@@ -232,7 +225,7 @@ function Updates() {
         {remoteHosts.length > 0 && (
           <Section title={`Hôtes distants (${remoteHosts.length})`}>
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-sm min-w-[500px]">
                 <UpdateTableHead />
                 <tbody>
                   {remoteHosts.map(t => (
@@ -249,33 +242,11 @@ function Updates() {
           </Section>
         )}
 
-        {/* DEV containers */}
-        {devContainers.length > 0 && (
-          <Section title={`Containers DEV (${devContainers.length})`}>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <UpdateTableHead showDevCols />
-                <tbody>
-                  {devContainers.map(t => (
-                    <UpdateTableRow
-                      key={t.id}
-                      target={t}
-                      upgradeState={upgradeStates[t.id] || {}}
-                      onUpgrade={handleUpgrade}
-                      showDevCols
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </Section>
-        )}
-
         {/* PROD containers */}
         {prodContainers.length > 0 && (
           <Section title={`Containers PROD (${prodContainers.length})`}>
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-sm min-w-[500px]">
                 <UpdateTableHead />
                 <tbody>
                   {prodContainers.map(t => (
@@ -296,7 +267,7 @@ function Updates() {
         {history.length > 0 && (
           <Card title="Historique des mises à jour" icon={Clock}>
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-sm min-w-[500px]">
                 <thead>
                   <tr className="text-left text-gray-400 border-b border-gray-700">
                     <th className="pb-2 pr-4">Date</th>

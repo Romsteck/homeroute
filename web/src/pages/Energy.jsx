@@ -288,7 +288,7 @@ function Energy() {
       <PageHeader title="Énergie" icon={Zap} />
 
       <Section title={`CPU — ${cpuModel}`}>
-        <div className="flex items-center gap-6 text-sm">
+        <div className="flex items-center gap-3 sm:gap-6 text-sm flex-wrap">
           <div className="flex items-center gap-1.5">
             <Thermometer className="w-3.5 h-3.5 text-gray-500" />
             <span className={`font-semibold ${getTempColor(cpuInfo.temperature || 0)}`}>

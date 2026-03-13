@@ -8,6 +8,7 @@ use hr_ipc::{NetcoreClient, EdgeClient};
 use hr_ipc::orchestrator::OrchestratorClient;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use hr_git::GitService;
 use tracing::info;
 
 #[tokio::main]
@@ -98,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
         // These fields are managed by hr-orchestrator; homeroute passes None/empty.
         registry: None,
         container_manager: None,
-        git: None,
+        git: Some(Arc::new(GitService::new())),
         migrations: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         renames: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         dataverse_schemas: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),

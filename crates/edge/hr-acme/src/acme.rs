@@ -10,6 +10,16 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+/// Certificate expiry information for a single domain.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CertExpiryInfo {
+    pub domain: String,
+    pub wildcard_type: String,
+    pub days_remaining: i64,
+    pub expires_at: String,
+    pub needs_renewal: bool,
+}
+
 /// ACME certificate manager for Let's Encrypt
 pub struct AcmeManager {
     config: AcmeConfig,
@@ -409,5 +419,21 @@ impl AcmeManager {
     /// Get a reference to the storage
     pub fn storage(&self) -> &AcmeStorage {
         &self.storage
+    }
+
+    /// Return expiry information for all certificates.
+    /// Each entry contains the domain pattern, days remaining, and expiry timestamp.
+    pub fn cert_expiry_info(&self) -> AcmeResult<Vec<CertExpiryInfo>> {
+        let index = self.storage.load_index()?;
+        Ok(index
+            .iter()
+            .map(|c| CertExpiryInfo {
+                domain: c.wildcard_type.domain_pattern(&self.config.base_domain),
+                wildcard_type: c.wildcard_type.display_name(),
+                days_remaining: c.days_until_expiry(),
+                expires_at: c.expires_at.to_rfc3339(),
+                needs_renewal: c.needs_renewal(self.config.renewal_threshold_days),
+            })
+            .collect())
     }
 }

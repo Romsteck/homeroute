@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Key, Shield, Code2, HardDrive } from 'lucide-react';
+import { Key, Shield, HardDrive } from 'lucide-react';
 import Button from './Button';
 
 function CreateContainerModal({
@@ -20,9 +20,8 @@ function CreateContainerModal({
     name: initialName || '',
     slug: initialSlug || '',
     host_id: 'local',
-    environment: isPaired ? (initialEnvironment || 'development') : 'development',
+    environment: isPaired ? (initialEnvironment || 'production') : 'production',
     frontend: { auth_required: true, allowed_groups: [], local_only: false },
-    code_server_enabled: isPaired ? (initialEnvironment !== 'production') : true,
     linked_app_id: initialLinkedAppId || '',
     stack: 'leptos-rust',
   });
@@ -43,7 +42,6 @@ function CreateContainerModal({
         allowed_groups: form.frontend.allowed_groups,
         local_only: form.frontend.local_only,
       },
-      code_server_enabled: isDev ? form.code_server_enabled : false,
       linked_app_id: form.linked_app_id || null,
       stack: form.stack,
     };
@@ -52,7 +50,7 @@ function CreateContainerModal({
   }
 
   const previewUrl = form.slug && baseDomain
-    ? isDev ? `code.${form.slug}.${baseDomain}` : `${form.slug}.${baseDomain}`
+    ? `${form.slug}.${baseDomain}`
     : null;
 
   return (
@@ -165,25 +163,17 @@ function CreateContainerModal({
             </div>
           )}
 
-          {/* Auto-creation note (only when creating from scratch) */}
-          {!isPaired && (
-            <p className="text-xs text-gray-500">Un conteneur de production sera automatiquement créé</p>
-          )}
 
           {/* Auth options */}
           <div className="flex items-center gap-4">
-            <label className={`flex items-center gap-1.5 text-xs ${isDev ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'}`}
-              title={isDev ? 'Obligatoire pour les containers DEV' : undefined}
-            >
+            <label className="flex items-center gap-1.5 text-xs cursor-pointer">
               <input
                 type="checkbox"
-                checked={isDev ? true : form.frontend.auth_required}
-                onChange={isDev ? undefined : e => setForm({ ...form, frontend: { ...form.frontend, auth_required: e.target.checked } })}
-                disabled={isDev}
+                checked={form.frontend.auth_required}
+                onChange={e => setForm({ ...form, frontend: { ...form.frontend, auth_required: e.target.checked } })}
                 className="rounded"
               />
               <Key className="w-3 h-3 text-purple-400" /> Auth requise
-              {isDev && <span className="text-gray-500 ml-1">(obligatoire)</span>}
             </label>
             <label className="flex items-center gap-1.5 text-xs cursor-pointer">
               <input
@@ -196,22 +186,6 @@ function CreateContainerModal({
             </label>
           </div>
 
-          {/* code-server (dev only) */}
-          {isDev && (
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input
-                type="checkbox"
-                checked={form.code_server_enabled}
-                onChange={e => setForm({ ...form, code_server_enabled: e.target.checked })}
-                className="rounded"
-              />
-              <Code2 className="w-4 h-4 text-cyan-400" />
-              code-server IDE
-              {form.slug && baseDomain && form.code_server_enabled && (
-                <span className="text-xs text-gray-500 font-mono ml-2">code.{form.slug}.{baseDomain}</span>
-              )}
-            </label>
-          )}
         </div>
         <div className="flex justify-end gap-2 mt-6">
           <Button variant="secondary" onClick={onClose}>Annuler</Button>

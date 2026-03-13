@@ -197,6 +197,7 @@ function Containers() {
   const [renameProgress, setRenameProgress] = useState(null);
 
   // Agent metrics state
+  const [envFilter, setEnvFilter] = useState('production');
   const [appMetrics, setAppMetrics] = useState({});
 
   const fetchData = useCallback(async () => {
@@ -214,7 +215,6 @@ function Containers() {
         for (const c of list) {
           if (c.metrics) {
             initialMetrics[c.id] = {
-              codeServerStatus: c.metrics.code_server_status,
               appStatus: c.metrics.app_status,
               dbStatus: c.metrics.db_status,
               memoryBytes: c.metrics.memory_bytes,
@@ -263,24 +263,11 @@ function Containers() {
       });
     },
     'agent:metrics': (data) => {
-      const { appId, codeServerStatus, appStatus, dbStatus, memoryBytes, cpuPercent } = data;
+      const { appId, appStatus, dbStatus, memoryBytes, cpuPercent } = data;
       setAppMetrics(prev => ({
         ...prev,
-        [appId]: { codeServerStatus, appStatus, dbStatus, memoryBytes, cpuPercent }
+        [appId]: { appStatus, dbStatus, memoryBytes, cpuPercent }
       }));
-    },
-    'agent:service-command': (data) => {
-      const { appId, serviceType, action, success } = data;
-      if (success && appId) {
-        const statusMap = { started: 'running', stopped: 'stopped', starting: 'starting', stopping: 'stopping' };
-        const newStatus = statusMap[action] || action;
-        setAppMetrics(prev => {
-          const current = prev[appId] || {};
-          const updated = { ...current };
-          if (serviceType === 'code_server') updated.codeServerStatus = newStatus;
-          return { ...prev, [appId]: updated };
-        });
-      }
     },
     'hosts:status': (data) => {
       const { hostId, status } = data;
@@ -515,7 +502,13 @@ function Containers() {
   }
 
   const groups = groupByApp(containers);
-  const devRunning = containers.filter(c => (c.environment || 'development') !== 'production' && (c.agent_status || c.status) === 'connected').length;
+  const filteredGroups = envFilter === 'all'
+    ? groups
+    : groups.filter(g => {
+        if (envFilter === 'production') return g.prod;
+        if (envFilter === 'development') return g.dev;
+        return true;
+      });
   const prodRunning = containers.filter(c => c.environment === 'production' && (c.agent_status || c.status) === 'connected').length;
 
   return (
@@ -542,21 +535,39 @@ function Containers() {
       )}
 
       {/* Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-px">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-px">
         <Card title="Total" icon={Container}>
           <div className="text-2xl font-bold">{containers.length}</div>
-        </Card>
-        <Card title="Build Servers" icon={Wifi}>
-          <div className="text-2xl font-bold text-blue-400">{devRunning}</div>
         </Card>
         <Card title="Production" icon={Wifi}>
           <div className="text-2xl font-bold text-purple-400">{prodRunning}</div>
         </Card>
       </div>
 
+      {/* Environment filter */}
+      <div className="flex items-center gap-2 px-4 py-2 bg-gray-800/50 border-b border-gray-700">
+        <span className="text-xs text-gray-500 uppercase mr-2">Filtre:</span>
+        {[
+          { key: 'all', label: 'Tout' },
+          { key: 'production', label: 'Production' },
+        ].map(f => (
+          <button
+            key={f.key}
+            onClick={() => setEnvFilter(f.key)}
+            className={`px-2.5 py-1 text-xs font-medium transition-colors ${
+              envFilter === f.key
+                ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                : 'text-gray-400 hover:text-white border border-gray-700 hover:border-gray-500'
+            }`}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
       {/* App Groups */}
       <div>
-        {groups.length === 0 ? (
+        {filteredGroups.length === 0 ? (
           <Card>
             <div className="text-center py-8 text-gray-500">
               <Container className="w-12 h-12 mx-auto mb-2 opacity-50" />
@@ -568,7 +579,7 @@ function Containers() {
           <div>
           {/* Column headers */}
           <div
-            className="grid items-center gap-x-3 px-4 py-1.5 text-[11px] text-gray-500 uppercase tracking-wider border-b border-gray-600 bg-gray-900/80 sticky top-0 z-10"
+            className="hidden lg:grid items-center gap-x-3 px-4 py-1.5 text-[11px] text-gray-500 uppercase tracking-wider border-b border-gray-600 bg-gray-900/80 sticky top-0 z-10"
             style={{ gridTemplateColumns: CONTAINER_GRID }}
           >
             <span>Env</span>
@@ -581,7 +592,7 @@ function Containers() {
             <span>Hote</span>
             <span className="text-right">Actions</span>
           </div>
-          {groups.map(group => (
+          {filteredGroups.map(group => (
             <AppGroupCard
               key={group.slug}
               group={group}
@@ -687,7 +698,7 @@ function Containers() {
 
       {/* Migrate Modal */}
       {migrateModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-gray-800 p-6 w-full max-w-md border border-gray-700">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold">Migrer {migrateModal.name}</h3>

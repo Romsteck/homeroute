@@ -17,9 +17,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::{ProxyConfig, RouteConfig};
 use crate::logging::{self, AccessLogEntry, OptionalAccessLogger};
+use crate::metrics::ProxyMetrics;
 
 /// Route to an agent-managed application (LXC container).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AppRoute {
     pub app_id: String,
     pub host_id: String,
@@ -53,6 +54,10 @@ pub struct ProxyState {
     pub orchestrator_port: u16,
     /// Application routes: domain → AppRoute (agent-managed LXC containers).
     app_routes: RwLock<std::collections::HashMap<String, AppRoute>>,
+    /// Path to persist app routes on disk (survives edge restarts).
+    app_routes_path: Option<std::path::PathBuf>,
+    /// Per-domain request/error counters.
+    pub metrics: ProxyMetrics,
 }
 
 impl ProxyState {
@@ -79,6 +84,8 @@ impl ProxyState {
             management_port,
             orchestrator_port,
             app_routes: RwLock::new(std::collections::HashMap::new()),
+            app_routes_path: None,
+            metrics: ProxyMetrics::new(),
         }
     }
 
@@ -86,6 +93,50 @@ impl ProxyState {
     pub fn with_auth(mut self, auth: Arc<AuthService>) -> Self {
         self.auth = Some(auth);
         self
+    }
+
+    /// Set the path for persisting app routes to disk.
+    /// If the file exists, routes are loaded immediately.
+    pub fn with_app_routes_path(mut self, path: std::path::PathBuf) -> Self {
+        // Load persisted routes from disk
+        if path.exists() {
+            match std::fs::read_to_string(&path) {
+                Ok(json) => {
+                    match serde_json::from_str::<std::collections::HashMap<String, AppRoute>>(&json) {
+                        Ok(routes) => {
+                            let count = routes.len();
+                            *self.app_routes.write().unwrap() = routes;
+                            info!("Loaded {} persisted app routes from {}", count, path.display());
+                        }
+                        Err(e) => {
+                            warn!("Failed to parse persisted app routes: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to read persisted app routes: {}", e);
+                }
+            }
+        }
+        self.app_routes_path = Some(path);
+        self
+    }
+
+    /// Persist current app routes to disk (best-effort, non-blocking for callers).
+    fn persist_app_routes(&self) {
+        if let Some(ref path) = self.app_routes_path {
+            let map = self.app_routes.read().unwrap();
+            match serde_json::to_string(&*map) {
+                Ok(json) => {
+                    if let Err(e) = std::fs::write(path, json) {
+                        warn!("Failed to persist app routes: {}", e);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to serialize app routes: {}", e);
+                }
+            }
+        }
     }
 
     /// Reload the proxy config (called on SIGHUP)
@@ -123,6 +174,8 @@ impl ProxyState {
         let mut map = self.app_routes.write().unwrap();
         info!(domain = domain, target = %route.target_ip, port = route.target_port, "Added app route");
         map.insert(domain, route);
+        drop(map);
+        self.persist_app_routes();
     }
 
     /// Remove an application route by domain.
@@ -130,6 +183,8 @@ impl ProxyState {
         let mut map = self.app_routes.write().unwrap();
         if map.remove(domain).is_some() {
             info!(domain = domain, "Removed app route");
+            drop(map);
+            self.persist_app_routes();
         }
     }
 
@@ -182,6 +237,12 @@ pub async fn proxy_handler(
     };
 
     let duration_ms = start.elapsed().as_millis() as u64;
+
+    // Record metrics (domain without port)
+    let metric_domain = host_for_log.split(':').next().unwrap_or(&host_for_log);
+    if !metric_domain.is_empty() {
+        state.metrics.record_request(metric_domain, status);
+    }
 
     // Log to file
     state.access_logger.log(AccessLogEntry {
@@ -393,6 +454,18 @@ async fn proxy_handler_inner(
                 }
             }
         }
+    }
+
+    // Internal edge stats endpoint (no proxy round-trip)
+    if is_management && req.uri().path() == "/api/edge/stats" {
+        let global = state.metrics.global_snapshot();
+        let domains = state.metrics.snapshot();
+        let body = serde_json::json!({ "global": global, "domains": domains });
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap_or_default()))
+            .unwrap());
     }
 
     // Route orchestrator WebSocket paths on management domain to hr-orchestrator

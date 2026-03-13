@@ -45,6 +45,9 @@ pub enum EdgeRequest {
     CloudRelayEnable,
     CloudRelayDisable,
     CloudRelayPushBinary { path: String, sha256: String },
+
+    // Stats / metrics
+    GetStats,
 }
 
 // ── EdgeClient ───────────────────────────────────────────

@@ -696,6 +696,7 @@ dependencies = [
  "hr-api",
  "hr-auth",
  "hr-common",
+ "hr-git",
  "hr-ipc",
  "rustls",
  "tokio",

@@ -122,6 +122,7 @@ export const rebootHost = (id) => api.post(`/hosts/${id}/reboot`);
 export const sleepHost = (id) => api.post(`/hosts/${id}/sleep`);
 export const setWolMac = (id, mac) => api.post(`/hosts/${id}/wol-mac`, { mac });
 export const setAutoOff = (id, mode, minutes) => api.post(`/hosts/${id}/auto-off`, { mode, minutes });
+export const setHostRole = (id, role) => api.put(`/hosts/${id}/role`, { role });
 export const updateHostAgents = () => api.post('/hosts/agents/update');
 export const updateLocalHostConfig = (data) => api.put('/hosts/local/config', data);
 export const getLocalInterfaces = () => api.get('/hosts/local/interfaces');
@@ -133,6 +134,9 @@ export const disableCloudRelay = () => api.post('/cloud-relay/disable');
 export const bootstrapCloudRelay = (data) => api.post('/cloud-relay/bootstrap', data, { timeout: 300000 });
 export const updateCloudRelayConfig = (config) => api.put('/cloud-relay/config', config);
 export const pushCloudRelayUpdate = () => api.post('/cloud-relay/update', {}, { timeout: 120000 });
+
+// Edge Stats
+export const getEdgeStats = () => api.get('/edge/stats');
 
 // Containers (nspawn)
 export const getContainers = () => api.get('/containers');

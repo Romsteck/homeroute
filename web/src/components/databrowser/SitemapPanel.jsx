@@ -4,7 +4,7 @@ export default function SitemapPanel({ apps, selectedAppId, selectedTableName, e
   const filtered = (apps || []).filter(app => app.environment === envFilter);
 
   return (
-    <div className="w-60 flex-shrink-0 border-r border-gray-700 flex flex-col bg-gray-800 overflow-y-auto">
+    <div className="w-48 sm:w-60 flex-shrink-0 border-r border-gray-700 flex flex-col bg-gray-800 overflow-y-auto">
       {filtered.map(app => {
         const isExpanded = app.appId === selectedAppId;
         const tables = app.tables || [];

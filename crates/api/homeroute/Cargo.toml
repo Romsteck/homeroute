@@ -13,6 +13,7 @@ hr-auth = { path = "../../edge/hr-auth" }
 hr-acme = { path = "../../edge/hr-acme" }
 hr-ipc = { path = "../../shared/hr-ipc" }
 hr-api = { path = "../hr-api" }
+hr-git = { path = "../../orchestrator/hr-git" }
 
 rustls = { workspace = true }
 axum = { workspace = true }

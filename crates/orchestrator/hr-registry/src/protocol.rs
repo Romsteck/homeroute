@@ -294,6 +294,8 @@ pub enum HostAgentMessage {
         lan_interface: Option<String>,
         #[serde(default)]
         container_storage_path: Option<String>,
+        #[serde(default)]
+        role: Option<HostRole>,
     },
     Heartbeat {
         uptime_secs: u64,
@@ -394,6 +396,49 @@ pub struct HostMetrics {
     pub disk_used_bytes: u64,
     pub disk_total_bytes: u64,
     pub load_avg: [f32; 3],
+    /// CPU temperature in °C (from thermal zones)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_temp_celsius: Option<f32>,
+    /// System uptime in seconds
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uptime_seconds: Option<f64>,
+    /// ZFS pool statuses
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zfs_pools: Option<Vec<ZfsPoolInfo>>,
+    /// Disk usage per mount point
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_mounts: Option<Vec<DiskUsage>>,
+}
+
+/// ZFS pool information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZfsPoolInfo {
+    pub name: String,
+    pub size: u64,
+    pub allocated: u64,
+    pub free: u64,
+    pub health: String,
+}
+
+/// Disk usage for a mount point
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskUsage {
+    pub mount_point: String,
+    pub filesystem: String,
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub available_bytes: u64,
+}
+
+/// Role assigned to a host in the infrastructure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HostRole {
+    #[default]
+    None,
+    Dev,
+    Prod,
+    Backup,
 }
 
 /// LXC container info reported by host-agent
@@ -452,6 +497,10 @@ pub enum HostRegistryMessage {
     ExecInContainer {
         request_id: String,
         container_name: String,
+        command: Vec<String>,
+    },
+    ExecOnHost {
+        request_id: String,
         command: Vec<String>,
     },
     PowerOff,

@@ -60,7 +60,7 @@ function Dns() {
   function renderDnsTab() {
     return (
       <div className="space-y-px">
-        <div className="grid grid-cols-3 gap-px">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-px">
           <Section title="Serveurs DNS upstream" className="!mb-0">
             <div className="space-y-1">
               {config?.dnsServers?.map(server => (
@@ -80,7 +80,7 @@ function Dns() {
 
           <Section title="Wildcard DNS" className="!mb-0">
             {config?.wildcardAddress ? (
-              <div className="font-mono text-sm">
+              <div className="font-mono text-sm break-all">
                 <span className="text-purple-400">*.{config.wildcardAddress.domain}</span>
                 <span className="text-gray-400 mx-2">→</span>
                 <span className="text-green-400">{config.wildcardAddress.ip}</span>
@@ -94,7 +94,7 @@ function Dns() {
         <Section title={`Enregistrements DNS (${config?.staticRecords?.length || 0})`}>
           {config?.staticRecords?.length > 0 ? (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-sm min-w-[500px]">
                 <thead>
                   <tr className="text-left text-gray-400 border-b border-gray-700">
                     <th className="pb-2">Nom</th>
@@ -106,7 +106,7 @@ function Dns() {
                 <tbody>
                   {config.staticRecords.map((record, i) => (
                     <tr key={i} className="border-b border-gray-700/50 hover:bg-gray-700/30">
-                      <td className="py-2 font-mono text-blue-400">{record.name}</td>
+                      <td className="py-2 font-mono text-blue-400 break-all">{record.name}</td>
                       <td className="py-2">
                         <span className={`px-2 py-0.5 text-xs font-medium ${
                           record.record_type === 'A' ? 'bg-green-900/50 text-green-400' :
@@ -117,7 +117,7 @@ function Dns() {
                           {record.record_type}
                         </span>
                       </td>
-                      <td className="py-2 font-mono text-sm">{record.value}</td>
+                      <td className="py-2 font-mono text-sm break-all">{record.value}</td>
                       <td className="py-2 text-gray-400">{record.ttl}s</td>
                     </tr>
                   ))}
@@ -135,7 +135,7 @@ function Dns() {
   function renderDhcpTab() {
     return (
       <div className="space-y-px">
-        <div className="grid grid-cols-5 gap-px">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-px">
           <Section title="Configuration DHCP" className="!mb-0">
             <dl className="space-y-3 text-sm">
               <div className="flex justify-between">
@@ -157,7 +157,7 @@ function Dns() {
             <div className="space-y-1">
               {config?.dhcpOptions?.length > 0 ? (
                 config.dhcpOptions.map((opt, i) => (
-                  <div key={i} className="font-mono text-xs bg-gray-900 px-2 py-1">
+                  <div key={i} className="font-mono text-xs bg-gray-900 px-2 py-1 break-all">
                     {opt}
                   </div>
                 ))
@@ -167,7 +167,7 @@ function Dns() {
             </div>
           </Section>
 
-          <Section title="Configuration IPv6" contrast className="!mb-0 col-span-3">
+          <Section title="Configuration IPv6" contrast className="!mb-0 sm:col-span-2 lg:col-span-3">
             <dl className="space-y-2 text-sm">
               <div className="flex justify-between">
                 <dt className="text-gray-400">Router Advertisement</dt>
@@ -192,18 +192,18 @@ function Dns() {
                 placeholder="Rechercher..."
                 value={search}
                 onChange={e => setSearch(e.target.value)}
-                className="pl-9 pr-4 py-1.5 bg-gray-900 border border-gray-600 text-sm focus:outline-none focus:border-blue-500"
+                className="w-full sm:w-auto pl-9 pr-4 py-1.5 bg-gray-900 border border-gray-600 text-sm focus:outline-none focus:border-blue-500"
               />
             </div>
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full text-sm min-w-[500px]">
               <thead>
                 <tr className="text-left text-gray-400 border-b border-gray-700">
                   <th className="pb-2">Hostname</th>
                   <th className="pb-2">Adresse IPv4</th>
                   <th className="pb-2">Adresse MAC</th>
-                  <th className="pb-2">Expiration</th>
+                  <th className="pb-2 hidden sm:table-cell">Expiration</th>
                 </tr>
               </thead>
               <tbody>
@@ -214,7 +214,7 @@ function Dns() {
                     </td>
                     <td className="py-2 font-mono text-blue-400">{lease.ip}</td>
                     <td className="py-2 font-mono text-gray-400 text-xs">{lease.mac}</td>
-                    <td className="py-2 text-gray-400 text-xs">
+                    <td className="py-2 text-gray-400 text-xs hidden sm:table-cell">
                       {new Date(lease.expiry * 1000).toLocaleString('fr-FR')}
                     </td>
                   </tr>
@@ -239,15 +239,16 @@ function Dns() {
     <div>
       <PageHeader title="DNS / DHCP" icon={Server} />
 
-      <div className="flex flex-1">
-        {/* Vertical Tab Sidebar */}
-        <div className="w-56 border-r border-gray-700 bg-gray-800/50 flex-shrink-0">
+      {/* Horizontal tabs on mobile, vertical on desktop */}
+      <div className="flex flex-col md:flex-row flex-1">
+        {/* Tab bar - horizontal on mobile, vertical sidebar on desktop */}
+        <div className="flex md:flex-col md:w-56 border-b md:border-b-0 md:border-r border-gray-700 bg-gray-800/50 flex-shrink-0 overflow-x-auto">
           <button
             onClick={() => setActiveTab('dns')}
-            className={`w-full flex items-center gap-2 px-4 py-2.5 text-sm text-left transition-colors ${
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm text-left transition-colors whitespace-nowrap ${
               activeTab === 'dns'
-                ? 'bg-gray-900 text-blue-400 border-l-2 border-blue-400'
-                : 'text-gray-400 hover:bg-gray-800 hover:text-gray-300 border-l-2 border-transparent'
+                ? 'bg-gray-900 text-blue-400 border-b-2 md:border-b-0 md:border-l-2 border-blue-400'
+                : 'text-gray-400 hover:bg-gray-800 hover:text-gray-300 border-b-2 md:border-b-0 md:border-l-2 border-transparent'
             }`}
           >
             <Globe className="w-4 h-4" />
@@ -255,10 +256,10 @@ function Dns() {
           </button>
           <button
             onClick={() => setActiveTab('dhcp')}
-            className={`w-full flex items-center gap-2 px-4 py-2.5 text-sm text-left transition-colors ${
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm text-left transition-colors whitespace-nowrap ${
               activeTab === 'dhcp'
-                ? 'bg-gray-900 text-blue-400 border-l-2 border-blue-400'
-                : 'text-gray-400 hover:bg-gray-800 hover:text-gray-300 border-l-2 border-transparent'
+                ? 'bg-gray-900 text-blue-400 border-b-2 md:border-b-0 md:border-l-2 border-blue-400'
+                : 'text-gray-400 hover:bg-gray-800 hover:text-gray-300 border-b-2 md:border-b-0 md:border-l-2 border-transparent'
             }`}
           >
             <Network className="w-4 h-4" />

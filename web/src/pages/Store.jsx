@@ -102,8 +102,8 @@ function Store() {
           {releases.length === 0 ? (
             <p className="text-sm text-gray-500">Aucune release.</p>
           ) : (
-            <div className="-mx-6 -my-3 overflow-x-auto">
-              <table className="w-full text-left">
+            <div className="-mx-4 sm:-mx-6 -my-3 overflow-x-auto">
+              <table className="w-full text-left min-w-[500px]">
                 <thead className="bg-gray-800/60 border-b border-gray-700">
                   <tr>
                     <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Version</th>
@@ -201,8 +201,8 @@ function Store() {
             Aucune application. Les publications sont gerees via MCP.
           </div>
         ) : (
-          <div className="-mx-6 -my-3 overflow-x-auto">
-            <table className="w-full text-left">
+          <div className="-mx-4 sm:-mx-6 -my-3 overflow-x-auto">
+            <table className="w-full text-left min-w-[500px]">
               <thead className="bg-gray-800/60 border-b border-gray-700">
                 <tr>
                   <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Nom</th>

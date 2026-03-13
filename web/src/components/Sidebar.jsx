@@ -1,11 +1,12 @@
-import { NavLink } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Server, Shield, Globe, Settings,
-  ArrowLeftRight, RefreshCw, Zap, LogOut,
+  ArrowLeftRight, RefreshCw, Zap, LogOut, Activity,
   User, HardDrive, Lock, Database, Cloud, Container, Table2,
-  Store as StoreIcon, GitBranch
+  Store as StoreIcon, GitBranch, X
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useEffect } from 'react';
 
 const navGroups = [
   {
@@ -42,6 +43,7 @@ const navGroups = [
   {
     label: 'Système',
     items: [
+      { to: '/monitoring', icon: Activity, label: 'Monitoring' },
       { to: '/hosts', icon: HardDrive, label: 'Hotes' },
       { to: '/updates', icon: RefreshCw, label: 'Mises à jour' },
       { to: '/energy', icon: Zap, label: 'Énergie' },
@@ -49,17 +51,30 @@ const navGroups = [
   },
 ];
 
-function Sidebar() {
+function Sidebar({ onClose }) {
   const { user, logout } = useAuth();
+  const location = useLocation();
+
+  // Auto-close sidebar on route change (mobile)
+  useEffect(() => {
+    if (onClose) onClose();
+  }, [location.pathname]);
 
   return (
-    <aside className="w-64 bg-gray-800 border-r border-gray-700 flex flex-col">
-      <div className="p-4 border-b border-gray-700">
+    <aside className="w-64 h-full bg-gray-800 border-r border-gray-700 flex flex-col">
+      <div className="p-4 border-b border-gray-700 flex items-center justify-between">
         <h1 className="text-xl font-bold flex items-center gap-2">
           <Settings className="w-6 h-6 text-blue-400" />
           HomeRoute
         </h1>
-        <p className="text-xs text-gray-400 mt-1">cloudmaster</p>
+        {onClose && (
+          <button
+            onClick={onClose}
+            className="lg:hidden p-1 text-gray-400 hover:text-white"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        )}
       </div>
 
       <nav className="flex-1 py-2 overflow-y-auto">

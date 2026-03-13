@@ -405,17 +405,17 @@ Verification rapide (sans les details utilisateur).
       </div>
 
       {/* Vertical Tabs Layout */}
-      <div className="flex flex-1">
+      <div className="flex flex-col md:flex-row flex-1">
         {/* Tab Sidebar */}
-        <div className="w-56 border-r border-gray-700 bg-gray-800/50 flex-shrink-0">
+        <div className="flex md:flex-col md:w-56 border-b md:border-b-0 md:border-r border-gray-700 bg-gray-800/50 flex-shrink-0 overflow-x-auto">
           {tabs.map(tab => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`w-full flex items-center gap-2 px-4 py-2.5 text-sm text-left transition-colors ${
+              className={`flex items-center gap-2 px-4 py-2.5 text-sm text-left transition-colors whitespace-nowrap md:w-full ${
                 activeTab === tab.id
-                  ? 'bg-gray-900 text-blue-400 border-l-2 border-blue-400'
-                  : 'text-gray-400 hover:bg-gray-800 hover:text-gray-300 border-l-2 border-transparent'
+                  ? 'bg-gray-900 text-blue-400 border-b-2 md:border-b-0 md:border-l-2 border-blue-400'
+                  : 'text-gray-400 hover:bg-gray-800 hover:text-gray-300 border-b-2 md:border-b-0 md:border-l-2 border-transparent'
               }`}
             >
               <tab.icon className="w-4 h-4" />
