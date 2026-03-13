@@ -250,14 +250,22 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 }
             }
             OrchestratorRequest::CreateContainer { request } => {
-                // Validate the request parses correctly
-                let _req: CreateContainerRequest = match serde_json::from_value(request) {
+                let req: CreateContainerRequest = match serde_json::from_value(request) {
                     Ok(r) => r,
                     Err(e) => return IpcResponse::err(format!("Invalid create request: {e}")),
                 };
-                // TODO: Wire up create_container when the full deploy pipeline
-                // is migrated to hr-orchestrator. For now, return not implemented.
-                IpcResponse::err("Container creation not yet migrated to orchestrator")
+                match self.container_manager.create_container(req).await {
+                    Ok((record, token)) => IpcResponse::ok_data(serde_json::json!({
+                        "id": record.id,
+                        "name": record.name,
+                        "slug": record.slug,
+                        "container_name": record.container_name,
+                        "host_id": record.host_id,
+                        "status": record.status,
+                        "token": token,
+                    })),
+                    Err(e) => IpcResponse::err(format!("Failed to create container: {e}")),
+                }
             }
             OrchestratorRequest::StartContainer { id } => {
                 match self.container_manager.start_container(&id).await {

@@ -13,7 +13,7 @@ use tracing::{info, warn};
 use hr_acme::AcmeManager;
 use hr_common::config::EnvConfig;
 use hr_common::events::{AgentMetricsEvent, AgentStatusEvent, AgentUpdateEvent, AgentUpdateStatus, EventBus, HostPowerEvent, HostPowerState, PowerAction, UpdateTarget, WakeResult};
-use crate::protocol::{AgentMetrics, ContainerInfo, HostMetrics, HostRegistryMessage, NetworkInterfaceInfo, RegistryMessage};
+use crate::protocol::{AgentMetrics, ContainerInfo, HostMetrics, HostRegistryMessage, HostRole, NetworkInterfaceInfo, RegistryMessage};
 use crate::types::{
     AgentNotifyResult, AgentSkipResult, AgentStatus, AgentUpdateStatusInfo,
     AppStack, Application, CreateApplicationRequest, RegistryState, UpdateApplicationRequest,
@@ -48,6 +48,7 @@ pub struct HostConnection {
     pub metrics: Option<HostMetrics>,
     pub containers: Vec<ContainerInfo>,
     pub interfaces: Vec<NetworkInterfaceInfo>,
+    pub role: Option<HostRole>,
 }
 
 pub enum MigrationResult {
@@ -640,6 +641,7 @@ impl AgentRegistry {
         host_name: String,
         tx: mpsc::Sender<OutgoingHostMessage>,
         version: String,
+        role: Option<HostRole>,
     ) {
         let conn = HostConnection {
             tx,
@@ -650,6 +652,7 @@ impl AgentRegistry {
             metrics: None,
             containers: Vec::new(),
             interfaces: Vec::new(),
+            role,
         };
         self.host_connections.write().await.insert(host_id.clone(), conn);
 
@@ -683,7 +686,12 @@ impl AgentRegistry {
     }
 
     pub async fn is_host_connected(&self, host_id: &str) -> bool {
-        self.host_connections.read().await.contains_key(host_id)
+        let conns = self.host_connections.read().await;
+        if host_id == "local" {
+            !conns.is_empty()
+        } else {
+            conns.contains_key(host_id)
+        }
     }
 
     /// Check if an agent has an active WebSocket connection.
@@ -970,7 +978,14 @@ impl AgentRegistry {
         // (which would deadlock with heartbeat/status write locks).
         let tx = {
             let conns = self.host_connections.read().await;
-            match conns.get(host_id) {
+            // Resolve "local" to the first (and typically only) connected host
+            let resolved = if host_id == "local" {
+                conns.keys().next().map(|k| k.clone())
+            } else {
+                None
+            };
+            let lookup_id = resolved.as_deref().unwrap_or(host_id);
+            match conns.get(lookup_id) {
                 Some(conn) => conn.tx.clone(),
                 None => return Err(format!("Host {} not connected", host_id)),
             }
@@ -993,7 +1008,14 @@ impl AgentRegistry {
     ) -> Result<(), String> {
         let tx = {
             let conns = self.host_connections.read().await;
-            match conns.get(host_id) {
+            // Resolve "local" to the first (and typically only) connected host
+            let resolved = if host_id == "local" {
+                conns.keys().next().map(|k| k.clone())
+            } else {
+                None
+            };
+            let lookup_id = resolved.as_deref().unwrap_or(host_id);
+            match conns.get(lookup_id) {
                 Some(conn) => conn.tx.clone(),
                 None => return Err(format!("Host {} not connected", host_id)),
             }
@@ -1069,6 +1091,21 @@ impl AgentRegistry {
     }
 
     pub async fn exec_in_remote_container(&self, host_id: &str, container_name: &str, command: Vec<String>) -> Result<(bool, String, String)> {
+        // Local host: execute directly via machinectl (no host-agent needed)
+        if host_id == "local" {
+            let full_cmd = command.join(" && ");
+            info!(container = container_name, cmd = %full_cmd, "Local exec via machinectl");
+            let output = tokio::process::Command::new("machinectl")
+                .args(["shell", container_name, "/bin/bash", "-c", &full_cmd])
+                .output()
+                .await
+                .map_err(|e| anyhow::anyhow!("machinectl exec failed: {e}"))?;
+
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Ok((output.status.success(), stdout, stderr));
+        }
+
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.exec_signals.write().await.insert(request_id.clone(), tx);
@@ -1087,6 +1124,70 @@ impl AgentRegistry {
             Err(_) => {
                 self.exec_signals.write().await.remove(&request_id);
                 anyhow::bail!("Exec timeout after 60s");
+            }
+        }
+    }
+
+    /// Execute a command in a remote container with configurable timeout.
+    pub async fn exec_in_remote_container_with_timeout(&self, host_id: &str, container_name: &str, command: Vec<String>, timeout_secs: u64) -> Result<(bool, String, String)> {
+        // Local host: execute directly via machinectl (no host-agent needed)
+        if host_id == "local" {
+            let full_cmd = command.join(" && ");
+            info!(container = container_name, cmd = %full_cmd, "Local exec via machinectl");
+            let output = tokio::process::Command::new("machinectl")
+                .args(["shell", container_name, "/bin/bash", "-c", &full_cmd])
+                .output()
+                .await
+                .map_err(|e| anyhow::anyhow!("machinectl exec failed: {e}"))?;
+
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Ok((output.status.success(), stdout, stderr));
+        }
+
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.exec_signals.write().await.insert(request_id.clone(), tx);
+
+        self.send_host_command(host_id, crate::protocol::HostRegistryMessage::ExecInContainer {
+            request_id: request_id.clone(),
+            container_name: container_name.to_string(),
+            command,
+        }).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(_)) => {
+                anyhow::bail!("Exec signal channel closed");
+            }
+            Err(_) => {
+                self.exec_signals.write().await.remove(&request_id);
+                anyhow::bail!("Exec timeout after {timeout_secs}s");
+            }
+        }
+    }
+
+    /// Execute a command directly on a remote host (not inside a container).
+    pub async fn exec_on_host(
+        &self,
+        host_id: &str,
+        command: Vec<String>,
+    ) -> Result<(bool, String, String), String> {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.exec_signals.write().await.insert(request_id.clone(), tx);
+
+        self.send_host_command(host_id, crate::protocol::HostRegistryMessage::ExecOnHost {
+            request_id: request_id.clone(),
+            command,
+        }).await?;
+
+        match tokio::time::timeout(std::time::Duration::from_secs(120), rx).await {
+            Ok(Ok((success, stdout, stderr))) => Ok((success, stdout, stderr)),
+            Ok(Err(_)) => Err("Exec signal cancelled".to_string()),
+            Err(_) => {
+                self.exec_signals.write().await.remove(&request_id);
+                Err("Exec timeout (120s)".to_string())
             }
         }
     }

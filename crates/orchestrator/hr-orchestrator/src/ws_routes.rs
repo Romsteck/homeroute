@@ -444,7 +444,7 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: WsState) {
 
     // Wait for Auth message (5s timeout)
     let auth_msg = tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await;
-    let (host_id, host_name, version) = match auth_msg {
+    let (host_id, host_name, version, role) = match auth_msg {
         Ok(Some(Ok(Message::Text(text)))) => {
             match serde_json::from_str::<HostAgentMessage>(&text) {
                 Ok(HostAgentMessage::Auth {
@@ -453,6 +453,7 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: WsState) {
                     version,
                     lan_interface,
                     container_storage_path,
+                    role,
                 }) => {
                     let mut data = load_hosts().await;
                     let host_id = data
@@ -488,6 +489,10 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: WsState) {
                                     changed = true;
                                 }
                             }
+                            if let Some(ref r) = role {
+                                host["role"] = serde_json::json!(r);
+                                changed = true;
+                            }
                             if changed {
                                 let _ = save_hosts(&data).await;
                                 info!(
@@ -501,7 +506,7 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: WsState) {
                     }
 
                     match host_id {
-                        Some(id) => (id, host_name, version),
+                        Some(id) => (id, host_name, version, role),
                         None => {
                             warn!("Host agent auth failed: unknown host '{}'", host_name);
                             let _ = socket
@@ -553,7 +558,7 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: WsState) {
     // Register connection
     let (tx, mut rx) = mpsc::channel::<hr_registry::OutgoingHostMessage>(512);
     registry
-        .on_host_connected(host_id.clone(), host_name.clone(), tx, version.clone())
+        .on_host_connected(host_id.clone(), host_name.clone(), tx, version.clone(), role)
         .await;
 
     // Mark host online

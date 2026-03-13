@@ -1,3 +1,4 @@
+use hr_registry::protocol::HostRole;
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -14,6 +15,9 @@ pub struct Config {
     /// Storage path for nspawn containers (default: /var/lib/machines).
     #[serde(default)]
     pub container_storage_path: Option<String>,
+    /// Role of this host in the infrastructure (dev, prod, backup).
+    #[serde(default)]
+    pub role: Option<HostRole>,
 }
 
 fn default_reconnect() -> u64 {

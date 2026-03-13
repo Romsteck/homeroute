@@ -18,6 +18,7 @@ pub mod applications;
 pub mod containers;
 pub mod dataverse;
 pub mod cloud_relay;
+pub mod edge_stats;
 pub mod store;
 pub mod git;
 pub mod ws_proxy;

@@ -16,6 +16,7 @@ import Containers from './pages/Containers';
 import CloudRelay from './pages/CloudRelay';
 import Store from './pages/Store';
 import Git from './pages/Git';
+import Monitoring from './pages/Monitoring';
 import Login from './pages/Login';
 import Profile from './pages/Profile';
 
@@ -93,6 +94,7 @@ function AppRoutes() {
           <Layout>
             <Routes>
               <Route path="/" element={<Dashboard />} />
+              <Route path="/monitoring" element={<Monitoring />} />
               <Route path="/dns" element={<Dns />} />
               <Route path="/adblock" element={<Adblock />} />
               <Route path="/ddns" element={<Ddns />} />

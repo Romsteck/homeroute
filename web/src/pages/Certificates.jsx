@@ -164,7 +164,7 @@ const Certificates = () => {
             Aucun certificat. Les certificats seront emis automatiquement.
           </div>
         ) : (
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto"><table className="w-full text-sm min-w-[600px]">
             <thead>
               <tr className="text-xs text-gray-500 uppercase tracking-wider border-b border-gray-700/50">
                 <th className="text-left py-1.5 font-medium">Domaine</th>
@@ -249,7 +249,7 @@ const Certificates = () => {
                 );
               })}
             </tbody>
-          </table>
+          </table></div>
         )}
       </Section>
     </div>

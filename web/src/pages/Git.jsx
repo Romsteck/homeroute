@@ -258,10 +258,10 @@ function Git() {
       {/* Config panel (SSH key + GitHub token) */}
       {showConfig && (
         <div className="border-b border-gray-700 bg-gray-900">
-          <div className="px-6 py-3 border-b border-gray-700/50">
+          <div className="px-4 sm:px-6 py-3 border-b border-gray-700/50">
             <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Configuration GitHub</h2>
           </div>
-          <div className="px-6 py-4 space-y-4">
+          <div className="px-4 sm:px-6 py-4 space-y-4">
             {/* SSH Key */}
             <div>
               <label className="block text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">
@@ -420,7 +420,7 @@ function Git() {
           ) : (
             <div className="flex-1 overflow-y-auto">
               {/* Repo header */}
-              <div className="px-6 py-4 border-b border-gray-700 bg-gray-800/30">
+              <div className="px-4 sm:px-6 py-4 border-b border-gray-700 bg-gray-800/30">
                 <div className="flex items-center justify-between">
                   <div>
                     <h2 className="text-lg font-semibold text-white flex items-center gap-2">
@@ -477,7 +477,7 @@ function Git() {
 
               {/* Branches */}
               {branches.length > 0 && (
-                <div className="px-6 py-3 border-b border-gray-700/50">
+                <div className="px-4 sm:px-6 py-3 border-b border-gray-700/50">
                   <div className="flex items-center gap-2 flex-wrap">
                     <GitMerge className="w-3.5 h-3.5 text-gray-500" />
                     <span className="text-xs text-gray-500 uppercase tracking-wider mr-1">Branches</span>
@@ -499,7 +499,7 @@ function Git() {
 
               {/* Mirror / Sync details */}
               {orgInput && config?.github_token && (
-                <div className="px-6 py-3 border-b border-gray-700/50 bg-gray-800/20">
+                <div className="px-4 sm:px-6 py-3 border-b border-gray-700/50 bg-gray-800/20">
                   <div className="flex items-center gap-2 mb-2">
                     <ArrowUpCircle className="w-3.5 h-3.5 text-gray-500" />
                     <span className="text-xs text-gray-500 uppercase tracking-wider">GitHub Mirror</span>
@@ -535,7 +535,7 @@ function Git() {
 
               {/* Commits */}
               <div>
-                <div className="px-6 py-2 border-b border-gray-700 bg-gray-900/80 sticky top-0 z-10">
+                <div className="px-4 sm:px-6 py-2 border-b border-gray-700 bg-gray-900/80 sticky top-0 z-10">
                   <div className="flex items-center gap-2">
                     <GitCommit className="w-3.5 h-3.5 text-gray-500" />
                     <span className="text-xs text-gray-500 uppercase tracking-wider">
@@ -544,7 +544,7 @@ function Git() {
                   </div>
                 </div>
                 {commits.length === 0 ? (
-                  <div className="px-6 py-8 text-center">
+                  <div className="px-4 sm:px-6 py-8 text-center">
                     <GitCommit className="w-8 h-8 text-gray-700 mx-auto mb-2" />
                     <p className="text-sm text-gray-500">Aucun commit</p>
                     <p className="text-xs text-gray-600 mt-1">
@@ -556,7 +556,7 @@ function Git() {
                     {commits.map((c, i) => (
                       <div
                         key={c.hash || i}
-                        className="px-6 py-2.5 border-b border-gray-700/30 hover:bg-gray-800/50 transition-colors"
+                        className="px-4 sm:px-6 py-2.5 border-b border-gray-700/30 hover:bg-gray-800/50 transition-colors"
                       >
                         <div className="flex items-start gap-3">
                           <span className="text-xs font-mono text-blue-400 bg-blue-900/20 px-1.5 py-0.5 mt-0.5 flex-shrink-0">

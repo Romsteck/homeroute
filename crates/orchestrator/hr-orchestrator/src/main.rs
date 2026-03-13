@@ -4,6 +4,7 @@
 #[allow(dead_code)]
 mod container_manager;
 mod ipc_handler;
+mod mcp;
 mod ws_routes;
 
 use hr_acme::{AcmeConfig, AcmeManager};
@@ -347,6 +348,13 @@ async fn main() -> anyhow::Result<()> {
 
     let netcore = Arc::new(NetcoreClient::new("/run/hr-netcore.sock"));
 
+    // ── MCP endpoint (optional, requires MCP_TOKEN env var) ─────────
+
+    let mcp_state = mcp::McpState::from_env(registry.clone(), container_manager.clone(), git_service.clone(), edge.clone());
+    if mcp_state.is_some() {
+        info!("MCP endpoint enabled (POST /mcp)");
+    }
+
     // ── Axum server (port 4001) — WebSocket + health endpoints ────
 
     let ws_state = ws_routes::WsState {
@@ -375,6 +383,16 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_state(ws_state);
 
+    // Merge MCP route (has its own state, only if MCP_TOKEN is set)
+    let ws_router = if let Some(mcp_st) = mcp_state {
+        let mcp_router = axum::Router::new()
+            .route("/mcp", axum::routing::post(mcp::mcp_handler))
+            .with_state(mcp_st);
+        ws_router.merge(mcp_router)
+    } else {
+        ws_router
+    };
+
     let ws_handle = tokio::spawn(async move {
         let addr: SocketAddr = format!("[::]:{}", ORCHESTRATOR_WS_PORT)
             .parse()
@@ -396,6 +414,7 @@ async fn main() -> anyhow::Result<()> {
     info!("  Git: initialized");
     info!("  IPC: {}", ORCHESTRATOR_SOCKET);
     info!("  WS: port {}", ORCHESTRATOR_WS_PORT);
+    info!("  MCP: {}", if std::env::var("MCP_TOKEN").is_ok() { "enabled" } else { "disabled (set MCP_TOKEN)" });
 
     // Wait for shutdown signal
     tokio::signal::ctrl_c().await?;

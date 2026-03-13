@@ -56,7 +56,7 @@ function Dashboard() {
       <PageHeader title="Dashboard" icon={LayoutDashboard} />
 
       <Section title="Vue d'ensemble" flush>
-        <div className="flex items-stretch divide-x divide-gray-700">
+        <div className="flex flex-col sm:flex-row sm:items-stretch divide-y sm:divide-y-0 sm:divide-x divide-gray-700">
           <Link to="/dns" className="flex items-center gap-3 px-4 py-3 flex-1 hover:bg-gray-800/50">
             <Wifi className="w-4 h-4 text-blue-400 shrink-0" />
             <span className="text-xs text-gray-500 uppercase">DHCP</span>
@@ -86,13 +86,13 @@ function Dashboard() {
 
       <Section title="Baux DHCP Récents" flush>
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full text-sm min-w-[500px]">
             <thead>
               <tr className="text-left text-gray-400 border-b border-gray-700">
                 <th className="px-4 pb-1">Hostname</th>
                 <th className="px-4 pb-1">IP</th>
-                <th className="px-4 pb-1">MAC</th>
-                <th className="px-4 pb-1">Expiration</th>
+                <th className="px-4 pb-1 hidden sm:table-cell">MAC</th>
+                <th className="px-4 pb-1 hidden sm:table-cell">Expiration</th>
               </tr>
             </thead>
             <tbody>
@@ -102,8 +102,8 @@ function Dashboard() {
                     {lease.hostname || <span className="text-gray-500">-</span>}
                   </td>
                   <td className="px-4 py-1 font-mono text-blue-400">{lease.ip}</td>
-                  <td className="px-4 py-1 font-mono text-gray-400 text-xs">{lease.mac}</td>
-                  <td className="px-4 py-1 text-gray-400 text-xs">
+                  <td className="px-4 py-1 font-mono text-gray-400 text-xs hidden sm:table-cell">{lease.mac}</td>
+                  <td className="px-4 py-1 text-gray-400 text-xs hidden sm:table-cell">
                     {new Date(lease.expiration).toLocaleString('fr-FR')}
                   </td>
                 </tr>

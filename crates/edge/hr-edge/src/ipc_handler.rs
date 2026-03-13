@@ -3,6 +3,7 @@ use std::sync::Arc;
 use hr_ipc::edge::EdgeRequest;
 use hr_ipc::server::IpcHandler;
 use hr_ipc::types::IpcResponse;
+use tracing::{info, warn};
 
 pub struct EdgeHandler {
     pub auth: Arc<hr_auth::AuthService>,
@@ -13,6 +14,42 @@ pub struct EdgeHandler {
     pub cloud_relay_enabled: tokio::sync::watch::Sender<bool>,
     pub cloud_relay_cmd_tx: Option<tokio::sync::mpsc::Sender<hr_common::events::CloudRelayCommand>>,
     pub env: Arc<hr_common::config::EnvConfig>,
+}
+
+impl EdgeHandler {
+    /// Re-load ACME wildcard certificates into the TLS manager.
+    /// Must be called after `reload_certificates` which does `replace_all`
+    /// and would otherwise wipe ACME certs loaded at startup.
+    fn reload_acme_certs(&self) {
+        let certs = self.acme.list_certificates().unwrap_or_default();
+        let mut loaded = 0;
+        for cert_info in &certs {
+            let cert_path = std::path::Path::new(&cert_info.cert_path);
+            let key_path = std::path::Path::new(&cert_info.key_path);
+            if cert_path.exists() && key_path.exists() {
+                match self.tls_manager.load_cert_from_files(cert_path, key_path) {
+                    Ok(certified_key) => {
+                        let domain = cert_info.wildcard_type.domain_pattern(&self.env.base_domain);
+                        self.tls_manager.add_cert(&domain, certified_key);
+                        loaded += 1;
+                    }
+                    Err(e) => {
+                        warn!(cert_id = %cert_info.id, error = %e, "Failed to reload ACME cert");
+                    }
+                }
+            }
+        }
+        // Re-set fallback cert
+        if let Ok(cert_info) = self.acme.get_certificate(hr_acme::WildcardType::Global) {
+            if let Err(e) = self.tls_manager.set_fallback_certificate_from_pem(
+                &cert_info.cert_path,
+                &cert_info.key_path,
+            ) {
+                warn!("Failed to re-set fallback certificate: {}", e);
+            }
+        }
+        info!("Re-loaded {} ACME certificates after config reload", loaded);
+    }
 }
 
 impl IpcHandler<EdgeRequest, IpcResponse> for EdgeHandler {
@@ -62,6 +99,7 @@ impl IpcHandler<EdgeRequest, IpcResponse> for EdgeHandler {
                         if let Err(e) = self.tls_manager.reload_certificates(&new_config.routes) {
                             return IpcResponse::err(format!("TLS reload failed: {}", e));
                         }
+                        self.reload_acme_certs();
                         self.proxy.reload_config(new_config);
                         IpcResponse::ok_empty()
                     }
@@ -88,6 +126,7 @@ impl IpcHandler<EdgeRequest, IpcResponse> for EdgeHandler {
                                         e
                                     ));
                                 }
+                                self.reload_acme_certs();
                                 self.proxy.reload_config(new_config);
                                 IpcResponse::ok_empty()
                             }
@@ -230,6 +269,18 @@ impl IpcHandler<EdgeRequest, IpcResponse> for EdgeHandler {
                 let _ = self.cloud_relay_enabled.send(false);
                 IpcResponse::ok_empty()
             }
+            // ── Stats / metrics ────────────────────────────────
+            EdgeRequest::GetStats => {
+                let global = self.proxy.metrics.global_snapshot();
+                let domain_stats = self.proxy.metrics.snapshot();
+                let cert_expiry = self.acme.cert_expiry_info().unwrap_or_default();
+                IpcResponse::ok_data(serde_json::json!({
+                    "global": global,
+                    "domains": domain_stats,
+                    "certificates": cert_expiry,
+                }))
+            }
+
             EdgeRequest::CloudRelayPushBinary { path, sha256 } => {
                 if let Some(tx) = &self.cloud_relay_cmd_tx {
                     let binary_data = match std::fs::read(&path) {

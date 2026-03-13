@@ -160,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
 
     let orchestrator_port = env.orchestrator_port;
     let proxy_state = Arc::new(
-        ProxyState::new(proxy_config.clone(), env.api_port, orchestrator_port).with_auth(auth.clone()),
+        ProxyState::new(proxy_config.clone(), env.api_port, orchestrator_port).with_auth(auth.clone()).with_app_routes_path(env.data_dir.join("app-routes.json")),
     );
 
     let https_port = proxy_config.https_port;
@@ -185,12 +185,14 @@ async fn main() -> anyhow::Result<()> {
     {
         let proxy_state_c = proxy_state.clone();
         let tls_config_c = tls_config.clone();
+        let acme_c = acme.clone();
         let reg = service_registry.clone();
         spawn_supervised("proxy-https", ServicePriority::Critical, reg, move || {
             let proxy_state = proxy_state_c.clone();
             let tls_config = tls_config_c.clone();
+            let acme = acme_c.clone();
             let port = https_port;
-            async move { run_https_server(proxy_state, tls_config, port).await }
+            async move { run_https_server(proxy_state, tls_config, acme, port).await }
         });
     }
 
@@ -354,11 +356,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── SIGHUP handler ───────────────────────────────────────────────
+    let acme_sighup = acme.clone();
+    let env_sighup = env.clone();
     tokio::spawn(async move {
         if let Err(e) = handle_sighup(
             proxy_config_path_reload,
             proxy_state_reload,
             tls_manager_reload,
+            acme_sighup,
+            env_sighup,
         )
         .await
         {
@@ -689,11 +695,92 @@ fn load_relay_vps_ipv4(data_dir: &std::path::Path) -> Option<String> {
     v.get("vps_ipv4")?.as_str().map(|s| s.to_string())
 }
 
+// ── Metrics endpoint (Prometheus text format, localhost only) ───────────
+
+fn build_metrics_response(
+    state: &Arc<ProxyState>,
+    acme: &Arc<hr_acme::AcmeManager>,
+) -> hyper::Response<axum::body::Body> {
+    use std::fmt::Write;
+
+    let global = state.metrics.global_snapshot();
+    let domains = state.metrics.snapshot();
+    let certs = acme.cert_expiry_info().unwrap_or_default();
+
+    let mut out = String::with_capacity(2048);
+
+    // Global counters
+    let _ = writeln!(out, "# HELP hr_proxy_requests_total Total proxied requests.");
+    let _ = writeln!(out, "# TYPE hr_proxy_requests_total counter");
+    let _ = writeln!(out, "hr_proxy_requests_total {}", global.total_requests);
+
+    let _ = writeln!(out, "# HELP hr_proxy_status_2xx_total Total 2xx responses.");
+    let _ = writeln!(out, "# TYPE hr_proxy_status_2xx_total counter");
+    let _ = writeln!(out, "hr_proxy_status_2xx_total {}", global.status_2xx);
+
+    let _ = writeln!(out, "# HELP hr_proxy_status_4xx_total Total 4xx responses.");
+    let _ = writeln!(out, "# TYPE hr_proxy_status_4xx_total counter");
+    let _ = writeln!(out, "hr_proxy_status_4xx_total {}", global.status_4xx);
+
+    let _ = writeln!(out, "# HELP hr_proxy_errors_5xx_total Total 5xx errors.");
+    let _ = writeln!(out, "# TYPE hr_proxy_errors_5xx_total counter");
+    let _ = writeln!(out, "hr_proxy_errors_5xx_total {}", global.status_5xx);
+
+    let _ = writeln!(out, "# HELP hr_proxy_uptime_seconds Proxy uptime in seconds.");
+    let _ = writeln!(out, "# TYPE hr_proxy_uptime_seconds gauge");
+    let _ = writeln!(out, "hr_proxy_uptime_seconds {}", global.uptime_secs);
+
+    let _ = writeln!(out, "# HELP hr_proxy_requests_per_second Average requests per second since start.");
+    let _ = writeln!(out, "# TYPE hr_proxy_requests_per_second gauge");
+    let _ = writeln!(out, "hr_proxy_requests_per_second {:.2}", global.requests_per_second);
+
+    // Per-domain counters
+    let _ = writeln!(out, "# HELP hr_proxy_domain_requests_total Requests per domain.");
+    let _ = writeln!(out, "# TYPE hr_proxy_domain_requests_total counter");
+    for d in &domains {
+        let _ = writeln!(out, "hr_proxy_domain_requests_total{{domain=\"{}\"}} {}", d.domain, d.total_requests);
+    }
+
+    let _ = writeln!(out, "# HELP hr_proxy_domain_errors_5xx_total 5xx errors per domain.");
+    let _ = writeln!(out, "# TYPE hr_proxy_domain_errors_5xx_total counter");
+    for d in &domains {
+        let _ = writeln!(out, "hr_proxy_domain_errors_5xx_total{{domain=\"{}\"}} {}", d.domain, d.errors_5xx);
+    }
+
+    // Certificate expiry
+    let _ = writeln!(out, "# HELP hr_tls_cert_expiry_days Days until TLS certificate expires.");
+    let _ = writeln!(out, "# TYPE hr_tls_cert_expiry_days gauge");
+    for c in &certs {
+        let _ = writeln!(
+            out,
+            "hr_tls_cert_expiry_days{{domain=\"{}\",type=\"{}\"}} {}",
+            c.domain, c.wildcard_type, c.days_remaining
+        );
+    }
+
+    let _ = writeln!(out, "# HELP hr_tls_cert_needs_renewal Whether certificate needs renewal (1=yes).");
+    let _ = writeln!(out, "# TYPE hr_tls_cert_needs_renewal gauge");
+    for c in &certs {
+        let _ = writeln!(
+            out,
+            "hr_tls_cert_needs_renewal{{domain=\"{}\",type=\"{}\"}} {}",
+            c.domain, c.wildcard_type, if c.needs_renewal { 1 } else { 0 }
+        );
+    }
+
+    hyper::Response::builder()
+        .status(200)
+        .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
+        .body(axum::body::Body::from(out))
+        .unwrap()
+}
+
 // ── HTTPS server ───────────────────────────────────────────────────────
 
 async fn run_https_server(
     proxy_state: Arc<ProxyState>,
     tls_config: Arc<rustls::ServerConfig>,
+    acme: Arc<hr_acme::AcmeManager>,
     port: u16,
 ) -> anyhow::Result<()> {
     use hyper::server::conn::http1;
@@ -718,6 +805,7 @@ async fn run_https_server(
 
         let acceptor = acceptor.clone();
         let proxy_state = proxy_state.clone();
+        let acme = acme.clone();
         let client_ip = remote_addr.ip();
 
         tokio::spawn(async move {
@@ -732,7 +820,15 @@ async fn run_https_server(
             let io = TokioIo::new(tls_stream);
             let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                 let state = proxy_state.clone();
+                let acme = acme.clone();
                 async move {
+                    // Internal /metrics endpoint — localhost only
+                    if req.uri().path() == "/metrics" && client_ip.is_loopback() {
+                        return Ok::<_, std::convert::Infallible>(
+                            build_metrics_response(&state, &acme),
+                        );
+                    }
+
                     let (parts, body) = req.into_parts();
                     let req =
                         axum::extract::Request::from_parts(parts, axum::body::Body::new(body));
@@ -824,6 +920,8 @@ async fn handle_sighup(
     proxy_config_path: PathBuf,
     proxy_state: Arc<ProxyState>,
     tls_manager: Arc<TlsManager>,
+    acme: Arc<hr_acme::AcmeManager>,
+    env: hr_common::config::EnvConfig,
 ) -> anyhow::Result<()> {
     let mut signals = Signals::new([SIGHUP])?;
 
@@ -836,6 +934,9 @@ async fn handle_sighup(
                     if let Err(e) = tls_manager.reload_certificates(&new_config.routes) {
                         error!("Failed to reload TLS certificates: {}", e);
                     }
+                    // Re-load ACME wildcard certs (reload_certificates does replace_all
+                    // which wipes certs not referenced by routes)
+                    reload_acme_certs(&tls_manager, &acme, &env.base_domain);
                     proxy_state.reload_config(new_config);
                     info!("Proxy config reloaded");
                 }
@@ -847,4 +948,42 @@ async fn handle_sighup(
     }
 
     Ok(())
+}
+
+/// Re-load all ACME wildcard certificates into the TLS manager.
+/// Called after `reload_certificates` which does `replace_all` and would
+/// otherwise wipe ACME certs that were loaded at startup.
+fn reload_acme_certs(
+    tls_manager: &TlsManager,
+    acme: &hr_acme::AcmeManager,
+    base_domain: &str,
+) {
+    let certs = acme.list_certificates().unwrap_or_default();
+    let mut loaded = 0;
+    for cert_info in &certs {
+        let cert_path = std::path::Path::new(&cert_info.cert_path);
+        let key_path = std::path::Path::new(&cert_info.key_path);
+        if cert_path.exists() && key_path.exists() {
+            match tls_manager.load_cert_from_files(cert_path, key_path) {
+                Ok(certified_key) => {
+                    let domain = cert_info.wildcard_type.domain_pattern(base_domain);
+                    tls_manager.add_cert(&domain, certified_key);
+                    loaded += 1;
+                }
+                Err(e) => {
+                    warn!(cert_id = %cert_info.id, error = %e, "Failed to reload ACME cert");
+                }
+            }
+        }
+    }
+    // Re-set fallback cert
+    if let Ok(cert_info) = acme.get_certificate(hr_acme::WildcardType::Global) {
+        if let Err(e) = tls_manager.set_fallback_certificate_from_pem(
+            &cert_info.cert_path,
+            &cert_info.key_path,
+        ) {
+            warn!("Failed to re-set fallback certificate: {}", e);
+        }
+    }
+    info!("Re-loaded {} ACME certificates after config reload", loaded);
 }

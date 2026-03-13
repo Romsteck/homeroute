@@ -39,7 +39,7 @@ function ConfirmModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={!loading ? onClose : undefined} />
       <div ref={modalRef} className="relative bg-gray-800 border border-gray-700 shadow-2xl w-full max-w-md mx-4 overflow-hidden">
         <button onClick={onClose} disabled={loading} className="absolute top-3 right-3 text-gray-400 hover:text-gray-200 disabled:opacity-50">

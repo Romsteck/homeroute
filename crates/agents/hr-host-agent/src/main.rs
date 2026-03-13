@@ -79,6 +79,7 @@ async fn run_connection(config: &Config) -> Result<(), String> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         lan_interface: config.lan_interface.clone(),
         container_storage_path: config.container_storage_path.clone(),
+        role: config.role,
     };
     let auth_json = serde_json::to_string(&auth).map_err(|e| e.to_string())?;
     tokio::time::timeout(
@@ -533,6 +534,31 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                             .output()
                                             .await
                                     };
+                                    let (success, stdout, stderr) = match result {
+                                        Ok(out) => (
+                                            out.status.success(),
+                                            String::from_utf8_lossy(&out.stdout).to_string(),
+                                            String::from_utf8_lossy(&out.stderr).to_string(),
+                                        ),
+                                        Err(e) => (false, String::new(), e.to_string()),
+                                    };
+                                    let _ = tx_exec.send(OutgoingWsMessage::Text(HostAgentMessage::ExecResult {
+                                        request_id,
+                                        success,
+                                        stdout,
+                                        stderr,
+                                    })).await;
+                                });
+                            }
+                            Ok(HostRegistryMessage::ExecOnHost { request_id, command }) => {
+                                info!("Executing command on host");
+                                let tx_exec = tx.clone();
+                                tokio::spawn(async move {
+                                    let joined = command.join(" ");
+                                    let result = tokio::process::Command::new("/bin/bash")
+                                        .args(["-c", &joined])
+                                        .output()
+                                        .await;
                                     let (success, stdout, stderr) = match result {
                                         Ok(out) => (
                                             out.status.success(),
@@ -1404,7 +1430,7 @@ fn collect_metrics() -> HostMetrics {
         ]
     };
 
-    // Disk usage for /
+    // Disk usage for / (legacy fields)
     let (disk_total, disk_used) = {
         let output = std::process::Command::new("df")
             .args(["-B1", "/"])
@@ -1429,6 +1455,101 @@ fn collect_metrics() -> HostMetrics {
         }
     };
 
+    // CPU temperature from thermal zones
+    let cpu_temp_celsius = {
+        let mut max_temp: Option<f32> = None;
+        if let Ok(entries) = std::fs::read_dir("/sys/class/thermal") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_string_lossy().starts_with("thermal_zone") {
+                    let temp_path = entry.path().join("temp");
+                    if let Ok(content) = std::fs::read_to_string(&temp_path) {
+                        if let Ok(millideg) = content.trim().parse::<f32>() {
+                            let deg = millideg / 1000.0;
+                            max_temp = Some(max_temp.map_or(deg, |m: f32| m.max(deg)));
+                        }
+                    }
+                }
+            }
+        }
+        max_temp
+    };
+
+    // System uptime
+    let uptime_seconds = std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|c| c.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()));
+
+    // ZFS pool status
+    let zfs_pools = {
+        let output = std::process::Command::new("zpool")
+            .args(["list", "-Hp"])
+            .output()
+            .ok();
+        match output {
+            Some(o) if o.status.success() => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let pools: Vec<hr_registry::protocol::ZfsPoolInfo> = stdout
+                    .lines()
+                    .filter_map(|line| {
+                        let cols: Vec<&str> = line.split('\t').collect();
+                        if cols.len() >= 10 {
+                            Some(hr_registry::protocol::ZfsPoolInfo {
+                                name: cols[0].to_string(),
+                                size: cols[1].parse().unwrap_or(0),
+                                allocated: cols[2].parse().unwrap_or(0),
+                                free: cols[3].parse().unwrap_or(0),
+                                health: cols[9].to_string(),
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if pools.is_empty() { None } else { Some(pools) }
+            }
+            _ => None,
+        }
+    };
+
+    // Disk usage per mount point
+    let disk_mounts = {
+        let output = std::process::Command::new("df")
+            .args(["-T", "-B1"])
+            .output()
+            .ok();
+        match output {
+            Some(o) if o.status.success() => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let skip_fs = ["tmpfs", "devtmpfs", "overlay", "squashfs"];
+                let mounts: Vec<hr_registry::protocol::DiskUsage> = stdout
+                    .lines()
+                    .skip(1)
+                    .filter_map(|line| {
+                        let cols: Vec<&str> = line.split_whitespace().collect();
+                        if cols.len() >= 7 {
+                            let fstype = cols[1];
+                            if skip_fs.contains(&fstype) {
+                                return None;
+                            }
+                            Some(hr_registry::protocol::DiskUsage {
+                                filesystem: fstype.to_string(),
+                                total_bytes: cols[2].parse().unwrap_or(0),
+                                used_bytes: cols[3].parse().unwrap_or(0),
+                                available_bytes: cols[4].parse().unwrap_or(0),
+                                mount_point: cols[6].to_string(),
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if mounts.is_empty() { None } else { Some(mounts) }
+            }
+            _ => None,
+        }
+    };
+
     HostMetrics {
         cpu_percent: load_avg[0] * 100.0 / num_cpus().max(1) as f32,
         memory_used_bytes: mem_total.saturating_sub(mem_available),
@@ -1436,6 +1557,10 @@ fn collect_metrics() -> HostMetrics {
         disk_used_bytes: disk_used,
         disk_total_bytes: disk_total,
         load_avg,
+        cpu_temp_celsius,
+        uptime_seconds,
+        zfs_pools,
+        disk_mounts,
     }
 }
 

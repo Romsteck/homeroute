@@ -40,6 +40,7 @@ pub fn router() -> Router<ApiState> {
         .route("/{id}/sleep", post(sleep_host))
         .route("/{id}/wol-mac", post(set_wol_mac))
         .route("/{id}/auto-off", post(set_auto_off))
+        .route("/{id}/role", put(set_host_role))
         .route("/{id}/metrics", get(get_host_metrics))
         .route("/bulk/wake", post(bulk_wake))
         .route("/bulk/shutdown", post(bulk_shutdown))
@@ -707,6 +708,31 @@ async fn set_wol_mac(Path(id): Path<String>, State(state): State<ApiState>, Json
     Json(json!({"success": true}))
 }
 
+#[derive(Deserialize)]
+struct SetRoleRequest {
+    role: String,
+}
+
+async fn set_host_role(Path(id): Path<String>, Json(body): Json<SetRoleRequest>) -> Json<Value> {
+    let valid_roles = ["none", "dev", "prod", "backup"];
+    if !valid_roles.contains(&body.role.as_str()) {
+        return Json(json!({"success": false, "error": format!("Invalid role: {}. Valid: none, dev, prod, backup", body.role)}));
+    }
+
+    let mut data = load_hosts().await;
+    if let Some(host) = find_host_mut(&mut data, &id) {
+        host["role"] = json!(body.role);
+        host["updatedAt"] = json!(chrono::Utc::now().to_rfc3339());
+    } else {
+        return Json(json!({"success": false, "error": "Host not found"}));
+    }
+
+    if let Err(e) = save_hosts(&data).await {
+        return Json(json!({"success": false, "error": e}));
+    }
+    Json(json!({"success": true, "role": body.role}))
+}
+
 async fn set_auto_off(
     Path(id): Path<String>,
     State(state): State<ApiState>,
@@ -929,10 +955,10 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
 
     // Wait for Auth message (5s timeout)
     let auth_msg = tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await;
-    let (host_id, host_name, version) = match auth_msg {
+    let (host_id, host_name, version, role) = match auth_msg {
         Ok(Some(Ok(Message::Text(text)))) => {
             match serde_json::from_str::<HostAgentMessage>(&text) {
-                Ok(HostAgentMessage::Auth { token: _, host_name, version, lan_interface, container_storage_path }) => {
+                Ok(HostAgentMessage::Auth { token: _, host_name, version, lan_interface, container_storage_path, role }) => {
                     let mut data = load_hosts().await;
                     let host_id = data
                         .get("hosts")
@@ -961,6 +987,10 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                                     changed = true;
                                 }
                             }
+                            if let Some(ref r) = role {
+                                host["role"] = serde_json::json!(r);
+                                changed = true;
+                            }
                             if changed {
                                 let _ = save_hosts(&data).await;
                                 tracing::info!(host = %host_name, "Updated host config from agent: lan_interface={:?}, storage_path={:?}", lan_interface, container_storage_path);
@@ -969,7 +999,7 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                     }
 
                     match host_id {
-                        Some(id) => (id, host_name, version),
+                        Some(id) => (id, host_name, version, role),
                         None => {
                             tracing::warn!("Host agent auth failed: unknown host '{}'", host_name);
                             let _ = socket.send(Message::Text(
@@ -1008,7 +1038,7 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
 
     // Register connection
     let (tx, mut rx) = mpsc::channel::<hr_registry::OutgoingHostMessage>(512);
-    registry.on_host_connected(host_id.clone(), host_name.clone(), tx, version.clone()).await;
+    registry.on_host_connected(host_id.clone(), host_name.clone(), tx, version.clone(), role).await;
 
     // Mark host online
     update_host_status(&host_id, "online", &state.events.host_status).await;

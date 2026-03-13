@@ -18,6 +18,7 @@ import {
   sleepHost,
   setWolMac,
   setAutoOff,
+  setHostRole,
   updateLocalHostConfig,
   getLocalInterfaces
 } from '../api/client';
@@ -356,10 +357,11 @@ export default function Hosts() {
           </div>
         ) : (
           <div className="border border-gray-700 overflow-x-auto">
-            <table className="w-full text-left">
+            <table className="w-full text-left min-w-[700px]">
               <thead className="bg-gray-800/60 border-b border-gray-700">
                 <tr>
                   <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Nom</th>
+                  <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Role</th>
                   <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Statut</th>
                   <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">Adresse</th>
                   <th className="px-3 py-2 text-xs font-medium text-gray-400 uppercase">CPU</th>
@@ -377,7 +379,57 @@ export default function Hosts() {
                       <div className="flex items-center gap-2">
                         <HardDrive className={`w-4 h-4 flex-shrink-0 ${host.is_local ? 'text-green-400' : 'text-blue-400'}`} />
                         {host.is_local ? 'HomeRoute' : host.name}
+                        {(() => {
+                          const role = host.is_local ? 'prod' : host.role;
+                          if (!role || role === 'none') return null;
+                          const colors = {
+                            dev: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
+                            prod: 'bg-green-500/20 text-green-400 border-green-500/30',
+                            backup: 'bg-orange-500/20 text-orange-400 border-orange-500/30',
+                          };
+                          return (
+                            <span className={`px-1.5 py-0.5 text-[10px] font-medium border ${colors[role] || 'bg-gray-500/20 text-gray-400 border-gray-500/30'}`}>
+                              {role.toUpperCase()}
+                            </span>
+                          );
+                        })()}
                       </div>
+                    </td>
+                    {/* Role */}
+                    <td className="px-3 py-2 text-sm">
+                      {host.is_local ? (
+                        <span className="px-2 py-0.5 text-xs font-medium bg-green-500/20 text-green-400 border border-green-500/30">prod</span>
+                      ) : host.role && host.role !== 'none' ? (
+                          <span className={`px-2 py-0.5 text-xs font-medium border ${
+                            { dev: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
+                              prod: 'bg-green-500/20 text-green-400 border-green-500/30',
+                              backup: 'bg-orange-500/20 text-orange-400 border-orange-500/30',
+                            }[host.role] || 'bg-gray-500/20 text-gray-400 border-gray-500/30'
+                          }`}>
+                            {host.role.charAt(0).toUpperCase() + host.role.slice(1)}
+                          </span>
+                        ) : (
+                          <select
+                            value="none"
+                            onChange={async (e) => {
+                              const role = e.target.value;
+                              if (role === 'none') return;
+                              try {
+                                await setHostRole(host.id, role);
+                                setHosts(prev => prev.map(h => h.id === host.id ? { ...h, role } : h));
+                              } catch (err) {
+                                console.error('Failed to set role:', err);
+                              }
+                            }}
+                            className="bg-gray-700 border border-gray-600 text-xs px-1.5 py-0.5 text-gray-200 focus:border-blue-500 focus:outline-none"
+                          >
+                            <option value="none">—</option>
+                            <option value="dev">Dev</option>
+                            <option value="prod">Prod</option>
+                            <option value="backup">Backup</option>
+                          </select>
+                        )
+                      }
                     </td>
                     {/* Status */}
                     <td className="px-3 py-2 text-sm">
@@ -494,7 +546,7 @@ export default function Hosts() {
 
       {/* Add Host Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-gray-800 p-4 w-full max-w-md">
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-sm font-bold text-white">Ajouter un hote</h2>
@@ -599,7 +651,7 @@ export default function Hosts() {
 
       {/* Host Settings Modal */}
       {settingsHost && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-gray-800 p-4 w-full max-w-md">
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-sm font-bold text-white">

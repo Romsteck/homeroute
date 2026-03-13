@@ -8,5 +8,5 @@ mod cloudflare;
 mod storage;
 pub mod types;
 
-pub use acme::AcmeManager;
+pub use acme::{AcmeManager, CertExpiryInfo};
 pub use types::{AcmeConfig, AcmeError, AcmeResult, CertificateInfo, WildcardType};

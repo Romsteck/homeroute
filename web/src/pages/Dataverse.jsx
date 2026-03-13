@@ -586,7 +586,7 @@ function Dataverse() {
         /* ER Diagram view */
         <div className="flex-1 min-h-0 flex">
           {/* App sidebar for diagram view */}
-          <div className="w-64 flex-shrink-0 border-r border-gray-700 flex flex-col bg-gray-800">
+          <div className="w-48 sm:w-64 flex-shrink-0 border-r border-gray-700 flex flex-col bg-gray-800">
             <ColumnHeader>Applications ({filteredApps.length})</ColumnHeader>
             <div className="flex-1 overflow-y-auto">
               {filteredApps.map(app => {
@@ -640,7 +640,7 @@ function Dataverse() {
         <div className="flex-1 min-h-0 flex">
 
           {/* Column 1: Apps */}
-          <div className="w-64 flex-shrink-0 border-r border-gray-700 flex flex-col bg-gray-800">
+          <div className="w-48 sm:w-64 flex-shrink-0 border-r border-gray-700 flex flex-col bg-gray-800">
             <ColumnHeader>Applications ({filteredApps.length})</ColumnHeader>
             <div className="flex-1 overflow-y-auto">
               {filteredApps.map(app => {

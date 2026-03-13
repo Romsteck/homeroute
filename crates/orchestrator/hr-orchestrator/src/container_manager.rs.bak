@@ -849,388 +849,6 @@ impl ContainerManager {
         Err(format!("No lan_interface configured for host '{}'. Please configure a macvlan interface in host settings.", host_id))
     }
 
-
-    // ── Remote-aware helpers ─────────────────────────────────────
-
-    /// Create an nspawn container (local or remote via host-agent).
-    async fn nspawn_create_container(
-        &self,
-        host_id: &str,
-        container_name: &str,
-        storage_path: &str,
-        network_mode: &str,
-        with_workspace: bool,
-    ) -> Result<(), String> {
-        if host_id == "local" {
-            NspawnClient::create_container(
-                container_name,
-                Path::new(storage_path),
-                network_mode,
-                with_workspace,
-            )
-            .await
-            .map_err(|e| e.to_string())
-        } else {
-            // Send create command to remote host-agent
-            self.registry
-                .send_host_command(
-                    host_id,
-                    HostRegistryMessage::CreateNspawnContainer {
-                        app_id: String::new(),
-                        slug: String::new(),
-                        container_name: container_name.to_string(),
-                        storage_path: storage_path.to_string(),
-                        network_mode: network_mode.to_string(),
-                        agent_token: String::new(),
-                        agent_config: String::new(),
-                    },
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-
-            // Poll until container is ready (debootstrap can take 2-5 minutes)
-            for _i in 0..120 {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                if let Ok((success, _, _)) = self
-                    .registry
-                    .exec_in_remote_container_with_timeout(
-                        host_id,
-                        container_name,
-                        vec!["echo ready".to_string()],
-                        10,
-                    )
-                    .await
-                {
-                    if success {
-                        return Ok(());
-                    }
-                }
-            }
-            Err("Timeout waiting for remote container creation (10 min)".to_string())
-        }
-    }
-
-    /// Execute a command inside a container (local or remote).
-    async fn container_exec(
-        &self,
-        host_id: &str,
-        container_name: &str,
-        cmd: &str,
-    ) -> Result<String, String> {
-        if host_id == "local" {
-            NspawnClient::exec(container_name, &[cmd])
-                .await
-                .map_err(|e| e.to_string())
-        } else {
-            let (success, stdout, stderr) = self
-                .registry
-                .exec_in_remote_container_with_timeout(
-                    host_id,
-                    container_name,
-                    vec![cmd.to_string()],
-                    300,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-            if success {
-                Ok(stdout)
-            } else {
-                Err(format!("Remote exec failed: {stderr}"))
-            }
-        }
-    }
-
-    /// Execute a command inside a container with retries (local or remote).
-    async fn container_exec_retry(
-        &self,
-        host_id: &str,
-        container_name: &str,
-        cmd: &str,
-        max_retries: u32,
-    ) -> Result<String, String> {
-        let mut last_err = String::new();
-        for attempt in 0..max_retries {
-            match self.container_exec(host_id, container_name, cmd).await {
-                Ok(out) => return Ok(out),
-                Err(e) => {
-                    last_err = e;
-                    if attempt + 1 < max_retries {
-                        warn!(
-                            container = container_name,
-                            attempt = attempt + 1,
-                            max_retries,
-                            "Exec failed, retrying: {last_err}"
-                        );
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                    }
-                }
-            }
-        }
-        Err(last_err)
-    }
-
-    /// Push raw content bytes into a container file via exec.
-    /// Uses hex encoding for reliability (no shell escaping issues).
-    async fn container_push_content(
-        &self,
-        host_id: &str,
-        container_name: &str,
-        content: &[u8],
-        dest: &str,
-    ) -> Result<(), String> {
-        // Use base64 encoding (available in coreutils, unlike xxd)
-        let mut b64 = String::new();
-        {
-            // Manual base64 encoding (no external crate needed)
-            const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            let mut i = 0;
-            while i < content.len() {
-                let b0 = content[i] as u32;
-                let b1 = if i + 1 < content.len() { content[i + 1] as u32 } else { 0 };
-                let b2 = if i + 2 < content.len() { content[i + 2] as u32 } else { 0 };
-                let triple = (b0 << 16) | (b1 << 8) | b2;
-                b64.push(B64[((triple >> 18) & 0x3F) as usize] as char);
-                b64.push(B64[((triple >> 12) & 0x3F) as usize] as char);
-                if i + 1 < content.len() {
-                    b64.push(B64[((triple >> 6) & 0x3F) as usize] as char);
-                } else {
-                    b64.push('=');
-                }
-                if i + 2 < content.len() {
-                    b64.push(B64[(triple & 0x3F) as usize] as char);
-                } else {
-                    b64.push('=');
-                }
-                i += 3;
-            }
-        }
-
-        let dest_path = if dest.starts_with('/') {
-            dest.to_string()
-        } else {
-            format!("/{dest}")
-        };
-
-        let dir_cmd = format!("mkdir -p $(dirname '{dest_path}')");
-        let _ = self.container_exec(host_id, container_name, &dir_cmd).await;
-
-        let chunk_size = 76_000; // base64 chars per chunk (~57KB binary)
-        if b64.len() <= chunk_size {
-            let cmd = format!("printf '%s' '{b64}' | base64 -d > '{dest_path}'");
-            self.container_exec(host_id, container_name, &cmd).await?;
-        } else {
-            // First chunk: write base64 to temp file, then decode
-            // (can't pipe partial base64 - must decode complete blocks)
-            let first_chunk = &b64[..chunk_size];
-            let cmd = format!("printf '%s' '{first_chunk}' > '{dest_path}.b64'");
-            self.container_exec(host_id, container_name, &cmd).await?;
-            // Remaining chunks (append to b64 file)
-            let mut offset = chunk_size;
-            while offset < b64.len() {
-                let end = (offset + chunk_size).min(b64.len());
-                let chunk = &b64[offset..end];
-                let cmd = format!("printf '%s' '{chunk}' >> '{dest_path}.b64'");
-                self.container_exec(host_id, container_name, &cmd).await?;
-                offset = end;
-            }
-            // Decode the complete b64 file
-            let cmd = format!("base64 -d '{dest_path}.b64' > '{dest_path}' && rm -f '{dest_path}.b64'");
-            self.container_exec(host_id, container_name, &cmd).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Push a text string into a container file.
-    async fn container_push_text(
-        &self,
-        host_id: &str,
-        container_name: &str,
-        text: &str,
-        dest: &str,
-    ) -> Result<(), String> {
-        self.container_push_content(host_id, container_name, text.as_bytes(), dest)
-            .await
-    }
-
-    /// Create workspace directory for a container (local or remote).
-    async fn container_create_workspace(
-        &self,
-        host_id: &str,
-        container_name: &str,
-        storage_path: &Path,
-    ) -> Result<(), String> {
-        if host_id == "local" {
-            NspawnClient::create_workspace(container_name, storage_path)
-                .await
-                .map_err(|e| e.to_string())
-        } else {
-            // On remote hosts, workspace is created by CreateNspawnContainer.
-            // Just ensure it exists inside the container.
-            self.container_exec(
-                host_id,
-                container_name,
-                "mkdir -p /root/workspace && chmod 755 /root/workspace",
-            )
-            .await?;
-            Ok(())
-        }
-    }
-
-    /// Wait for network connectivity in a container (local or remote).
-    async fn container_wait_for_network(
-        &self,
-        host_id: &str,
-        container_name: &str,
-        timeout_secs: u32,
-    ) -> Result<(), String> {
-        if host_id == "local" {
-            NspawnClient::wait_for_network(container_name, timeout_secs)
-                .await
-                .map_err(|e| e.to_string())
-        } else {
-            for _i in 0..timeout_secs {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                if let Ok(out) = self
-                    .container_exec(host_id, container_name, "ip addr show | grep 'inet ' | grep -v 127.0.0.1")
-                    .await
-                {
-                    if !out.trim().is_empty() {
-                        return Ok(());
-                    }
-                }
-            }
-            Err(format!("Network not ready after {timeout_secs}s"))
-        }
-    }
-
-    /// Deploy agent binary to a container.
-    /// Local: copies from /opt/homeroute/data/agent-binaries/hr-agent
-    /// Remote: downloads from orchestrator HTTP API inside the container
-    async fn container_deploy_agent_binary(
-        &self,
-        host_id: &str,
-        container_name: &str,
-        storage_path: &Path,
-    ) -> Result<(), String> {
-        if host_id == "local" {
-            let agent_binary = PathBuf::from("/opt/homeroute/data/agent-binaries/hr-agent");
-            if !agent_binary.exists() {
-                return Err("Agent binary not found".to_string());
-            }
-            NspawnClient::push_file(
-                container_name,
-                &agent_binary,
-                "usr/local/bin/hr-agent",
-                storage_path,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        } else {
-            // Download from orchestrator HTTP API
-            let api_port = self.env.api_port;
-            let cmd = format!(
-                "curl -4 -fsSL -o /usr/local/bin/hr-agent http://10.0.0.254:{api_port}/api/applications/agents/binary"
-            );
-            self.container_exec(host_id, container_name, &cmd).await?;
-        }
-        self.container_exec(host_id, container_name, "chmod +x /usr/local/bin/hr-agent")
-            .await?;
-        Ok(())
-    }
-
-    /// Write workspace files (MCP config, rules, .gitignore) for a DEV container.
-    /// Local: writes directly to the workspace bind-mount on disk.
-    /// Remote: writes inside the container via exec.
-    async fn deploy_workspace_files(
-        &self,
-        host_id: &str,
-        container_name: &str,
-        storage_path: &Path,
-        slug: &str,
-        stack: hr_registry::types::AppStack,
-    ) {
-        let base_domain = &self.env.base_domain;
-        let api_port = self.env.api_port;
-        let render_rules = |template: &str| -> String {
-            template
-                .replace("{{slug}}", slug)
-                .replace("{{domain}}", base_domain)
-        };
-
-        let mcp_config = r#"{
-  "mcpServers": {
-    "dataverse": {
-      "command": "/usr/local/bin/hr-agent",
-      "args": ["mcp"],
-      "autoApprove": [
-        "list_tables","describe_table","create_table","add_column","remove_column",
-        "drop_table","create_relation","query_data","insert_data","update_data",
-        "delete_data","count_rows","get_schema","get_db_info"
-      ]
-    },
-    "deploy": {
-      "command": "/usr/local/bin/hr-agent",
-      "args": ["mcp-deploy"],
-      "autoApprove": [
-        "deploy_status","prod_logs"
-      ]
-    },
-    "store": {
-      "command": "/usr/local/bin/hr-agent",
-      "args": ["mcp-store"],
-      "autoApprove": [
-        "list_store_apps","get_app_info","check_updates","publish_release"
-      ]
-    }
-  }
-}
-"#;
-
-        let dev_md_content = match stack {
-            hr_registry::types::AppStack::NextJs => render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev-nextjs.md")),
-            hr_registry::types::AppStack::LeptosRust => render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev-leptos.md")),
-        };
-        let deploy_md_content = match stack {
-            hr_registry::types::AppStack::NextJs => render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy-nextjs.md")),
-            hr_registry::types::AppStack::LeptosRust => render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy-leptos.md")),
-        };
-        let dataverse_md = render_rules(include_str!("../../hr-registry/src/rules/homeroute-dataverse.md"));
-        let store_md = render_rules(include_str!("../../hr-registry/src/rules/homeroute-store.md"));
-        let todos_md = render_rules(include_str!("../../hr-registry/src/rules/homeroute-studio-todos.md"));
-        let gitignore = "node_modules/\ntarget/\n.env\n*.db\n*.db-shm\n*.db-wal\ndist/\n.cache/\ntmp/\n";
-
-        if host_id == "local" {
-            // Write directly to workspace bind mount
-            let ws_dir = storage_path.join(format!("{container_name}-workspace"));
-            let _ = tokio::fs::write(ws_dir.join(".mcp.json"), mcp_config).await;
-            let rules_dir = ws_dir.join(".claude/rules");
-            let _ = tokio::fs::create_dir_all(&rules_dir).await;
-            let _ = tokio::fs::write(rules_dir.join("homeroute-dataverse.md"), &dataverse_md).await;
-            let _ = tokio::fs::write(rules_dir.join("homeroute-deploy.md"), &deploy_md_content).await;
-            let _ = tokio::fs::write(rules_dir.join("homeroute-dev.md"), &dev_md_content).await;
-            let _ = tokio::fs::write(rules_dir.join("homeroute-store.md"), &store_md).await;
-            let _ = tokio::fs::write(rules_dir.join("homeroute-studio-todos.md"), &todos_md).await;
-            let _ = tokio::fs::write(ws_dir.join(".gitignore"), gitignore).await;
-        } else {
-            // Write via exec inside the container
-            let _ = self.container_push_text(host_id, container_name, mcp_config, "/root/workspace/.mcp.json").await;
-            let _ = self.container_exec(host_id, container_name, "mkdir -p /root/workspace/.claude/rules").await;
-            let _ = self.container_push_text(host_id, container_name, &dataverse_md, "/root/workspace/.claude/rules/homeroute-dataverse.md").await;
-            let _ = self.container_push_text(host_id, container_name, &deploy_md_content, "/root/workspace/.claude/rules/homeroute-deploy.md").await;
-            let _ = self.container_push_text(host_id, container_name, &dev_md_content, "/root/workspace/.claude/rules/homeroute-dev.md").await;
-            let _ = self.container_push_text(host_id, container_name, &store_md, "/root/workspace/.claude/rules/homeroute-store.md").await;
-            let _ = self.container_push_text(host_id, container_name, &todos_md, "/root/workspace/.claude/rules/homeroute-studio-todos.md").await;
-            let _ = self.container_push_text(host_id, container_name, gitignore, "/root/workspace/.gitignore").await;
-        }
-
-        // Git init workspace
-        let git_init_cmd = format!(
-            r#"cd /root/workspace && git init && git config user.name "HomeRoute ({slug})" && git config user.email "{slug}@{base_domain}" && git add -A && git commit -m "Initial scaffold (HomeRoute)" && git remote add origin http://10.0.0.254:{api_port}/api/git/repos/{slug}.git"#,
-        );
-        let _ = self.container_exec(host_id, container_name, &git_init_cmd).await;
-    }
-
     // ── Background deploy ────────────────────────────────────────
 
     async fn run_nspawn_deploy_dev(
@@ -1267,7 +885,7 @@ impl ContainerManager {
 
         // Phase 1: Create the nspawn container (dev -> with workspace)
         emit("Creation du conteneur nspawn...");
-        if let Err(e) = self.nspawn_create_container(host_id, container_name, &storage_path, &network_mode, true).await {
+        if let Err(e) = NspawnClient::create_container(container_name, storage, &network_mode, true).await {
             error!(container = container_name, "Nspawn creation failed: {e}");
             emit(&format!("Erreur: {e}"));
             self.set_container_status(app_id, ContainerV2Status::Error)
@@ -1277,8 +895,33 @@ impl ContainerManager {
 
         // Phase 2: Deploy agent binary
         emit("Deploiement du binaire agent...");
-        if let Err(e) = self.container_deploy_agent_binary(host_id, container_name, storage).await {
-            error!(container = container_name, "Agent binary deploy failed: {e}");
+        let agent_binary = PathBuf::from("/opt/homeroute/data/agent-binaries/hr-agent");
+        if !agent_binary.exists() {
+            let msg = "Agent binary not found";
+            emit(msg);
+            self.set_container_status(app_id, ContainerV2Status::Error)
+                .await;
+            return;
+        }
+
+        if let Err(e) =
+            NspawnClient::push_file(container_name, &agent_binary, "usr/local/bin/hr-agent", storage)
+                .await
+        {
+            error!(container = container_name, "Failed to push agent binary: {e}");
+            emit(&format!("Erreur: {e}"));
+            self.set_container_status(app_id, ContainerV2Status::Error)
+                .await;
+            return;
+        }
+
+        if let Err(e) = NspawnClient::exec(
+            container_name,
+            &["chmod", "+x", "/usr/local/bin/hr-agent"],
+        )
+        .await
+        {
+            error!(container = container_name, "chmod failed: {e}");
             emit(&format!("Erreur: {e}"));
             self.set_container_status(app_id, ContainerV2Status::Error)
                 .await;
@@ -1288,6 +931,7 @@ impl ContainerManager {
         // Phase 3: Generate and push agent config
         emit("Configuration de l'agent...");
         let api_port = self.env.api_port;
+        // Derive container-internal interface name from network_mode
         let agent_interface = if let Some(parent) = network_mode.strip_prefix("macvlan:") {
             format!("mv-{parent}")
         } else {
@@ -1301,7 +945,16 @@ service_name = "{slug}"
 interface = "{agent_interface}"
 "#
         );
-        let _ = self.container_push_text(host_id, container_name, &config_content, "/etc/hr-agent.toml").await;
+
+        let tmp_config = PathBuf::from(format!("/tmp/hr-agent-v2-{slug}.toml"));
+        if let Err(e) = tokio::fs::write(&tmp_config, &config_content).await {
+            error!("Failed to write tmp config: {e}");
+            self.set_container_status(app_id, ContainerV2Status::Error)
+                .await;
+            return;
+        }
+        let _ = NspawnClient::push_file(container_name, &tmp_config, "etc/hr-agent.toml", storage).await;
+        let _ = tokio::fs::remove_file(&tmp_config).await;
 
         // Phase 4: Push systemd unit
         let unit_content = r#"[Unit]
@@ -1318,127 +971,266 @@ Environment=RUST_LOG=info
 [Install]
 WantedBy=multi-user.target
 "#;
-        let _ = self.container_push_text(host_id, container_name, unit_content, "/etc/systemd/system/hr-agent.service").await;
+        let tmp_unit = PathBuf::from(format!("/tmp/hr-agent-v2-{slug}.service"));
+        let _ = tokio::fs::write(&tmp_unit, unit_content).await;
+        let _ = NspawnClient::push_file(
+            container_name,
+            &tmp_unit,
+            "etc/systemd/system/hr-agent.service",
+            storage,
+        )
+        .await;
+        let _ = tokio::fs::remove_file(&tmp_unit).await;
 
         // Phase 5: Enable and start agent
         emit("Demarrage de l'agent...");
-        let _ = self.container_exec(host_id, container_name, "systemctl daemon-reload").await;
-        let _ = self.container_exec(host_id, container_name, "systemctl enable --now hr-agent").await;
+        let _ = NspawnClient::exec(container_name, &["systemctl", "daemon-reload"]).await;
+        let _ =
+            NspawnClient::exec(container_name, &["systemctl", "enable", "--now", "hr-agent"])
+                .await;
 
         // Phase 6: Wait for network
         emit("Attente de la connectivite reseau...");
-        if let Err(e) = self.container_wait_for_network(host_id, container_name, 30).await {
+        if let Err(e) = NspawnClient::wait_for_network(container_name, 30).await {
             warn!(container = container_name, "Network wait failed: {e}");
         }
 
-        // Phase 7: Install dependencies
+        // Phase 7: Install dependencies (curl now pre-installed in rootfs, this is a safety net)
         emit("Installation des dependances...");
-        let _ = self.container_exec_retry(
-            host_id, container_name,
-            "apt-get update -qq && apt-get install -y -qq curl ca-certificates git",
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["apt-get update -qq && apt-get install -y -qq curl ca-certificates git"],
             3,
-        ).await;
+        )
+        .await;
 
         // Phase 8: Install code-server
         emit("Installation de code-server...");
-        let _ = self.container_exec_retry(
-            host_id, container_name,
-            "curl -4 -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/usr/local",
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["curl -4 -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/usr/local"],
             3,
-        ).await;
+        )
+        .await;
 
-        // Phase 8b: Install Claude Code CLI
+        // Phase 8b: Install Claude Code CLI (direct binary download, skips `claude install`
+        // which needs network access from Node.js)
         emit("Installation de Claude Code CLI...");
-        let _ = self.container_exec_retry(
-            host_id, container_name,
-            concat!(
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &[concat!(
                 "GCS=https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases",
                 " && VERSION=$(curl -4 -fsSL $GCS/latest)",
                 " && ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/')",
                 " && curl -4 -fsSL -o /usr/local/bin/claude $GCS/$VERSION/linux-$ARCH/claude",
                 " && chmod +x /usr/local/bin/claude",
-            ),
+            )],
             3,
-        ).await;
+        )
+        .await;
 
-        // Phase 8b3: Create studio user
+        // Phase 8b3: Create studio user for Claude Studio (non-root Claude CLI execution)
         emit("Cr\u{00e9}ation utilisateur studio...");
-        let _ = self.container_exec_retry(
-            host_id, container_name,
-            "id studio >/dev/null 2>&1 || useradd -m -s /bin/bash studio && chmod 755 /root && mkdir -p /home/studio/.claude/projects && printf '{\"autoUpdates\":\"disabled\"}' > /home/studio/.claude/settings.json; chown -R studio:studio /home/studio",
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["id studio >/dev/null 2>&1 || useradd -m -s /bin/bash studio && chmod 755 /root && mkdir -p /home/studio/.claude/projects && printf '{\"autoUpdates\":\"disabled\"}' > /home/studio/.claude/settings.json; chown -R studio:studio /home/studio"],
             3,
-        ).await;
+        )
+        .await;
 
         // Phase 8b4: Grant studio full sudo NOPASSWD + fix hostname resolution
         emit("Configuration sudo studio...");
-        let sudo_cmd = format!("apt-get install -y -qq sudo 2>/dev/null; printf 'studio ALL=(ALL) NOPASSWD: ALL\\n' > /etc/sudoers.d/studio && chmod 440 /etc/sudoers.d/studio && visudo -cf /etc/sudoers.d/studio && grep -q '{container_name}' /etc/hosts || printf '127.0.0.1 {container_name}\\n' >> /etc/hosts");
-        let _ = self.container_exec_retry(host_id, container_name, &sudo_cmd, 3).await;
-
-        // Phase 8b5: Enable passwordless su for studio user
-        emit("Configuration su sans mot de passe pour studio...");
-        let _ = self.container_exec_retry(
-            host_id, container_name,
-            "groupadd -f wheel && usermod -aG wheel studio && sed -i 's/^# auth       sufficient pam_wheel.so trust$/auth       sufficient pam_wheel.so trust/' /etc/pam.d/su",
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &[&format!("apt-get install -y -qq sudo 2>/dev/null; printf 'studio ALL=(ALL) NOPASSWD: ALL\\n' > /etc/sudoers.d/studio && chmod 440 /etc/sudoers.d/studio && visudo -cf /etc/sudoers.d/studio && grep -q '{container_name}' /etc/hosts || printf '127.0.0.1 {container_name}\\n' >> /etc/hosts")],
             3,
-        ).await;
+        )
+        .await;
+
+        // Phase 8b5: Enable passwordless su for studio user (wheel group + PAM)
+        emit("Configuration su sans mot de passe pour studio...");
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["groupadd -f wheel && usermod -aG wheel studio && sed -i 's/^# auth       sufficient pam_wheel.so trust$/auth       sufficient pam_wheel.so trust/' /etc/pam.d/su"],
+            3,
+        )
+        .await;
 
         // Phase 8c: Install Rust toolchain + cargo-watch
         emit("Installation Rust toolchain + cargo-watch...");
-        let _ = self.container_exec_retry(
-            host_id, container_name,
-            "curl -4 --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source /root/.cargo/env && cargo install cargo-watch",
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["curl -4 --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source /root/.cargo/env && cargo install cargo-watch"],
             3,
-        ).await;
+        )
+        .await;
 
         // Phase 8c2: Install cargo-leptos + wasm32 target (if LeptosRust stack)
         if stack == hr_registry::types::AppStack::LeptosRust {
             emit("Installation cargo-leptos + wasm32 target...");
-            let _ = self.container_exec_retry(
-                host_id, container_name,
-                "source /root/.cargo/env && rustup target add wasm32-unknown-unknown && cargo install cargo-leptos",
+            let _ = NspawnClient::exec_with_retry(
+                container_name,
+                &["source /root/.cargo/env && rustup target add wasm32-unknown-unknown && cargo install cargo-leptos"],
                 3,
-            ).await;
+            )
+            .await;
         }
 
         // Phase 8d: Install Node.js 22
         emit("Installation Node.js 22...");
-        let _ = self.container_exec_retry(
-            host_id, container_name,
-            "curl -4 -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y -qq nodejs",
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["curl -4 -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y -qq nodejs"],
             3,
-        ).await;
+        )
+        .await;
 
-        // Phase 8e: Install Google Chrome (headless)
+        // Phase 8e: Install Google Chrome (headless browser for dev_test_browser)
         emit("Installation Google Chrome (headless)...");
-        let _ = self.container_exec_retry(
-            host_id, container_name,
-            "apt-get install -y -qq wget gnupg 2>/dev/null && wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && apt-get install -y -qq /tmp/chrome.deb 2>/dev/null || (apt-get -f install -y -qq 2>/dev/null && apt-get install -y -qq /tmp/chrome.deb 2>/dev/null) && rm -f /tmp/chrome.deb",
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["apt-get install -y -qq wget gnupg 2>/dev/null && wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && apt-get install -y -qq /tmp/chrome.deb 2>/dev/null || (apt-get -f install -y -qq 2>/dev/null && apt-get install -y -qq /tmp/chrome.deb 2>/dev/null) && rm -f /tmp/chrome.deb"],
             3,
-        ).await;
+        )
+        .await;
 
-        // Phase 8f: Transfer cargo/rustup ownership to studio
-        let _ = self.container_exec_retry(
-            host_id, container_name,
-            "chown -R studio:studio /root/.cargo /root/.rustup 2>/dev/null; chmod -R a+rX /root/.nvm 2>/dev/null; true",
+        // Phase 8f: Transfer cargo/rustup ownership to studio, grant read access to nvm
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["chown -R studio:studio /root/.cargo /root/.rustup 2>/dev/null; chmod -R a+rX /root/.nvm 2>/dev/null; true"],
             3,
-        ).await;
+        )
+        .await;
 
         // Phase 9: Create workspace
         emit("Creation du volume workspace...");
-        let _ = self.container_create_workspace(host_id, container_name, storage).await;
+        let _ = NspawnClient::create_workspace(container_name, storage).await;
 
-        // Phase 10-11: Deploy workspace files (MCP, rules, git)
-        emit("Configuration workspace (MCP, rules, git)...");
-        self.deploy_workspace_files(host_id, container_name, storage, slug, stack).await;
+        // Phase 10: Deploy MCP config
+        emit("Configuration MCP...");
+        let mcp_config = r#"{
+  "mcpServers": {
+    "dataverse": {
+      "command": "/usr/local/bin/hr-agent",
+      "args": ["mcp"],
+      "autoApprove": [
+        "list_tables","describe_table","create_table","add_column","remove_column",
+        "drop_table","create_relation","query_data","insert_data","update_data",
+        "delete_data","count_rows","get_schema","get_db_info"
+      ]
+    },
+    "deploy": {
+      "command": "/usr/local/bin/hr-agent",
+      "args": ["mcp-deploy"],
+      "autoApprove": [
+        "deploy_status","prod_logs"
+      ]
+    },
+    "store": {
+      "command": "/usr/local/bin/hr-agent",
+      "args": ["mcp-store"],
+      "autoApprove": [
+        "list_store_apps","get_app_info","check_updates","publish_release"
+      ]
+    }
+  }
+}
+"#;
+        // Write directly to the workspace directory (not rootfs) since /root/workspace
+        // is a bind mount from {storage}/{container}-workspace/
+        let ws_dir = storage.join(format!("{container_name}-workspace"));
+        let _ = tokio::fs::write(ws_dir.join(".mcp.json"), mcp_config).await;
+
+        // Phase 11: Deploy .claude/rules/ (modular instructions with template variables)
+        emit("Deploiement .claude/rules/...");
+        let rules_dir = ws_dir.join(".claude/rules");
+        let _ = tokio::fs::create_dir_all(&rules_dir).await;
+        let base_domain = &self.env.base_domain;
+        let render_rules = |template: &str| -> String {
+            template
+                .replace("{{slug}}", slug)
+                .replace("{{domain}}", base_domain)
+        };
+        let _ = tokio::fs::write(
+            rules_dir.join("homeroute-dataverse.md"),
+            render_rules(include_str!("../../hr-registry/src/rules/homeroute-dataverse.md")),
+        )
+        .await;
+        let dev_md_content = match stack {
+            hr_registry::types::AppStack::NextJs => render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev-nextjs.md")),
+            hr_registry::types::AppStack::LeptosRust => render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev-leptos.md")),
+        };
+        let deploy_md_content = match stack {
+            hr_registry::types::AppStack::NextJs => render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy-nextjs.md")),
+            hr_registry::types::AppStack::LeptosRust => render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy-leptos.md")),
+        };
+        let _ = tokio::fs::write(
+            rules_dir.join("homeroute-deploy.md"),
+            deploy_md_content,
+        )
+        .await;
+        let _ = tokio::fs::write(
+            rules_dir.join("homeroute-dev.md"),
+            dev_md_content,
+        )
+        .await;
+        let _ = tokio::fs::write(
+            rules_dir.join("homeroute-store.md"),
+            render_rules(include_str!("../../hr-registry/src/rules/homeroute-store.md")),
+        )
+        .await;
+        let _ = tokio::fs::write(
+            rules_dir.join("homeroute-studio-todos.md"),
+            render_rules(include_str!("../../hr-registry/src/rules/homeroute-studio-todos.md")),
+        )
+        .await;
+
+        // Phase 11b: Git init workspace
+        emit("Initialisation du depot Git...");
+        // Write .gitignore directly to the workspace bind mount
+        let gitignore = "node_modules/\ntarget/\n.env\n*.db\n*.db-shm\n*.db-wal\ndist/\n.cache/\ntmp/\n";
+        let _ = tokio::fs::write(ws_dir.join(".gitignore"), gitignore).await;
+
+        // Initialize git repo inside the container
+        let git_init_cmd = format!(
+            r#"cd /root/workspace && \
+            git init && \
+            git config user.name "HomeRoute ({slug})" && \
+            git config user.email "{slug}@{base_domain}" && \
+            git add -A && \
+            git commit -m "Initial scaffold (HomeRoute)" && \
+            git remote add origin http://10.0.0.254:{api_port}/api/git/repos/{slug}.git"#,
+            slug = slug,
+            base_domain = base_domain,
+            api_port = api_port,
+        );
+        let _ = NspawnClient::exec(container_name, &[&git_init_cmd]).await;
 
         // Phase 12: Configure code-server
         emit("Configuration de code-server...");
-        let _ = self.container_exec(host_id, container_name, "mkdir -p /home/studio/.config/code-server").await;
+        let _ = NspawnClient::exec(
+            container_name,
+            &["mkdir", "-p", "/home/studio/.config/code-server"],
+        )
+        .await;
         let cs_config = "bind-addr: 0.0.0.0:13337\nauth: none\ncert: false\n";
-        let _ = self.container_push_text(host_id, container_name, cs_config, "/home/studio/.config/code-server/config.yaml").await;
+        let tmp_cs = PathBuf::from(format!("/tmp/cs-config-v2-{slug}.yaml"));
+        let _ = tokio::fs::write(&tmp_cs, cs_config).await;
+        let _ = NspawnClient::push_file(
+            container_name,
+            &tmp_cs,
+            "home/studio/.config/code-server/config.yaml",
+            storage,
+        )
+        .await;
+        let _ = tokio::fs::remove_file(&tmp_cs).await;
 
         // VS Code settings
-        let _ = self.container_exec(host_id, container_name, "mkdir -p /home/studio/.local/share/code-server/User").await;
+        let _ = NspawnClient::exec(
+            container_name,
+            &["mkdir", "-p", "/home/studio/.local/share/code-server/User"],
+        )
+        .await;
         let cs_settings = r#"{
   "workbench.colorTheme": "Default Dark Modern",
   "chat.disableAIFeatures": true,
@@ -1447,8 +1239,17 @@ WantedBy=multi-user.target
   "remote.autoForwardPorts": false
 }
 "#;
-        let _ = self.container_push_text(host_id, container_name, cs_settings, "/home/studio/.local/share/code-server/User/settings.json").await;
-        let _ = self.container_exec(host_id, container_name, "chown -R studio:studio /home/studio/.config /home/studio/.local").await;
+        let tmp_settings = PathBuf::from(format!("/tmp/cs-settings-v2-{slug}.json"));
+        let _ = tokio::fs::write(&tmp_settings, cs_settings).await;
+        let _ = NspawnClient::push_file(
+            container_name,
+            &tmp_settings,
+            "home/studio/.local/share/code-server/User/settings.json",
+            storage,
+        )
+        .await;
+        let _ = tokio::fs::remove_file(&tmp_settings).await;
+        let _ = NspawnClient::exec(container_name, &["chown -R studio:studio /home/studio/.config /home/studio/.local"]).await;
 
         // code-server systemd unit
         let cs_unit = r#"[Unit]
@@ -1470,9 +1271,20 @@ TimeoutStopSec=10
 [Install]
 WantedBy=multi-user.target
 "#;
-        let _ = self.container_push_text(host_id, container_name, cs_unit, "/etc/systemd/system/code-server.service").await;
+        let tmp_cs_unit = PathBuf::from(format!("/tmp/cs-unit-v2-{slug}.service"));
+        let _ = tokio::fs::write(&tmp_cs_unit, cs_unit).await;
+        let _ = NspawnClient::push_file(
+            container_name,
+            &tmp_cs_unit,
+            "etc/systemd/system/code-server.service",
+            storage,
+        )
+        .await;
+        let _ = tokio::fs::remove_file(&tmp_cs_unit).await;
 
         // code-server extension update helper script
+        // Uses curl to download VSIX (reads /root/.curlrc --ipv4) to bypass Node.js DNS
+        // which fails on IPv6-only domains when IPv6 is disabled in the container
         let cs_ext_script = r#"#!/bin/bash
 set -e
 VSIX_URL=$(curl -fsSL https://open-vsx.org/api/Anthropic/claude-code/latest \
@@ -1481,8 +1293,17 @@ curl -fsSL -o /tmp/claude-code.vsix "$VSIX_URL"
 /usr/local/bin/code-server --install-extension /tmp/claude-code.vsix
 rm -f /tmp/claude-code.vsix
 "#;
-        let _ = self.container_push_text(host_id, container_name, cs_ext_script, "/usr/local/bin/update-claude-ext.sh").await;
-        let _ = self.container_exec(host_id, container_name, "chmod +x /usr/local/bin/update-claude-ext.sh").await;
+        let tmp_ext_script = PathBuf::from(format!("/tmp/cs-ext-v2-{slug}.sh"));
+        let _ = tokio::fs::write(&tmp_ext_script, cs_ext_script).await;
+        let _ = NspawnClient::push_file(
+            container_name,
+            &tmp_ext_script,
+            "usr/local/bin/update-claude-ext.sh",
+            storage,
+        )
+        .await;
+        let _ = tokio::fs::remove_file(&tmp_ext_script).await;
+        let _ = NspawnClient::exec(container_name, &["chmod", "+x", "/usr/local/bin/update-claude-ext.sh"]).await;
 
         let cs_setup_unit = r#"[Unit]
 Description=code-server Claude Code extension updater
@@ -1500,22 +1321,46 @@ Environment=HOME=/home/studio
 [Install]
 WantedBy=multi-user.target
 "#;
-        let _ = self.container_push_text(host_id, container_name, cs_setup_unit, "/etc/systemd/system/code-server-setup.service").await;
+        let tmp_cs_setup = PathBuf::from(format!("/tmp/cs-setup-v2-{slug}.service"));
+        let _ = tokio::fs::write(&tmp_cs_setup, cs_setup_unit).await;
+        let _ = NspawnClient::push_file(
+            container_name,
+            &tmp_cs_setup,
+            "etc/systemd/system/code-server-setup.service",
+            storage,
+        )
+        .await;
+        let _ = tokio::fs::remove_file(&tmp_cs_setup).await;
 
         emit("Demarrage de code-server...");
-        let _ = self.container_exec(host_id, container_name, "systemctl daemon-reload").await;
-        let _ = self.container_exec(host_id, container_name, "systemctl enable --now code-server").await;
+        let _ = NspawnClient::exec(container_name, &["systemctl", "daemon-reload"]).await;
+        let _ =
+            NspawnClient::exec(container_name, &["systemctl", "enable", "--now", "code-server"])
+                .await;
 
-        // Install Claude Code extension during provisioning
+        // Install Claude Code extension during provisioning (don't rely only on boot service)
         emit("Installation extension Claude Code...");
-        let _ = self.container_exec_retry(host_id, container_name, "/usr/local/bin/update-claude-ext.sh", 3).await;
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["/usr/local/bin/update-claude-ext.sh"],
+            3,
+        )
+        .await;
 
         // Enable the setup service for future boots/updates
-        let _ = self.container_exec(host_id, container_name, "systemctl enable code-server-setup").await;
+        let _ = NspawnClient::exec(
+            container_name,
+            &["systemctl", "enable", "code-server-setup"],
+        )
+        .await;
 
         // Phase 12c: Transfer workspace ownership to studio
         emit("Attribution workspace a studio...");
-        let _ = self.container_exec(host_id, container_name, "chown -R studio:studio /root/workspace 2>/dev/null; mkdir -p /home/studio/.npm && chown -R studio:studio /home/studio/.npm; true").await;
+        let _ = NspawnClient::exec(
+            container_name,
+            &["chown -R studio:studio /root/workspace 2>/dev/null; mkdir -p /home/studio/.npm && chown -R studio:studio /home/studio/.npm; true"],
+        )
+        .await;
 
         // Phase 13-14: Dev server systemd units (stack-dependent)
         match stack {
@@ -1540,9 +1385,25 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 [Install]
 WantedBy=multi-user.target
 "#;
-                let _ = self.container_push_text(host_id, container_name, nextjs_unit, "/etc/systemd/system/nextjs-dev.service").await;
-                let _ = self.container_exec(host_id, container_name, "systemctl daemon-reload").await;
-                let _ = self.container_exec(host_id, container_name, "systemctl enable --now nextjs-dev").await;
+                let tmp_nextjs_unit =
+                    PathBuf::from(format!("/tmp/nextjs-unit-v2-{slug}.service"));
+                let _ = tokio::fs::write(&tmp_nextjs_unit, nextjs_unit).await;
+                let _ = NspawnClient::push_file(
+                    container_name,
+                    &tmp_nextjs_unit,
+                    "etc/systemd/system/nextjs-dev.service",
+                    storage,
+                )
+                .await;
+                let _ = tokio::fs::remove_file(&tmp_nextjs_unit).await;
+
+                let _ =
+                    NspawnClient::exec(container_name, &["systemctl", "daemon-reload"]).await;
+                let _ = NspawnClient::exec(
+                    container_name,
+                    &["systemctl", "enable", "--now", "nextjs-dev"],
+                )
+                .await;
             }
             hr_registry::types::AppStack::LeptosRust => {
                 emit("Configuration cargo-leptos-dev.service...");
@@ -1568,9 +1429,25 @@ Environment=RUST_LOG=info
 [Install]
 WantedBy=multi-user.target
 "#;
-                let _ = self.container_push_text(host_id, container_name, leptos_unit, "/etc/systemd/system/cargo-leptos-dev.service").await;
-                let _ = self.container_exec(host_id, container_name, "systemctl daemon-reload").await;
-                let _ = self.container_exec(host_id, container_name, "systemctl enable --now cargo-leptos-dev").await;
+                let tmp_leptos_unit =
+                    PathBuf::from(format!("/tmp/leptos-unit-v2-{slug}.service"));
+                let _ = tokio::fs::write(&tmp_leptos_unit, leptos_unit).await;
+                let _ = NspawnClient::push_file(
+                    container_name,
+                    &tmp_leptos_unit,
+                    "etc/systemd/system/cargo-leptos-dev.service",
+                    storage,
+                )
+                .await;
+                let _ = tokio::fs::remove_file(&tmp_leptos_unit).await;
+
+                let _ =
+                    NspawnClient::exec(container_name, &["systemctl", "daemon-reload"]).await;
+                let _ = NspawnClient::exec(
+                    container_name,
+                    &["systemctl", "enable", "--now", "cargo-leptos-dev"],
+                )
+                .await;
             }
         }
 
@@ -1628,7 +1505,7 @@ WantedBy=multi-user.target
 
         // Phase 1: Create the nspawn container (prod -> no workspace)
         emit("Creation du conteneur nspawn...");
-        if let Err(e) = self.nspawn_create_container(host_id, container_name, &storage_path, &network_mode, false).await {
+        if let Err(e) = NspawnClient::create_container(container_name, storage, &network_mode, false).await {
             error!(container = container_name, "Nspawn creation failed: {e}");
             emit(&format!("Erreur: {e}"));
             self.set_container_status(app_id, ContainerV2Status::Error)
@@ -1638,8 +1515,33 @@ WantedBy=multi-user.target
 
         // Phase 2: Deploy agent binary
         emit("Deploiement du binaire agent...");
-        if let Err(e) = self.container_deploy_agent_binary(host_id, container_name, storage).await {
-            error!(container = container_name, "Agent binary deploy failed: {e}");
+        let agent_binary = PathBuf::from("/opt/homeroute/data/agent-binaries/hr-agent");
+        if !agent_binary.exists() {
+            let msg = "Agent binary not found";
+            emit(msg);
+            self.set_container_status(app_id, ContainerV2Status::Error)
+                .await;
+            return;
+        }
+
+        if let Err(e) =
+            NspawnClient::push_file(container_name, &agent_binary, "usr/local/bin/hr-agent", storage)
+                .await
+        {
+            error!(container = container_name, "Failed to push agent binary: {e}");
+            emit(&format!("Erreur: {e}"));
+            self.set_container_status(app_id, ContainerV2Status::Error)
+                .await;
+            return;
+        }
+
+        if let Err(e) = NspawnClient::exec(
+            container_name,
+            &["chmod", "+x", "/usr/local/bin/hr-agent"],
+        )
+        .await
+        {
+            error!(container = container_name, "chmod failed: {e}");
             emit(&format!("Erreur: {e}"));
             self.set_container_status(app_id, ContainerV2Status::Error)
                 .await;
@@ -1662,7 +1564,16 @@ service_name = "{slug}"
 interface = "{agent_interface}"
 "#
         );
-        let _ = self.container_push_text(host_id, container_name, &config_content, "/etc/hr-agent.toml").await;
+
+        let tmp_config = PathBuf::from(format!("/tmp/hr-agent-v2-{slug}.toml"));
+        if let Err(e) = tokio::fs::write(&tmp_config, &config_content).await {
+            error!("Failed to write tmp config: {e}");
+            self.set_container_status(app_id, ContainerV2Status::Error)
+                .await;
+            return;
+        }
+        let _ = NspawnClient::push_file(container_name, &tmp_config, "etc/hr-agent.toml", storage).await;
+        let _ = tokio::fs::remove_file(&tmp_config).await;
 
         // Phase 4: Push systemd unit
         let unit_content = r#"[Unit]
@@ -1679,27 +1590,48 @@ Environment=RUST_LOG=info
 [Install]
 WantedBy=multi-user.target
 "#;
-        let _ = self.container_push_text(host_id, container_name, unit_content, "/etc/systemd/system/hr-agent.service").await;
+        let tmp_unit = PathBuf::from(format!("/tmp/hr-agent-v2-{slug}.service"));
+        let _ = tokio::fs::write(&tmp_unit, unit_content).await;
+        let _ = NspawnClient::push_file(
+            container_name,
+            &tmp_unit,
+            "etc/systemd/system/hr-agent.service",
+            storage,
+        )
+        .await;
+        let _ = tokio::fs::remove_file(&tmp_unit).await;
 
         // Phase 5: Enable and start agent
         emit("Demarrage de l'agent...");
-        let _ = self.container_exec(host_id, container_name, "systemctl daemon-reload").await;
-        let _ = self.container_exec(host_id, container_name, "systemctl enable --now hr-agent").await;
+        let _ = NspawnClient::exec(container_name, &["systemctl", "daemon-reload"]).await;
+        let _ =
+            NspawnClient::exec(container_name, &["systemctl", "enable", "--now", "hr-agent"])
+                .await;
 
         // Phase 6: Wait for network
         emit("Attente de la connectivite reseau...");
-        if let Err(e) = self.container_wait_for_network(host_id, container_name, 30).await {
+        if let Err(e) = NspawnClient::wait_for_network(container_name, 30).await {
             warn!(container = container_name, "Network wait failed: {e}");
         }
 
-        // Phase 7: Install dependencies
+        // Phase 7: Install dependencies (curl for agent binary updates)
         emit("Installation des dependances...");
-        let _ = self.container_exec_retry(host_id, container_name, "apt-get update -qq && apt-get install -y -qq curl ca-certificates", 3).await;
+        let _ = NspawnClient::exec_with_retry(
+            container_name,
+            &["apt-get update -qq && apt-get install -y -qq curl ca-certificates"],
+            3,
+        )
+        .await;
 
         // Phase 7b: Install Node.js for NextJs stack
         if stack == hr_registry::types::AppStack::NextJs {
             emit("Installation Node.js 22 (PROD)...");
-            let _ = self.container_exec_retry(host_id, container_name, "curl -4 -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y -qq nodejs", 3).await;
+            let _ = NspawnClient::exec_with_retry(
+                container_name,
+                &["curl -4 -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y -qq nodejs"],
+                3,
+            )
+            .await;
         }
 
         // Update status (no workspace for prod containers)
@@ -1720,6 +1652,7 @@ WantedBy=multi-user.target
         info!(container = container_name, "Container V2 prod deploy complete");
     }
 
+    /// Update the status of a container V2 record and the corresponding application.
     async fn set_container_status(&self, id: &str, status: ContainerV2Status) {
         {
             let mut state = self.state.write().await;

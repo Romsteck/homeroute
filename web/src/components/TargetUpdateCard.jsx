@@ -66,22 +66,19 @@ function OsCell({ target, onUpgrade, upgrading }) {
   );
 }
 
-export function UpdateTableHead({ showDevCols = false }) {
+export function UpdateTableHead() {
   return (
     <thead>
       <tr className="text-left text-gray-500 text-xs uppercase tracking-wider border-b border-gray-700">
         <th className="py-2 px-3">Cible</th>
         <th className="py-2 px-3">OS (APT)</th>
         <th className="py-2 px-3">Agent</th>
-        {showDevCols && <th className="py-2 px-3">Claude Code</th>}
-        {showDevCols && <th className="py-2 px-3">code-server</th>}
-        {showDevCols && <th className="py-2 px-3">Extension</th>}
       </tr>
     </thead>
   );
 }
 
-export function UpdateTableRow({ target, upgradeState = {}, onUpgrade, showDevCols = false }) {
+export function UpdateTableRow({ target, upgradeState = {}, onUpgrade }) {
   const isOnline = target.online;
   const isUpgrading = (cat) => upgradeState[cat]?.running;
 
@@ -112,36 +109,6 @@ export function UpdateTableRow({ target, upgradeState = {}, onUpgrade, showDevCo
         onUpgrade={onUpgrade}
         upgrading={isUpgrading('hr_agent')}
       />
-      {showDevCols && (
-        <VersionCell
-          installed={target.claude_cli_installed}
-          latest={target.claude_cli_latest}
-          category="claude_cli"
-          targetId={target.id}
-          onUpgrade={onUpgrade}
-          upgrading={isUpgrading('claude_cli')}
-        />
-      )}
-      {showDevCols && (
-        <VersionCell
-          installed={target.code_server_installed}
-          latest={target.code_server_latest}
-          category="code_server"
-          targetId={target.id}
-          onUpgrade={onUpgrade}
-          upgrading={isUpgrading('code_server')}
-        />
-      )}
-      {showDevCols && (
-        <VersionCell
-          installed={target.claude_ext_installed}
-          latest={target.claude_ext_latest}
-          category="claude_ext"
-          targetId={target.id}
-          onUpgrade={onUpgrade}
-          upgrading={isUpgrading('claude_ext')}
-        />
-      )}
     </tr>
   );
 }
