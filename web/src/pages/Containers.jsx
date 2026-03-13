@@ -4,24 +4,15 @@ import {
   Plus,
   CheckCircle,
   XCircle,
-  Wifi,
-  WifiOff,
-  Clock,
-  HardDrive,
   RefreshCw,
   AlertTriangle,
   X,
   Terminal,
   Loader2,
-  Play,
-  Square,
-  ArrowRightLeft,
 } from 'lucide-react';
-import Card from '../components/Card';
 import Button from '../components/Button';
 import PageHeader from '../components/PageHeader';
-import AppGroupCard from '../components/AppGroupCard';
-import { CONTAINER_GRID } from '../components/ContainerCard';
+import ApplicationCard from '../components/ApplicationCard';
 import CreateContainerModal from '../components/CreateContainerModal';
 import useWebSocket from '../hooks/useWebSocket';
 import {
@@ -38,25 +29,6 @@ import {
   renameContainer,
   getRenameStatus,
 } from '../api/client';
-
-function groupByApp(containers) {
-  const groups = new Map();
-  containers.forEach(c => {
-    const slug = c.slug;
-    if (!groups.has(slug)) {
-      groups.set(slug, { slug, name: c.name, dev: null, prod: null });
-    }
-    const g = groups.get(slug);
-    if (c.environment === 'production') {
-      g.prod = c;
-    } else {
-      g.dev = c;
-    }
-    // Use the dev name as group name if available
-    if (g.dev) g.name = g.dev.name;
-  });
-  return Array.from(groups.values());
-}
 
 function formatBytes(bytes) {
   if (bytes === 0) return '0 B';
@@ -149,9 +121,9 @@ function MigrationProgress({ appId, migration, onDismiss }) {
           )}
         </div>
       </div>
-      <div className="w-full bg-gray-600 h-1.5">
+      <div className="w-full bg-gray-600 h-1.5 rounded-full overflow-hidden">
         <div
-          className={`h-1.5 transition-all duration-500 ${
+          className={`h-1.5 rounded-full transition-all duration-500 ${
             migration.phase === 'failed' ? 'bg-red-500' :
             migration.phase === 'complete' ? 'bg-green-500' : 'bg-blue-500'
           }`}
@@ -186,7 +158,6 @@ function Containers() {
 
   // Modal states
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [createModalDefaults, setCreateModalDefaults] = useState({});
   const [terminalContainer, setTerminalContainer] = useState(null);
   const [migrateModal, setMigrateModal] = useState(null);
   const [selectedHostId, setSelectedHostId] = useState('');
@@ -197,7 +168,6 @@ function Containers() {
   const [renameProgress, setRenameProgress] = useState(null);
 
   // Agent metrics state
-  const [envFilter, setEnvFilter] = useState('production');
   const [appMetrics, setAppMetrics] = useState({});
 
   const fetchData = useCallback(async () => {
@@ -317,7 +287,6 @@ function Containers() {
       const res = await createContainer(payload);
       if (res.data.success) {
         setShowCreateModal(false);
-        setCreateModalDefaults({});
         setMessage({ type: 'success', text: 'Conteneur cree' });
         fetchData();
       } else {
@@ -330,18 +299,14 @@ function Containers() {
     }
   }
 
-  async function handleDeleteApp(group) {
-    const name = group.name || group.slug;
-    const parts = [group.dev && 'DEV', group.prod && 'PROD'].filter(Boolean).join(' + ');
-    if (!confirm(`Supprimer l'application "${name}" (${parts}) ?\nCeci detruira les conteneurs nspawn, les enregistrements DNS et les certificats.`)) return;
+  async function handleDelete(container) {
+    if (!confirm(`Supprimer "${container.name || container.slug}" ?\nCeci detruira le conteneur nspawn, les enregistrements DNS et les certificats.`)) return;
     try {
-      const ids = [group.dev?.id, group.prod?.id].filter(Boolean);
-      const results = await Promise.all(ids.map(id => deleteContainer(id)));
-      const failed = results.filter(r => !r.data.success);
-      if (failed.length === 0) {
+      const res = await deleteContainer(container.id);
+      if (res.data.success) {
         setMessage({ type: 'success', text: 'Application supprimee' });
       } else {
-        setMessage({ type: 'error', text: failed.map(r => r.data.error).join(', ') });
+        setMessage({ type: 'error', text: res.data.error || 'Erreur' });
       }
       fetchData();
     } catch {
@@ -380,31 +345,28 @@ function Containers() {
     }
   }
 
-  function openAppEditModal(group) {
-    setEditingApp(group);
-    setAppEditForm({ name: group.name || group.slug, slug: group.slug });
+  function openEditModal(container) {
+    setEditingApp(container);
+    setAppEditForm({ name: container.name || container.slug, slug: container.slug });
     setRenameProgress(null);
   }
 
   async function handleAppEdit() {
     if (!editingApp) return;
-    const firstContainer = editingApp.dev || editingApp.prod;
-    if (!firstContainer) return;
     const slugChanged = appEditForm.slug !== editingApp.slug;
 
     setSaving(true);
     try {
       if (slugChanged) {
-        const res = await renameContainer(firstContainer.id, {
+        const res = await renameContainer(editingApp.id, {
           new_slug: appEditForm.slug,
           new_name: appEditForm.name,
         });
         if (res.data.success) {
           setRenameProgress({ phase: 'started' });
-          // Poll rename status
           const pollInterval = setInterval(async () => {
             try {
-              const statusRes = await getRenameStatus(firstContainer.id);
+              const statusRes = await getRenameStatus(editingApp.id);
               const status = statusRes.data;
               setRenameProgress(status);
               if (status.phase === 'complete' || status.phase === 'failed') {
@@ -428,7 +390,7 @@ function Containers() {
           setSaving(false);
         }
       } else {
-        const res = await updateContainer(firstContainer.id, { name: appEditForm.name });
+        const res = await updateContainer(editingApp.id, { name: appEditForm.name });
         if (res.data.success) {
           setEditingApp(null);
           setMessage({ type: 'success', text: 'Application modifiee' });
@@ -488,11 +450,6 @@ function Containers() {
     }
   };
 
-  function handleCreatePaired(slug, name, environment, linkedAppId) {
-    setCreateModalDefaults({ slug, name, environment, linkedAppId });
-    setShowCreateModal(true);
-  }
-
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -501,24 +458,20 @@ function Containers() {
     );
   }
 
-  const groups = groupByApp(containers);
-  const filteredGroups = envFilter === 'all'
-    ? groups
-    : groups.filter(g => {
-        if (envFilter === 'production') return g.prod;
-        if (envFilter === 'development') return g.dev;
-        return true;
-      });
-  const prodRunning = containers.filter(c => c.environment === 'production' && (c.agent_status || c.status) === 'connected').length;
+  const prodContainers = containers.filter(c => c.environment === 'production');
+  const connectedCount = prodContainers.filter(c => (c.agent_status || c.status) === 'connected').length;
 
   return (
     <div>
       <PageHeader title="Applications" icon={Container}>
+        <span className="text-sm text-gray-400 hidden sm:inline">
+          {prodContainers.length} application{prodContainers.length !== 1 ? 's' : ''} · {connectedCount} connectee{connectedCount !== 1 ? 's' : ''}
+        </span>
         <Button onClick={fetchData} variant="secondary">
           <RefreshCw className="w-4 h-4" />
           Rafraichir
         </Button>
-        <Button onClick={() => { setCreateModalDefaults({}); setShowCreateModal(true); }}>
+        <Button onClick={() => setShowCreateModal(true)}>
           <Plus className="w-4 h-4" />
           Nouvelle application
         </Button>
@@ -534,89 +487,39 @@ function Containers() {
         </div>
       )}
 
-      {/* Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-px">
-        <Card title="Total" icon={Container}>
-          <div className="text-2xl font-bold">{containers.length}</div>
-        </Card>
-        <Card title="Production" icon={Wifi}>
-          <div className="text-2xl font-bold text-purple-400">{prodRunning}</div>
-        </Card>
-      </div>
-
-      {/* Environment filter */}
-      <div className="flex items-center gap-2 px-4 py-2 bg-gray-800/50 border-b border-gray-700">
-        <span className="text-xs text-gray-500 uppercase mr-2">Filtre:</span>
-        {[
-          { key: 'all', label: 'Tout' },
-          { key: 'production', label: 'Production' },
-        ].map(f => (
-          <button
-            key={f.key}
-            onClick={() => setEnvFilter(f.key)}
-            className={`px-2.5 py-1 text-xs font-medium transition-colors ${
-              envFilter === f.key
-                ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
-                : 'text-gray-400 hover:text-white border border-gray-700 hover:border-gray-500'
-            }`}
-          >
-            {f.label}
-          </button>
-        ))}
-      </div>
-
-      {/* App Groups */}
-      <div>
-        {filteredGroups.length === 0 ? (
-          <Card>
-            <div className="text-center py-8 text-gray-500">
-              <Container className="w-12 h-12 mx-auto mb-2 opacity-50" />
-              <p>Aucune application</p>
-              <p className="text-xs mt-2">Créez une application pour commencer</p>
-            </div>
-          </Card>
-        ) : (
-          <div>
-          {/* Column headers */}
-          <div
-            className="hidden lg:grid items-center gap-x-3 px-4 py-1.5 text-[11px] text-gray-500 uppercase tracking-wider border-b border-gray-600 bg-gray-900/80 sticky top-0 z-10"
-            style={{ gridTemplateColumns: CONTAINER_GRID }}
-          >
-            <span>Env</span>
-            <span>Status</span>
-            <span></span>
-            <span></span>
-            <span>Acces</span>
-            <span>CPU</span>
-            <span>RAM</span>
-            <span>Hote</span>
-            <span className="text-right">Actions</span>
+      {/* Card Grid */}
+      <div className="p-4">
+        {prodContainers.length === 0 ? (
+          <div className="text-center py-12 text-gray-500">
+            <Container className="w-12 h-12 mx-auto mb-2 opacity-50" />
+            <p>Aucune application</p>
+            <p className="text-xs mt-2">Creez une application pour commencer</p>
           </div>
-          {filteredGroups.map(group => (
-            <AppGroupCard
-              key={group.slug}
-              group={group}
-              baseDomain={baseDomain}
-              appMetrics={appMetrics}
-              migrations={migrations}
-              hosts={hosts}
-              onStart={handleStart}
-              onStop={handleStop}
-              onTerminal={setTerminalContainer}
-              onEditApp={openAppEditModal}
-              onToggleSecurity={handleToggleSecurity}
-              onMigrate={openMigrateModal}
-              onDeleteApp={handleDeleteApp}
-              onMigrationDismiss={(id) => setMigrations(prev => {
-                const next = { ...prev };
-                delete next[id];
-                return next;
-              })}
-              onCreatePaired={handleCreatePaired}
-              MigrationProgress={MigrationProgress}
-            />
-          ))
-          }
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {prodContainers.map(container => (
+              <ApplicationCard
+                key={container.id}
+                container={container}
+                baseDomain={baseDomain}
+                metrics={appMetrics[container.id]}
+                migration={migrations[container.id]}
+                hosts={hosts}
+                onStart={handleStart}
+                onStop={handleStop}
+                onTerminal={setTerminalContainer}
+                onEdit={openEditModal}
+                onDelete={handleDelete}
+                onToggleSecurity={handleToggleSecurity}
+                onMigrate={openMigrateModal}
+                onMigrationDismiss={(id) => setMigrations(prev => {
+                  const next = { ...prev };
+                  delete next[id];
+                  return next;
+                })}
+                MigrationProgress={MigrationProgress}
+              />
+            ))}
           </div>
         )}
       </div>
@@ -627,20 +530,16 @@ function Containers() {
           baseDomain={baseDomain}
           hosts={hosts}
           containers={containers}
-          onClose={() => { setShowCreateModal(false); setCreateModalDefaults({}); }}
+          onClose={() => setShowCreateModal(false)}
           onCreate={handleCreate}
           saving={saving}
-          initialEnvironment={createModalDefaults.environment}
-          initialSlug={createModalDefaults.slug}
-          initialName={createModalDefaults.name}
-          initialLinkedAppId={createModalDefaults.linkedAppId}
         />
       )}
 
       {/* App Edit Modal */}
       {editingApp && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 p-6 w-full max-w-md border border-gray-700">
+          <div className="bg-gray-800 p-6 w-full max-w-md border border-gray-700 rounded-lg">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-bold">Modifier {editingApp.name || editingApp.slug}</h2>
               <button onClick={() => setEditingApp(null)} className="p-1 text-gray-400 hover:text-white">
@@ -654,7 +553,7 @@ function Containers() {
                   type="text"
                   value={appEditForm.name}
                   onChange={e => setAppEditForm({ ...appEditForm, name: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-900 border border-gray-600 text-sm"
+                  className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm"
                 />
               </div>
               <div>
@@ -663,20 +562,20 @@ function Containers() {
                   type="text"
                   value={appEditForm.slug}
                   onChange={e => setAppEditForm({ ...appEditForm, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
-                  className="w-full px-3 py-2 bg-gray-900 border border-gray-600 text-sm font-mono"
+                  className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm font-mono"
                 />
                 {(appEditForm.slug.length < 3 || appEditForm.slug.length > 32) && appEditForm.slug.length > 0 && (
                   <p className="text-xs text-red-400 mt-1">Le slug doit contenir entre 3 et 32 caracteres</p>
                 )}
               </div>
               {appEditForm.slug !== editingApp.slug && appEditForm.slug.length >= 3 && (
-                <div className="p-3 bg-yellow-900/30 border border-yellow-700/50 text-yellow-400 text-xs">
+                <div className="p-3 bg-yellow-900/30 border border-yellow-700/50 rounded text-yellow-400 text-xs">
                   <AlertTriangle className="w-3.5 h-3.5 inline mr-1" />
                   Le renommage entrainera un bref downtime (~2min)
                 </div>
               )}
               {renameProgress && renameProgress.phase && renameProgress.phase !== 'complete' && renameProgress.phase !== 'failed' && (
-                <div className="p-3 bg-blue-900/30 border border-blue-700/50 text-blue-400 text-xs flex items-center gap-2">
+                <div className="p-3 bg-blue-900/30 border border-blue-700/50 rounded text-blue-400 text-xs flex items-center gap-2">
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   {renameProgress.phase}...
                 </div>
@@ -699,7 +598,7 @@ function Containers() {
       {/* Migrate Modal */}
       {migrateModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 p-6 w-full max-w-md border border-gray-700">
+          <div className="bg-gray-800 p-6 w-full max-w-md border border-gray-700 rounded-lg">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold">Migrer {migrateModal.name}</h3>
               <button onClick={() => setMigrateModal(null)} className="p-1 text-gray-400 hover:text-white">
@@ -712,7 +611,7 @@ function Containers() {
             <select
               value={selectedHostId}
               onChange={(e) => setSelectedHostId(e.target.value)}
-              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-white mb-4"
+              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white mb-4"
             >
               <option value="">Choisir un hote...</option>
               {hosts
@@ -737,7 +636,7 @@ function Containers() {
               <button
                 onClick={handleMigrate}
                 disabled={!selectedHostId || migrating}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white transition-colors flex items-center gap-2"
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded transition-colors flex items-center gap-2"
               >
                 {migrating && <Loader2 className="w-4 h-4 animate-spin" />}
                 Migrer
