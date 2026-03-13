@@ -22,3 +22,4 @@ pub mod edge_stats;
 pub mod store;
 pub mod git;
 pub mod ws_proxy;
+pub mod backup;

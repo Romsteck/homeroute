@@ -281,7 +281,8 @@ async fn run_ssh_backup() -> Result<String, String> {
                 "-o", "BatchMode=yes",
                 "-o", "StrictHostKeyChecking=no",
                 "-o", "ConnectTimeout=15",
-                &format!("{BACKUP_SERVER_USER}@{BACKUP_SERVER_IP}"),
+                "-i", "/root/.ssh/id_ed25519_backup",
+                &format!("root@{BACKUP_SERVER_IP}"),
                 &format!("sudo {BACKUP_SCRIPT}"),
             ])
             .output(),

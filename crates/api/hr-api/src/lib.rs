@@ -60,5 +60,6 @@ fn api_routes() -> Router<ApiState> {
         .nest("/store", routes::store::router())
         .nest("/git", routes::git::router())
         .merge(routes::ws::router())
+        .nest("/backup", routes::backup::router())
         .merge(routes::health::router())
 }
