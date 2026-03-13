@@ -1187,14 +1187,8 @@ impl ContainerManager {
 }
 "#;
 
-        let dev_md_content = match stack {
-            hr_registry::types::AppStack::NextJs => render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev-nextjs.md")),
-            hr_registry::types::AppStack::LeptosRust => render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev-leptos.md")),
-        };
-        let deploy_md_content = match stack {
-            hr_registry::types::AppStack::NextJs => render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy-nextjs.md")),
-            hr_registry::types::AppStack::LeptosRust => render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy-leptos.md")),
-        };
+        let dev_md_content = render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev-nextjs.md"));
+        let deploy_md_content = render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy-nextjs.md"));
         let dataverse_md = render_rules(include_str!("../../hr-registry/src/rules/homeroute-dataverse.md"));
         let store_md = render_rules(include_str!("../../hr-registry/src/rules/homeroute-store.md"));
         let todos_md = render_rules(include_str!("../../hr-registry/src/rules/homeroute-studio-todos.md"));
@@ -1390,15 +1384,6 @@ WantedBy=multi-user.target
             3,
         ).await;
 
-        // Phase 8c2: Install cargo-leptos + wasm32 target (if LeptosRust stack)
-        if stack == hr_registry::types::AppStack::LeptosRust {
-            emit("Installation cargo-leptos + wasm32 target...");
-            let _ = self.container_exec_retry(
-                host_id, container_name,
-                "source /root/.cargo/env && rustup target add wasm32-unknown-unknown && cargo install cargo-leptos",
-                3,
-            ).await;
-        }
 
         // Phase 8d: Install Node.js 22
         emit("Installation Node.js 22...");
@@ -1543,34 +1528,6 @@ WantedBy=multi-user.target
                 let _ = self.container_push_text(host_id, container_name, nextjs_unit, "/etc/systemd/system/nextjs-dev.service").await;
                 let _ = self.container_exec(host_id, container_name, "systemctl daemon-reload").await;
                 let _ = self.container_exec(host_id, container_name, "systemctl enable --now nextjs-dev").await;
-            }
-            hr_registry::types::AppStack::LeptosRust => {
-                emit("Configuration cargo-leptos-dev.service...");
-                let leptos_unit = r#"[Unit]
-Description=Cargo Leptos Dev Server (SSR + WASM)
-After=network.target
-
-[Service]
-Type=simple
-User=studio
-Group=studio
-WorkingDirectory=/root/workspace
-ExecStart=/root/.cargo/bin/cargo-leptos watch
-Restart=always
-RestartSec=3
-Environment=HOME=/home/studio
-Environment=CARGO_HOME=/root/.cargo
-Environment=RUSTUP_HOME=/root/.rustup
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:/root/.cargo/bin
-Environment=LEPTOS_SITE_ADDR=0.0.0.0:3000
-Environment=RUST_LOG=info
-
-[Install]
-WantedBy=multi-user.target
-"#;
-                let _ = self.container_push_text(host_id, container_name, leptos_unit, "/etc/systemd/system/cargo-leptos-dev.service").await;
-                let _ = self.container_exec(host_id, container_name, "systemctl daemon-reload").await;
-                let _ = self.container_exec(host_id, container_name, "systemctl enable --now cargo-leptos-dev").await;
             }
         }
 

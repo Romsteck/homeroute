@@ -407,7 +407,7 @@ async fn start_deploy_mcp() -> Result<()> {
 
     // Read the Config message to get the environment and stack
     let mut environment = hr_registry::types::Environment::Development;
-    let mut stack = hr_registry::types::AppStack::LeptosRust;
+    let mut stack = hr_registry::types::AppStack::NextJs;
     if let Ok(Some(Ok(msg))) = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         ws_stream.next(),

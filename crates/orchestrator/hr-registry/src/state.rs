@@ -1235,10 +1235,7 @@ impl AgentRegistry {
                 .replace("{{domain}}", base_domain)
         };
 
-        let deploy_rules = match app.stack {
-            AppStack::NextJs => include_str!("rules/homeroute-deploy-nextjs.md"),
-            AppStack::LeptosRust => include_str!("rules/homeroute-deploy-leptos.md"),
-        };
+        let deploy_rules = include_str!("rules/homeroute-deploy-nextjs.md");
 
         let rules = vec![
             ("homeroute-deploy.md".to_string(), render(deploy_rules)),
