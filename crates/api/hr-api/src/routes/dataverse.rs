@@ -1,5 +1,4 @@
 use axum::{
-    body::Body,
     extract::{Path, Query, State},
     response::IntoResponse,
     routing::{delete, get, post, put},
@@ -24,8 +23,6 @@ pub fn router() -> Router<ApiState> {
         .route("/apps/{app_id}/tables/{table_name}/count", get(count_rows))
         .route("/apps/{app_id}/relations", get(app_relations))
         .route("/apps/{app_id}/stats", get(app_stats))
-        .route("/apps/{app_id}/migrations", get(app_migrations))
-        .route("/apps/{app_id}/backup", get(backup_download))
 }
 
 // ── Helper ────────────────────────────────────────────────────
@@ -296,104 +293,4 @@ async fn count_rows(
         "filters": filters,
     });
     proxy_query(&state, &app_id, query).await.into_response()
-}
-
-async fn app_migrations(
-    State(state): State<ApiState>,
-    Path(app_id): Path<String>,
-) -> impl IntoResponse {
-    let query = json!({ "action": "get_migrations" });
-    proxy_query(&state, &app_id, query).await.into_response()
-}
-
-// ── Backup route ──────────────────────────────────────────────
-
-async fn backup_download(
-    State(state): State<ApiState>,
-    Path(app_id): Path<String>,
-) -> impl IntoResponse {
-    // Look up the app via IPC
-    let app = match state.orchestrator.request(&OrchestratorRequest::GetApplication { id: app_id.clone() }).await {
-        Ok(r) if r.ok => r.data.unwrap_or(json!(null)),
-        Ok(r) => {
-            let msg = r.error.unwrap_or_else(|| "Application not found".to_string());
-            return (axum::http::StatusCode::NOT_FOUND, Json(json!({"error": msg}))).into_response();
-        }
-        Err(e) => {
-            return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": format!("IPC error: {e}")}))).into_response();
-        }
-    };
-
-    let slug = app.get("slug").and_then(|s| s.as_str()).unwrap_or("app").to_string();
-    let container_name = app.get("container_name").and_then(|s| s.as_str()).unwrap_or("").to_string();
-    let host_id = app.get("host_id").and_then(|s| s.as_str()).unwrap_or("local").to_string();
-
-    // Get storage path via IPC
-    let storage_path = match state.orchestrator.request(&OrchestratorRequest::GetContainerConfig).await {
-        Ok(r) if r.ok => {
-            r.data
-                .and_then(|d| d.get("container_storage_path").and_then(|s| s.as_str()).map(|s| s.to_string()))
-                .unwrap_or_else(|| "/var/lib/machines".to_string())
-        }
-        _ => "/var/lib/machines".to_string(),
-    };
-
-    // Only support local containers for now
-    if host_id != "local" {
-        return (axum::http::StatusCode::NOT_IMPLEMENTED, Json(json!({"error": "Backup only supported for local containers"}))).into_response();
-    }
-
-    let db_path = std::path::PathBuf::from(&storage_path)
-        .join(&container_name)
-        .join("root/workspace/.dataverse/app.db");
-
-    if !db_path.exists() {
-        return (axum::http::StatusCode::NOT_FOUND, Json(json!({"error": "No Dataverse database found for this application"}))).into_response();
-    }
-
-    // Create a backup copy using sqlite3 .backup to ensure WAL consistency
-    let backup_path = std::env::temp_dir().join(format!("dataverse-backup-{}.db", app_id));
-    let backup_result = tokio::process::Command::new("sqlite3")
-        .arg(&db_path)
-        .arg(format!(".backup '{}'", backup_path.display()))
-        .output()
-        .await;
-
-    let backup_file = match backup_result {
-        Ok(output) if output.status.success() => backup_path.clone(),
-        _ => {
-            // Fallback: direct copy if sqlite3 is not available
-            if let Err(e) = tokio::fs::copy(&db_path, &backup_path).await {
-                return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to copy database: {}", e)}))).into_response();
-            }
-            backup_path.clone()
-        }
-    };
-
-    // Read the backup file into memory
-    let bytes = match tokio::fs::read(&backup_file).await {
-        Ok(b) => b,
-        Err(e) => {
-            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to read backup: {}", e)}))).into_response();
-        }
-    };
-
-    let body = Body::from(bytes);
-
-    let filename = format!("dataverse-{}.db", slug);
-
-    // Clean up the temp file after a delay (fire and forget)
-    let cleanup_path = backup_file;
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-        let _ = tokio::fs::remove_file(cleanup_path).await;
-    });
-
-    axum::http::Response::builder()
-        .status(200)
-        .header("Content-Type", "application/x-sqlite3")
-        .header("Content-Disposition", format!("attachment; filename=\"{}\"", filename))
-        .body(body)
-        .unwrap()
-        .into_response()
 }

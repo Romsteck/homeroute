@@ -34,7 +34,7 @@ const navGroups = [
     label: 'Applications',
     items: [
       { to: '/containers', icon: Container, label: 'Applications' },
-      { to: '/dataverse', icon: Database, label: 'Dataverse' },
+      { to: '/dataverse', icon: Database, label: 'Database' },
       { to: '/data-browser', icon: Table2, label: 'Data Browser' },
       { to: '/store', icon: StoreIcon, label: 'Store' },
       { to: '/git', icon: GitBranch, label: 'Git' },

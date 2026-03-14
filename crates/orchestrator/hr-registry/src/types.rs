@@ -27,6 +27,8 @@ impl Default for Environment {
 pub enum AppStack {
     #[default]
     NextJs,
+    LeptosRust,
+    AxumVite,
 }
 
 /// A registered application with its container and agent.

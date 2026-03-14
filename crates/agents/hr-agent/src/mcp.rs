@@ -2754,6 +2754,7 @@ WantedBy=multi-user.target"#;
 
                     Ok(text_result(report.join("\n\n")))
                 }
+                _ => Ok(text_result("Stack not supported for this MCP deploy operation.".to_string())),
             }
         }
 
@@ -2763,6 +2764,7 @@ WantedBy=multi-user.target"#;
             // Stack-aware service list
             let services: Vec<&str> = match ctx.stack {
                 AppStack::NextJs => vec!["code-server.service", "nextjs-dev.service"],
+                _ => vec![],
             };
             for service in &services {
                 let output = tokio::process::Command::new("systemctl")
@@ -2785,6 +2787,7 @@ WantedBy=multi-user.target"#;
             // Stack-aware port list
             let ports: Vec<(u16, &str)> = match ctx.stack {
                 AppStack::NextJs => vec![(13337, "code-server"), (3000, "nextjs-dev")],
+                _ => vec![],
             };
             for (port, label) in &ports {
                 let addr = format!("127.0.0.1:{}", port);
