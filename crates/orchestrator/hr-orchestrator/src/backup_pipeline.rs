@@ -596,8 +596,8 @@ async fn run_rustic_backup(
         backup_args.push(path.clone());
     }
     for exclude in &repo.excludes {
-        backup_args.push("--exclude".into());
-        backup_args.push(exclude.clone());
+        backup_args.push("--glob".into());
+        backup_args.push(format!("!{}", exclude));
     }
     backup_args.push("--json".into());
 
