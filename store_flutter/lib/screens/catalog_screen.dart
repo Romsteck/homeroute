@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import '../theme.dart';
 import '../services/api_client.dart';
+import '../services/install_tracker.dart';
 import '../services/secure_storage.dart' as storage;
 import '../widgets/app_card.dart';
 import '../widgets/error_banner.dart';
@@ -35,6 +36,9 @@ class _CatalogScreenState extends State<CatalogScreen> {
   Map<String, dynamic>? _updateInfo;
   bool _updateDismissed = false;
 
+  /// Slugs of installed apps that have an available update.
+  Set<String> _appsWithUpdates = {};
+
   @override
   void initState() {
     super.initState();
@@ -44,6 +48,7 @@ class _CatalogScreenState extends State<CatalogScreen> {
   Future<void> _init() async {
     await _fetchApps();
     _checkClientUpdate();
+    _checkAppUpdates();
   }
 
   Future<void> _fetchApps() async {
@@ -84,6 +89,28 @@ class _CatalogScreenState extends State<CatalogScreen> {
             'sizeBytes': data['size_bytes'] ?? 0,
           };
         });
+      }
+    } catch (_) {}
+  }
+
+  /// Check for updates for all installed apps by calling /api/store/updates.
+  Future<void> _checkAppUpdates() async {
+    try {
+      final installed = await InstallTracker.getAllInstalled();
+      if (installed.isEmpty) return;
+      // Filter out entries with non-semver version like 'installed'
+      final valid = Map.fromEntries(
+        installed.entries.where((e) => RegExp(r'^\d').hasMatch(e.value)),
+      );
+      if (valid.isEmpty) return;
+      final data = await ApiClient.instance.checkUpdates(valid);
+      final updates = (data['updates'] as List?)
+              ?.map((e) => (e as Map<String, dynamic>)['slug'] as String?)
+              .whereType<String>()
+              .toSet() ??
+          {};
+      if (mounted) {
+        setState(() => _appsWithUpdates = updates);
       }
     } catch (_) {}
   }
@@ -162,7 +189,10 @@ class _CatalogScreenState extends State<CatalogScreen> {
                 const Divider(height: 1),
                 Expanded(
                   child: RefreshIndicator(
-                    onRefresh: _fetchApps,
+                    onRefresh: () async {
+                      await _fetchApps();
+                      await _checkAppUpdates();
+                    },
                     color: AppColors.primary,
                     child: _apps.isEmpty
                         ? ListView(
@@ -200,10 +230,11 @@ class _CatalogScreenState extends State<CatalogScreen> {
                             itemCount: _apps.length,
                             itemBuilder: (context, index) {
                               final app = _apps[index];
+                              final slug = app['slug'] as String;
                               return AppCard(
                                 app: app,
+                                hasUpdate: _appsWithUpdates.contains(slug),
                                 onTap: () {
-                                  final slug = app['slug'] as String;
                                   final name = app['name'] as String?;
                                   context.push(
                                     '/app/$slug${name != null ? '?name=${Uri.encodeComponent(name)}' : ''}',
