@@ -65,6 +65,7 @@ impl LocalDataverse {
                             .to_string(),
                         required: c.required,
                         unique: c.unique,
+                        choices: c.choices.clone(),
                     })
                     .collect(),
                 row_count,

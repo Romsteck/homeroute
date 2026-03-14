@@ -24,7 +24,7 @@ class UpdateScreen extends StatefulWidget {
 }
 
 class _UpdateScreenState extends State<UpdateScreen> {
-  String _phase = 'idle'; // idle, download, install, error
+  String _phase = 'idle'; // idle, download, install, done, error
   double _progress = 0.0;
   String? _error;
 
@@ -57,15 +57,11 @@ class _UpdateScreenState extends State<UpdateScreen> {
         _progress = 1.0;
       });
 
+      if (!mounted) return;
+      setState(() {
+        _phase = 'done';
+      });
       await PackageChecker.installApk(savePath);
-
-      if (mounted) {
-        setState(() {
-          _phase = 'idle';
-          _progress = 0.0;
-          _error = null;
-        });
-      }
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -80,6 +76,7 @@ class _UpdateScreenState extends State<UpdateScreen> {
   @override
   Widget build(BuildContext context) {
     final isBusy = _phase == 'download' || _phase == 'install';
+    final isDone = _phase == 'done';
 
     return Scaffold(
       appBar: AppBar(title: const Text('Mise \u00e0 jour')),
@@ -217,14 +214,31 @@ class _UpdateScreenState extends State<UpdateScreen> {
             const Divider(height: 1),
           ],
 
-          // Download button
+          if (isDone)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              child: Text(
+                "Installation lanc\u00e9e ! Fermez et relancez l'application.",
+                style: const TextStyle(
+                  fontSize: 14,
+                  color: AppColors.textPrimary,
+                  height: 1.5,
+                ),
+              ),
+            ),
+
+          // Download / close button
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             child: SizedBox(
               width: double.infinity,
               height: 48,
               child: ElevatedButton(
-                onPressed: isBusy ? null : _handleUpdate,
+                onPressed: isBusy
+                    ? null
+                    : isDone
+                        ? () => Navigator.of(context).pop()
+                        : _handleUpdate,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF059669),
                   disabledBackgroundColor: const Color(0xFF059669).withOpacity(0.5),
@@ -246,14 +260,16 @@ class _UpdateScreenState extends State<UpdateScreen> {
                         ),
                       )
                     else
-                      const Icon(Icons.download, size: 20),
+                      Icon(isDone ? Icons.close : Icons.download, size: 20),
                     const SizedBox(width: 8),
                     Text(
                       _phase == 'download'
                           ? 'T\u00e9l\u00e9chargement ${(_progress * 100).round()}%'
                           : _phase == 'install'
                               ? 'Installation en cours...'
-                              : 'T\u00e9l\u00e9charger et installer',
+                              : isDone
+                                  ? 'Fermer'
+                                  : 'T\u00e9l\u00e9charger et installer',
                       style: const TextStyle(
                         fontSize: 15,
                         fontWeight: FontWeight.w600,

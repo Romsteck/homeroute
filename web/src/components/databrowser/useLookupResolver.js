@@ -18,7 +18,7 @@ export default function useLookupResolver(appId) {
   }, [appId]);
 
   const getRelation = useCallback((tableName, columnName) => {
-    return relations.find(r => r.from_table === tableName && r.from_column === columnName);
+    return relations.find(r => r.fromTable === tableName && r.fromColumn === columnName);
   }, [relations]);
 
   const isLookup = useCallback((tableName, columnName) => {

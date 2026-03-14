@@ -1345,6 +1345,7 @@ impl AgentRegistry {
                     "fieldType": c.field_type,
                     "required": c.required,
                     "unique": c.unique,
+                    "choices": c.choices,
                 })).collect::<Vec<_>>(),
                 "rowsCount": t.row_count,
             })).collect::<Vec<_>>(),
