@@ -823,6 +823,7 @@ dependencies = [
  "hr-git",
  "hr-ipc",
  "rustls",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
