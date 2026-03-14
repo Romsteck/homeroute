@@ -769,6 +769,14 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 let status = self.backup.get_status().await;
                 IpcResponse::ok_data(status)
             }
+            OrchestratorRequest::GetBackupRepos => {
+                let repos = self.backup.get_repos().await;
+                IpcResponse::ok_data(repos)
+            }
+            OrchestratorRequest::GetBackupJobs => {
+                let jobs = self.backup.get_jobs().await;
+                IpcResponse::ok_data(jobs)
+            }
         }
     }
 }

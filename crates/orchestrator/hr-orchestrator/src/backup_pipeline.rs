@@ -1,9 +1,13 @@
-// backup_pipeline.rs — Automated Borg backup pipeline
+// backup_pipeline.rs — Automated Rustic backup pipeline
 //
-// Pipeline: WOL → wait-for-up → SSH backup scripts → verify → sleep → log
+// Pipeline: WOL → wait-for-up → rustic backup (per repo) → forget/prune → sleep → log
+//
+// Repos: homeroute, containers, git, pixel
+// Backend: SSH to backup server, run rustic binary
 //
 // Triggered manually via IPC (TriggerBackup) or automatically on a schedule.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,17 +21,55 @@ use tracing::{error, info, warn};
 const BACKUP_SERVER_HOST_ID: &str = "877bcb76-4fb8-4164-940c-707201adf9bc";
 const BACKUP_SERVER_IP: &str = "10.0.0.20";
 const BACKUP_SERVER_USER: &str = "romain";
-const BACKUP_SCRIPT: &str = "/opt/backup-scripts/backup-all.sh";
+const BACKUP_SSH_KEY: &str = "/root/.ssh/id_ed25519_backup";
 const HOMEROUTE_API_BASE: &str = "http://10.0.0.254:4000";
 
 /// Maximum time to wait for the backup server to come online after WOL (3 min).
 const WAKE_TIMEOUT_SECS: u64 = 180;
 /// Interval between ping checks while waiting for server.
 const WAKE_POLL_INTERVAL_SECS: u64 = 10;
-/// Maximum time to let the backup script run (2 hours for large backups).
-const BACKUP_TIMEOUT_SECS: u64 = 7200;
+/// Maximum time for a single rustic backup operation.
+const REPO_BACKUP_TIMEOUT_SECS: u64 = 3600;
+/// Maximum total time for the full pipeline.
+const TOTAL_PIPELINE_TIMEOUT_SECS: u64 = 10800;
+/// Max job history entries kept in memory.
+const MAX_JOB_HISTORY: usize = 20;
+
+// ── Repo configurations ───────────────────────────────────────────────────────
+
+fn default_repos() -> Vec<RepoConfig> {
+    vec![
+        RepoConfig {
+            name: "homeroute".to_string(),
+            source_paths: vec!["/opt/homeroute".to_string()],
+            rustic_repo: "/backup/homeroute/rustic".to_string(),
+        },
+        RepoConfig {
+            name: "containers".to_string(),
+            source_paths: vec!["/var/lib/machines".to_string()],
+            rustic_repo: "/backup/containers/rustic".to_string(),
+        },
+        RepoConfig {
+            name: "git".to_string(),
+            source_paths: vec!["/srv/git".to_string()],
+            rustic_repo: "/backup/git/rustic".to_string(),
+        },
+        RepoConfig {
+            name: "pixel".to_string(),
+            source_paths: vec!["/home/romain".to_string()],
+            rustic_repo: "/backup/pixel/rustic".to_string(),
+        },
+    ]
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct RepoConfig {
+    pub name: String,
+    pub source_paths: Vec<String>,
+    pub rustic_repo: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -43,6 +85,41 @@ pub enum PipelineStage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoStatus {
+    pub name: String,
+    pub last_backup_at: Option<String>,
+    pub last_success: Option<bool>,
+    pub last_duration_secs: Option<u64>,
+    pub last_snapshot_id: Option<String>,
+    pub last_error: Option<String>,
+}
+
+impl RepoStatus {
+    fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            last_backup_at: None,
+            last_success: None,
+            last_duration_secs: None,
+            last_snapshot_id: None,
+            last_error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupJob {
+    pub id: String,
+    pub repo_name: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub success: bool,
+    pub duration_secs: Option<u64>,
+    pub message: String,
+    pub snapshot_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupStatus {
     pub stage: PipelineStage,
     pub running: bool,
@@ -51,10 +128,18 @@ pub struct BackupStatus {
     pub last_run_duration_secs: Option<u64>,
     pub last_run_message: Option<String>,
     pub current_message: Option<String>,
+    /// Per-repo status, keyed by repo name.
+    pub repos: HashMap<String, RepoStatus>,
+    /// Last N jobs (most recent first).
+    pub jobs: Vec<BackupJob>,
 }
 
 impl Default for BackupStatus {
     fn default() -> Self {
+        let repos = default_repos()
+            .into_iter()
+            .map(|r| (r.name.clone(), RepoStatus::new(&r.name)))
+            .collect();
         Self {
             stage: PipelineStage::Idle,
             running: false,
@@ -63,6 +148,8 @@ impl Default for BackupStatus {
             last_run_duration_secs: None,
             last_run_message: None,
             current_message: None,
+            repos,
+            jobs: Vec::new(),
         }
     }
 }
@@ -143,6 +230,16 @@ impl BackupPipeline {
     pub async fn get_status(&self) -> BackupStatus {
         self.status.read().await.clone()
     }
+
+    pub async fn get_repos(&self) -> Vec<RepoStatus> {
+        let status = self.status.read().await;
+        status.repos.values().cloned().collect()
+    }
+
+    pub async fn get_jobs(&self) -> Vec<BackupJob> {
+        let status = self.status.read().await;
+        status.jobs.clone()
+    }
 }
 
 // ── Pipeline implementation ───────────────────────────────────────────────────
@@ -151,6 +248,8 @@ async fn run_pipeline(
     status: Arc<RwLock<BackupStatus>>,
     http: reqwest::Client,
 ) -> Result<String, String> {
+    let repos = default_repos();
+
     // ── Step 1: Wake the backup server ──────────────────────────────────────
     set_stage(
         &status,
@@ -180,32 +279,86 @@ async fn run_pipeline(
 
     wait_for_server(status.clone()).await?;
 
-    // ── Step 3: Run backup scripts via SSH ──────────────────────────────────
+    // ── Step 3: Run rustic backup for each repo ──────────────────────────────
     set_stage(
         &status,
         PipelineStage::RunningBackup,
-        "Running Borg backup scripts on backup server...",
+        "Running rustic backups...",
     )
     .await;
 
-    info!("Backup pipeline: executing {BACKUP_SCRIPT} on {BACKUP_SERVER_IP}");
-    let backup_result = run_ssh_backup().await;
+    let mut any_success = false;
+    let mut all_success = true;
+    let mut repo_messages = Vec::new();
+
+    for repo in &repos {
+        let msg = format!("Backing up repo: {}", repo.name);
+        {
+            let mut s = status.write().await;
+            s.current_message = Some(msg.clone());
+        }
+        info!("Backup pipeline: {msg}");
+
+        let job_id = format!("{}-{}", repo.name, Utc::now().timestamp_millis());
+        let job_started = Utc::now().to_rfc3339();
+        let t0 = Instant::now();
+
+        let result = run_rustic_backup(repo).await;
+        let duration = t0.elapsed().as_secs();
+        let finished_at = Utc::now().to_rfc3339();
+
+        let (success, snapshot_id, message) = match result {
+            Ok(snap_id) => {
+                info!("Repo {} backup succeeded, snapshot: {:?}", repo.name, snap_id);
+                any_success = true;
+                (true, snap_id.clone(), format!("Backup OK (snapshot: {})", snap_id.as_deref().unwrap_or("?")))
+            }
+            Err(e) => {
+                error!("Repo {} backup failed: {e}", repo.name);
+                all_success = false;
+                (false, None, format!("Backup FAILED: {e}"))
+            }
+        };
+
+        // Update per-repo status
+        {
+            let mut s = status.write().await;
+            if let Some(repo_status) = s.repos.get_mut(&repo.name) {
+                repo_status.last_backup_at = Some(finished_at.clone());
+                repo_status.last_success = Some(success);
+                repo_status.last_duration_secs = Some(duration);
+                repo_status.last_snapshot_id = snapshot_id.clone();
+                if !success {
+                    repo_status.last_error = Some(message.clone());
+                } else {
+                    repo_status.last_error = None;
+                }
+            }
+
+            // Add job to history
+            let job = BackupJob {
+                id: job_id.clone(),
+                repo_name: repo.name.clone(),
+                started_at: job_started,
+                finished_at: Some(finished_at),
+                success,
+                duration_secs: Some(duration),
+                message: message.clone(),
+                snapshot_id,
+            };
+            s.jobs.insert(0, job);
+            if s.jobs.len() > MAX_JOB_HISTORY {
+                s.jobs.truncate(MAX_JOB_HISTORY);
+            }
+        }
+
+        repo_messages.push(format!("{}: {}", repo.name, message));
+    }
 
     // ── Step 4: Verify ──────────────────────────────────────────────────────
-    set_stage(&status, PipelineStage::Verifying, "Verifying backup...").await;
+    set_stage(&status, PipelineStage::Verifying, "Verifying backups...").await;
 
-    let backup_ok = match &backup_result {
-        Ok(output) => {
-            info!("Backup script succeeded:\n{output}");
-            true
-        }
-        Err(e) => {
-            error!("Backup script failed: {e}");
-            false
-        }
-    };
-
-    // ── Step 5: Put server to sleep (even if backup failed) ─────────────────
+    // ── Step 5: Put server to sleep ─────────────────────────────────────────
     set_stage(
         &status,
         PipelineStage::PuttingToSleep,
@@ -225,15 +378,116 @@ async fn run_pipeline(
     }
 
     // ── Step 6: Return result ────────────────────────────────────────────────
-    if backup_ok {
-        Ok(format!(
-            "Backup completed successfully. Output: {}",
-            backup_result.unwrap_or_default()
-        ))
+    let summary = repo_messages.join("; ");
+    if all_success {
+        Ok(format!("All repos backed up successfully. {summary}"))
+    } else if any_success {
+        Err(format!("Some repos failed. {summary}"))
     } else {
+        Err(format!("All repos failed. {summary}"))
+    }
+}
+
+/// Run rustic backup + forget/prune for a single repo via SSH.
+/// Returns the snapshot ID on success.
+async fn run_rustic_backup(repo: &RepoConfig) -> Result<Option<String>, String> {
+    let rustic_password = std::env::var("RUSTIC_PASSWORD").unwrap_or_else(|_| {
+        warn!("RUSTIC_PASSWORD not set, using default password. Please set it in production!");
+        "changeme".to_string()
+    });
+
+    let source_paths = repo.source_paths.join(" ");
+
+    // Initialize repo if it doesn't exist yet (rustic init is idempotent-ish)
+    // We run this every time; rustic will skip if already initialized.
+    let init_cmd = format!(
+        "RUSTIC_PASSWORD={pw} rustic -r {repo} init 2>&1 || true",
+        pw = shell_escape(&rustic_password),
+        repo = shell_escape(&repo.rustic_repo),
+    );
+    let _ = run_ssh_command(&init_cmd, 60).await;
+
+    // Run backup
+    let backup_cmd = format!(
+        "RUSTIC_PASSWORD={pw} rustic -r {repo} backup {paths} --json 2>&1",
+        pw = shell_escape(&rustic_password),
+        repo = shell_escape(&repo.rustic_repo),
+        paths = source_paths,
+    );
+
+    let output = run_ssh_command(&backup_cmd, REPO_BACKUP_TIMEOUT_SECS).await
+        .map_err(|e| format!("SSH backup failed: {e}"))?;
+
+    // Try to extract snapshot ID from JSON output
+    let snapshot_id = parse_snapshot_id(&output);
+
+    // Run forget + prune
+    let forget_cmd = format!(
+        "RUSTIC_PASSWORD={pw} rustic -r {repo} forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune 2>&1",
+        pw = shell_escape(&rustic_password),
+        repo = shell_escape(&repo.rustic_repo),
+    );
+
+    match run_ssh_command(&forget_cmd, REPO_BACKUP_TIMEOUT_SECS).await {
+        Ok(out) => info!("Forget/prune for {}: {}", repo.name, out.trim()),
+        Err(e) => warn!("Forget/prune for {} failed: {e}", repo.name),
+    }
+
+    Ok(snapshot_id)
+}
+
+/// Parse snapshot ID from rustic JSON backup output.
+/// rustic outputs lines of JSON, one of which contains the snapshot ID.
+fn parse_snapshot_id(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let line = line.trim();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            // rustic JSON output may have "id" or "snapshot_id"
+            if let Some(id) = v.get("id").and_then(|v| v.as_str()) {
+                return Some(id.to_string());
+            }
+            if let Some(id) = v.get("snapshot_id").and_then(|v| v.as_str()) {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Escape a string for use in a shell command (simple single-quote escaping).
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Run an SSH command on the backup server and return stdout+stderr.
+async fn run_ssh_command(cmd: &str, timeout_secs: u64) -> Result<String, String> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        tokio::process::Command::new("ssh")
+            .args([
+                "-o", "BatchMode=yes",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "ConnectTimeout=15",
+                "-i", BACKUP_SSH_KEY,
+                &format!("{BACKUP_SERVER_USER}@{BACKUP_SERVER_IP}"),
+                cmd,
+            ])
+            .output(),
+    )
+    .await
+    .map_err(|_| format!("SSH command timed out after {timeout_secs}s"))?
+    .map_err(|e| format!("Failed to spawn SSH process: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = format!("{stdout}{stderr}").trim().to_string();
+
+    if output.status.success() {
+        Ok(combined)
+    } else {
+        let code = output.status.code().unwrap_or(-1);
         Err(format!(
-            "Backup script failed: {}",
-            backup_result.unwrap_err()
+            "SSH command exited with code {code}. Output: {combined}"
         ))
     }
 }
@@ -271,37 +525,6 @@ async fn wait_for_server(status: Arc<RwLock<BackupStatus>>) -> Result<(), String
     Err(format!(
         "Backup server did not come online within {WAKE_TIMEOUT_SECS}s"
     ))
-}
-
-async fn run_ssh_backup() -> Result<String, String> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(BACKUP_TIMEOUT_SECS),
-        tokio::process::Command::new("ssh")
-            .args([
-                "-o", "BatchMode=yes",
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "ConnectTimeout=15",
-                "-i", "/root/.ssh/id_ed25519_backup",
-                &format!("root@{BACKUP_SERVER_IP}"),
-                &format!("sudo {BACKUP_SCRIPT}"),
-            ])
-            .output(),
-    )
-    .await
-    .map_err(|_| format!("Backup script timed out after {BACKUP_TIMEOUT_SECS}s"))?
-    .map_err(|e| format!("Failed to spawn SSH process: {e}"))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if output.status.success() {
-        Ok(format!("{stdout}\n{stderr}").trim().to_string())
-    } else {
-        let code = output.status.code().unwrap_or(-1);
-        Err(format!(
-            "SSH backup script exited with code {code}.\nSTDOUT: {stdout}\nSTDERR: {stderr}"
-        ))
-    }
 }
 
 async fn set_stage(

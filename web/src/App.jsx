@@ -18,6 +18,7 @@ import Git from './pages/Git';
 import Monitoring from './pages/Monitoring';
 import Login from './pages/Login';
 import Profile from './pages/Profile';
+import Backup from './pages/Backup';
 
 // Component to protect routes that require authentication
 function ProtectedRoute({ children }) {
@@ -107,6 +108,7 @@ function AppRoutes() {
               <Route path="/cloud-relay" element={<CloudRelay />} />
               <Route path="/store" element={<Store />} />
               <Route path="/git" element={<Git />} />
+              <Route path="/backup" element={<Backup />} />
             </Routes>
           </Layout>
         </ProtectedRoute>

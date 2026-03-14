@@ -46,6 +46,7 @@ const navGroups = [
       { to: '/hosts', icon: HardDrive, label: 'Hotes' },
       { to: '/updates', icon: RefreshCw, label: 'Mises à jour' },
       { to: '/energy', icon: Zap, label: 'Énergie' },
+      { to: '/backup', icon: Archive, label: 'Backup' },
     ],
   },
 ];
