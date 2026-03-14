@@ -65,6 +65,101 @@ const statusBadge = (job) => {
   return { label: 'Échec', className: 'border-red-500/30 bg-red-500/10 text-red-200', icon: XCircle };
 };
 
+const PIPELINE_STEPS = [
+  { id: 'wol', label: 'Réveil serveur backup', stages: ['waking_server', 'waiting_for_server'] },
+  { id: 'homeroute', label: 'Backup HomeRoute', repo: 'homeroute' },
+  { id: 'containers', label: 'Backup Containers', repo: 'containers' },
+  { id: 'git', label: 'Backup Git', repo: 'git' },
+  { id: 'pixel', label: 'Backup Pixel', repo: 'pixel' },
+  { id: 'retention', label: 'Rétention / Prune', stages: ['verifying'] },
+  { id: 'sleep', label: 'Mise en veille serveur', stages: ['putting_to_sleep'] },
+];
+
+function getStepStatuses(status, progress) {
+  const stage = status?.stage || 'idle';
+  const currentRepo = progress?.current_repo;
+  const isFailed = stage === 'failed';
+
+  let activeIndex = -1;
+  PIPELINE_STEPS.forEach((step, i) => {
+    if (step.stages?.includes(stage)) activeIndex = i;
+    if (step.repo && stage === 'running_backup' && step.repo === currentRepo) activeIndex = i;
+  });
+
+  if (stage === 'done') return PIPELINE_STEPS.map(() => 'complete');
+  if (stage === 'idle') return PIPELINE_STEPS.map(() => 'pending');
+
+  return PIPELINE_STEPS.map((_, i) => {
+    if (i < activeIndex) return 'complete';
+    if (i === activeIndex) return isFailed ? 'failed' : 'active';
+    return 'pending';
+  });
+}
+
+function PipelineStep({ step, stepStatus, progress, status, isLast }) {
+  const icons = {
+    pending: <Clock3 className="h-5 w-5 text-gray-500" />,
+    active: <Loader2 className="h-5 w-5 text-blue-400 animate-spin" />,
+    complete: <CheckCircle2 className="h-5 w-5 text-emerald-400" />,
+    failed: <XCircle className="h-5 w-5 text-red-400" />,
+  };
+
+  const lineColors = {
+    pending: 'bg-gray-700',
+    active: 'bg-blue-500',
+    complete: 'bg-emerald-500',
+    failed: 'bg-red-500',
+  };
+
+  const borderColors = {
+    pending: 'border-gray-700/70 bg-gray-800/70',
+    active: 'border-blue-500/40 bg-blue-500/10',
+    complete: 'border-emerald-500/30 bg-emerald-500/10',
+    failed: 'border-red-500/30 bg-red-500/10',
+  };
+
+  const isBackupStep = Boolean(step.repo);
+  const showProgress = stepStatus === 'active' && isBackupStep && progress?.running;
+  const progressPct = Math.max(0, Math.min(100, Number(progress?.progress || 0)));
+
+  return (
+    <div className="flex gap-4">
+      <div className="flex flex-col items-center">
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-gray-700 bg-gray-900">
+          {icons[stepStatus]}
+        </div>
+        {!isLast && (
+          <div className={`w-0.5 flex-1 ${lineColors[stepStatus]} transition-colors duration-300`} style={{ minHeight: '24px' }} />
+        )}
+      </div>
+
+      <div className={`mb-3 flex-1 rounded-xl border px-4 py-3 ${borderColors[stepStatus]} transition-colors duration-300`}>
+        <div className="text-sm font-medium text-white">{step.label}</div>
+
+        {stepStatus === 'active' && status?.current_message && (
+          <div className="mt-1 text-xs text-gray-400">{status.current_message}</div>
+        )}
+
+        {showProgress && (
+          <div className="mt-2">
+            <div className="h-2 overflow-hidden rounded-full bg-gray-950/60">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-500"
+                style={{ width: `${progressPct}%` }}
+              />
+            </div>
+            <div className="mt-1.5 flex flex-wrap gap-x-4 text-xs text-blue-100/80">
+              <span>{Math.round(progressPct)}%</span>
+              {progress?.speed && <span>{progress.speed}</span>}
+              {progress?.remaining_secs != null && <span>Reste {formatDuration(progress.remaining_secs)}</span>}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function RepoRow({ repo, active }) {
   return (
     <div className={`flex items-center justify-between gap-4 rounded-2xl border px-4 py-4 ${active ? 'border-blue-500/40 bg-blue-500/10' : 'border-gray-700/70 bg-gray-800/70'}`}>
@@ -141,10 +236,8 @@ export default function Backup() {
   };
 
   const isRunning = Boolean(status?.running || progress?.running);
-  const progressPct = Math.max(0, Math.min(100, Number(progress?.progress || 0)));
-  const currentRepo = progress?.current_repo || 'backup';
-  const currentPhase = progress?.phase ? ` (${progress.phase})` : '';
   const lastRun = useMemo(() => latestJob || null, [latestJob]);
+  const stepStatuses = useMemo(() => getStepStatuses(status, progress), [status, progress]);
   const lastRunBadge = statusBadge(lastRun);
   const StatusIcon = lastRunBadge.icon;
 
@@ -167,7 +260,7 @@ export default function Backup() {
           <div>
             <div className="text-sm font-medium text-gray-400">Action</div>
             <div className="mt-1 text-2xl font-semibold text-white">
-              {isRunning ? 'Sauvegarde en cours' : 'Prêt à lancer une sauvegarde'}
+              {isRunning ? (status?.current_message || 'Sauvegarde en cours') : 'Prêt à lancer une sauvegarde'}
             </div>
           </div>
 
@@ -181,22 +274,19 @@ export default function Backup() {
           </Button>
 
           {isRunning && (
-            <div className="rounded-2xl border border-blue-500/30 bg-blue-500/10 p-5">
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-3 text-sm">
-                <div className="font-medium text-blue-50">
-                  Sauvegarde en cours — {currentRepo}{currentPhase} — {Math.round(progressPct)}%
-                </div>
-                <div className="text-blue-200">{Math.round(progressPct)}%</div>
-              </div>
-              <div className="h-4 overflow-hidden rounded-full bg-gray-950/60">
-                <div
-                  className="h-full rounded-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-500"
-                  style={{ width: `${progressPct}%` }}
-                />
-              </div>
-              <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-sm text-blue-100/80">
-                <span>Vitesse : {progress?.speed || '—'}</span>
-                <span>Temps restant : {formatDuration(progress?.remaining_secs)}</span>
+            <div className="rounded-2xl border border-gray-700/70 bg-gray-800/70 p-5">
+              <div className="mb-4 text-sm font-medium text-gray-400">Pipeline</div>
+              <div>
+                {PIPELINE_STEPS.map((step, i) => (
+                  <PipelineStep
+                    key={step.id}
+                    step={step}
+                    stepStatus={stepStatuses[i]}
+                    progress={step.repo === progress?.current_repo ? progress : null}
+                    status={status}
+                    isLast={i === PIPELINE_STEPS.length - 1}
+                  />
+                ))}
               </div>
             </div>
           )}
