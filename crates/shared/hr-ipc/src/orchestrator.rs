@@ -83,10 +83,14 @@ pub enum OrchestratorRequest {
     StoreScanResult { target: serde_json::Value },
 
     // ── Backup pipeline ─────────────────────────────────────
-    /// Trigger the full backup pipeline (WOL → backup → sleep).
+    /// Trigger the full backup pipeline (WOL → rustic backup per repo → sleep).
     TriggerBackup,
     /// Get the current backup pipeline status and last run result.
     GetBackupStatus,
+    /// Get per-repo backup status (last backup time, success, snapshot ID, etc.).
+    GetBackupRepos,
+    /// Get backup job history (last 20 jobs, most recent first).
+    GetBackupJobs,
 
     // ── Agent auth (for hr-api cert distribution) ────────────
     /// Authenticate an agent by its bearer token.

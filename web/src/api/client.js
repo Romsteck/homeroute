@@ -200,3 +200,9 @@ export const getScanResults = () => api.get('/updates/scan-all/results');
 export const upgradeTarget = (targetId, category) =>
   api.post('/updates/upgrade-target', { target_id: targetId, category }, { timeout: 1800000 });
 export const getUpdateHistory = (limit = 50) => api.get('/updates/history', { params: { limit } });
+
+// ========== Backup ==========
+export const getBackupStatus = () => api.get('/backup/status');
+export const getBackupRepos = () => api.get('/backup/repos');
+export const getBackupJobs = () => api.get('/backup/jobs');
+export const triggerBackup = () => api.post('/backup/trigger');
