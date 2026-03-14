@@ -91,6 +91,8 @@ pub enum OrchestratorRequest {
     GetBackupRepos,
     /// Get backup job history (last 20 jobs, most recent first).
     GetBackupJobs,
+    /// Get live backup progress for the currently running repo/phase.
+    GetBackupProgress,
 
     // ── Agent auth (for hr-api cert distribution) ────────────
     /// Authenticate an agent by its bearer token.
