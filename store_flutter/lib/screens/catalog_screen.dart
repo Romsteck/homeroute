@@ -5,7 +5,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../theme.dart';
 import '../services/api_client.dart';
 import '../services/install_tracker.dart';
-import '../services/secure_storage.dart' as storage;
 import '../widgets/app_card.dart';
 import '../widgets/error_banner.dart';
 import '../widgets/update_banner.dart';
@@ -186,9 +185,6 @@ class _CatalogScreenState extends State<CatalogScreen> {
     }).toList();
   }
 
-  int get _totalReleases =>
-      _apps.fold(0, (sum, a) => sum + ((a['release_count'] as int?) ?? 0));
-
   @override
   Widget build(BuildContext context) {
     final cats = _categories;
@@ -244,6 +240,7 @@ class _CatalogScreenState extends State<CatalogScreen> {
                     version: _updateInfo!['version'] as String,
                     onTap: () {
                       PackageInfo.fromPlatform().then((info) {
+                        if (!context.mounted) return;
                         context.push('/update', extra: {
                           'currentVersion': info.version,
                           'newVersion': _updateInfo!['version'],
@@ -273,7 +270,7 @@ class _CatalogScreenState extends State<CatalogScreen> {
                               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                               decoration: BoxDecoration(
                                 color: selected
-                                    ? AppColors.primary.withOpacity(0.15)
+                                    ? AppColors.primary.withValues(alpha: 0.15)
                                     : AppColors.surface,
                                 borderRadius: BorderRadius.circular(14),
                                 border: Border.all(

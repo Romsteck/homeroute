@@ -28,8 +28,8 @@ class AppCard extends StatelessWidget {
 
     return InkWell(
       onTap: onTap,
-      splashColor: AppColors.primary.withOpacity(0.05),
-      highlightColor: AppColors.primary.withOpacity(0.03),
+      splashColor: AppColors.primary.withValues(alpha: 0.05),
+      highlightColor: AppColors.primary.withValues(alpha: 0.03),
       child: Column(
         children: [
           Padding(
@@ -128,10 +128,10 @@ class AppCard extends StatelessWidget {
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                               decoration: BoxDecoration(
-                                color: AppColors.success.withOpacity(0.15),
+                                color: AppColors.success.withValues(alpha: 0.15),
                                 borderRadius: BorderRadius.circular(4),
                                 border: Border.all(
-                                  color: AppColors.success.withOpacity(0.3),
+                                  color: AppColors.success.withValues(alpha: 0.3),
                                   width: 1,
                                 ),
                               ),
@@ -149,7 +149,7 @@ class AppCard extends StatelessWidget {
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                               decoration: BoxDecoration(
-                                color: AppColors.textTertiary.withOpacity(0.15),
+                                color: AppColors.textTertiary.withValues(alpha: 0.15),
                                 borderRadius: BorderRadius.circular(4),
                               ),
                               child: const Text(

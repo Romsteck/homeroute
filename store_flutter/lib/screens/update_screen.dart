@@ -241,7 +241,7 @@ class _UpdateScreenState extends State<UpdateScreen> {
                         : _handleUpdate,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF059669),
-                  disabledBackgroundColor: const Color(0xFF059669).withOpacity(0.5),
+                  disabledBackgroundColor: const Color(0xFF059669).withValues(alpha: 0.5),
                   foregroundColor: Colors.white,
                   shape: const RoundedRectangleBorder(
                     borderRadius: BorderRadius.zero,

@@ -167,7 +167,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onPressed: canConnect ? _handleConnect : null,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppColors.primary,
-                  disabledBackgroundColor: AppColors.primary.withOpacity(0.5),
+                  disabledBackgroundColor: AppColors.primary.withValues(alpha: 0.5),
                   foregroundColor: Colors.white,
                   shape: const RoundedRectangleBorder(
                     borderRadius: BorderRadius.zero,
