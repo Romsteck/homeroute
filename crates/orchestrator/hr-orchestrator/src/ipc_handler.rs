@@ -777,6 +777,10 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 let jobs = self.backup.get_jobs().await;
                 IpcResponse::ok_data(jobs)
             }
+            OrchestratorRequest::GetBackupProgress => {
+                let progress = self.backup.get_progress().await;
+                IpcResponse::ok_data(progress)
+            }
         }
     }
 }
