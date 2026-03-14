@@ -37,6 +37,21 @@ class InstallTracker {
     await prefs.setString(_storageKey, jsonEncode(all));
   }
 
+  /// Returns a map of slug -> installed version for all tracked apps.
+  static Future<Map<String, String>> getAllInstalled() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final raw = prefs.getString(_storageKey);
+    if (raw == null) return {};
+    final all = jsonDecode(raw) as Map<String, dynamic>;
+    return Map.fromEntries(
+      all.entries.map((e) {
+        final v = (e.value as Map<String, dynamic>)['version'] as String?;
+        return MapEntry(e.key, v ?? 'installed');
+      }),
+    );
+  }
+
   static Future<InstalledInfo?> getInstalled(
       String slug, String? androidPackage) async {
     final prefs = await SharedPreferences.getInstance();
