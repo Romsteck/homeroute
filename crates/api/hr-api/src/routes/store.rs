@@ -3,7 +3,7 @@
 use axum::extract::{DefaultBodyLimit, Path, Query};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -100,7 +100,7 @@ fn version_newer(a: &str, b: &str) -> bool {
 pub fn router() -> Router<ApiState> {
     Router::new()
         .route("/apps", get(list_apps))
-        .route("/apps/{slug}", get(get_app))
+        .route("/apps/{slug}", get(get_app).delete(delete_app))
         .route(
             "/apps/{slug}/releases",
             post(publish_release).layer(DefaultBodyLimit::max(500 * 1024 * 1024)),
@@ -160,6 +160,35 @@ async fn get_app(Path(slug): Path<String>) -> impl IntoResponse {
         )
             .into_response(),
     }
+}
+
+/// DELETE /api/store/apps/{slug} - remove app from catalog and delete releases.
+async fn delete_app(Path(slug): Path<String>) -> impl IntoResponse {
+    let mut catalog = load_catalog();
+    let Some(pos) = catalog.apps.iter().position(|a| a.slug == slug) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"success":false,"error":"App not found"})),
+        )
+            .into_response();
+    };
+    catalog.apps.remove(pos);
+    if let Err(e) = save_catalog(&catalog) {
+        error!(slug, "Failed to save catalog: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"success":false,"error":format!("Failed to update catalog: {e}")})),
+        )
+            .into_response();
+    }
+    let releases_dir = std::path::PathBuf::from(STORE_DIR).join("releases").join(&slug);
+    if releases_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&releases_dir) {
+            error!(slug, "Failed to delete releases dir: {e}");
+        }
+    }
+    info!(slug, "Deleted app and releases");
+    (StatusCode::OK, Json(serde_json::json!({"success":true,"slug":slug}))).into_response()
 }
 
 /// POST /api/store/apps/{slug}/releases — upload an APK release.
