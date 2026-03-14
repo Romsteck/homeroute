@@ -27,7 +27,7 @@ function DataBrowser() {
   // App data
   const [apps, setApps] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [envFilter, setEnvFilter] = useState(() => localStorage.getItem('databrowser-env') || 'production');
+  const envFilter = 'production'; // Fixed to production only
 
   // Table schema + data
   const [tableInfo, setTableInfo] = useState(null);
@@ -130,28 +130,7 @@ function DataBrowser() {
     }
   }, [apps, appId, envFilter]);
 
-  // Persist env filter
-  useEffect(() => {
-    localStorage.setItem('databrowser-env', envFilter);
-  }, [envFilter]);
 
-  // Handle env filter change
-  function handleEnvChange(newEnv) {
-    setEnvFilter(newEnv);
-    // If current app doesn't match new env, reset
-    if (selectedApp && selectedApp.environment !== newEnv) {
-      const filtered = apps.filter(a => a.environment === newEnv);
-      if (filtered.length > 0) {
-        setSearchParams({ app: filtered[0].appId });
-      } else {
-        setSearchParams({});
-      }
-      setTableInfo(null);
-      setRows([]);
-      setTotal(0);
-      setFilters([]);
-    }
-  }
 
   // Fetch table schema when table changes
   useEffect(() => {
@@ -285,28 +264,7 @@ function DataBrowser() {
   return (
     <div className="h-full flex flex-col">
       <PageHeader icon={Table2} title="Data Browser">
-        <div className="flex items-center gap-1 bg-gray-700/50 rounded-lg p-0.5">
-          <button
-            onClick={() => handleEnvChange('production')}
-            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-              envFilter === 'production'
-                ? 'bg-purple-600 text-white'
-                : 'text-gray-400 hover:text-gray-200'
-            }`}
-          >
-            PROD
-          </button>
-          <button
-            onClick={() => handleEnvChange('development')}
-            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-              envFilter === 'development'
-                ? 'bg-blue-600 text-white'
-                : 'text-gray-400 hover:text-gray-200'
-            }`}
-          >
-            DEV
-          </button>
-        </div>
+
       </PageHeader>
 
       <div className="flex-1 min-h-0 flex">

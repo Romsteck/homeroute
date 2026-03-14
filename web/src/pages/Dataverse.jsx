@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Database, ChevronRight, Table2, Loader2,
-  Download, History, Network
+  Network
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import {
   getDataverseOverview, getDataverseTables, getDataverseTable,
-  getDataverseSchema, getDataverseMigrations, downloadDataverseBackup
+  getDataverseSchema
 } from '../api/client';
 
 const FIELD_TYPE_COLORS = {
@@ -158,12 +158,12 @@ function ERDiagram({ schema }) {
       >
         {/* Relations lines */}
         {relations.map((rel, i) => {
-          const fromPos = layout.positions[rel.from_table];
-          const toPos = layout.positions[rel.to_table];
+          const fromPos = layout.positions[rel.fromTable];
+          const toPos = layout.positions[rel.toTable];
           if (!fromPos || !toPos) return null;
 
-          const fromColIdx = tableColIndex[rel.from_table]?.[rel.from_column] ?? 0;
-          const toColIdx = tableColIndex[rel.to_table]?.[rel.to_column] ?? 0;
+          const fromColIdx = tableColIndex[rel.fromTable]?.[rel.fromColumn] ?? 0;
+          const toColIdx = tableColIndex[rel.toTable]?.[rel.toColumn] ?? 0;
 
           const fromY = fromPos.y + TABLE_HEADER_H + fromColIdx * TABLE_ROW_H + TABLE_ROW_H / 2;
           const toY = toPos.y + TABLE_HEADER_H + toColIdx * TABLE_ROW_H + TABLE_ROW_H / 2;
@@ -204,7 +204,7 @@ function ERDiagram({ schema }) {
                 fill="#818cf8"
                 fillOpacity="0.7"
               >
-                {rel.relation_type || ''}
+                {rel.relationType || ''}
               </text>
             </g>
           );
@@ -255,7 +255,7 @@ function ERDiagram({ schema }) {
               >
                 {table.name}
               </text>
-              {table.row_count != null && (
+              {table.rowsCount != null && (
                 <text
                   x={pos.x + pos.w - 8}
                   y={pos.y + TABLE_HEADER_H / 2 + 1}
@@ -264,14 +264,14 @@ function ERDiagram({ schema }) {
                   className="text-[9px]"
                   fill="#6b7280"
                 >
-                  {table.row_count} rows
+                  {table.rowsCount} rows
                 </text>
               )}
 
               {/* Columns */}
               {cols.map((col, ci) => {
                 const cy = pos.y + TABLE_HEADER_H + ci * TABLE_ROW_H + TABLE_ROW_H / 2;
-                const isLookup = col.field_type === 'lookup';
+                const isLookup = col.fieldType === 'lookup';
                 return (
                   <g key={col.name}>
                     <text
@@ -293,7 +293,7 @@ function ERDiagram({ schema }) {
                       className="text-[9px]"
                       fill="#6b7280"
                     >
-                      {col.field_type}
+                      {col.fieldType}
                     </text>
                   </g>
                 );
@@ -307,52 +307,6 @@ function ERDiagram({ schema }) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Migrations panel                                                  */
-/* ------------------------------------------------------------------ */
-
-function MigrationsPanel({ migrations, loading }) {
-  if (loading) return <Spinner />;
-  if (!migrations || migrations.length === 0) {
-    return <EmptyState icon={History} text="Aucune migration" />;
-  }
-
-  return (
-    <div className="flex-1 overflow-y-auto">
-      {migrations.map((m) => (
-        <div
-          key={m.id}
-          className="px-4 py-3 border-b border-gray-700/50 text-gray-300"
-        >
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-sm font-mono text-blue-400">#{m.id}</span>
-            <span className="text-xs text-gray-500">
-              {m.applied_at ? new Date(m.applied_at).toLocaleString('fr-FR') : '--'}
-            </span>
-          </div>
-          <p className="text-sm text-gray-200 mb-1">{m.description || 'Sans description'}</p>
-          {m.operations && (
-            <details className="mt-1">
-              <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-400">
-                Operations
-              </summary>
-              <pre className="mt-1 text-xs text-gray-500 bg-gray-900/50 rounded p-2 overflow-x-auto max-h-40">
-                {(() => {
-                  try {
-                    return JSON.stringify(JSON.parse(m.operations), null, 2);
-                  } catch {
-                    return m.operations;
-                  }
-                })()}
-              </pre>
-            </details>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
 /*  Main Component                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -360,8 +314,8 @@ function Dataverse() {
   const [apps, setApps] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // Environment filter
-  const [envFilter, setEnvFilter] = useState('production');
+  // Environment filter (fixed to production)
+  const envFilter = 'production';
 
   // View mode: 'schema' (3-column) or 'diagram' (ER)
   const [viewMode, setViewMode] = useState('schema');
@@ -375,13 +329,6 @@ function Dataverse() {
   const [selectedTableName, setSelectedTableName] = useState(null);
   const [tableDetail, setTableDetail] = useState(null);
   const [loadingColumns, setLoadingColumns] = useState(false);
-
-  // Column 3 tab: 'columns' or 'migrations'
-  const [col3Tab, setCol3Tab] = useState('columns');
-
-  // Migrations data
-  const [migrations, setMigrations] = useState([]);
-  const [loadingMigrations, setLoadingMigrations] = useState(false);
 
   // ER diagram schema
   const [erSchema, setErSchema] = useState(null);
@@ -408,26 +355,12 @@ function Dataverse() {
     }
   }, [apps]);
 
-  // Reset selection when environment changes
-  useEffect(() => {
-    const filtered = apps.filter(a => a.environment === envFilter);
-    if (filtered.length > 0) {
-      selectApp(filtered[0]);
-    } else {
-      setSelectedApp(null);
-      setTables([]);
-      setSelectedTableName(null);
-      setTableDetail(null);
-      setErSchema(null);
-    }
-  }, [envFilter]);
+
 
   async function selectApp(app) {
     setSelectedApp(app);
     setSelectedTableName(null);
     setTableDetail(null);
-    setCol3Tab('columns');
-    setMigrations([]);
     setErSchema(null);
     setLoadingTables(true);
     try {
@@ -442,7 +375,6 @@ function Dataverse() {
 
   async function selectTable(name) {
     setSelectedTableName(name);
-    setCol3Tab('columns');
     setLoadingColumns(true);
     try {
       const res = await getDataverseTable(selectedApp.appId, name);
@@ -454,35 +386,12 @@ function Dataverse() {
     }
   }
 
-  // Fetch migrations when tab switches
-  async function fetchMigrations() {
-    if (!selectedApp) return;
-    setLoadingMigrations(true);
-    try {
-      const res = await getDataverseMigrations(selectedApp.appId);
-      setMigrations(res.data?.migrations || []);
-    } catch {
-      setMigrations([]);
-    } finally {
-      setLoadingMigrations(false);
-    }
-  }
-
-  function handleCol3TabChange(tab) {
-    setCol3Tab(tab);
-    if (tab === 'migrations') {
-      setSelectedTableName(null);
-      setTableDetail(null);
-      fetchMigrations();
-    }
-  }
-
   // Fetch ER schema when switching to diagram view
   async function fetchErSchema(appId) {
     setLoadingEr(true);
     try {
       const res = await getDataverseSchema(appId);
-      setErSchema(res.data || null);
+      setErSchema(res.data?.data || null);
     } catch {
       setErSchema(null);
     } finally {
@@ -504,7 +413,7 @@ function Dataverse() {
   if (loading) {
     return (
       <div className="h-full flex flex-col">
-        <PageHeader icon={Database} title="Dataverse" />
+        <PageHeader icon={Database} title="Database" />
         <div className="flex-1 flex items-center justify-center">
           <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
         </div>
@@ -515,7 +424,7 @@ function Dataverse() {
   if (apps.length === 0) {
     return (
       <div className="h-full flex flex-col">
-        <PageHeader icon={Database} title="Dataverse" />
+        <PageHeader icon={Database} title="Database" />
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center">
             <Database className="w-12 h-12 text-gray-600 mx-auto mb-3" />
@@ -529,31 +438,8 @@ function Dataverse() {
 
   return (
     <div className="h-full flex flex-col">
-      <PageHeader icon={Database} title="Dataverse">
+      <PageHeader icon={Database} title="Database">
         <div className="flex items-center gap-3">
-          {/* Environment toggle */}
-          <div className="flex items-center gap-1 bg-gray-700/50 rounded-lg p-0.5">
-            <button
-              onClick={() => setEnvFilter('production')}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                envFilter === 'production'
-                  ? 'bg-purple-600 text-white'
-                  : 'text-gray-400 hover:text-gray-200'
-              }`}
-            >
-              PROD
-            </button>
-            <button
-              onClick={() => setEnvFilter('development')}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                envFilter === 'development'
-                  ? 'bg-blue-600 text-white'
-                  : 'text-gray-400 hover:text-gray-200'
-              }`}
-            >
-              DEV
-            </button>
-          </div>
           {/* View mode toggle */}
           <div className="flex items-center gap-1 bg-gray-700/50 rounded-lg p-0.5">
             <button
@@ -674,20 +560,7 @@ function Dataverse() {
 
           {/* Column 2: Tables */}
           <div className="w-72 flex-shrink-0 border-r border-gray-700 flex flex-col bg-gray-800/80">
-            <ColumnHeader
-              actions={
-                selectedApp ? (
-                  <button
-                    onClick={() => downloadDataverseBackup(selectedApp.appId)}
-                    className="flex items-center gap-1 px-2 py-1 rounded text-xs text-gray-400 hover:text-blue-400 hover:bg-gray-700/50 transition-colors"
-                    title="Telecharger un backup"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    Backup
-                  </button>
-                ) : null
-              }
-            >
+            <ColumnHeader>
               {selectedApp ? `Tables — ${selectedApp.slug} (${tables.length})` : 'Tables'}
             </ColumnHeader>
             {!selectedApp ? (
@@ -715,7 +588,7 @@ function Dataverse() {
                         <div className="min-w-0">
                           <div className="text-sm font-mono truncate">{table.name}</div>
                           <div className={`text-xs ${isSelected ? 'text-blue-100' : 'text-gray-500'}`}>
-                            {table.columns?.length || 0} col · {table.row_count || 0} lignes
+                            {table.columns?.length || 0} col · {table.rowsCount || 0} lignes
                           </div>
                         </div>
                       </div>
@@ -733,48 +606,22 @@ function Dataverse() {
             <div className="px-3 py-2 border-b border-gray-700 bg-gray-800/60 flex-shrink-0">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => handleCol3TabChange('columns')}
-                    className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold uppercase tracking-wider transition-colors ${
-                      col3Tab === 'columns'
-                        ? 'text-blue-400 bg-blue-900/20'
-                        : 'text-gray-500 hover:text-gray-300'
-                    }`}
-                  >
+                  <span className="flex items-center gap-1 px-2 py-1 text-xs font-semibold uppercase tracking-wider text-blue-400">
                     <Table2 className="w-3 h-3" />
                     Colonnes
-                  </button>
-                  {selectedApp && (
-                    <button
-                      onClick={() => handleCol3TabChange('migrations')}
-                      className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold uppercase tracking-wider transition-colors ${
-                        col3Tab === 'migrations'
-                          ? 'text-blue-400 bg-blue-900/20'
-                          : 'text-gray-500 hover:text-gray-300'
-                      }`}
-                    >
-                      <History className="w-3 h-3" />
-                      Migrations
-                    </button>
-                  )}
+                  </span>
                 </div>
-                {col3Tab === 'columns' && tableDetail && (
+                {tableDetail && (
                   <span className="text-xs text-gray-500">
                     {tableDetail.name} ({columns.length})
-                  </span>
-                )}
-                {col3Tab === 'migrations' && (
-                  <span className="text-xs text-gray-500">
-                    {migrations.length} migration{migrations.length !== 1 ? 's' : ''}
                   </span>
                 )}
               </div>
             </div>
 
-            {col3Tab === 'columns' ? (
-              /* Columns view */
-              <>
-                {!selectedTableName ? (
+            {/* Columns view */}
+            <>
+              {!selectedTableName ? (
                   <EmptyState text={selectedApp ? 'Selectionnez une table' : 'Selectionnez une application'} />
                 ) : loadingColumns ? (
                   <Spinner />
@@ -796,23 +643,19 @@ function Dataverse() {
                             <span className="text-xs px-1 py-0.5 rounded bg-blue-900/30 text-blue-400" title="Unique">U</span>
                           )}
                         </div>
-                        <FieldTypeBadge type={col.field_type} />
+                        <FieldTypeBadge type={col.fieldType} />
                       </div>
                     ))}
                     <div className="px-4 py-3 border-t border-gray-700 bg-gray-800/40 flex-shrink-0">
                       <div className="flex items-center gap-4 text-xs text-gray-500">
-                        <span>{tableDetail.row_count || 0} lignes</span>
+                        <span>{tableDetail.rowsCount || 0} lignes</span>
                         <span>{columns.length} colonnes</span>
                         <span>v{selectedApp?.version || 0}</span>
                       </div>
                     </div>
                   </div>
-                )}
-              </>
-            ) : (
-              /* Migrations view */
-              <MigrationsPanel migrations={migrations} loading={loadingMigrations} />
-            )}
+              )}
+            </>
           </div>
 
         </div>

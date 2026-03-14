@@ -104,7 +104,8 @@ async fn list_certificates(State(state): State<ApiState>) -> Json<Value> {
     }
 }
 
-/// Force renewal of all certificates that need it (global, legacy code, and per-app).
+/// Force renewal of all certificates that need it (global and per-app only).
+/// LegacyCode (*.code.mynetwk.biz) is no longer renewed — dev code-server is retired.
 async fn renew_certificates(State(state): State<ApiState>) -> Json<Value> {
     let mut renewed = Vec::new();
     let mut errors = Vec::new();
@@ -124,11 +125,12 @@ async fn renew_certificates(State(state): State<ApiState>) -> Json<Value> {
         types_to_renew.push(WildcardType::Global);
     }
 
-    // Check legacy code wildcard
+    // NOTE: LegacyCode (*.code.mynetwk.biz) intentionally skipped — dev code-server retired.
+    // Only renew if it already exists in the index (don't create a new one).
     let code_needs = certs.iter()
         .find(|c| c.wildcard_type == WildcardType::LegacyCode)
         .map(|c| c.needs_renewal(state.acme.renewal_threshold_days()))
-        .unwrap_or(true);
+        .unwrap_or(false); // false = don't create if missing
     if code_needs {
         types_to_renew.push(WildcardType::LegacyCode);
     }

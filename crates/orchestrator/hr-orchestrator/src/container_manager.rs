@@ -1529,6 +1529,9 @@ WantedBy=multi-user.target
                 let _ = self.container_exec(host_id, container_name, "systemctl daemon-reload").await;
                 let _ = self.container_exec(host_id, container_name, "systemctl enable --now nextjs-dev").await;
             }
+            _ => {
+                // No stack-specific dev server for this stack (axum-vite, leptos-rust handle their own)
+            }
         }
 
         // Update status to Pending (agent not yet connected)

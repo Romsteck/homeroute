@@ -81,7 +81,10 @@ export default function Monitoring() {
 
       if (hostsRes.status === 'fulfilled') setHosts(hostsRes.value.data.hosts || []);
       if (containersRes.status === 'fulfilled') setContainers(containersRes.value.data.containers || []);
-      if (certsRes.status === 'fulfilled' && certsRes.value.success) setCertificates(certsRes.value.certificates || []);
+      if (certsRes.status === 'fulfilled' && certsRes.value.success) {
+        // Filter out legacy_code certs (dev code-server, no longer in use)
+        setCertificates((certsRes.value.certificates || []).filter(c => c.type !== 'legacy_code'));
+      }
       if (edgeRes.status === 'fulfilled') setEdgeStats(edgeRes.value.data);
     } catch (error) {
       console.error('Failed to load monitoring data:', error);
@@ -107,7 +110,9 @@ export default function Monitoring() {
       const name = host.is_local ? 'HomeRoute' : host.name;
 
       // Host offline (not local, status not online)
-      if (!host.is_local && !isOnline) {
+      // Skip backup server — being offline is normal behavior
+      const BACKUP_HOST_ID = '877bcb76-4fb8-4164-940c-707201adf9bc';
+      if (!host.is_local && !isOnline && host.id !== BACKUP_HOST_ID) {
         result.push({ severity: 'critical', source: `host:${host.id}`, message: `Host '${name}' is offline` });
       }
 
@@ -247,12 +252,12 @@ export default function Monitoring() {
       )}
 
       {/* Hosts */}
-      <Section title={`Hotes (${onlineHosts.length}/${hosts.length})`}>
+      <Section title={`Hotes (${onlineHosts.filter(h => h.id !== '877bcb76-4fb8-4164-940c-707201adf9bc').length}/${hosts.filter(h => h.id !== '877bcb76-4fb8-4164-940c-707201adf9bc').length})`}>
         {hosts.length === 0 ? (
           <div className="text-center py-4 text-gray-400 text-sm">Aucun hote configure.</div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-            {hosts.map((host) => {
+            {hosts.filter(h => h.id !== '877bcb76-4fb8-4164-940c-707201adf9bc').map((host) => {
               const isOnline = host.is_local || host.status === 'online';
               const m = host.metrics;
               return (
