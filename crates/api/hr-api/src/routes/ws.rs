@@ -37,6 +37,7 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut host_power_rx = state.events.host_power.subscribe();
     let mut cloud_relay_rx = state.events.cloud_relay.subscribe();
     let mut update_scan_rx = state.events.update_scan.subscribe();
+    let mut backup_live_rx = state.events.backup_live.subscribe();
 
     // Send current active migrations so reconnecting clients get up-to-date state
     {
@@ -334,6 +335,30 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("WebSocket cloud_relay lagged by {}", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // Backup live events
+            result = backup_live_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({
+                            "type": "backup:live",
+                            "data": {
+                                "status": event.status,
+                                "progress": event.progress,
+                                "repos": event.repos,
+                                "latestJob": event.latest_job,
+                            }
+                        });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("WebSocket backup_live lagged by {}", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

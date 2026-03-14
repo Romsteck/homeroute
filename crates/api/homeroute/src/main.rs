@@ -173,6 +173,78 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Backup live poller → websocket (every ~2s while state changes)
+    {
+        let events = events.clone();
+        let orchestrator = orchestrator.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            let mut last_payload: Option<String> = None;
+
+            loop {
+                interval.tick().await;
+
+                let status_resp = orchestrator
+                    .request(&hr_ipc::orchestrator::OrchestratorRequest::GetBackupStatus)
+                    .await;
+                let repos_resp = orchestrator
+                    .request(&hr_ipc::orchestrator::OrchestratorRequest::GetBackupRepos)
+                    .await;
+                let jobs_resp = orchestrator
+                    .request(&hr_ipc::orchestrator::OrchestratorRequest::GetBackupJobs)
+                    .await;
+                let progress_resp = orchestrator
+                    .request(&hr_ipc::orchestrator::OrchestratorRequest::GetBackupProgress)
+                    .await;
+
+                let status = match status_resp {
+                    Ok(resp) if resp.ok => resp.data.unwrap_or_else(|| serde_json::json!({})),
+                    _ => continue,
+                };
+                let repos_val = match repos_resp {
+                    Ok(resp) if resp.ok => resp.data.unwrap_or_else(|| serde_json::json!([])),
+                    _ => continue,
+                };
+                let jobs_val = match jobs_resp {
+                    Ok(resp) if resp.ok => resp.data.unwrap_or_else(|| serde_json::json!([])),
+                    _ => continue,
+                };
+                let progress = match progress_resp {
+                    Ok(resp) if resp.ok => resp.data.unwrap_or_else(|| serde_json::json!({"running": false})),
+                    _ => continue,
+                };
+
+                let repos = repos_val.as_array().cloned().unwrap_or_default();
+                let latest_job = jobs_val.as_array().and_then(|jobs| jobs.first().cloned());
+
+                let payload = serde_json::json!({
+                    "status": status,
+                    "progress": progress,
+                    "repos": repos,
+                    "latestJob": latest_job,
+                });
+
+                let serialized = match serde_json::to_string(&payload) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                if last_payload.as_deref() == Some(serialized.as_str()) {
+                    continue;
+                }
+                last_payload = Some(serialized);
+
+                let event = hr_common::events::BackupLiveEvent {
+                    status: payload["status"].clone(),
+                    progress: payload["progress"].clone(),
+                    repos: payload["repos"].as_array().cloned().unwrap_or_default(),
+                    latest_job: Some(payload["latestJob"].clone()).filter(|v| !v.is_null()),
+                };
+                let _ = events.backup_live.send(event);
+            }
+        });
+    }
+
     // Migrate servers.json -> hosts.json if needed
     hr_api::routes::hosts::ensure_hosts_file().await;
 

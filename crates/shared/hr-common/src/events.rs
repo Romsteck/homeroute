@@ -31,6 +31,8 @@ pub struct EventBus {
     pub cert_ready: broadcast::Sender<CertReadyEvent>,
     /// Unified update scan events (registry → websocket)
     pub update_scan: broadcast::Sender<UpdateScanEvent>,
+    /// Backup live events (API poller → websocket)
+    pub backup_live: broadcast::Sender<BackupLiveEvent>,
 }
 
 impl EventBus {
@@ -50,6 +52,7 @@ impl EventBus {
             cloud_relay: broadcast::channel(64).0,
             cert_ready: broadcast::channel(16).0,
             update_scan: broadcast::channel(256).0,
+            backup_live: broadcast::channel(64).0,
         }
     }
 }
@@ -148,6 +151,15 @@ pub struct MigrationProgressEvent {
     pub total_bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupLiveEvent {
+    pub status: serde_json::Value,
+    pub progress: serde_json::Value,
+    pub repos: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_job: Option<serde_json::Value>,
 }
 
 /// Phase of an LXC container migration.
