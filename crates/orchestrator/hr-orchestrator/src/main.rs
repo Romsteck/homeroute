@@ -7,10 +7,11 @@ mod ipc_handler;
 mod mcp;
 mod backup_pipeline;
 mod ws_routes;
+mod container_watcher;
 
 use hr_acme::{AcmeConfig, AcmeManager};
 use hr_common::config::EnvConfig;
-use hr_common::events::{CertReadyEvent, EventBus};
+use hr_common::events::EventBus;
 use hr_ipc::{EdgeClient, NetcoreClient};
 use hr_registry::AgentRegistry;
 use std::collections::HashMap;
@@ -97,73 +98,7 @@ async fn main() -> anyhow::Result<()> {
     // Provide ACME manager to registry for per-app certificate management
     registry.set_acme(acme.clone()).await;
 
-    // Request per-app wildcard certificates for existing apps that don't have one yet.
-    // Certificate requests are sent to hr-edge via IPC.
-    {
-        let apps = registry.list_applications().await;
-        let edge_init = edge.clone();
-        let events_init = events.clone();
-        let base_domain_init = env.base_domain.clone();
-        let acme_init = acme.clone();
-        let missing_apps: Vec<_> = apps
-            .iter()
-            .filter(|app| acme_init.get_app_certificate(&app.slug).is_err())
-            .map(|app| app.slug.clone())
-            .collect();
-
-        if !missing_apps.is_empty() {
-            info!(
-                count = missing_apps.len(),
-                "Requesting per-app wildcard certificates for existing applications"
-            );
-            tokio::spawn(async move {
-                for slug in missing_apps {
-                    info!(slug = %slug, "Requesting per-app wildcard certificate via edge IPC");
-                    match edge_init
-                        .request(&hr_ipc::edge::EdgeRequest::AcmeRequestAppWildcard {
-                            slug: slug.clone(),
-                        })
-                        .await
-                    {
-                        Ok(resp) if resp.ok => {
-                            let domain = format!("*.{}.{}", slug, base_domain_init);
-                            let cert_path = resp
-                                .data
-                                .as_ref()
-                                .and_then(|d| d.get("cert_path"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string();
-                            let key_path = resp
-                                .data
-                                .as_ref()
-                                .and_then(|d| d.get("key_path"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string();
-                            let _ = events_init.cert_ready.send(CertReadyEvent {
-                                slug: slug.clone(),
-                                wildcard_domain: domain.clone(),
-                                cert_path,
-                                key_path,
-                            });
-                            info!(slug = %slug, domain = %domain, "Per-app wildcard certificate issued");
-                        }
-                        Ok(resp) => {
-                            warn!(slug = %slug, error = ?resp.error, "Edge returned error for per-app wildcard");
-                        }
-                        Err(e) => {
-                            warn!(slug = %slug, error = %e, "Failed to request per-app wildcard via edge IPC");
-                        }
-                    }
-                    // Stagger requests to avoid Let's Encrypt rate limits
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                }
-            });
-        }
-    }
-
-    // Heartbeat monitor
+        // Heartbeat monitor
     {
         let reg = registry.clone();
         tokio::spawn(async move {
@@ -326,6 +261,10 @@ async fn main() -> anyhow::Result<()> {
     let backup_pipeline = Arc::new(backup_pipeline::BackupPipeline::new());
     backup_pipeline::spawn_daily_scheduler(backup_pipeline.clone());
     info!("Backup pipeline initialized (daily at 03:00 UTC)");
+
+    // ── Container health watcher ──────────────────────────────────────────
+    container_watcher::ContainerWatcher::spawn(registry.clone(), events.clone());
+    info!("Container health watcher spawned (60s interval, auto-recovery)");
 
     let handler = Arc::new(OrchestratorHandler {
         registry: registry.clone(),

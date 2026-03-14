@@ -35,59 +35,38 @@ impl Default for AcmeConfig {
     }
 }
 
-/// Type of wildcard certificate
+/// Type of wildcard certificate.
 ///
-/// Custom serde implementation for backward compatibility:
-/// - `"main"` or `"global"` deserializes to `Global`
-/// - `"code"` deserializes to `LegacyCode`
-/// - `{"app": "slug_value"}` deserializes to `App { slug: "slug_value" }`
+/// Only the global wildcard (`*.mynetwk.biz`) is issued. Per-app and legacy
+/// code-server wildcards have been removed.
 ///
-/// Serialization:
-/// - `Global` -> `"global"`
-/// - `LegacyCode` -> `"code"`
-/// - `App { slug }` -> `{"app": "slug_value"}`
+/// Custom serde for backward compatibility:
+/// - `"global"` or `"main"` → `Global`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WildcardType {
-    /// *.mynetwk.biz - global wildcard (dashboard, redirections)
+    /// *.mynetwk.biz — global wildcard (dashboard, all prod apps)
     Global,
-    /// *.{slug}.mynetwk.biz - per-application wildcard
-    App { slug: String },
-    /// *.code.mynetwk.biz - legacy code server wildcard
-    LegacyCode,
 }
 
 impl WildcardType {
-    /// Get the domain pattern for this wildcard type
+    /// Get the domain pattern for this wildcard type.
     pub fn domain_pattern(&self, base_domain: &str) -> String {
         match self {
             Self::Global => format!("*.{}", base_domain),
-            Self::App { slug } => format!("*.{}.{}", slug, base_domain),
-            Self::LegacyCode => format!("*.code.{}", base_domain),
         }
     }
 
-    /// Get the unique ID for this wildcard type
+    /// Get the unique ID for this wildcard type.
     pub fn id(&self) -> String {
         match self {
             Self::Global => "wildcard-global".to_string(),
-            Self::App { slug } => format!("app-{}", slug),
-            Self::LegacyCode => "wildcard-code".to_string(),
         }
     }
 
-    /// Get display name
+    /// Get display name.
     pub fn display_name(&self) -> String {
         match self {
             Self::Global => "Global (Dashboard)".to_string(),
-            Self::App { slug } => format!("App: {}", slug),
-            Self::LegacyCode => "Code Server (Legacy)".to_string(),
-        }
-    }
-
-    /// Create an App wildcard type for a given application slug
-    pub fn for_app(slug: &str) -> Self {
-        Self::App {
-            slug: slug.to_string(),
         }
     }
 }
@@ -99,13 +78,6 @@ impl Serialize for WildcardType {
     {
         match self {
             Self::Global => serializer.serialize_str("global"),
-            Self::LegacyCode => serializer.serialize_str("code"),
-            Self::App { slug } => {
-                use serde::ser::SerializeMap;
-                let mut map = serializer.serialize_map(Some(1))?;
-                map.serialize_entry("app", slug)?;
-                map.end()
-            }
         }
     }
 }
@@ -123,9 +95,7 @@ impl<'de> Deserialize<'de> for WildcardType {
             type Value = WildcardType;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str(
-                    r#"a string ("global", "main", "code") or a map ({"app": "slug"})"#,
-                )
+                formatter.write_str(r#"a string ("global" or "main")"#)
             }
 
             fn visit_str<E>(self, value: &str) -> Result<WildcardType, E>
@@ -134,28 +104,7 @@ impl<'de> Deserialize<'de> for WildcardType {
             {
                 match value {
                     "global" | "main" => Ok(WildcardType::Global),
-                    "code" => Ok(WildcardType::LegacyCode),
-                    other => Err(de::Error::unknown_variant(
-                        other,
-                        &["global", "main", "code"],
-                    )),
-                }
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<WildcardType, A::Error>
-            where
-                A: de::MapAccess<'de>,
-            {
-                let key: String = map
-                    .next_key()?
-                    .ok_or_else(|| de::Error::custom("expected a key in map"))?;
-
-                match key.as_str() {
-                    "app" => {
-                        let slug: String = map.next_value()?;
-                        Ok(WildcardType::App { slug })
-                    }
-                    other => Err(de::Error::unknown_field(other, &["app"])),
+                    other => Err(de::Error::unknown_variant(other, &["global", "main"])),
                 }
             }
         }
@@ -237,20 +186,6 @@ mod tests {
     }
 
     #[test]
-    fn test_wildcard_type_serialize_legacy_code() {
-        let wt = WildcardType::LegacyCode;
-        let json = serde_json::to_string(&wt).unwrap();
-        assert_eq!(json, r#""code""#);
-    }
-
-    #[test]
-    fn test_wildcard_type_serialize_app() {
-        let wt = WildcardType::for_app("www");
-        let json = serde_json::to_string(&wt).unwrap();
-        assert_eq!(json, r#"{"app":"www"}"#);
-    }
-
-    #[test]
     fn test_wildcard_type_deserialize_global() {
         let wt: WildcardType = serde_json::from_str(r#""global""#).unwrap();
         assert_eq!(wt, WildcardType::Global);
@@ -263,37 +198,19 @@ mod tests {
     }
 
     #[test]
-    fn test_wildcard_type_deserialize_code() {
-        let wt: WildcardType = serde_json::from_str(r#""code""#).unwrap();
-        assert_eq!(wt, WildcardType::LegacyCode);
-    }
-
-    #[test]
-    fn test_wildcard_type_deserialize_app() {
-        let wt: WildcardType = serde_json::from_str(r#"{"app":"www"}"#).unwrap();
-        assert_eq!(wt, WildcardType::App { slug: "www".to_string() });
-    }
-
-    #[test]
     fn test_wildcard_type_id() {
         assert_eq!(WildcardType::Global.id(), "wildcard-global");
-        assert_eq!(WildcardType::LegacyCode.id(), "wildcard-code");
-        assert_eq!(WildcardType::for_app("www").id(), "app-www");
     }
 
     #[test]
     fn test_wildcard_type_domain_pattern() {
         let base = "mynetwk.biz";
         assert_eq!(WildcardType::Global.domain_pattern(base), "*.mynetwk.biz");
-        assert_eq!(WildcardType::LegacyCode.domain_pattern(base), "*.code.mynetwk.biz");
-        assert_eq!(WildcardType::for_app("www").domain_pattern(base), "*.www.mynetwk.biz");
     }
 
     #[test]
     fn test_wildcard_type_display_name() {
         assert_eq!(WildcardType::Global.display_name(), "Global (Dashboard)");
-        assert_eq!(WildcardType::LegacyCode.display_name(), "Code Server (Legacy)");
-        assert_eq!(WildcardType::for_app("www").display_name(), "App: www");
     }
 
     #[test]

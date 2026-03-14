@@ -762,18 +762,8 @@ async fn agent_certs(
 
     info!(app_id, slug, "Agent fetching certificates");
 
-    // Get app-specific wildcard cert
-    let app_cert = match state.acme.get_cert_pem(WildcardType::App { slug: slug.clone() }).await {
-        Ok((cert_pem, key_pem)) => {
-            let wildcard_domain = WildcardType::App { slug: slug.clone() }.domain_pattern(&state.env.base_domain);
-            Some(serde_json::json!({
-                "cert_pem": cert_pem,
-                "key_pem": key_pem,
-                "wildcard_domain": wildcard_domain,
-            }))
-        }
-        Err(_) => None,
-    };
+    // Per-app wildcard certs removed — only global wildcard is issued.
+    let app_cert: Option<serde_json::Value> = None;
 
     // Get global wildcard cert
     let global_cert = match state.acme.get_cert_pem(WildcardType::Global).await {
