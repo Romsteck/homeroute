@@ -122,6 +122,8 @@ pub struct SchemaColumnInfo {
     pub field_type: String,
     pub required: bool,
     pub unique: bool,
+    #[serde(default)]
+    pub choices: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

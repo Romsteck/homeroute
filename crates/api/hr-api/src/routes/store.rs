@@ -8,7 +8,8 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::{error, info};
+use std::io::Read;
+use tracing::{error, info, warn};
 
 use crate::state::ApiState;
 
@@ -71,6 +72,81 @@ fn save_catalog(catalog: &StoreCatalog) -> Result<(), String> {
     Ok(())
 }
 
+// ── Icon extraction ──────────────────────────────────────────
+
+/// Extract the app icon from an APK (ZIP) file and save it to the icons directory.
+/// Looks for ic_launcher.png in mipmap directories, preferring higher resolutions.
+fn extract_apk_icon(apk_path: &str, slug: &str) -> Option<()> {
+    let file = std::fs::File::open(apk_path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+
+    // Priority order: xxxhdpi > xxhdpi > xhdpi > hdpi > mdpi > any mipmap
+    let priority_patterns = [
+        "xxxhdpi",
+        "xxhdpi",
+        "xhdpi",
+        "hdpi",
+        "mdpi",
+        "mipmap",
+    ];
+
+    let mut best_entry: Option<String> = None;
+    let mut best_priority = usize::MAX;
+
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).ok()?;
+        let name = entry.name().to_string();
+        drop(entry);
+
+        if !name.ends_with(".png") {
+            continue;
+        }
+        let lower = name.to_lowercase();
+        if !lower.contains("ic_launcher") || lower.contains("round") || lower.contains("foreground") {
+            continue;
+        }
+        if !lower.contains("mipmap") && !lower.contains("drawable") {
+            continue;
+        }
+
+        // Find the best resolution
+        let priority = priority_patterns
+            .iter()
+            .position(|p| lower.contains(p))
+            .unwrap_or(priority_patterns.len());
+
+        if priority < best_priority {
+            best_priority = priority;
+            best_entry = Some(name);
+        }
+    }
+
+    let entry_name = best_entry?;
+    info!(slug, entry = %entry_name, "Extracting icon from APK");
+
+    // Re-open file to read the entry (ZipArchive requires re-open after borrow issues)
+    let file2 = std::fs::File::open(apk_path).ok()?;
+    let mut archive2 = zip::ZipArchive::new(file2).ok()?;
+    let mut entry = archive2.by_name(&entry_name).ok()?;
+
+    let mut icon_bytes = Vec::new();
+    entry.read_to_end(&mut icon_bytes).ok()?;
+
+    if icon_bytes.is_empty() {
+        warn!(slug, "Extracted icon is empty");
+        return None;
+    }
+
+    // Save icon
+    let icons_dir = std::path::PathBuf::from(STORE_DIR).join("icons");
+    std::fs::create_dir_all(&icons_dir).ok()?;
+    let icon_path = icons_dir.join(format!("{}.png", slug));
+    std::fs::write(&icon_path, &icon_bytes).ok()?;
+
+    info!(slug, bytes = icon_bytes.len(), "Saved app icon");
+    Some(())
+}
+
 // ── Version comparison ───────────────────────────────────────
 
 /// Compare two dotted version strings segment-by-segment as u64.
@@ -101,6 +177,7 @@ pub fn router() -> Router<ApiState> {
     Router::new()
         .route("/apps", get(list_apps))
         .route("/apps/{slug}", get(get_app).delete(delete_app))
+        .route("/apps/{slug}/icon", get(get_app_icon))
         .route(
             "/apps/{slug}/releases",
             post(publish_release).layer(DefaultBodyLimit::max(500 * 1024 * 1024)),
@@ -162,6 +239,22 @@ async fn get_app(Path(slug): Path<String>) -> impl IntoResponse {
     }
 }
 
+/// GET /api/store/apps/{slug}/icon — serve the app icon PNG.
+async fn get_app_icon(Path(slug): Path<String>) -> impl IntoResponse {
+    // Validate slug to prevent path traversal
+    if slug.contains('/') || slug.contains("..") {
+        return (StatusCode::BAD_REQUEST, "Invalid slug").into_response();
+    }
+    let icon_path = format!("{}/icons/{}.png", STORE_DIR, slug);
+    match tokio::fs::read(&icon_path).await {
+        Ok(data) => {
+            let headers = [(header::CONTENT_TYPE, "image/png")];
+            (headers, data).into_response()
+        }
+        Err(_) => (StatusCode::NOT_FOUND, "Icon not found").into_response(),
+    }
+}
+
 /// DELETE /api/store/apps/{slug} - remove app from catalog and delete releases.
 async fn delete_app(Path(slug): Path<String>) -> impl IntoResponse {
     let mut catalog = load_catalog();
@@ -186,6 +279,11 @@ async fn delete_app(Path(slug): Path<String>) -> impl IntoResponse {
         if let Err(e) = std::fs::remove_dir_all(&releases_dir) {
             error!(slug, "Failed to delete releases dir: {e}");
         }
+    }
+    // Also remove icon if present
+    let icon_path = std::path::PathBuf::from(STORE_DIR).join("icons").join(format!("{}.png", slug));
+    if icon_path.exists() {
+        let _ = std::fs::remove_file(&icon_path);
     }
     info!(slug, "Deleted app and releases");
     (StatusCode::OK, Json(serde_json::json!({"success":true,"slug":slug}))).into_response()
@@ -325,6 +423,14 @@ async fn publish_release(
         None
     });
 
+    // Extract icon from APK (best-effort, non-blocking)
+    let icon_url = if extract_apk_icon(&apk_path, &slug).is_some() {
+        Some(format!("/api/store/apps/{}/icon", slug))
+    } else {
+        warn!(slug, "Could not extract icon from APK");
+        None
+    };
+
     // Upsert into catalog
     let now = Utc::now();
     let release = StoreRelease {
@@ -351,6 +457,10 @@ async fn publish_release(
         if !app_category.is_empty() && app_category != "other" {
             app.category = app_category;
         }
+        // Update icon if successfully extracted
+        if let Some(ref icon) = icon_url {
+            app.icon = Some(icon.clone());
+        }
     } else {
         // New app — name is required
         let name = match app_name {
@@ -374,7 +484,7 @@ async fn publish_release(
             name,
             description: app_description,
             category: app_category,
-            icon: None,
+            icon: icon_url,
             android_package,
             publisher_app_id,
             releases: vec![release],

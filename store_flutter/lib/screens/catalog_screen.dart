@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../theme.dart';
 import '../services/api_client.dart';
 import '../services/install_tracker.dart';
@@ -30,25 +31,42 @@ class CatalogScreen extends StatefulWidget {
 }
 
 class _CatalogScreenState extends State<CatalogScreen> {
+  static const _dismissedStoreVersionKey = 'dismissed_store_version';
   List<Map<String, dynamic>> _apps = [];
   bool _loading = true;
   String? _error;
   Map<String, dynamic>? _updateInfo;
   bool _updateDismissed = false;
 
-  /// Slugs of installed apps that have an available update.
   Set<String> _appsWithUpdates = {};
+  Set<String> _installedSlugs = {};
+
+  // Search + filter
+  final _searchController = TextEditingController();
+  String _searchQuery = '';
+  String _selectedCategory = 'Tous';
+  bool _showSearch = false;
 
   @override
   void initState() {
     super.initState();
     _init();
+    _searchController.addListener(() {
+      setState(() => _searchQuery = _searchController.text.toLowerCase());
+    });
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
   }
 
   Future<void> _init() async {
     await _fetchApps();
     _checkClientUpdate();
     _checkAppUpdates();
+    _loadInstalledSlugs();
   }
 
   Future<void> _fetchApps() async {
@@ -75,30 +93,52 @@ class _CatalogScreenState extends State<CatalogScreen> {
     }
   }
 
+  Future<void> _loadInstalledSlugs() async {
+    try {
+      final installed = await InstallTracker.getAllInstalled();
+      if (mounted) {
+        setState(() => _installedSlugs = installed.keys.toSet());
+      }
+    } catch (_) {}
+  }
+
   Future<void> _checkClientUpdate() async {
     try {
       final data = await ApiClient.instance.getClientVersion();
       final packageInfo = await PackageInfo.fromPlatform();
+      final prefs = await SharedPreferences.getInstance();
       final current = packageInfo.version;
       final remote = data['version'] as String?;
       if (remote != null && _versionNewer(remote, current) && mounted) {
+        final dismissedVersion =
+            prefs.getString(_dismissedStoreVersionKey);
         setState(() {
           _updateInfo = {
             'version': remote,
             'changelog': data['changelog'] ?? '',
             'sizeBytes': data['size_bytes'] ?? 0,
           };
+          _updateDismissed = dismissedVersion == remote;
         });
       }
     } catch (_) {}
   }
 
-  /// Check for updates for all installed apps by calling /api/store/updates.
+  Future<void> _dismissUpdateBanner() async {
+    final version = _updateInfo?['version'] as String?;
+    if (version == null) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_dismissedStoreVersionKey, version);
+
+    if (!mounted) return;
+    setState(() => _updateDismissed = true);
+  }
+
   Future<void> _checkAppUpdates() async {
     try {
       final installed = await InstallTracker.getAllInstalled();
       if (installed.isEmpty) return;
-      // Filter out entries with non-semver version like 'installed'
       final valid = Map.fromEntries(
         installed.entries.where((e) => RegExp(r'^\d').hasMatch(e.value)),
       );
@@ -115,15 +155,76 @@ class _CatalogScreenState extends State<CatalogScreen> {
     } catch (_) {}
   }
 
+  List<String> get _categories {
+    final cats = <String>{'Tous'};
+    for (final app in _apps) {
+      final cat = app['category'] as String?;
+      if (cat != null && cat.isNotEmpty) cats.add(cat);
+    }
+    return cats.toList();
+  }
+
+  List<Map<String, dynamic>> get _filteredApps {
+    return _apps.where((app) {
+      // Category filter
+      if (_selectedCategory != 'Tous') {
+        final cat = app['category'] as String? ?? '';
+        if (cat != _selectedCategory) return false;
+      }
+      // Search filter
+      if (_searchQuery.isNotEmpty) {
+        final name = (app['name'] as String? ?? '').toLowerCase();
+        final slug = (app['slug'] as String? ?? '').toLowerCase();
+        final cat = (app['category'] as String? ?? '').toLowerCase();
+        if (!name.contains(_searchQuery) &&
+            !slug.contains(_searchQuery) &&
+            !cat.contains(_searchQuery)) {
+          return false;
+        }
+      }
+      return true;
+    }).toList();
+  }
+
   int get _totalReleases =>
       _apps.fold(0, (sum, a) => sum + ((a['release_count'] as int?) ?? 0));
 
   @override
   Widget build(BuildContext context) {
+    final cats = _categories;
+    final filtered = _filteredApps;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Store'),
+        title: _showSearch
+            ? TextField(
+                controller: _searchController,
+                autofocus: true,
+                style: const TextStyle(color: AppColors.textPrimary),
+                decoration: const InputDecoration(
+                  hintText: 'Rechercher...',
+                  border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                  hintStyle: TextStyle(color: AppColors.textTertiary),
+                  isDense: true,
+                  contentPadding: EdgeInsets.zero,
+                ),
+              )
+            : const Text('Store'),
         actions: [
+          IconButton(
+            icon: Icon(_showSearch ? Icons.close : Icons.search),
+            onPressed: () {
+              setState(() {
+                _showSearch = !_showSearch;
+                if (!_showSearch) {
+                  _searchController.clear();
+                  _searchQuery = '';
+                }
+              });
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () => context.push('/settings'),
@@ -142,8 +243,7 @@ class _CatalogScreenState extends State<CatalogScreen> {
                   UpdateBanner(
                     version: _updateInfo!['version'] as String,
                     onTap: () {
-                      final packageInfo = PackageInfo.fromPlatform();
-                      packageInfo.then((info) {
+                      PackageInfo.fromPlatform().then((info) {
                         context.push('/update', extra: {
                           'currentVersion': info.version,
                           'newVersion': _updateInfo!['version'],
@@ -152,37 +252,96 @@ class _CatalogScreenState extends State<CatalogScreen> {
                         });
                       });
                     },
-                    onDismiss: () =>
-                        setState(() => _updateDismissed = true),
+                    onDismiss: _dismissUpdateBanner,
                   ),
+                // Category filter tabs (only show if more than 1 category)
+                if (cats.length > 2) ...[
+                  SizedBox(
+                    height: 40,
+                    child: ListView.builder(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      itemCount: cats.length,
+                      itemBuilder: (context, i) {
+                        final cat = cats[i];
+                        final selected = cat == _selectedCategory;
+                        return Padding(
+                          padding: const EdgeInsets.only(right: 6),
+                          child: GestureDetector(
+                            onTap: () => setState(() => _selectedCategory = cat),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: selected
+                                    ? AppColors.primary.withOpacity(0.15)
+                                    : AppColors.surface,
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(
+                                  color: selected ? AppColors.primary : AppColors.border,
+                                  width: 1,
+                                ),
+                              ),
+                              child: Text(
+                                cat,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: selected
+                                      ? AppColors.primary
+                                      : AppColors.textSecondary,
+                                  fontWeight: selected
+                                      ? FontWeight.w600
+                                      : FontWeight.normal,
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  const Divider(height: 1),
+                ],
+                // Stats row
                 Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 10,
-                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                   child: Row(
                     children: [
                       const Icon(Icons.widgets_outlined,
-                          size: 14, color: AppColors.textTertiary),
-                      const SizedBox(width: 6),
+                          size: 13, color: AppColors.textTertiary),
+                      const SizedBox(width: 5),
                       Text(
-                        '${_apps.length} app${_apps.length != 1 ? 's' : ''}',
+                        '${filtered.length} app${filtered.length != 1 ? 's' : ''}',
                         style: const TextStyle(
                           fontSize: 12,
                           color: AppColors.textTertiary,
                         ),
                       ),
-                      const SizedBox(width: 16),
-                      const Icon(Icons.local_offer_outlined,
-                          size: 14, color: AppColors.textTertiary),
-                      const SizedBox(width: 6),
-                      Text(
-                        '$_totalReleases release${_totalReleases != 1 ? 's' : ''}',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: AppColors.textTertiary,
+                      if (_installedSlugs.isNotEmpty) ...[
+                        const SizedBox(width: 14),
+                        const Icon(Icons.check_circle_outline,
+                            size: 13, color: AppColors.textTertiary),
+                        const SizedBox(width: 5),
+                        Text(
+                          '${_installedSlugs.length} installée${_installedSlugs.length != 1 ? 's' : ''}',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: AppColors.textTertiary,
+                          ),
                         ),
-                      ),
+                      ],
+                      if (_appsWithUpdates.isNotEmpty) ...[
+                        const SizedBox(width: 14),
+                        const Icon(Icons.update,
+                            size: 13, color: AppColors.success),
+                        const SizedBox(width: 5),
+                        Text(
+                          '${_appsWithUpdates.length} màj',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: AppColors.success,
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -192,32 +351,31 @@ class _CatalogScreenState extends State<CatalogScreen> {
                     onRefresh: () async {
                       await _fetchApps();
                       await _checkAppUpdates();
+                      await _loadInstalledSlugs();
                     },
                     color: AppColors.primary,
-                    child: _apps.isEmpty
+                    child: filtered.isEmpty
                         ? ListView(
                             children: [
                               Padding(
                                 padding: const EdgeInsets.only(top: 80),
                                 child: Column(
-                                  children: const [
-                                    Icon(Icons.storefront_outlined,
-                                        size: 48,
-                                        color: AppColors.textTertiary),
-                                    SizedBox(height: 12),
+                                  children: [
+                                    Icon(
+                                      _searchQuery.isNotEmpty
+                                          ? Icons.search_off
+                                          : Icons.storefront_outlined,
+                                      size: 48,
+                                      color: AppColors.textTertiary,
+                                    ),
+                                    const SizedBox(height: 12),
                                     Text(
-                                      'Aucune application',
-                                      style: TextStyle(
+                                      _searchQuery.isNotEmpty
+                                          ? 'Aucun résultat pour "$_searchQuery"'
+                                          : 'Aucune application',
+                                      style: const TextStyle(
                                         color: AppColors.textSecondary,
                                         fontSize: 16,
-                                      ),
-                                    ),
-                                    SizedBox(height: 4),
-                                    Text(
-                                      'Les publications sont g\u00e9r\u00e9es via MCP.',
-                                      style: TextStyle(
-                                        color: AppColors.textTertiary,
-                                        fontSize: 13,
                                       ),
                                     ),
                                   ],
@@ -227,13 +385,14 @@ class _CatalogScreenState extends State<CatalogScreen> {
                           )
                         : ListView.builder(
                             padding: EdgeInsets.zero,
-                            itemCount: _apps.length,
+                            itemCount: filtered.length,
                             itemBuilder: (context, index) {
-                              final app = _apps[index];
+                              final app = filtered[index];
                               final slug = app['slug'] as String;
                               return AppCard(
                                 app: app,
                                 hasUpdate: _appsWithUpdates.contains(slug),
+                                isInstalled: _installedSlugs.contains(slug),
                                 onTap: () {
                                   final name = app['name'] as String?;
                                   context.push(

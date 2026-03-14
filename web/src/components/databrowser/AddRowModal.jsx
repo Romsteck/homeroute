@@ -5,11 +5,11 @@ import { getFieldComponent } from './fields';
 const SYSTEM_COLUMNS = ['id', 'created_at', 'updated_at'];
 
 export default function AddRowModal({ columns, lookupResolver, tableName, onClose, onAdd }) {
-  const editableColumns = columns.filter(c => !SYSTEM_COLUMNS.includes(c.name) && c.field_type !== 'auto_increment');
+  const editableColumns = columns.filter(c => !SYSTEM_COLUMNS.includes(c.name) && c.fieldType !== 'auto_increment');
   const [values, setValues] = useState(() => {
     const init = {};
     editableColumns.forEach(c => {
-      init[c.name] = c.field_type === 'boolean' ? false : '';
+      init[c.name] = c.fieldType === 'boolean' ? false : '';
     });
     return init;
   });
@@ -54,21 +54,21 @@ export default function AddRowModal({ columns, lookupResolver, tableName, onClos
 
         <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
           {editableColumns.map((col, i) => {
-            const FieldComponent = getFieldComponent(col.field_type);
+            const FieldComponent = getFieldComponent(col.fieldType);
             const relation = lookupResolver?.getRelation(tableName, col.name);
 
             const extraProps = {};
-            if (col.field_type === 'choice' || col.field_type === 'multi_choice') {
+            if (col.fieldType === 'choice' || col.fieldType === 'multi_choice') {
               extraProps.choices = col.choices || [];
             }
-            if (col.field_type === 'lookup' && relation) {
-              extraProps.lookupInfo = { targetTable: relation.to_table, targetColumn: relation.to_column };
+            if (col.fieldType === 'lookup' && relation) {
+              extraProps.lookupInfo = { targetTable: relation.toTable, targetColumn: relation.toColumn };
             }
-            if (col.field_type === 'date' || col.field_type === 'time' || col.field_type === 'date_time') {
-              extraProps.fieldType = col.field_type;
+            if (col.fieldType === 'date' || col.fieldType === 'time' || col.fieldType === 'date_time') {
+              extraProps.fieldType = col.fieldType;
             }
-            if (col.field_type === 'number' || col.field_type === 'decimal') {
-              extraProps.fieldType = col.field_type;
+            if (col.fieldType === 'number' || col.fieldType === 'decimal') {
+              extraProps.fieldType = col.fieldType;
             }
 
             return (
@@ -76,7 +76,7 @@ export default function AddRowModal({ columns, lookupResolver, tableName, onClos
                 <label className="block mb-1.5">
                   <span className="text-sm font-medium text-gray-300">{col.name}</span>
                   {col.required && <span className="text-yellow-400 ml-1">*</span>}
-                  <span className="text-xs text-gray-600 ml-2">{col.field_type}</span>
+                  <span className="text-xs text-gray-600 ml-2">{col.fieldType}</span>
                 </label>
                 <FieldComponent
                   value={values[col.name]}

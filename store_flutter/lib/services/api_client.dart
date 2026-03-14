@@ -62,6 +62,17 @@ class ApiClient {
     return '$_baseUrl/api/store/client/apk';
   }
 
+  /// Returns the full URL to the app icon, or null if no icon path is set.
+  String? getIconUrl(String? iconPath) {
+    if (iconPath == null || iconPath.isEmpty) return null;
+    // If already a full URL, return as-is
+    if (iconPath.startsWith('http://') || iconPath.startsWith('https://')) {
+      return iconPath;
+    }
+    // Otherwise, prepend base URL (iconPath is like /api/store/apps/{slug}/icon)
+    return '$_baseUrl$iconPath';
+  }
+
   Future<Response> downloadFile({
     required String url,
     required String savePath,

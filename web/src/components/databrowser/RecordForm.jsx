@@ -24,7 +24,7 @@ const RecordForm = forwardRef(function RecordForm({
   const [error, setError] = useState(null);
   const [notFound, setNotFound] = useState(false);
 
-  const editableColumns = columns.filter(c => !SYSTEM_COLUMNS.includes(c.name) && c.field_type !== 'auto_increment');
+  const editableColumns = columns.filter(c => !SYSTEM_COLUMNS.includes(c.name) && c.fieldType !== 'auto_increment');
 
   // Check dirty state
   const isDirty = originalRow && Object.keys(editValues).some(k => {
@@ -57,7 +57,7 @@ const RecordForm = forwardRef(function RecordForm({
         // Initialize edit values with current row values for editable columns
         const init = {};
         editableColumns.forEach(c => {
-          init[c.name] = row[c.name] ?? (c.field_type === 'boolean' ? false : '');
+          init[c.name] = row[c.name] ?? (c.fieldType === 'boolean' ? false : '');
         });
         setEditValues(init);
       }
@@ -212,34 +212,34 @@ const RecordForm = forwardRef(function RecordForm({
         {/* Editable fields */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-4">
           {editableColumns.map(col => {
-            const FieldComponent = getFieldComponent(col.field_type);
+            const FieldComponent = getFieldComponent(col.fieldType);
             const relation = lookupResolver?.getRelation(tableName, col.name);
 
             // Build extra props for special field types
             const extraProps = {};
-            if (col.field_type === 'choice' || col.field_type === 'multi_choice') {
+            if (col.fieldType === 'choice' || col.fieldType === 'multi_choice') {
               extraProps.choices = col.choices || [];
             }
-            if (col.field_type === 'lookup' && relation) {
-              extraProps.lookupInfo = { targetTable: relation.to_table, targetColumn: relation.to_column };
+            if (col.fieldType === 'lookup' && relation) {
+              extraProps.lookupInfo = { targetTable: relation.toTable, targetColumn: relation.toColumn };
               extraProps.onLookupNavigate = (table, id) => onLookupNavigate(table, id);
             }
-            if (col.field_type === 'date' || col.field_type === 'time' || col.field_type === 'date_time') {
-              extraProps.fieldType = col.field_type;
+            if (col.fieldType === 'date' || col.fieldType === 'time' || col.fieldType === 'date_time') {
+              extraProps.fieldType = col.fieldType;
             }
-            if (col.field_type === 'number' || col.field_type === 'decimal') {
-              extraProps.fieldType = col.field_type;
+            if (col.fieldType === 'number' || col.fieldType === 'decimal') {
+              extraProps.fieldType = col.fieldType;
             }
 
             // JSON fields and textarea-like fields take full width
-            const fullWidth = col.field_type === 'json' || col.field_type === 'text';
+            const fullWidth = col.fieldType === 'json' || col.fieldType === 'text';
 
             return (
               <div key={col.name} className={fullWidth ? 'lg:col-span-2' : ''}>
                 <label className="block mb-1.5">
                   <span className="text-sm font-medium text-gray-300">{col.name}</span>
                   {col.required && <span className="text-yellow-400 ml-1">*</span>}
-                  <span className="text-xs text-gray-600 ml-2">{col.field_type}</span>
+                  <span className="text-xs text-gray-600 ml-2">{col.fieldType}</span>
                 </label>
                 {col.description && (
                   <p className="text-xs text-gray-500 mb-1.5">{col.description}</p>
@@ -253,10 +253,10 @@ const RecordForm = forwardRef(function RecordForm({
                   {...extraProps}
                 />
                 {/* Lookup preview link */}
-                {col.field_type === 'lookup' && relation && editValues[col.name] && (
+                {col.fieldType === 'lookup' && relation && editValues[col.name] && (
                   <div className="mt-1">
                     <LookupLink
-                      targetTable={relation.to_table}
+                      targetTable={relation.toTable}
                       value={editValues[col.name]}
                       onClick={(table, id) => onLookupNavigate(table, id)}
                     />

@@ -10,7 +10,7 @@ import AddRowModal from '../components/databrowser/AddRowModal';
 import useLookupResolver from '../components/databrowser/useLookupResolver';
 import {
   getDataverseOverview, getDataverseTable, getDataverseRows,
-  insertDataverseRows, downloadDataverseBackup
+  insertDataverseRows
 } from '../api/client';
 
 const ROWS_PER_PAGE_OPTIONS = [25, 50, 100];
@@ -64,7 +64,7 @@ function DataBrowser() {
           saving: !!formRef.current.saving,
         });
       }
-    }, 100);
+    }, 500);
     return () => clearInterval(interval);
   }, [viewMode]);
 
@@ -289,7 +289,6 @@ function DataBrowser() {
             onNavigateTable={navigateToTableView}
             onAddRow={() => setShowAddModal(true)}
             onRefresh={fetchRows}
-            onBackup={() => downloadDataverseBackup(appId)}
             totalRows={total}
             rowsPerPage={rowsPerPage}
             rowsPerPageOptions={ROWS_PER_PAGE_OPTIONS}

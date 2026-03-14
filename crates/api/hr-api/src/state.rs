@@ -61,6 +61,8 @@ pub struct CachedColumnInfo {
     pub field_type: String,
     pub required: bool,
     pub unique: bool,
+    #[serde(default)]
+    pub choices: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

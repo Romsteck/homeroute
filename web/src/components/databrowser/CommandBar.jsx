@@ -1,4 +1,4 @@
-import { Plus, RefreshCw, Download, ArrowLeft, Trash2, Save, Loader2 } from 'lucide-react';
+import { Plus, RefreshCw, ArrowLeft, Trash2, Save, Loader2 } from 'lucide-react';
 import Breadcrumb from './Breadcrumb';
 
 function CmdButton({ icon: Icon, label, onClick, disabled, variant = 'default', spinning }) {
@@ -27,12 +27,11 @@ function CmdButton({ icon: Icon, label, onClick, disabled, variant = 'default', 
   );
 }
 
-function GridCommands({ onAddRow, onRefresh, onBackup, totalRows, rowsPerPage, onRowsPerPageChange }) {
+function GridCommands({ onAddRow, onRefresh, totalRows, rowsPerPage, onRowsPerPageChange }) {
   return (
     <>
       <CmdButton icon={Plus} label="Nouveau" onClick={onAddRow} variant="primary" />
       <CmdButton icon={RefreshCw} label="Actualiser" onClick={onRefresh} />
-      <CmdButton icon={Download} label="Backup" onClick={onBackup} />
 
       <div className="flex items-center gap-3 ml-auto px-3">
         {totalRows != null && (
@@ -82,7 +81,6 @@ export default function CommandBar({
   onNavigateTable,
   onAddRow,
   onRefresh,
-  onBackup,
   totalRows,
   rowsPerPage,
   onRowsPerPageChange,
@@ -113,7 +111,6 @@ export default function CommandBar({
             <GridCommands
               onAddRow={onAddRow}
               onRefresh={onRefresh}
-              onBackup={onBackup}
               totalRows={totalRows}
               rowsPerPage={rowsPerPage}
               onRowsPerPageChange={onRowsPerPageChange}

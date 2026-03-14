@@ -1545,9 +1545,6 @@ WantedBy=multi-user.target
             message: Some("Deploiement termine".to_string()),
         });
 
-        // Request per-app wildcard certificate (*.{slug}.{base_domain})
-        emit("Certificat ACME wildcard...");
-        self.registry.request_app_cert(slug).await;
 
         info!(container = container_name, "Container V2 dev deploy complete");
     }
@@ -1673,9 +1670,6 @@ WantedBy=multi-user.target
             message: Some("Deploiement termine".to_string()),
         });
 
-        // Request per-app wildcard certificate (*.{slug}.{base_domain})
-        emit("Certificat ACME wildcard...");
-        self.registry.request_app_cert(slug).await;
 
         info!(container = container_name, "Container V2 prod deploy complete");
     }
@@ -2508,19 +2502,6 @@ WantedBy=multi-user.target
         // Determine the network mode for .nspawn unit rewrite
         let network_mode = self.resolve_network_mode("local").await
             .map_err(|e| format!("Cannot resolve network mode: {e}"))?;
-
-        // -- Phase 1: Request new certificate --
-        Self::set_rename_phase(renames, rename_id, RenamePhase::RequestingCert, None).await;
-        {
-            let acme_guard = self.registry.acme.read().await;
-            if let Some(ref acme) = *acme_guard {
-                let acme = acme.clone();
-                drop(acme_guard);
-                acme.request_app_wildcard(new_slug)
-                    .await
-                    .map_err(|e| format!("Failed to request certificate for new slug: {e}"))?;
-            }
-        }
 
         // -- Phase 2: Create new DNS records --
         Self::set_rename_phase(renames, rename_id, RenamePhase::CreatingDns, None).await;

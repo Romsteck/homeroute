@@ -4,6 +4,7 @@ import '../theme.dart';
 import '../services/api_client.dart';
 import '../services/install_tracker.dart';
 import '../services/package_checker.dart';
+import '../utils/format_size.dart';
 import '../widgets/progress_card.dart';
 
 bool _versionNewer(String a, String b) {
@@ -59,8 +60,7 @@ class AppDetailScreen extends StatefulWidget {
 class _AppDetailScreenState extends State<AppDetailScreen> {
   Map<String, dynamic>? _app;
   bool _loading = true;
-  // null = loading, false = not installed, InstalledInfo = installed
-  dynamic _installed;
+  dynamic _installed; // null = loading, false = not installed, InstalledInfo = installed
   _DownloadState? _dlState;
 
   @override
@@ -92,8 +92,59 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
     }
   }
 
+  Future<void> _showUnknownSourcesDialog() async {
+    return showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        title: const Text(
+          'Sources inconnues',
+          style: TextStyle(color: AppColors.textPrimary, fontSize: 16, fontWeight: FontWeight.w700),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: const [
+            Text(
+              'Pour installer cet APK, il faut autoriser les sources inconnues :',
+              style: TextStyle(color: AppColors.textSecondary, fontSize: 13, height: 1.5),
+            ),
+            SizedBox(height: 12),
+            Text(
+              '1. Paramètres → Applications\n'
+              '2. Trouver "HomeRoute Store"\n'
+              '3. Activer "Installer des applis inconnues"',
+              style: TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 13,
+                height: 1.7,
+                fontFamily: 'monospace',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Compris', style: TextStyle(color: AppColors.primary)),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _handleDownload(String version) async {
     if (_dlState != null) return;
+
+    // Show Unknown Sources dialog for first-time installs
+    final installed = _installed;
+    final isInstalled = installed is InstalledInfo;
+    if (!isInstalled) {
+      await _showUnknownSourcesDialog();
+      if (!mounted) return;
+    }
+
     setState(() {
       _dlState = _DownloadState(version: version, phase: 'download', progress: 0);
     });
@@ -120,16 +171,13 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
 
       final androidPkg = _app?['android_package'] as String?;
 
-      final installed = await PackageChecker.installApk(
+      final installed2 = await PackageChecker.installApk(
         savePath,
         androidPackage: androidPkg,
       );
       if (!mounted) return;
 
-      // Verify the app is actually on the device.
-      // Retry up to 3 times with 1s delays to handle PackageManager
-      // registration delays on some devices.
-      bool onDevice = installed;
+      bool onDevice = installed2;
       if (!onDevice && androidPkg != null && androidPkg.isNotEmpty) {
         for (int attempt = 0; attempt < 3; attempt++) {
           await Future.delayed(const Duration(seconds: 1));
@@ -150,7 +198,10 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
       } else {
         if (mounted) {
           setState(() {
-            _dlState = _dlState?.copyWith(phase: 'error', error: 'Installation annul\u00e9e ou \u00e9chou\u00e9e');
+            _dlState = _dlState?.copyWith(
+              phase: 'error',
+              error: 'Installation annulée ou échouée',
+            );
           });
         }
       }
@@ -208,14 +259,17 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
     final releases = List<Map<String, dynamic>>.from(
       (app['releases'] as List?)?.reversed ?? [],
     );
-    final InstalledInfo? installedInfo = _installed is InstalledInfo ? _installed as InstalledInfo : null;
+    final InstalledInfo? installedInfo =
+        _installed is InstalledInfo ? _installed as InstalledInfo : null;
     final isInstalled = installedInfo != null;
 
     String? latestVersion;
     bool hasUpdate = false;
     bool isUpToDate = false;
+    int? latestSizeBytes;
     if (releases.isNotEmpty) {
       latestVersion = releases[0]['version'] as String;
+      latestSizeBytes = releases[0]['size_bytes'] as int?;
       if (isInstalled) {
         final installedVersion = installedInfo.version;
         hasUpdate = _versionNewer(latestVersion, installedVersion);
@@ -223,51 +277,251 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
       }
     }
 
-    return SingleChildScrollView(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Divider(height: 1),
-
-          // App header
-          _buildHeader(app, releases, installedInfo),
-          const Divider(height: 1),
-
-          // Action buttons
-          if (releases.isNotEmpty) ...[
-            _buildActionRow(latestVersion!, hasUpdate, isUpToDate, isInstalled),
+    return RefreshIndicator(
+      onRefresh: _fetchData,
+      color: AppColors.primary,
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
             const Divider(height: 1),
+
+            // App header
+            _buildHeader(app, releases, installedInfo),
+            const Divider(height: 1),
+
+            // Action buttons
+            if (releases.isNotEmpty) ...[
+              _buildActionRow(latestVersion!, hasUpdate, isUpToDate, isInstalled),
+              const Divider(height: 1),
+            ],
+
+            // Download progress
+            if (_dlState != null)
+              ProgressCard(
+                phase: _dlState!.phase,
+                progress: _dlState!.progress,
+                version: _dlState!.version,
+                error: _dlState!.error,
+                onDismiss: () => setState(() => _dlState = null),
+              ),
+
+            // App info tiles
+            _buildInfoRow('Package', app['android_package'] as String? ?? '—'),
+            _buildInfoRow('Catégorie', app['category'] as String? ?? 'other'),
+            if (latestSizeBytes != null)
+              _buildInfoRow('Taille', formatSize(latestSizeBytes)),
+            if (releases.isNotEmpty)
+              _buildInfoRow('Releases', '${releases.length}'),
+            const Divider(height: 1),
+
+            // Description
+            if (app['description'] != null &&
+                (app['description'] as String).isNotEmpty) ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Description',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: AppColors.textTertiary,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      app['description'] as String,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: AppColors.textSecondary,
+                        height: 1.6,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+            ],
+
+            // Releases / Changelog
+            if (releases.isNotEmpty) ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+                child: const Text(
+                  'Historique des versions',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: AppColors.textTertiary,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ),
+              ...releases.take(5).map((release) => _buildReleaseRow(release, installedInfo)),
+              const SizedBox(height: 24),
+            ],
+
+            // Unknown sources hint (for non-installed apps)
+            if (!isInstalled && releases.isNotEmpty) ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.info_outline,
+                        size: 14, color: AppColors.textTertiary),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: _showUnknownSourcesDialog,
+                        child: const Text(
+                          'Sources inconnues requises pour installer. Appuyez pour les instructions.',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: AppColors.textTertiary,
+                            height: 1.5,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ],
+        ),
+      ),
+    );
+  }
 
-          // Progress
-          if (_dlState != null)
-            ProgressCard(
-              phase: _dlState!.phase,
-              progress: _dlState!.progress,
-              version: _dlState!.version,
-              error: _dlState!.error,
-              onDismiss: () => setState(() => _dlState = null),
-            ),
-
-          // Description
-          if (app['description'] != null && (app['description'] as String).isNotEmpty) ...[
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              child: Text(
-                app['description'] as String,
+  Widget _buildInfoRow(String label, String value) {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            children: [
+              Text(
+                label,
+                style: const TextStyle(
+                  fontSize: 13,
+                  color: AppColors.textTertiary,
+                ),
+              ),
+              const Spacer(),
+              Text(
+                value,
                 style: const TextStyle(
                   fontSize: 13,
                   color: AppColors.textSecondary,
-                  height: 1.5,
+                  fontFamily: 'monospace',
                 ),
               ),
-            ),
-            const Divider(height: 1),
-          ],
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+      ],
+    );
+  }
 
-          const SizedBox(height: 40),
-        ],
-      ),
+  Widget _buildReleaseRow(Map<String, dynamic> release, InstalledInfo? installedInfo) {
+    final version = release['version'] as String? ?? '?';
+    final changelog = release['changelog'] as String?;
+    final sizeBytes = release['size_bytes'] as int?;
+    final isCurrentInstall = installedInfo?.version == version;
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                decoration: BoxDecoration(
+                  color: isCurrentInstall
+                      ? AppColors.success.withOpacity(0.12)
+                      : AppColors.surface,
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(
+                    color: isCurrentInstall
+                        ? AppColors.success.withOpacity(0.3)
+                        : AppColors.border,
+                    width: 1,
+                  ),
+                ),
+                child: Text(
+                  'v$version',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: isCurrentInstall
+                        ? AppColors.success
+                        : AppColors.textSecondary,
+                    fontFamily: 'monospace',
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (changelog != null && changelog.isNotEmpty)
+                      Text(
+                        changelog,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: AppColors.textSecondary,
+                          height: 1.5,
+                        ),
+                      )
+                    else
+                      const Text(
+                        'Pas de notes de version.',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: AppColors.textTertiary,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
+                    if (sizeBytes != null) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        formatSize(sizeBytes),
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: AppColors.textTertiary,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (isCurrentInstall)
+                const Padding(
+                  padding: EdgeInsets.only(left: 8),
+                  child: Text(
+                    'Installé ✓',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: AppColors.success,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+      ],
     );
   }
 
@@ -276,18 +530,41 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
     List<Map<String, dynamic>> releases,
     InstalledInfo? installedInfo,
   ) {
+    final iconPath = app['icon'] as String?;
+    final iconUrl = ApiClient.instance.getIconUrl(iconPath);
+
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Container(
-            width: 48,
-            height: 48,
-            color: const Color(0xFF1E3A5F),
-            child: const Icon(
-              Icons.widgets_outlined,
-              color: AppColors.primary,
-              size: 26,
+            width: 64,
+            height: 64,
+            decoration: BoxDecoration(
+              color: const Color(0xFF1E3A5F),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: AppColors.border, width: 1),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(13),
+              child: iconUrl != null
+                  ? Image.network(
+                      iconUrl,
+                      width: 64,
+                      height: 64,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => const Icon(
+                        Icons.widgets_rounded,
+                        color: AppColors.primary,
+                        size: 32,
+                      ),
+                    )
+                  : const Icon(
+                      Icons.widgets_rounded,
+                      color: AppColors.primary,
+                      size: 32,
+                    ),
             ),
           ),
           const SizedBox(width: 14),
@@ -298,48 +575,45 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
                 Text(
                   app['name'] as String? ?? '',
                   style: const TextStyle(
-                    fontSize: 18,
+                    fontSize: 20,
                     fontWeight: FontWeight.w700,
                     color: AppColors.textPrimary,
                   ),
                 ),
-                const SizedBox(height: 2),
-                Row(
-                  children: [
-                    Text(
-                      app['slug'] as String? ?? '',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: AppColors.textTertiary,
-                        fontFamily: 'monospace',
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Text(
-                      app['category'] as String? ?? 'other',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: AppColors.textTertiary,
-                      ),
-                    ),
-                  ],
+                const SizedBox(height: 4),
+                Text(
+                  app['slug'] as String? ?? '',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: AppColors.textTertiary,
+                    fontFamily: 'monospace',
+                  ),
                 ),
+                if (installedInfo != null) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: AppColors.success.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(
+                        color: AppColors.success.withOpacity(0.3),
+                        width: 1,
+                      ),
+                    ),
+                    child: Text(
+                      'Installé ✓  v${installedInfo.version}',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: AppColors.success,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
-          if (installedInfo != null)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              color: const Color(0xFF064E3B),
-              child: Text(
-                'v${installedInfo.version}',
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: AppColors.success,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
         ],
       ),
     );
@@ -358,51 +632,93 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
           if (!isUpToDate)
             Expanded(
               child: SizedBox(
-                height: 44,
+                height: 46,
                 child: ElevatedButton(
                   onPressed: _dlState != null
                       ? null
                       : () => _handleDownload(latestVersion),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor:
-                        hasUpdate ? const Color(0xFF059669) : const Color(0xFF2563EB),
+                    backgroundColor: hasUpdate
+                        ? const Color(0xFFF97316)  // orange for update
+                        : const Color(0xFF2563EB), // blue for install
                     disabledBackgroundColor: (hasUpdate
-                            ? const Color(0xFF059669)
+                            ? const Color(0xFFF97316)
                             : const Color(0xFF2563EB))
-                        .withOpacity(0.5),
+                        .withOpacity(0.4),
                     foregroundColor: Colors.white,
-                    shape: const RoundedRectangleBorder(
-                      borderRadius: BorderRadius.zero,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(6),
                     ),
                   ),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
+                    mainAxisSize: MainAxisSize.min,
                     children: [
                       if (_dlState?.version == latestVersion &&
-                          _dlState?.phase != 'error')
-                        const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
+                          _dlState?.phase == 'download')
+                        ...[
+                          const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
                           ),
-                        )
-                      else
+                          const SizedBox(width: 8),
+                          Flexible(
+                            child: Text(
+                              'Téléchargement... ${(_dlState!.progress * 100).round()}%',
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                              maxLines: 1,
+                            ),
+                          ),
+                        ]
+                      else if (_dlState?.version == latestVersion &&
+                          _dlState?.phase == 'install')
+                        ...[
+                          const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          const Flexible(
+                            child: Text(
+                              'Installation...',
+                              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                              overflow: TextOverflow.ellipsis,
+                              maxLines: 1,
+                            ),
+                          ),
+                        ]
+                      else ...[
                         Icon(
-                          hasUpdate ? Icons.refresh : Icons.download,
+                          hasUpdate ? Icons.system_update_alt : Icons.download_rounded,
                           size: 18,
                         ),
-                      const SizedBox(width: 8),
-                      Text(
-                        hasUpdate
-                            ? 'Mettre \u00e0 jour v$latestVersion'
-                            : 'Installer v$latestVersion',
-                        style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(
+                            hasUpdate
+                                ? 'Màj v$latestVersion'
+                                : 'Installer v$latestVersion',
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                            maxLines: 1,
+                          ),
                         ),
-                      ),
+                      ],
                     ],
                   ),
                 ),
@@ -412,26 +728,28 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
             if (!isUpToDate) const SizedBox(width: 10),
             Expanded(
               child: SizedBox(
-                height: 44,
+                height: 46,
                 child: ElevatedButton(
                   onPressed: _handleOpenApp,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF059669),
                     foregroundColor: Colors.white,
-                    shape: const RoundedRectangleBorder(
-                      borderRadius: BorderRadius.zero,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(6),
                     ),
                   ),
-                  child: Row(
+                  child: const Row(
                     mainAxisAlignment: MainAxisAlignment.center,
-                    children: const [
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
                       Icon(Icons.open_in_new, size: 18),
-                      SizedBox(width: 8),
-                      Text(
-                        'Ouvrir',
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
+                      SizedBox(width: 6),
+                      Flexible(
+                        child: Text(
+                          'Ouvrir',
+                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                          overflow: TextOverflow.ellipsis,
+                          maxLines: 1,
                         ),
                       ),
                     ],
@@ -439,17 +757,18 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
                 ),
               ),
             ),
-            const SizedBox(width: 10),
+            const SizedBox(width: 8),
             SizedBox(
-              height: 44,
+              height: 46,
               child: OutlinedButton(
                 onPressed: _handleUninstall,
                 style: OutlinedButton.styleFrom(
                   foregroundColor: const Color(0xFFF87171),
                   side: const BorderSide(color: Color(0xFF7F1D1D)),
-                  shape: const RoundedRectangleBorder(
-                    borderRadius: BorderRadius.zero,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(6),
                   ),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
                 ),
                 child: const Icon(Icons.delete_outline, size: 18),
               ),

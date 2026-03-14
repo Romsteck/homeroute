@@ -136,7 +136,7 @@ export default function RecordGrid({
     if (name === 'id') return 'auto_increment';
     if (name === 'created_at' || name === 'updated_at') return 'date_time';
     const col = getColumnInfo(name);
-    return col?.field_type || 'text';
+    return col?.fieldType || 'text';
   }
 
   function handleFilterApply(filter) {
@@ -264,7 +264,7 @@ export default function RecordGrid({
                         return (
                           <td key={col} className="px-3 py-2 whitespace-nowrap">
                             <LookupLink
-                              targetTable={relation.to_table}
+                              targetTable={relation.toTable}
                               value={row[col]}
                               onClick={(table, id) => onLookupClick(table, id)}
                             />
