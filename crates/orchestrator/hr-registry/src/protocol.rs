@@ -371,6 +371,21 @@ pub enum HostAgentMessage {
         #[serde(default)]
         scan_error: Option<String>,
     },
+    /// Backup: host-agent is ready to receive data, returns previous manifest.
+    BackupRepoReady {
+        transfer_id: String,
+        #[serde(default)]
+        previous_manifest: Option<String>,
+    },
+    /// Backup: repo backup completed on host-agent side.
+    BackupRepoComplete {
+        transfer_id: String,
+        repo_name: String,
+        success: bool,
+        message: String,
+        #[serde(default)]
+        snapshot_name: Option<String>,
+    },
 }
 
 /// Nspawn container info reported by host-agent.
@@ -572,6 +587,17 @@ pub enum HostRegistryMessage {
     /// Registry asks host-agent to run an APT upgrade.
     RunAptUpgrade {
         full_upgrade: bool,
+    },
+    /// Backup: start receiving backup data for a repo.
+    StartBackupRepo {
+        repo_name: String,
+        transfer_id: String,
+    },
+    /// Backup: all chunks sent, finalize the repo backup.
+    FinishBackupRepo {
+        repo_name: String,
+        transfer_id: String,
+        manifest_json: String,
     },
 }
 

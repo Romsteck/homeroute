@@ -258,7 +258,7 @@ async fn main() -> anyhow::Result<()> {
     let renames = Arc::new(RwLock::new(HashMap::new()));
 
     // ── Backup pipeline ──────────────────────────────────────────────────
-    let backup_pipeline = Arc::new(backup_pipeline::BackupPipeline::new(events.clone()));
+    let backup_pipeline = Arc::new(backup_pipeline::BackupPipeline::new(events.clone(), registry.clone()));
     backup_pipeline::spawn_daily_scheduler(backup_pipeline.clone());
     info!("Backup pipeline initialized (daily at 03:00 UTC)");
 

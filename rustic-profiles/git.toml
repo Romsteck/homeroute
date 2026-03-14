@@ -1,5 +1,0 @@
-[repository]
-repository = "sftp:romain@10.0.0.20:/backup/git/rustic"
-
-[repository.options]
-sftp.command = "ssh romain@10.0.0.20 -i /root/.ssh/id_ed25519_backup -o StrictHostKeyChecking=no -o BatchMode=yes -s sftp"

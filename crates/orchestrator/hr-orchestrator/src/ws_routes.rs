@@ -1119,6 +1119,36 @@ async fn handle_host_agent_message(
                 },
             );
         }
+        HostAgentMessage::BackupRepoReady {
+            transfer_id,
+            previous_manifest,
+        } => {
+            info!(
+                transfer_id = %transfer_id,
+                has_manifest = previous_manifest.is_some(),
+                "Backup repo ready"
+            );
+            registry
+                .on_backup_repo_ready(&transfer_id, previous_manifest)
+                .await;
+        }
+        HostAgentMessage::BackupRepoComplete {
+            transfer_id,
+            repo_name,
+            success,
+            message,
+            snapshot_name,
+        } => {
+            info!(
+                transfer_id = %transfer_id,
+                repo = %repo_name,
+                success,
+                "Backup repo complete"
+            );
+            registry
+                .on_backup_repo_complete(&transfer_id, success, &message, snapshot_name)
+                .await;
+        }
     }
 }
 

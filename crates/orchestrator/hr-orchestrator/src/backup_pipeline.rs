@@ -1,33 +1,52 @@
 use std::collections::HashMap;
-use std::process::Stdio;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use hr_common::events::{BackupLiveEvent, EventBus};
+use hr_registry::protocol::HostRegistryMessage;
+use hr_registry::{AgentRegistry, BackupSignal};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 const BACKUP_SERVER_HOST_ID: &str = "877bcb76-4fb8-4164-940c-707201adf9bc";
-const BACKUP_SERVER_IP: &str = "10.0.0.20";
-const BACKUP_SERVER_USER: &str = "romain";
 const HOMEROUTE_API_BASE: &str = "http://10.0.0.254:4000";
 const WAKE_TIMEOUT_SECS: u64 = 180;
 const WAKE_POLL_INTERVAL_SECS: u64 = 10;
-const REPO_BACKUP_TIMEOUT_SECS: u64 = 3600;
-const TOTAL_PIPELINE_TIMEOUT_SECS: u64 = 10800;
+const REPO_BACKUP_TIMEOUT_SECS: u64 = 7200;
+const TOTAL_PIPELINE_TIMEOUT_SECS: u64 = 14400;
 const MAX_JOB_HISTORY: usize = 20;
+const CHUNK_SIZE: usize = 524288; // 512KB
+const EMIT_THROTTLE_MS: u64 = 100;
+
+// ── Manifest types ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileManifest {
+    pub created_at: String,
+    pub repo_name: String,
+    pub files: Vec<ManifestEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestEntry {
+    pub path: String,
+    pub size: u64,
+    pub mtime: i64,
+    #[serde(default)]
+    pub hash: Option<u32>, // xxhash32, computed when mtime is ambiguous
+}
+
+// ── Repo config ────────────────────────────────────────────────────
 
 fn default_repos() -> Vec<RepoConfig> {
     vec![
         RepoConfig {
             name: "homeroute".to_string(),
-            source_paths: vec!["/opt/homeroute".to_string()],
-            rustic_repo: format!(
-                "sftp:{BACKUP_SERVER_USER}@{BACKUP_SERVER_IP}:/backup/homeroute/rustic"
-            ),
+            source_path: "/opt/homeroute".to_string(),
             excludes: vec![
                 ".git".to_string(),
                 "crates/target".to_string(),
@@ -39,26 +58,17 @@ fn default_repos() -> Vec<RepoConfig> {
         },
         RepoConfig {
             name: "containers".to_string(),
-            source_paths: vec!["/var/lib/machines".to_string()],
-            rustic_repo: format!(
-                "sftp:{BACKUP_SERVER_USER}@{BACKUP_SERVER_IP}:/backup/containers/rustic"
-            ),
+            source_path: "/var/lib/machines".to_string(),
             excludes: Vec::new(),
         },
         RepoConfig {
             name: "git".to_string(),
-            source_paths: vec!["/var/lib/git".to_string()],
-            rustic_repo: format!(
-                "sftp:{BACKUP_SERVER_USER}@{BACKUP_SERVER_IP}:/backup/git/rustic"
-            ),
+            source_path: "/var/lib/git".to_string(),
             excludes: Vec::new(),
         },
         RepoConfig {
             name: "pixel".to_string(),
-            source_paths: vec!["/home/romain".to_string()],
-            rustic_repo: format!(
-                "sftp:{BACKUP_SERVER_USER}@{BACKUP_SERVER_IP}:/backup/pixel/rustic"
-            ),
+            source_path: "/home/romain".to_string(),
             excludes: vec![".cache".to_string()],
         },
     ]
@@ -67,10 +77,11 @@ fn default_repos() -> Vec<RepoConfig> {
 #[derive(Debug, Clone)]
 pub struct RepoConfig {
     pub name: String,
-    pub source_paths: Vec<String>,
-    pub rustic_repo: String,
+    pub source_path: String,
     pub excludes: Vec<String>,
 }
+
+// ── Status types ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -79,7 +90,6 @@ pub enum PipelineStage {
     WakingServer,
     WaitingForServer,
     RunningBackup,
-    Verifying,
     PuttingToSleep,
     Done,
     Failed,
@@ -89,8 +99,9 @@ pub enum PipelineStage {
 #[serde(rename_all = "snake_case")]
 pub enum BackupPhase {
     Idle,
-    Backup,
-    Forget,
+    Scanning,
+    Transferring,
+    Verifying,
     Sleep,
     Done,
     Failed,
@@ -102,9 +113,10 @@ pub struct RepoStatus {
     pub last_backup_at: Option<String>,
     pub last_success: Option<bool>,
     pub last_duration_secs: Option<u64>,
-    pub last_snapshot_id: Option<String>,
     pub last_error: Option<String>,
     pub last_transferred_bytes: Option<u64>,
+    pub last_files_changed: Option<u64>,
+    pub last_files_total: Option<u64>,
 }
 
 impl RepoStatus {
@@ -114,9 +126,10 @@ impl RepoStatus {
             last_backup_at: None,
             last_success: None,
             last_duration_secs: None,
-            last_snapshot_id: None,
             last_error: None,
             last_transferred_bytes: None,
+            last_files_changed: None,
+            last_files_total: None,
         }
     }
 }
@@ -130,7 +143,8 @@ pub struct BackupJob {
     pub success: bool,
     pub duration_secs: Option<u64>,
     pub message: String,
-    pub snapshot_id: Option<String>,
+    pub files_changed: Option<u64>,
+    pub bytes_transferred: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,9 +187,10 @@ pub struct BackupProgress {
     pub phase: BackupPhase,
     pub progress: f64,
     pub speed: Option<String>,
-    pub files_processed: Option<u64>,
-    pub total_files: Option<u64>,
+    pub files_changed: Option<u64>,
+    pub files_total: Option<u64>,
     pub bytes_transferred: u64,
+    pub total_bytes: u64,
     pub elapsed_secs: u64,
     pub remaining_secs: Option<u64>,
     pub started_at: Option<String>,
@@ -190,9 +205,10 @@ impl Default for BackupProgress {
             phase: BackupPhase::Idle,
             progress: 0.0,
             speed: None,
-            files_processed: None,
-            total_files: None,
+            files_changed: None,
+            files_total: None,
             bytes_transferred: 0,
+            total_bytes: 0,
             elapsed_secs: 0,
             remaining_secs: None,
             started_at: None,
@@ -201,20 +217,18 @@ impl Default for BackupProgress {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct RepoRunMetrics {
-    transferred_bytes: u64,
-}
+// ── BackupPipeline ─────────────────────────────────────────────────
 
 pub struct BackupPipeline {
     pub status: Arc<RwLock<BackupStatus>>,
     pub progress: Arc<RwLock<BackupProgress>>,
     http: reqwest::Client,
     events: Arc<EventBus>,
+    registry: Arc<AgentRegistry>,
 }
 
 impl BackupPipeline {
-    pub fn new(events: Arc<EventBus>) -> Self {
+    pub fn new(events: Arc<EventBus>, registry: Arc<AgentRegistry>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -224,6 +238,7 @@ impl BackupPipeline {
             progress: Arc::new(RwLock::new(BackupProgress::default())),
             http,
             events,
+            registry,
         }
     }
 
@@ -260,12 +275,19 @@ impl BackupPipeline {
         let progress = self.progress.clone();
         let http = self.http.clone();
         let events = self.events.clone();
+        let registry = self.registry.clone();
 
         tokio::spawn(async move {
             let started = Instant::now();
             let result = tokio::time::timeout(
                 Duration::from_secs(TOTAL_PIPELINE_TIMEOUT_SECS),
-                run_pipeline(status.clone(), progress.clone(), http, events.clone()),
+                run_pipeline(
+                    status.clone(),
+                    progress.clone(),
+                    http,
+                    events.clone(),
+                    registry,
+                ),
             )
             .await;
             let elapsed = started.elapsed().as_secs();
@@ -278,7 +300,7 @@ impl BackupPipeline {
 
                 match &result {
                     Ok(Ok(msg)) => {
-                        info!("Backup pipeline completed successfully in {elapsed}s: {msg}");
+                        info!("Backup pipeline completed in {elapsed}s: {msg}");
                         s.stage = PipelineStage::Done;
                         s.last_run_success = Some(true);
                         s.last_run_message = Some(msg.clone());
@@ -317,9 +339,6 @@ impl BackupPipeline {
                 };
                 if matches!(result, Ok(Ok(_))) {
                     p.progress = 100.0;
-                    if p.detail.is_none() {
-                        p.detail = Some("Sauvegarde terminée".to_string());
-                    }
                 }
             }
 
@@ -345,6 +364,8 @@ impl BackupPipeline {
         self.progress.read().await.clone()
     }
 }
+
+// ── Event emission ─────────────────────────────────────────────────
 
 async fn emit_backup_live(
     events: &EventBus,
@@ -373,14 +394,40 @@ async fn emit_backup_live(
     let _ = events.backup_live.send(event);
 }
 
+async fn set_stage(
+    status: &Arc<RwLock<BackupStatus>>,
+    progress: &Arc<RwLock<BackupProgress>>,
+    stage: PipelineStage,
+    phase: BackupPhase,
+    message: &str,
+    events: &EventBus,
+) {
+    {
+        let mut s = status.write().await;
+        s.stage = stage;
+        s.current_message = Some(message.to_string());
+    }
+    {
+        let mut p = progress.write().await;
+        p.phase = phase;
+        p.detail = Some(message.to_string());
+    }
+    info!("Backup pipeline: {message}");
+    emit_backup_live(events, status, progress).await;
+}
+
+// ── Pipeline ───────────────────────────────────────────────────────
+
 async fn run_pipeline(
     status: Arc<RwLock<BackupStatus>>,
     progress: Arc<RwLock<BackupProgress>>,
     http: reqwest::Client,
     events: Arc<EventBus>,
+    registry: Arc<AgentRegistry>,
 ) -> Result<String, String> {
     let repos = default_repos();
 
+    // ── Wake backup server ──────────────────────────────────────
     set_stage(
         &status,
         &progress,
@@ -407,8 +454,9 @@ async fn run_pipeline(
     )
     .await;
 
-    wait_for_server(status.clone(), progress.clone()).await?;
+    wait_for_host_agent(&registry, &status, &progress).await?;
 
+    // ── Run backups ─────────────────────────────────────────────
     set_stage(
         &status,
         &progress,
@@ -432,14 +480,15 @@ async fn run_pipeline(
             let mut p = progress.write().await;
             p.running = true;
             p.current_repo = Some(repo.name.clone());
-            p.phase = BackupPhase::Backup;
+            p.phase = BackupPhase::Scanning;
             p.progress = 0.0;
             p.speed = None;
-            p.files_processed = None;
-            p.total_files = None;
+            p.files_changed = None;
+            p.files_total = None;
             p.bytes_transferred = 0;
+            p.total_bytes = 0;
             p.remaining_secs = None;
-            p.detail = Some(format!("Préparation du repo {}", repo.name));
+            p.detail = Some(format!("Scan du repo {}", repo.name));
         }
 
         emit_backup_live(&events, &status, &progress).await;
@@ -447,32 +496,30 @@ async fn run_pipeline(
         let job_id = format!("{}-{}", repo.name, Utc::now().timestamp_millis());
         let job_started = Utc::now().to_rfc3339();
         let t0 = Instant::now();
-        let result =
-            run_rustic_backup(repo, status.clone(), progress.clone(), events.clone()).await;
+        let result = run_repo_backup(
+            repo,
+            &registry,
+            status.clone(),
+            progress.clone(),
+            events.clone(),
+        )
+        .await;
         let duration = t0.elapsed().as_secs();
         let finished_at = Utc::now().to_rfc3339();
 
-        let (success, snapshot_id, message, metrics) = match result {
-            Ok((snap_id, metrics)) => {
+        let (success, message, files_changed, bytes_transferred) = match result {
+            Ok((fc, bt)) => {
                 any_success = true;
                 (
                     true,
-                    snap_id.clone(),
-                    format!(
-                        "Backup OK (snapshot: {})",
-                        snap_id.as_deref().unwrap_or("?")
-                    ),
-                    metrics,
+                    format!("Backup OK ({fc} fichiers modifiés, {bt} octets transférés)"),
+                    Some(fc),
+                    Some(bt),
                 )
             }
             Err(e) => {
                 all_success = false;
-                (
-                    false,
-                    None,
-                    format!("Backup FAILED: {e}"),
-                    RepoRunMetrics::default(),
-                )
+                (false, format!("Backup FAILED: {e}"), None, None)
             }
         };
 
@@ -482,8 +529,8 @@ async fn run_pipeline(
                 repo_status.last_backup_at = Some(finished_at.clone());
                 repo_status.last_success = Some(success);
                 repo_status.last_duration_secs = Some(duration);
-                repo_status.last_snapshot_id = snapshot_id.clone();
-                repo_status.last_transferred_bytes = Some(metrics.transferred_bytes);
+                repo_status.last_transferred_bytes = bytes_transferred;
+                repo_status.last_files_changed = files_changed;
                 repo_status.last_error = if success {
                     None
                 } else {
@@ -501,7 +548,8 @@ async fn run_pipeline(
                     success,
                     duration_secs: Some(duration),
                     message: message.clone(),
-                    snapshot_id,
+                    files_changed,
+                    bytes_transferred,
                 },
             );
             if s.jobs.len() > MAX_JOB_HISTORY {
@@ -510,20 +558,10 @@ async fn run_pipeline(
         }
 
         emit_backup_live(&events, &status, &progress).await;
-
         repo_messages.push(format!("{}: {}", repo.name, message));
     }
 
-    set_stage(
-        &status,
-        &progress,
-        PipelineStage::Verifying,
-        BackupPhase::Forget,
-        "Vérification / rétention...",
-        &events,
-    )
-    .await;
-
+    // ── Sleep backup server ─────────────────────────────────────
     set_stage(
         &status,
         &progress,
@@ -550,410 +588,24 @@ async fn run_pipeline(
     }
 }
 
-async fn run_rustic_backup(
-    repo: &RepoConfig,
-    status: Arc<RwLock<BackupStatus>>,
-    progress: Arc<RwLock<BackupProgress>>,
-    events: Arc<EventBus>,
-) -> Result<(Option<String>, RepoRunMetrics), String> {
-    let rustic_password = std::env::var("RUSTIC_PASSWORD").unwrap_or_else(|_| {
-        warn!("RUSTIC_PASSWORD not set, using default password. Please set it in production!");
-        "changeme".to_string()
-    });
+// ── Wait for host-agent connection ─────────────────────────────────
 
-    // Init repo (ignore errors if already initialized)
-    let init_args: Vec<String> = vec![
-        "-P".into(),
-        repo.name.clone(),
-        "init".into(),
-    ];
-    let _ = run_local_command_with_env("rustic", &init_args, &rustic_password, 60).await;
-
-    // Backup phase
-    {
-        let mut p = progress.write().await;
-        p.phase = BackupPhase::Backup;
-        p.progress = 0.0;
-        p.speed = None;
-        p.files_processed = None;
-        p.total_files = None;
-        p.remaining_secs = None;
-        p.detail = Some(format!("Création du snapshot rustic pour {}", repo.name));
-    }
-    {
-        let mut s = status.write().await;
-        s.current_message = Some(format!("rustic backup: {}", repo.name));
-    }
-
-    emit_backup_live(&events, &status, &progress).await;
-
-    let mut backup_args: Vec<String> = vec![
-        "-P".into(),
-        repo.name.clone(),
-        "backup".into(),
-    ];
-    for path in &repo.source_paths {
-        backup_args.push(path.clone());
-    }
-    for exclude in &repo.excludes {
-        backup_args.push("--glob".into());
-        backup_args.push(format!("!{}", exclude));
-    }
-    backup_args.push("--json".into());
-
-    let output = run_local_command_streaming_with_env(
-        "rustic",
-        &backup_args,
-        &rustic_password,
-        REPO_BACKUP_TIMEOUT_SECS,
-        Some(progress.clone()),
-        Some(status.clone()),
-        Some(events.clone()),
-    )
-    .await
-    .map_err(|e| format!("rustic backup failed: {e}"))?;
-
-    let snapshot_id = parse_snapshot_id(&output);
-    let metrics = RepoRunMetrics {
-        transferred_bytes: progress.read().await.bytes_transferred,
-    };
-
-    {
-        let mut p = progress.write().await;
-        if p.progress < 100.0 {
-            p.progress = 100.0;
-        }
-        p.detail = Some(format!("Snapshot rustic terminé pour {}", repo.name));
-    }
-
-    emit_backup_live(&events, &status, &progress).await;
-
-    // Forget/prune phase
-    {
-        let mut p = progress.write().await;
-        p.phase = BackupPhase::Forget;
-        p.detail = Some(format!("Application de la rétention sur {}", repo.name));
-    }
-
-    emit_backup_live(&events, &status, &progress).await;
-
-    let forget_args: Vec<String> = vec![
-        "-P".into(),
-        repo.name.clone(),
-        "forget".into(),
-        "--keep-daily".into(),
-        "7".into(),
-        "--keep-weekly".into(),
-        "4".into(),
-        "--keep-monthly".into(),
-        "6".into(),
-        "--prune".into(),
-    ];
-
-    match run_local_command_with_env(
-        "rustic",
-        &forget_args,
-        &rustic_password,
-        REPO_BACKUP_TIMEOUT_SECS,
-    )
-    .await
-    {
-        Ok(out) => info!("Forget/prune for {}: {}", repo.name, out.trim()),
-        Err(e) => warn!("Forget/prune for {} failed: {e}", repo.name),
-    }
-
-    Ok((snapshot_id, metrics))
-}
-
-fn parse_snapshot_id(output: &str) -> Option<String> {
-    for line in output.lines() {
-        let line = line.trim();
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if let Some(id) = v.get("id").and_then(|v| v.as_str()) {
-                return Some(id.to_string());
-            }
-            if let Some(id) = v.get("snapshot_id").and_then(|v| v.as_str()) {
-                return Some(id.to_string());
-            }
-        }
-    }
-    None
-}
-
-async fn run_local_command_with_env(
-    binary: &str,
-    args: &[String],
-    rustic_password: &str,
-    timeout_secs: u64,
-) -> Result<String, String> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        tokio::process::Command::new(binary)
-            .env("RUSTIC_PASSWORD", rustic_password)
-            .args(args)
-            .output(),
-    )
-    .await
-    .map_err(|_| format!("{binary} timed out after {timeout_secs}s"))?
-    .map_err(|e| format!("Failed to spawn {binary}: {e}"))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let combined = format!("{stdout}{stderr}").trim().to_string();
-
-    if output.status.success() {
-        Ok(combined)
-    } else {
-        let code = output.status.code().unwrap_or(-1);
-        Err(format!(
-            "{binary} exited with code {code}. Output: {combined}"
-        ))
-    }
-}
-
-async fn run_local_command_streaming_with_env(
-    binary: &str,
-    args: &[String],
-    rustic_password: &str,
-    timeout_secs: u64,
-    progress: Option<Arc<RwLock<BackupProgress>>>,
-    status: Option<Arc<RwLock<BackupStatus>>>,
-    events: Option<Arc<EventBus>>,
-) -> Result<String, String> {
-    let mut child = tokio::process::Command::new(binary)
-        .env("RUSTIC_PASSWORD", rustic_password)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn {binary}: {e}"))?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| format!("{binary}: stdout unavailable"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| format!("{binary}: stderr unavailable"))?;
-
-    let out_task = tokio::spawn(read_stream(
-        stdout,
-        progress.clone(),
-        status.clone(),
-        events.clone(),
-    ));
-    let err_task = tokio::spawn(read_stream(
-        stderr,
-        progress.clone(),
-        status.clone(),
-        events.clone(),
-    ));
-
-    let exit = tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait())
-        .await
-        .map_err(|_| format!("{binary} timed out after {timeout_secs}s"))?
-        .map_err(|e| format!("Failed waiting for {binary}: {e}"))?;
-
-    let mut combined = String::new();
-    combined.push_str(
-        &out_task
-            .await
-            .map_err(|e| format!("stdout task failed: {e}"))?,
-    );
-    combined.push_str(
-        &err_task
-            .await
-            .map_err(|e| format!("stderr task failed: {e}"))?,
-    );
-
-    if exit.success() {
-        Ok(combined.trim().to_string())
-    } else {
-        Err(format!(
-            "{binary} exited with code {}. Output: {}",
-            exit.code().unwrap_or(-1),
-            combined.trim()
-        ))
-    }
-}
-
-async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
-    reader: R,
-    progress: Option<Arc<RwLock<BackupProgress>>>,
-    status: Option<Arc<RwLock<BackupStatus>>>,
-    events: Option<Arc<EventBus>>,
-) -> String {
-    let mut lines = BufReader::new(reader).lines();
-    let mut combined = String::new();
-    let mut last_emit = Instant::now();
-
-    while let Ok(Some(line)) = lines.next_line().await {
-        let normalized = line.replace('\r', "\n");
-        for chunk in normalized.lines() {
-            let text = chunk.trim();
-            if text.is_empty() {
-                continue;
-            }
-            combined.push_str(text);
-            combined.push('\n');
-            parse_rustic_progress(text, progress.clone(), status.clone()).await;
-
-            // Emit WebSocket events at most every 500ms during streaming
-            if let (Some(ev), Some(st), Some(pr)) = (&events, &status, &progress) {
-                if last_emit.elapsed() >= Duration::from_millis(500) {
-                    emit_backup_live(ev, st, pr).await;
-                    last_emit = Instant::now();
-                }
-            }
-        }
-    }
-
-    combined
-}
-
-async fn parse_rustic_progress(
-    line: &str,
-    progress: Option<Arc<RwLock<BackupProgress>>>,
-    status: Option<Arc<RwLock<BackupStatus>>>,
-) {
-    let Some(progress) = progress else { return };
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-
-    let (pct, bytes, files, total_files, speed);
-
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        pct = find_first_f64(
-            &value,
-            &["percent_done", "percent", "progress", "progress_percent"],
-        );
-        bytes = find_first_u64(
-            &value,
-            &[
-                "bytes_done",
-                "bytes",
-                "processed_bytes",
-                "total_bytes_processed",
-                "data_bytes",
-                "size",
-            ],
-        );
-        files = find_first_u64(
-            &value,
-            &["files_done", "files", "processed_files", "current_files"],
-        );
-        total_files = find_first_u64(&value, &["total_files", "files_total"]);
-        speed = find_first_stringish(&value, &["speed", "throughput"]);
-    } else {
-        pct = trimmed
-            .split_whitespace()
-            .find_map(|token| token.strip_suffix('%'))
-            .and_then(|v| v.replace(',', ".").parse::<f64>().ok());
-        bytes = None;
-        files = None;
-        total_files = None;
-        speed = None;
-    }
-
-    let mut p = progress.write().await;
-    if let Some(v) = pct {
-        p.progress = v.clamp(0.0, 100.0);
-    }
-    if let Some(v) = bytes {
-        p.bytes_transferred = p.bytes_transferred.max(v);
-    }
-    if let Some(v) = files {
-        p.files_processed = Some(v);
-    }
-    if let Some(v) = total_files {
-        p.total_files = Some(v);
-    }
-    if let Some(v) = speed {
-        p.speed = Some(v);
-    }
-    p.detail = Some(trimmed.to_string());
-    drop(p);
-
-    if let Some(status) = status {
-        status.write().await.current_message = Some(trimmed.to_string());
-    }
-}
-
-fn find_first_f64(value: &serde_json::Value, keys: &[&str]) -> Option<f64> {
-    match value {
-        serde_json::Value::Object(map) => {
-            for key in keys {
-                if let Some(v) = map.get(*key) {
-                    if let Some(n) = v
-                        .as_f64()
-                        .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
-                    {
-                        return Some(n);
-                    }
-                }
-            }
-            map.values().find_map(|v| find_first_f64(v, keys))
-        }
-        serde_json::Value::Array(items) => items.iter().find_map(|v| find_first_f64(v, keys)),
-        _ => None,
-    }
-}
-
-fn find_first_u64(value: &serde_json::Value, keys: &[&str]) -> Option<u64> {
-    match value {
-        serde_json::Value::Object(map) => {
-            for key in keys {
-                if let Some(v) = map.get(*key) {
-                    if let Some(n) = v
-                        .as_u64()
-                        .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
-                        .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-                    {
-                        return Some(n);
-                    }
-                }
-            }
-            map.values().find_map(|v| find_first_u64(v, keys))
-        }
-        serde_json::Value::Array(items) => items.iter().find_map(|v| find_first_u64(v, keys)),
-        _ => None,
-    }
-}
-
-fn find_first_stringish(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
-    match value {
-        serde_json::Value::Object(map) => {
-            for key in keys {
-                if let Some(v) = map.get(*key) {
-                    if let Some(s) = v.as_str() {
-                        return Some(s.to_string());
-                    }
-                    if let Some(n) = v.as_f64() {
-                        return Some(format!("{n:.1} B/s"));
-                    }
-                }
-            }
-            map.values().find_map(|v| find_first_stringish(v, keys))
-        }
-        serde_json::Value::Array(items) => {
-            items.iter().find_map(|v| find_first_stringish(v, keys))
-        }
-        _ => None,
-    }
-}
-
-async fn wait_for_server(
-    status: Arc<RwLock<BackupStatus>>,
-    progress: Arc<RwLock<BackupProgress>>,
+async fn wait_for_host_agent(
+    registry: &AgentRegistry,
+    status: &Arc<RwLock<BackupStatus>>,
+    progress: &Arc<RwLock<BackupProgress>>,
 ) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(WAKE_TIMEOUT_SECS);
     let mut attempt = 0u32;
 
     while Instant::now() < deadline {
         attempt += 1;
+
+        if registry.is_host_connected(BACKUP_SERVER_HOST_ID).await {
+            info!("Backup server host-agent connected (attempt {attempt})");
+            return Ok(());
+        }
+
         let remaining = deadline.saturating_duration_since(Instant::now()).as_secs();
         let message = format!(
             "Attente du serveur backup… tentative {attempt} ({remaining}s restantes)"
@@ -966,48 +618,489 @@ async fn wait_for_server(
             p.remaining_secs = Some(remaining);
         }
 
-        match tokio::net::TcpStream::connect((BACKUP_SERVER_IP, 22)).await {
-            Ok(_) => {
-                info!("Backup server is online (attempt {attempt})");
-                tokio::time::sleep(Duration::from_secs(3)).await;
-                return Ok(());
-            }
-            Err(_) => {
-                info!(
-                    "Backup server not yet reachable (attempt {attempt}), retrying in {WAKE_POLL_INTERVAL_SECS}s..."
-                );
-            }
-        }
-
         tokio::time::sleep(Duration::from_secs(WAKE_POLL_INTERVAL_SECS)).await;
     }
 
     Err(format!(
-        "Backup server did not come online within {WAKE_TIMEOUT_SECS}s"
+        "Backup server host-agent did not connect within {WAKE_TIMEOUT_SECS}s"
     ))
 }
 
-async fn set_stage(
-    status: &Arc<RwLock<BackupStatus>>,
-    progress: &Arc<RwLock<BackupProgress>>,
-    stage: PipelineStage,
-    phase: BackupPhase,
-    message: &str,
-    events: &EventBus,
-) {
-    {
-        let mut s = status.write().await;
-        s.stage = stage;
-        s.current_message = Some(message.to_string());
-    }
+// ── Per-repo backup ────────────────────────────────────────────────
+
+async fn run_repo_backup(
+    repo: &RepoConfig,
+    registry: &Arc<AgentRegistry>,
+    status: Arc<RwLock<BackupStatus>>,
+    progress: Arc<RwLock<BackupProgress>>,
+    events: Arc<EventBus>,
+) -> Result<(u64, u64), String> {
+    let transfer_id = uuid::Uuid::new_v4().to_string();
+
+    // Register backup signal to receive responses
+    let mut signal_rx = registry.register_backup_signal(&transfer_id).await;
+
+    // Step 1: Tell host-agent to prepare and send us the previous manifest
+    info!(repo = repo.name, "Sending StartBackupRepo");
+    registry
+        .send_host_command(
+            BACKUP_SERVER_HOST_ID,
+            HostRegistryMessage::StartBackupRepo {
+                repo_name: repo.name.clone(),
+                transfer_id: transfer_id.clone(),
+            },
+        )
+        .await
+        .map_err(|e| format!("Failed to send StartBackupRepo: {e}"))?;
+
+    // Wait for BackupRepoReady with previous manifest
+    let previous_manifest = tokio::time::timeout(Duration::from_secs(60), signal_rx.recv())
+        .await
+        .map_err(|_| "Timeout waiting for BackupRepoReady".to_string())?
+        .ok_or_else(|| "Backup signal channel closed".to_string())
+        .and_then(|sig| match sig {
+            BackupSignal::RepoReady { previous_manifest } => Ok(previous_manifest),
+            _ => Err("Unexpected backup signal".to_string()),
+        })?;
+
+    let old_manifest: Option<FileManifest> = previous_manifest
+        .as_deref()
+        .and_then(|json| serde_json::from_str(json).ok());
+
+    info!(
+        repo = repo.name,
+        has_previous = old_manifest.is_some(),
+        "Received previous manifest"
+    );
+
+    // Step 2: Scan local directory
     {
         let mut p = progress.write().await;
-        p.phase = phase;
-        p.detail = Some(message.to_string());
+        p.phase = BackupPhase::Scanning;
+        p.detail = Some(format!("Scan des fichiers de {}", repo.name));
     }
-    info!("Backup pipeline: {message}");
-    emit_backup_live(events, status, progress).await;
+    emit_backup_live(&events, &status, &progress).await;
+
+    let source_path = PathBuf::from(&repo.source_path);
+    let current_files = scan_directory(&source_path, &repo.excludes).await?;
+    let total_files = current_files.len() as u64;
+
+    // Step 3: Compute diff
+    let old_index: HashMap<String, &ManifestEntry> = old_manifest
+        .as_ref()
+        .map(|m| m.files.iter().map(|e| (e.path.clone(), e)).collect())
+        .unwrap_or_default();
+
+    let mut changed_files: Vec<String> = Vec::new();
+    for entry in &current_files {
+        match old_index.get(&entry.path) {
+            Some(old) if old.size == entry.size && old.mtime == entry.mtime => {
+                // Unchanged
+            }
+            _ => {
+                changed_files.push(entry.path.clone());
+            }
+        }
+    }
+
+    let files_changed = changed_files.len() as u64;
+    info!(
+        repo = repo.name,
+        total = total_files,
+        changed = files_changed,
+        "Diff computed"
+    );
+
+    {
+        let mut p = progress.write().await;
+        p.files_changed = Some(files_changed);
+        p.files_total = Some(total_files);
+        p.detail = Some(format!(
+            "{files_changed} fichiers modifiés sur {total_files} ({})",
+            repo.name
+        ));
+    }
+    emit_backup_live(&events, &status, &progress).await;
+
+    // Step 4: Transfer changed files via binary pipe
+    let bytes_transferred = if changed_files.is_empty() {
+        info!(repo = repo.name, "No changes to transfer");
+        {
+            let mut p = progress.write().await;
+            p.phase = BackupPhase::Transferring;
+            p.progress = 100.0;
+            p.detail = Some(format!("Aucun changement pour {}", repo.name));
+        }
+        emit_backup_live(&events, &status, &progress).await;
+
+        // Send TransferComplete even if no data (to close tar on agent side)
+        registry
+            .send_host_command(
+                BACKUP_SERVER_HOST_ID,
+                HostRegistryMessage::TransferComplete {
+                    transfer_id: transfer_id.clone(),
+                },
+            )
+            .await
+            .map_err(|e| format!("Failed to send TransferComplete: {e}"))?;
+
+        0u64
+    } else {
+        {
+            let mut p = progress.write().await;
+            p.phase = BackupPhase::Transferring;
+            p.progress = 0.0;
+            p.detail = Some(format!(
+                "Transfert de {} fichiers pour {}",
+                files_changed, repo.name
+            ));
+        }
+        emit_backup_live(&events, &status, &progress).await;
+
+        // Write file list to temp file for tar
+        let file_list_path = format!("/tmp/backup-filelist-{}.txt", transfer_id);
+        let file_list_content = changed_files.join("\n");
+        tokio::fs::write(&file_list_path, &file_list_content)
+            .await
+            .map_err(|e| format!("Failed to write file list: {e}"))?;
+
+        // Spawn tar process to create archive of changed files
+        let mut tar_child = tokio::process::Command::new("tar")
+            .args([
+                "cf",
+                "-",
+                "--numeric-owner",
+                "-C",
+                &repo.source_path,
+                "-T",
+                &file_list_path,
+                "--ignore-failed-read",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn tar: {e}"))?;
+
+        let mut tar_stdout = tar_child.stdout.take().ok_or("tar stdout unavailable")?;
+
+        // Estimate total bytes from changed files
+        let estimated_bytes: u64 = current_files
+            .iter()
+            .filter(|e| changed_files.contains(&e.path))
+            .map(|e| e.size)
+            .sum();
+
+        {
+            let mut p = progress.write().await;
+            p.total_bytes = estimated_bytes;
+        }
+
+        // Stream chunks to remote host-agent
+        let bytes = stream_backup_to_remote(
+            registry,
+            &transfer_id,
+            &mut tar_stdout,
+            estimated_bytes,
+            &status,
+            &progress,
+            &events,
+            &repo.name,
+        )
+        .await?;
+
+        // Wait for tar to finish
+        let _ = tar_child.wait().await;
+        // Clean up file list
+        let _ = tokio::fs::remove_file(&file_list_path).await;
+
+        // Send TransferComplete
+        registry
+            .send_host_command(
+                BACKUP_SERVER_HOST_ID,
+                HostRegistryMessage::TransferComplete {
+                    transfer_id: transfer_id.clone(),
+                },
+            )
+            .await
+            .map_err(|e| format!("Failed to send TransferComplete: {e}"))?;
+
+        bytes
+    };
+
+    // Step 5: Send new manifest and ask host-agent to finalize
+    {
+        let mut p = progress.write().await;
+        p.phase = BackupPhase::Verifying;
+        p.detail = Some(format!("Finalisation du backup {}", repo.name));
+    }
+    emit_backup_live(&events, &status, &progress).await;
+
+    let new_manifest = FileManifest {
+        created_at: Utc::now().to_rfc3339(),
+        repo_name: repo.name.clone(),
+        files: current_files,
+    };
+    let manifest_json =
+        serde_json::to_string(&new_manifest).map_err(|e| format!("Manifest serialize: {e}"))?;
+
+    registry
+        .send_host_command(
+            BACKUP_SERVER_HOST_ID,
+            HostRegistryMessage::FinishBackupRepo {
+                repo_name: repo.name.clone(),
+                transfer_id: transfer_id.clone(),
+                manifest_json,
+            },
+        )
+        .await
+        .map_err(|e| format!("Failed to send FinishBackupRepo: {e}"))?;
+
+    // Wait for BackupRepoComplete
+    let complete_result = tokio::time::timeout(
+        Duration::from_secs(REPO_BACKUP_TIMEOUT_SECS),
+        signal_rx.recv(),
+    )
+    .await
+    .map_err(|_| "Timeout waiting for BackupRepoComplete".to_string())?
+    .ok_or_else(|| "Backup signal channel closed".to_string())
+    .and_then(|sig| match sig {
+        BackupSignal::RepoComplete {
+            success,
+            message,
+            snapshot_name,
+        } => {
+            if success {
+                info!(
+                    repo = repo.name,
+                    snapshot = ?snapshot_name,
+                    "Backup repo complete"
+                );
+                Ok(())
+            } else {
+                Err(format!("Host-agent finalization failed: {message}"))
+            }
+        }
+        _ => Err("Unexpected backup signal".to_string()),
+    });
+
+    // Clean up signal
+    registry.remove_backup_signal(&transfer_id).await;
+    complete_result?;
+
+    {
+        let mut p = progress.write().await;
+        p.progress = 100.0;
+        p.detail = Some(format!("Backup terminé pour {}", repo.name));
+    }
+    emit_backup_live(&events, &status, &progress).await;
+
+    Ok((files_changed, bytes_transferred))
 }
+
+// ── Directory scanner ──────────────────────────────────────────────
+
+async fn scan_directory(
+    source_path: &Path,
+    excludes: &[String],
+) -> Result<Vec<ManifestEntry>, String> {
+    let source = source_path.to_path_buf();
+    let excludes = excludes.to_vec();
+
+    tokio::task::spawn_blocking(move || {
+        let mut entries = Vec::new();
+        scan_dir_recursive(&source, &source, &excludes, &mut entries)?;
+        Ok(entries)
+    })
+    .await
+    .map_err(|e| format!("Scan task failed: {e}"))?
+}
+
+fn scan_dir_recursive(
+    base: &Path,
+    dir: &Path,
+    excludes: &[String],
+    entries: &mut Vec<ManifestEntry>,
+) -> Result<(), String> {
+    let read_dir = std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
+
+    for entry in read_dir {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let rel_path = path
+            .strip_prefix(base)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
+
+        // Check excludes
+        if excludes.iter().any(|ex| {
+            rel_path == *ex
+                || rel_path.starts_with(&format!("{ex}/"))
+                || path.file_name().map_or(false, |n| n.to_string_lossy() == *ex)
+        }) {
+            continue;
+        }
+
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+
+        if ft.is_dir() {
+            scan_dir_recursive(base, &path, excludes, entries)?;
+        } else if ft.is_file() || ft.is_symlink() {
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+
+            entries.push(ManifestEntry {
+                path: rel_path,
+                size: meta.len(),
+                mtime,
+                hash: None,
+            });
+        }
+    }
+    Ok(())
+}
+
+// ── Binary streaming to remote ─────────────────────────────────────
+
+async fn stream_backup_to_remote(
+    registry: &Arc<AgentRegistry>,
+    transfer_id: &str,
+    reader: &mut (impl tokio::io::AsyncRead + Unpin),
+    estimated_bytes: u64,
+    status: &Arc<RwLock<BackupStatus>>,
+    progress: &Arc<RwLock<BackupProgress>>,
+    events: &Arc<EventBus>,
+    repo_name: &str,
+) -> Result<u64, String> {
+    let mut buf = vec![0u8; CHUNK_SIZE];
+    let mut transferred: u64 = 0;
+    let mut sequence: u32 = 0;
+    let mut last_emit = Instant::now();
+    let transfer_start = Instant::now();
+
+    loop {
+        let n = match reader.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => return Err(format!("Read error: {e}")),
+        };
+
+        let chunk = &buf[..n];
+        let checksum = xxhash_rust::xxh32::xxh32(chunk, 0);
+
+        if let Err(e) = registry
+            .send_host_command(
+                BACKUP_SERVER_HOST_ID,
+                HostRegistryMessage::ReceiveChunkBinary {
+                    transfer_id: transfer_id.to_string(),
+                    sequence,
+                    size: n as u32,
+                    checksum,
+                },
+            )
+            .await
+        {
+            return Err(format!("Send chunk metadata failed: {e}"));
+        }
+
+        if let Err(e) = registry
+            .send_host_binary(BACKUP_SERVER_HOST_ID, chunk.to_vec())
+            .await
+        {
+            return Err(format!("Send binary chunk failed: {e}"));
+        }
+
+        transferred += n as u64;
+        sequence += 1;
+
+        // Update progress with throttle
+        if last_emit.elapsed() >= Duration::from_millis(EMIT_THROTTLE_MS) || transferred >= estimated_bytes {
+            let pct = if estimated_bytes > 0 {
+                (transferred as f64 / estimated_bytes as f64 * 100.0).min(99.9)
+            } else {
+                0.0
+            };
+            let elapsed_secs = transfer_start.elapsed().as_secs_f64();
+            let speed = if elapsed_secs > 0.0 {
+                transferred as f64 / elapsed_secs
+            } else {
+                0.0
+            };
+            let speed_str = format_speed(speed);
+            let remaining = if speed > 0.0 && estimated_bytes > transferred {
+                Some(((estimated_bytes - transferred) as f64 / speed) as u64)
+            } else {
+                None
+            };
+
+            {
+                let mut p = progress.write().await;
+                p.progress = pct;
+                p.bytes_transferred = transferred;
+                p.speed = Some(speed_str);
+                p.remaining_secs = remaining;
+                p.detail = Some(format!(
+                    "Transfert {} : {} / {} ({}%)",
+                    repo_name,
+                    format_bytes(transferred),
+                    format_bytes(estimated_bytes),
+                    pct as u32
+                ));
+            }
+
+            emit_backup_live(events, status, progress).await;
+            last_emit = Instant::now();
+        }
+    }
+
+    info!(
+        repo = repo_name,
+        bytes = transferred,
+        chunks = sequence,
+        "Transfer complete"
+    );
+    Ok(transferred)
+}
+
+// ── Formatting helpers ─────────────────────────────────────────────
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+fn format_speed(bytes_per_sec: f64) -> String {
+    if bytes_per_sec < 1024.0 {
+        format!("{:.0} B/s", bytes_per_sec)
+    } else if bytes_per_sec < 1024.0 * 1024.0 {
+        format!("{:.1} KB/s", bytes_per_sec / 1024.0)
+    } else {
+        format!("{:.1} MB/s", bytes_per_sec / (1024.0 * 1024.0))
+    }
+}
+
+// ── Daily scheduler ────────────────────────────────────────────────
 
 pub fn spawn_daily_scheduler(pipeline: Arc<BackupPipeline>) {
     tokio::spawn(async move {

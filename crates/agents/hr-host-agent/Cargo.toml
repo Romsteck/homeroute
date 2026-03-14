@@ -22,3 +22,4 @@ base64 = "0.22"
 sha2 = "0.10"
 hex = "0.4"
 xxhash-rust = { workspace = true }
+chrono = { workspace = true }

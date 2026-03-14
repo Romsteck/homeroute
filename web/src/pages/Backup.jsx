@@ -71,9 +71,16 @@ const PIPELINE_STEPS = [
   { id: 'containers', label: 'Backup Containers', repo: 'containers' },
   { id: 'git', label: 'Backup Git', repo: 'git' },
   { id: 'pixel', label: 'Backup Pixel', repo: 'pixel' },
-  { id: 'retention', label: 'Rétention / Prune', stages: ['verifying'] },
   { id: 'sleep', label: 'Mise en veille serveur', stages: ['putting_to_sleep'] },
 ];
+
+const formatBytes = (bytes) => {
+  if (bytes === null || bytes === undefined) return null;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+};
 
 function getStepStatuses(status, progress) {
   const stage = status?.stage || 'idle';
@@ -119,7 +126,10 @@ function PipelineStep({ step, stepStatus, progress, status, isLast }) {
   };
 
   const isBackupStep = Boolean(step.repo);
-  const showProgress = stepStatus === 'active' && isBackupStep && progress?.running;
+  const phase = progress?.phase;
+  const isScanning = stepStatus === 'active' && isBackupStep && phase === 'scanning';
+  const isTransferring = stepStatus === 'active' && isBackupStep && phase === 'transferring' && progress?.running;
+  const isVerifying = stepStatus === 'active' && isBackupStep && phase === 'verifying';
   const progressPct = Math.max(0, Math.min(100, Number(progress?.progress || 0)));
 
   return (
@@ -140,7 +150,28 @@ function PipelineStep({ step, stepStatus, progress, status, isLast }) {
           <div className="mt-1 text-xs text-gray-400">{status.current_message}</div>
         )}
 
-        {showProgress && (
+        {isScanning && (
+          <div className="mt-2 flex items-center gap-2">
+            <div className="h-1.5 w-24 overflow-hidden rounded-full bg-gray-950/60">
+              <div className="h-full w-full animate-pulse rounded-full bg-gradient-to-r from-blue-500/60 to-cyan-400/60" />
+            </div>
+            <span className="text-xs text-blue-100/80">Scan des fichiers…</span>
+            {progress?.files_total != null && (
+              <span className="text-xs text-gray-400">{progress.files_total} fichiers</span>
+            )}
+          </div>
+        )}
+
+        {isVerifying && (
+          <div className="mt-2 flex items-center gap-2">
+            <div className="h-1.5 w-24 overflow-hidden rounded-full bg-gray-950/60">
+              <div className="h-full w-full animate-pulse rounded-full bg-gradient-to-r from-amber-500/60 to-yellow-400/60" />
+            </div>
+            <span className="text-xs text-amber-100/80">Vérification…</span>
+          </div>
+        )}
+
+        {isTransferring && (
           <div className="mt-2">
             <div className="h-2 overflow-hidden rounded-full bg-gray-950/60">
               <div
@@ -150,6 +181,12 @@ function PipelineStep({ step, stepStatus, progress, status, isLast }) {
             </div>
             <div className="mt-1.5 flex flex-wrap gap-x-4 text-xs text-blue-100/80">
               <span>{Math.round(progressPct)}%</span>
+              {progress?.files_changed != null && (
+                <span>{progress.files_changed} fichiers modifiés</span>
+              )}
+              {progress?.bytes_transferred != null && progress?.total_bytes != null && (
+                <span>{formatBytes(progress.bytes_transferred)} / {formatBytes(progress.total_bytes)}</span>
+              )}
               {progress?.speed && <span>{progress.speed}</span>}
               {progress?.remaining_secs != null && <span>Reste {formatDuration(progress.remaining_secs)}</span>}
             </div>
@@ -161,11 +198,22 @@ function PipelineStep({ step, stepStatus, progress, status, isLast }) {
 }
 
 function RepoRow({ repo, active }) {
+  const hasLastStats = repo.last_files_changed != null || repo.last_transferred_bytes != null;
   return (
     <div className={`flex items-center justify-between gap-4 rounded-2xl border px-4 py-4 ${active ? 'border-blue-500/40 bg-blue-500/10' : 'border-gray-700/70 bg-gray-800/70'}`}>
       <div className="min-w-0">
         <div className="truncate text-sm font-semibold text-white">{REPO_LABELS[repo.name] || repo.name}</div>
         <div className="text-sm text-gray-400">Dernière sauvegarde {timeAgo(repo.last_backup_at)}</div>
+        {hasLastStats && (
+          <div className="mt-0.5 flex gap-3 text-xs text-gray-500">
+            {repo.last_files_changed != null && (
+              <span>{repo.last_files_changed} fichier{repo.last_files_changed !== 1 ? 's' : ''} modifié{repo.last_files_changed !== 1 ? 's' : ''}</span>
+            )}
+            {repo.last_transferred_bytes != null && (
+              <span>{formatBytes(repo.last_transferred_bytes)} transférés</span>
+            )}
+          </div>
+        )}
       </div>
       <span className={`inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-xs font-medium ${freshnessClasses(repo.last_backup_at)}`}>
         {repo.last_backup_at ? timeAgo(repo.last_backup_at) : 'Jamais'}

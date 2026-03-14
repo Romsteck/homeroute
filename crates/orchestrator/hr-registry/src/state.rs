@@ -57,6 +57,11 @@ pub enum MigrationResult {
     ExportFailed { error: String },
 }
 
+pub enum BackupSignal {
+    RepoReady { previous_manifest: Option<String> },
+    RepoComplete { success: bool, message: String, snapshot_name: Option<String> },
+}
+
 /// Tracks power state of a remote host for WOL deduplication and conflict detection.
 pub struct HostPowerInfo {
     pub state: HostPowerState,
@@ -92,6 +97,8 @@ pub struct AgentRegistry {
     pub latest_versions: Arc<RwLock<LatestVersionsCache>>,
     /// Cached Dataverse schemas keyed by app_id (populated by agent SchemaMetadata messages).
     pub dataverse_schemas: Arc<RwLock<HashMap<String, serde_json::Value>>>,
+    /// Backup signals: maps transfer_id → sender for backup responses.
+    backup_signals: Arc<RwLock<HashMap<String, tokio::sync::mpsc::Sender<BackupSignal>>>>,
 }
 
 /// Server-side cache for latest tool versions (avoids GitHub API rate limits from agents).
@@ -143,6 +150,7 @@ impl AgentRegistry {
             scan_results: Arc::new(RwLock::new(HashMap::new())),
             latest_versions: Arc::new(RwLock::new(LatestVersionsCache::default())),
             dataverse_schemas: Arc::new(RwLock::new(HashMap::new())),
+            backup_signals: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -1087,6 +1095,30 @@ impl AgentRegistry {
     pub async fn on_host_exec_result(&self, _host_id: &str, request_id: &str, success: bool, stdout: &str, stderr: &str) {
         if let Some(tx) = self.exec_signals.write().await.remove(request_id) {
             let _ = tx.send((success, stdout.to_string(), stderr.to_string()));
+        }
+    }
+
+    // ── Backup signal handling ───────────────────────────────
+
+    pub async fn register_backup_signal(&self, transfer_id: &str) -> tokio::sync::mpsc::Receiver<BackupSignal> {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        self.backup_signals.write().await.insert(transfer_id.to_string(), tx);
+        rx
+    }
+
+    pub async fn remove_backup_signal(&self, transfer_id: &str) {
+        self.backup_signals.write().await.remove(transfer_id);
+    }
+
+    pub async fn on_backup_repo_ready(&self, transfer_id: &str, previous_manifest: Option<String>) {
+        if let Some(tx) = self.backup_signals.read().await.get(transfer_id) {
+            let _ = tx.send(BackupSignal::RepoReady { previous_manifest }).await;
+        }
+    }
+
+    pub async fn on_backup_repo_complete(&self, transfer_id: &str, success: bool, message: &str, snapshot_name: Option<String>) {
+        if let Some(tx) = self.backup_signals.read().await.get(transfer_id) {
+            let _ = tx.send(BackupSignal::RepoComplete { success, message: message.to_string(), snapshot_name }).await;
         }
     }
 

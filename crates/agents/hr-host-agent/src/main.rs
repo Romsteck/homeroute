@@ -142,6 +142,14 @@ async fn run_connection(config: &Config) -> Result<(), String> {
     }
     let mut active_nspawn_imports: HashMap<String, ActiveNspawnImport> = HashMap::new();
 
+    // Track active backup receives
+    struct ActiveBackupReceive {
+        repo_name: String,
+        tar_child: tokio::process::Child,
+        tar_stdin: tokio::process::ChildStdin,
+    }
+    let mut active_backup_receives: HashMap<String, ActiveBackupReceive> = HashMap::new();
+
     // Read nspawn storage path from config
     let _nspawn_storage_path = config.container_storage_path.clone()
         .unwrap_or_else(|| "/var/lib/machines".to_string());
@@ -363,6 +371,17 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                             })).await;
                                             active_nspawn_imports.remove(&transfer_id);
                                         }
+                                    }
+                                }
+                            }
+                            Ok(HostRegistryMessage::TransferComplete { transfer_id }) if active_backup_receives.contains_key(&transfer_id) => {
+                                // Backup transfer complete — close tar stdin
+                                if let Some(mut import) = active_backup_receives.remove(&transfer_id) {
+                                    use tokio::io::AsyncWriteExt;
+                                    let _ = import.tar_stdin.shutdown().await;
+                                    match import.tar_child.wait().await {
+                                        Ok(s) => info!(transfer_id = %transfer_id, repo = %import.repo_name, "Backup tar exited: {}", s),
+                                        Err(e) => warn!(transfer_id = %transfer_id, "Backup tar wait: {}", e),
                                     }
                                 }
                             }
@@ -1021,6 +1040,138 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                     )).await;
                                 });
                             }
+                            Ok(HostRegistryMessage::StartBackupRepo { repo_name, transfer_id }) => {
+                                info!(repo = %repo_name, transfer_id = %transfer_id, "Starting backup receive");
+                                let tx_backup = tx.clone();
+                                let tid = transfer_id.clone();
+                                let rname = repo_name.clone();
+
+                                // Prepare directories
+                                let base_dir = format!("/backup/{}", repo_name);
+                                let current_dir = format!("{}/current", base_dir);
+                                let manifests_dir = format!("{}/manifests", base_dir);
+
+                                if let Err(e) = tokio::fs::create_dir_all(&current_dir).await {
+                                    error!("Failed to create backup dir {}: {}", current_dir, e);
+                                    let _ = tx_backup.send(OutgoingWsMessage::Text(HostAgentMessage::BackupRepoReady {
+                                        transfer_id: tid,
+                                        previous_manifest: None,
+                                    })).await;
+                                    continue;
+                                }
+                                let _ = tokio::fs::create_dir_all(&manifests_dir).await;
+
+                                // Read previous manifest
+                                let manifest_path = format!("{}/latest.json", manifests_dir);
+                                let previous_manifest = tokio::fs::read_to_string(&manifest_path)
+                                    .await
+                                    .ok();
+
+                                info!(
+                                    repo = %rname,
+                                    has_manifest = previous_manifest.is_some(),
+                                    "Sending BackupRepoReady"
+                                );
+
+                                // Spawn tar extraction process
+                                match tokio::process::Command::new("tar")
+                                    .args(["xf", "-", "--numeric-owner", "--overwrite", "-C", &current_dir])
+                                    .stdin(std::process::Stdio::piped())
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::piped())
+                                    .spawn()
+                                {
+                                    Ok(mut child) => {
+                                        let stdin = child.stdin.take().expect("tar stdin");
+                                        active_backup_receives.insert(tid.clone(), ActiveBackupReceive {
+                                            repo_name: rname,
+                                            tar_child: child,
+                                            tar_stdin: stdin,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to spawn backup tar: {}", e);
+                                    }
+                                }
+
+                                let _ = tx_backup.send(OutgoingWsMessage::Text(HostAgentMessage::BackupRepoReady {
+                                    transfer_id: tid,
+                                    previous_manifest,
+                                })).await;
+                            }
+                            Ok(HostRegistryMessage::FinishBackupRepo { repo_name, transfer_id, manifest_json }) => {
+                                info!(repo = %repo_name, transfer_id = %transfer_id, "Finishing backup repo");
+
+                                let tx_finish = tx.clone();
+                                let tid = transfer_id.clone();
+                                let rname = repo_name.clone();
+                                let mj = manifest_json.clone();
+
+                                tokio::spawn(async move {
+                                    let base_dir = format!("/backup/{}", rname);
+                                    let current_dir = format!("{}/current", base_dir);
+                                    let manifests_dir = format!("{}/manifests", base_dir);
+                                    let snapshots_dir = format!("{}/snapshots", base_dir);
+
+                                    let _ = tokio::fs::create_dir_all(&snapshots_dir).await;
+
+                                    // Delete files not in new manifest from current/
+                                    if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&mj) {
+                                        if let Some(files) = manifest.get("files").and_then(|v| v.as_array()) {
+                                            let valid_paths: std::collections::HashSet<String> = files
+                                                .iter()
+                                                .filter_map(|f| f.get("path").and_then(|p| p.as_str()).map(|s| s.to_string()))
+                                                .collect();
+
+                                            // Walk current/ and delete files not in manifest
+                                            let current_path = std::path::PathBuf::from(&current_dir);
+                                            if current_path.exists() {
+                                                delete_stale_files(&current_path, &current_path, &valid_paths).await;
+                                            }
+                                        }
+                                    }
+
+                                    // Save manifest
+                                    let latest_path = format!("{}/latest.json", manifests_dir);
+                                    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+                                    let versioned_path = format!("{}/{}.json", manifests_dir, timestamp);
+                                    if let Err(e) = tokio::fs::write(&latest_path, &mj).await {
+                                        error!(repo = %rname, "Failed to write manifest: {}", e);
+                                    }
+                                    let _ = tokio::fs::write(&versioned_path, &mj).await;
+
+                                    // Create hardlink snapshot
+                                    let snapshot_name = format!("{}", timestamp);
+                                    let snapshot_path = format!("{}/{}", snapshots_dir, snapshot_name);
+                                    let cp_result = tokio::process::Command::new("cp")
+                                        .args(["-al", &current_dir, &snapshot_path])
+                                        .output()
+                                        .await;
+                                    match cp_result {
+                                        Ok(out) if out.status.success() => {
+                                            info!(repo = %rname, snapshot = %snapshot_name, "Snapshot created");
+                                        }
+                                        Ok(out) => {
+                                            let stderr = String::from_utf8_lossy(&out.stderr);
+                                            warn!(repo = %rname, "Snapshot failed: {}", stderr);
+                                        }
+                                        Err(e) => {
+                                            warn!(repo = %rname, "cp -al failed: {}", e);
+                                        }
+                                    }
+
+                                    // Apply retention: 7 daily, 4 weekly, 6 monthly
+                                    apply_retention(&snapshots_dir).await;
+
+                                    let _ = tx_finish.send(OutgoingWsMessage::Text(HostAgentMessage::BackupRepoComplete {
+                                        transfer_id: tid,
+                                        repo_name: rname,
+                                        success: true,
+                                        message: "Backup finalized".to_string(),
+                                        snapshot_name: Some(snapshot_name),
+                                    })).await;
+                                });
+                            }
                             Ok(HostRegistryMessage::AuthResult { .. }) => {
                                 // Already handled during auth phase
                             }
@@ -1048,6 +1199,12 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                 };
                                 if let Err(e) = target.write_all(&data).await {
                                     error!("Failed to write binary chunk for {}: {}", transfer_id, e);
+                                }
+                            } else if let Some(backup) = active_backup_receives.get_mut(&transfer_id) {
+                                // Backup receive
+                                use tokio::io::AsyncWriteExt;
+                                if let Err(e) = backup.tar_stdin.write_all(&data).await {
+                                    error!("Failed to write backup chunk for {}: {}", transfer_id, e);
                                 }
                             } else {
                                 warn!(transfer_id = %transfer_id, "Binary chunk for unknown import");
@@ -1121,6 +1278,13 @@ async fn run_connection(config: &Config) -> Result<(), String> {
     for (sid, session) in terminal_sessions {
         info!(session_id = %sid, "Cleaning up terminal session on disconnect");
         let _ = session.kill_tx.send(());
+    }
+
+    // Clean up orphaned backup receives on disconnect
+    for (tid, mut backup) in active_backup_receives {
+        warn!(transfer_id = %tid, "Cleaning orphaned backup receive on disconnect");
+        let _ = backup.tar_child.kill().await;
+        drop(backup.tar_stdin);
     }
 
     // Clean up orphaned nspawn imports on disconnect
@@ -1571,4 +1735,129 @@ fn num_cpus() -> usize {
         .filter(|l| l.starts_with("processor"))
         .count()
         .max(1)
+}
+
+// ── Backup helpers ─────────────────────────────────────────────────
+
+/// Recursively delete files in `dir` that are not present in `valid_paths`.
+/// `base` is the root of the backup current/ directory.
+async fn delete_stale_files(
+    base: &std::path::Path,
+    dir: &std::path::Path,
+    valid_paths: &std::collections::HashSet<String>,
+) {
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let mut empty_dirs = Vec::new();
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let rel = path.strip_prefix(base).unwrap_or(&path).to_string_lossy().to_string();
+
+        if let Ok(ft) = entry.file_type().await {
+            if ft.is_dir() {
+                Box::pin(delete_stale_files(base, &path, valid_paths)).await;
+                // Check if dir is now empty
+                if let Ok(mut rd) = tokio::fs::read_dir(&path).await {
+                    if rd.next_entry().await.ok().flatten().is_none() {
+                        empty_dirs.push(path);
+                    }
+                }
+            } else if !valid_paths.contains(&rel) {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+        }
+    }
+
+    // Remove empty directories
+    for dir in empty_dirs {
+        let _ = tokio::fs::remove_dir(&dir).await;
+    }
+}
+
+/// Apply retention policy: keep 7 daily, 4 weekly, 6 monthly snapshots.
+async fn apply_retention(snapshots_dir: &str) {
+    let mut entries = match tokio::fs::read_dir(snapshots_dir).await {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let mut snapshots: Vec<String> = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if let Ok(ft) = entry.file_type().await {
+            if ft.is_dir() {
+                snapshots.push(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+
+    // Sort descending (newest first) — format YYYYMMDD_HHMMSS sorts correctly
+    snapshots.sort_unstable_by(|a, b| b.cmp(a));
+
+    if snapshots.len() <= 7 {
+        return; // Not enough to prune
+    }
+
+    // Parse dates from snapshot names
+    let mut keep = std::collections::HashSet::new();
+
+    // Keep 7 most recent (daily)
+    for s in snapshots.iter().take(7) {
+        keep.insert(s.clone());
+    }
+
+    // Keep 1 per week for last 4 weeks
+    let now = chrono::Utc::now();
+    for week_offset in 0..4u32 {
+        let week_start = now - chrono::Duration::days((week_offset * 7 + 7) as i64);
+        let week_end = now - chrono::Duration::days((week_offset * 7) as i64);
+
+        if let Some(s) = snapshots.iter().find(|s| {
+            if let Some(dt) = parse_snapshot_date(s) {
+                dt >= week_start && dt < week_end
+            } else {
+                false
+            }
+        }) {
+            keep.insert(s.clone());
+        }
+    }
+
+    // Keep 1 per month for last 6 months
+    for month_offset in 0..6u32 {
+        let month_start = now - chrono::Duration::days(((month_offset + 1) * 30) as i64);
+        let month_end = now - chrono::Duration::days((month_offset * 30) as i64);
+
+        if let Some(s) = snapshots.iter().find(|s| {
+            if let Some(dt) = parse_snapshot_date(s) {
+                dt >= month_start && dt < month_end
+            } else {
+                false
+            }
+        }) {
+            keep.insert(s.clone());
+        }
+    }
+
+    // Delete snapshots not in keep set
+    for s in &snapshots {
+        if !keep.contains(s) {
+            let path = format!("{}/{}", snapshots_dir, s);
+            info!(snapshot = %s, "Pruning old snapshot");
+            let _ = tokio::process::Command::new("rm")
+                .args(["-rf", &path])
+                .output()
+                .await;
+        }
+    }
+}
+
+fn parse_snapshot_date(name: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    // Format: YYYYMMDD_HHMMSS
+    chrono::NaiveDateTime::parse_from_str(name, "%Y%m%d_%H%M%S")
+        .ok()
+        .map(|dt| dt.and_utc())
 }
