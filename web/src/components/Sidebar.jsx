@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Server, Shield, Globe, Settings,
   ArrowLeftRight, RefreshCw, Zap, LogOut, Activity,
   User, HardDrive, Lock, Cloud, Container, Table2,
-  Store as StoreIcon, GitBranch, X
+  Store as StoreIcon, GitBranch, Archive, X
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useEffect } from 'react';
