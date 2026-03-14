@@ -447,12 +447,12 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
                 padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
                 decoration: BoxDecoration(
                   color: isCurrentInstall
-                      ? AppColors.success.withOpacity(0.12)
+                      ? AppColors.success.withValues(alpha: 0.12)
                       : AppColors.surface,
                   borderRadius: BorderRadius.circular(4),
                   border: Border.all(
                     color: isCurrentInstall
-                        ? AppColors.success.withOpacity(0.3)
+                        ? AppColors.success.withValues(alpha: 0.3)
                         : AppColors.border,
                     width: 1,
                   ),
@@ -594,10 +594,10 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                     decoration: BoxDecoration(
-                      color: AppColors.success.withOpacity(0.12),
+                      color: AppColors.success.withValues(alpha: 0.12),
                       borderRadius: BorderRadius.circular(4),
                       border: Border.all(
-                        color: AppColors.success.withOpacity(0.3),
+                        color: AppColors.success.withValues(alpha: 0.3),
                         width: 1,
                       ),
                     ),
@@ -644,7 +644,7 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
                     disabledBackgroundColor: (hasUpdate
                             ? const Color(0xFFF97316)
                             : const Color(0xFF2563EB))
-                        .withOpacity(0.4),
+                        .withValues(alpha: 0.4),
                     foregroundColor: Colors.white,
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(6),

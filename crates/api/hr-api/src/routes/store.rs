@@ -312,6 +312,22 @@ async fn publish_release(
         }
     };
 
+    if slug.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"success": false, "error": "Invalid slug"})),
+        )
+            .into_response();
+    }
+
+    if !slug.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"success": false, "error": "Invalid slug"})),
+        )
+            .into_response();
+    }
+
     if body.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
