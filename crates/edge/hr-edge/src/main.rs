@@ -97,18 +97,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Remove legacy code wildcard certificate (replaced by per-app wildcards)
-    if acme.get_certificate(WildcardType::LegacyCode).is_ok() {
-        info!("Removing legacy code wildcard certificate (replaced by per-app wildcards)");
-        let mut index = acme.list_certificates().unwrap_or_default();
-        index.retain(|c| c.wildcard_type != WildcardType::LegacyCode);
-        let _ = acme.storage().save_index(&index);
-        let _ = std::fs::remove_file(acme.storage().cert_path(&WildcardType::LegacyCode));
-        let _ = std::fs::remove_file(acme.storage().key_path(&WildcardType::LegacyCode));
-        let _ = std::fs::remove_file(acme.storage().chain_path(&WildcardType::LegacyCode));
-        info!("Legacy code wildcard certificate removed");
-    }
-
     // ── TLS ──────────────────────────────────────────────────────────
     let tls_manager = TlsManager::new(env.acme_storage_path.clone());
 
@@ -304,10 +292,7 @@ async fn main() -> anyhow::Result<()> {
                                         .wildcard_type
                                         .domain_pattern(&base_domain_renewal);
                                     let _ = events_renewal.cert_ready.send(CertReadyEvent {
-                                        slug: match &new_cert.wildcard_type {
-                                            hr_acme::WildcardType::App { slug } => slug.clone(),
-                                            _ => String::new(),
-                                        },
+                                        slug: String::new(),
                                         wildcard_domain: domain,
                                         cert_path: new_cert.cert_path.clone(),
                                         key_path: new_cert.key_path.clone(),

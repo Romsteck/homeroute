@@ -373,36 +373,34 @@ impl AcmeManager {
         Ok((cert_pem, key_pem))
     }
 
-    /// Request a wildcard certificate for a specific application
-    pub async fn request_app_wildcard(&self, slug: &str) -> AcmeResult<CertificateInfo> {
-        self.request_wildcard(WildcardType::for_app(slug)).await
-    }
-
     /// Request the global wildcard certificate
     pub async fn request_global_wildcard(&self) -> AcmeResult<CertificateInfo> {
         self.request_wildcard(WildcardType::Global).await
     }
 
-    /// Get certificate info for a specific application
-    pub fn get_app_certificate(&self, slug: &str) -> AcmeResult<CertificateInfo> {
-        self.get_certificate(WildcardType::for_app(slug))
+
+    /// Request a wildcard certificate for a specific application.
+    /// DEPRECATED: Per-app wildcards are no longer issued. Returns an error.
+    #[deprecated(note = "Per-app wildcard certs have been removed. Only the global wildcard is issued.")]
+    pub async fn request_app_wildcard(&self, slug: &str) -> AcmeResult<CertificateInfo> {
+        Err(AcmeError::ConfigError(format!(
+            "Per-app wildcard certs are disabled (slug: {}). Only global wildcard is issued.",
+            slug
+        )))
     }
 
-    /// Delete certificate for a specific application
+    /// Get certificate info for a specific application.
+    /// DEPRECATED: Per-app wildcards no longer exist. Always returns CertificateNotFound.
+    #[deprecated(note = "Per-app wildcard certs have been removed.")]
+    pub fn get_app_certificate(&self, slug: &str) -> AcmeResult<CertificateInfo> {
+        Err(AcmeError::CertificateNotFound(format!("app-{}", slug)))
+    }
+
+    /// Delete certificate for a specific application.
+    /// DEPRECATED: Per-app wildcards no longer exist. This is a no-op.
+    #[deprecated(note = "Per-app wildcard certs have been removed.")]
     pub fn delete_app_certificate(&self, slug: &str) -> AcmeResult<()> {
-        let wt = WildcardType::for_app(slug);
-        let cert_id = wt.id();
-
-        // Remove from index
-        let mut index = self.storage.load_index()?;
-        index.retain(|c| c.wildcard_type != wt);
-        self.storage.save_index(&index)?;
-
-        // Remove cert and key files (ignore errors if files don't exist)
-        let _ = std::fs::remove_file(self.storage.cert_path_by_id(&cert_id));
-        let _ = std::fs::remove_file(self.storage.key_path_by_id(&cert_id));
-        let _ = std::fs::remove_file(self.storage.chain_path_by_id(&cert_id));
-
+        let _ = slug;
         Ok(())
     }
 
