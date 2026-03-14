@@ -56,6 +56,7 @@ all: studio netcore edge orchestrator server web
 # Deploy locally (only works on prod server itself)
 deploy: check-not-prod all
 	cp systemd/*.service /etc/systemd/system/ && systemctl daemon-reload
+	mkdir -p /root/.config/rustic && cp rustic-profiles/*.toml /root/.config/rustic/
 	systemctl restart hr-edge
 	systemctl restart hr-orchestrator
 	systemctl restart homeroute
@@ -70,6 +71,7 @@ deploy-prod: check-prod all
 	rsync -az --delete web/dist/ $(PROD_HOST):$(PROD_DIR)/web/dist/
 	rsync -az --delete web-studio/dist/ $(PROD_HOST):$(PROD_DIR)/web-studio/dist/
 	rsync -az systemd/ $(PROD_HOST):$(PROD_DIR)/systemd/
+	rsync -az rustic-profiles/ $(PROD_HOST):/root/.config/rustic/
 	ssh $(PROD_HOST) 'cp $(PROD_DIR)/systemd/*.service /etc/systemd/system/ && systemctl daemon-reload'
 	ssh $(PROD_HOST) 'systemctl restart hr-edge && systemctl restart hr-orchestrator && systemctl restart homeroute'
 	@sleep 3

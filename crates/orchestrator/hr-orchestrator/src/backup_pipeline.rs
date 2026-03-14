@@ -13,7 +13,6 @@ use tracing::{error, info, warn};
 const BACKUP_SERVER_HOST_ID: &str = "877bcb76-4fb8-4164-940c-707201adf9bc";
 const BACKUP_SERVER_IP: &str = "10.0.0.20";
 const BACKUP_SERVER_USER: &str = "romain";
-const BACKUP_SSH_KEY: &str = "/root/.ssh/id_ed25519_backup";
 const HOMEROUTE_API_BASE: &str = "http://10.0.0.254:4000";
 const WAKE_TIMEOUT_SECS: u64 = 180;
 const WAKE_POLL_INTERVAL_SECS: u64 = 10;
@@ -551,13 +550,6 @@ async fn run_pipeline(
     }
 }
 
-fn sftp_command() -> String {
-    format!(
-        "ssh {}@{} -i {} -o StrictHostKeyChecking=no -o BatchMode=yes -s sftp",
-        BACKUP_SERVER_USER, BACKUP_SERVER_IP, BACKUP_SSH_KEY
-    )
-}
-
 async fn run_rustic_backup(
     repo: &RepoConfig,
     status: Arc<RwLock<BackupStatus>>,
@@ -569,14 +561,10 @@ async fn run_rustic_backup(
         "changeme".to_string()
     });
 
-    let sftp_opt = format!("sftp.command={}", sftp_command());
-
     // Init repo (ignore errors if already initialized)
     let init_args: Vec<String> = vec![
-        "-r".into(),
-        repo.rustic_repo.clone(),
-        "-o".into(),
-        sftp_opt.clone(),
+        "-P".into(),
+        repo.name.clone(),
         "init".into(),
     ];
     let _ = run_local_command_with_env("rustic", &init_args, &rustic_password, 60).await;
@@ -600,10 +588,8 @@ async fn run_rustic_backup(
     emit_backup_live(&events, &status, &progress).await;
 
     let mut backup_args: Vec<String> = vec![
-        "-r".into(),
-        repo.rustic_repo.clone(),
-        "-o".into(),
-        sftp_opt.clone(),
+        "-P".into(),
+        repo.name.clone(),
         "backup".into(),
     ];
     for path in &repo.source_paths {
@@ -652,10 +638,8 @@ async fn run_rustic_backup(
     emit_backup_live(&events, &status, &progress).await;
 
     let forget_args: Vec<String> = vec![
-        "-r".into(),
-        repo.rustic_repo.clone(),
-        "-o".into(),
-        sftp_opt.clone(),
+        "-P".into(),
+        repo.name.clone(),
         "forget".into(),
         "--keep-daily".into(),
         "7".into(),
