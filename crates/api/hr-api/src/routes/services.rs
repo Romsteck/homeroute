@@ -17,15 +17,16 @@ async fn status(State(state): State<ApiState>) -> Json<Value> {
     if let Ok(netcore_services) = state.netcore.service_status().await {
         for entry in netcore_services {
             let svc_state = match entry.state.as_str() {
-                "Running" => ServiceState::Running,
-                "Disabled" => ServiceState::Disabled,
-                "Failed" => ServiceState::Failed,
-                "Starting" => ServiceState::Starting,
+                "running" => ServiceState::Running,
+                "disabled" => ServiceState::Disabled,
+                "failed" => ServiceState::Failed,
+                "starting" => ServiceState::Starting,
+                "stopped" => ServiceState::Stopped,
                 _ => ServiceState::Starting,
             };
             let priority = match entry.priority.as_str() {
-                "Critical" => ServicePriorityLevel::Critical,
-                "Important" => ServicePriorityLevel::Important,
+                "critical" => ServicePriorityLevel::Critical,
+                "important" => ServicePriorityLevel::Important,
                 _ => ServicePriorityLevel::Background,
             };
             services.push(ServiceStatus {

@@ -18,7 +18,7 @@ pub fn router() -> Router<ApiState> {
 async fn status(State(state): State<ApiState>) -> Json<Value> {
     match state.netcore.service_status().await {
         Ok(services) => {
-            let active = services.iter().any(|s| s.name == "dns" && s.state == "Running");
+            let active = services.iter().any(|s| s.name.starts_with("dns-") && s.state == "running");
             Json(json!({
                 "success": true,
                 "active": active,

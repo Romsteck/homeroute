@@ -46,7 +46,7 @@ impl ServicePriority {
 /// Le service est redemarre automatiquement en cas de panne ou de panic,
 /// selon sa priorite. Les services critiques redemarrent indefiniment.
 pub fn spawn_supervised<F, Fut>(
-    name: &'static str,
+    name: &str,
     priority: ServicePriority,
     registry: SharedServiceRegistry,
     factory: F,
@@ -55,6 +55,7 @@ where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
 {
+    let name = name.to_string();
     let factory = Arc::new(factory);
     let level = priority.to_level();
     tokio::spawn(async move {
@@ -69,9 +70,9 @@ where
             {
                 let mut reg = registry.write().await;
                 reg.insert(
-                    name.to_string(),
+                    name.clone(),
                     ServiceStatus {
-                        name: name.to_string(),
+                        name: name.clone(),
                         state: ServiceState::Running,
                         priority: level.clone(),
                         restart_count: retries,
@@ -92,7 +93,7 @@ where
                 Ok(Ok(())) => {
                     info!("[supervisor] {name} exited cleanly");
                     let mut reg = registry.write().await;
-                    if let Some(entry) = reg.get_mut(name) {
+                    if let Some(entry) = reg.get_mut(&name) {
                         entry.state = ServiceState::Stopped;
                         entry.last_state_change = now_millis();
                     }
@@ -102,7 +103,7 @@ where
                     let err_msg = format!("{e:#}");
                     error!("[supervisor] {name} failed: {err_msg}");
                     let mut reg = registry.write().await;
-                    if let Some(entry) = reg.get_mut(name) {
+                    if let Some(entry) = reg.get_mut(&name) {
                         entry.state = ServiceState::Failed;
                         entry.error = Some(err_msg);
                         entry.last_state_change = now_millis();
@@ -112,7 +113,7 @@ where
                     let err_msg = format!("{join_error}");
                     error!("[supervisor] {name} task panicked: {err_msg}");
                     let mut reg = registry.write().await;
-                    if let Some(entry) = reg.get_mut(name) {
+                    if let Some(entry) = reg.get_mut(&name) {
                         entry.state = ServiceState::Failed;
                         entry.error = Some(err_msg);
                         entry.last_state_change = now_millis();
@@ -132,7 +133,7 @@ where
                     "[supervisor] {name} exceeded max retries ({max_retries}), giving up"
                 );
                 let mut reg = registry.write().await;
-                if let Some(entry) = reg.get_mut(name) {
+                if let Some(entry) = reg.get_mut(&name) {
                     entry.state = ServiceState::Stopped;
                     entry.last_state_change = now_millis();
                 }
@@ -147,7 +148,7 @@ where
             // Update restart count
             {
                 let mut reg = registry.write().await;
-                if let Some(entry) = reg.get_mut(name) {
+                if let Some(entry) = reg.get_mut(&name) {
                     entry.restart_count = retries;
                 }
             }
