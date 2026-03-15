@@ -570,25 +570,25 @@ async fn run_pipeline(
         repo_messages.push(format!("{}: {}", repo.name, message));
     }
 
-    // ── Sleep backup server (only if still connected) ──────────
+    // ── Shutdown backup server (only if still connected) ──────────
     if registry.is_host_connected(BACKUP_SERVER_HOST_ID).await {
         set_stage(
             &status,
             &progress,
             PipelineStage::PuttingToSleep,
             BackupPhase::Sleep,
-            "Mise en veille du serveur backup...",
+            "Arrêt du serveur backup...",
             &events,
         )
         .await;
 
-        let sleep_url = format!("{HOMEROUTE_API_BASE}/api/hosts/{BACKUP_SERVER_HOST_ID}/sleep");
-        match http.post(&sleep_url).send().await {
-            Ok(resp) => info!("Sleep response: {}", resp.status()),
-            Err(e) => warn!("Sleep request failed: {e}"),
+        let shutdown_url = format!("{HOMEROUTE_API_BASE}/api/hosts/{BACKUP_SERVER_HOST_ID}/shutdown");
+        match http.post(&shutdown_url).send().await {
+            Ok(resp) => info!("Shutdown response: {}", resp.status()),
+            Err(e) => warn!("Shutdown request failed: {e}"),
         }
     } else {
-        info!("Backup server already disconnected, skipping sleep step");
+        info!("Backup server already disconnected, skipping shutdown step");
     }
 
     let summary = repo_messages.join("; ");

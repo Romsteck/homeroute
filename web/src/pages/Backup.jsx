@@ -71,7 +71,7 @@ const PIPELINE_STEPS = [
   { id: 'containers', label: 'Backup Containers', repo: 'containers' },
   { id: 'git', label: 'Backup Git', repo: 'git' },
   { id: 'pixel', label: 'Backup Pixel', repo: 'pixel' },
-  { id: 'sleep', label: 'Mise en veille serveur', stages: ['putting_to_sleep'] },
+  { id: 'sleep', label: 'Arrêt serveur backup', stages: ['putting_to_sleep'] },
 ];
 
 const formatBytes = (bytes) => {
