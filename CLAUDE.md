@@ -241,3 +241,32 @@ Les applications tournent dans des conteneurs nspawn gérés par HomeRoute. Le d
 - Les conteneurs sont dans `/var/lib/machines/` sur le routeur
 - Pour exécuter une commande dans un conteneur : `sudo ssh root@10.0.0.254 machinectl shell hr-v2-<name>-prod /bin/bash -c "commande"`
 - PATH Flutter : `export PATH=/ssd_pool/flutter/bin:$PATH`
+
+## MCP Self-Improvement
+
+Le serveur MCP HomeRoute est implémenté dans ce même repo. Claude Code peut donc faire évoluer ses propres outils MCP :
+
+### Code source MCP
+
+| Serveur MCP | Fichier source |
+|-------------|---------------|
+| **Orchestrator MCP** (HTTP, tools infra) | `crates/orchestrator/hr-orchestrator/src/mcp.rs` |
+| **Agent MCP** (stdio, Dataverse + Deploy + Store + Studio + Docs) | `crates/agents/hr-agent/src/mcp.rs` |
+
+Fichiers connexes :
+- `crates/agents/hr-agent/src/mcp_instructions.txt` — instructions incluses dans le MCP agent
+- `crates/agents/hr-agent/src/dataverse.rs` — opérations Dataverse utilisées par le MCP agent
+
+### Ce que Claude Code peut faire
+
+- **Ajouter de nouveaux tools** : créer le handler dans le code MCP, l'enregistrer dans la liste des tools, et ajouter le nom dans `generate_mcp_json()` pour l'auto-approve
+- **Fixer des bugs** : les tools MCP existants peuvent avoir des bugs — Claude Code peut les diagnostiquer et corriger
+- **Adapter le protocole** : si le protocole MCP évolue, Claude Code peut mettre à jour l'implémentation
+- **Mettre à jour les instructions** : modifier `mcp_instructions.txt` pour améliorer le contexte fourni aux tools
+
+C'est du self-improvement : Claude Code améliore les outils qu'il utilise lui-même via MCP.
+
+### Workflow après modification MCP
+
+- Si modification de `crates/orchestrator/hr-orchestrator/src/mcp.rs` → `make deploy-orchestrator`
+- Si modification de `crates/agents/hr-agent/src/mcp.rs` → `make agent && make agent-prod`
