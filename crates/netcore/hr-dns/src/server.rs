@@ -65,8 +65,26 @@ pub async fn run_tcp_server(addr: SocketAddr, state: SharedDnsState) -> Result<(
 
         let state = state.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_tcp_connection(stream, src, &state).await {
-                debug!("TCP connection error from {}: {}", src, e);
+            match handle_tcp_connection(stream, src, &state).await {
+                Ok(()) => {}
+                Err(e) => {
+                    // Connection resets and broken pipes are normal for DNS TCP
+                    // (client closes after receiving response). Only log
+                    // unexpected errors.
+                    let io_err = e.downcast_ref::<std::io::Error>();
+                    let is_benign = io_err.map_or(false, |ie| {
+                        matches!(
+                            ie.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::UnexpectedEof
+                                | std::io::ErrorKind::NotConnected
+                        )
+                    });
+                    if !is_benign {
+                        debug!("TCP connection error from {}: {}", src, e);
+                    }
+                }
             }
         });
     }
@@ -91,10 +109,16 @@ async fn handle_tcp_connection(
 
     let response = handle_dns_query(&query_buf, state, src).await;
 
-    // Write response with length prefix
-    let len_bytes = (response.len() as u16).to_be_bytes();
-    stream.write_all(&len_bytes).await?;
-    stream.write_all(&response).await?;
+    // Write length prefix + response in a single write (RFC 1035 TCP framing).
+    // Sending them separately causes broken framing visible in tcpdump as
+    // "[prefix length != length]" because the 2-byte prefix and payload land
+    // in different TCP segments.
+    let resp_len = response.len() as u16;
+    let mut buf = Vec::with_capacity(2 + response.len());
+    buf.extend_from_slice(&resp_len.to_be_bytes());
+    buf.extend_from_slice(&response);
+    stream.write_all(&buf).await?;
+    stream.shutdown().await?;
 
     Ok(())
 }
