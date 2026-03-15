@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../theme.dart';
 import '../services/api_client.dart';
 import '../services/package_checker.dart';
 import '../utils/format_size.dart';
+
+const _pendingSelfUpdateKey = 'pending_self_update_version';
 
 class UpdateScreen extends StatefulWidget {
   final String currentVersion;
@@ -57,6 +60,11 @@ class _UpdateScreenState extends State<UpdateScreen> {
         _progress = 1.0;
       });
 
+      // Save the expected version before install — the app may be killed during
+      // self-update, so we verify on next launch if it actually succeeded.
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_pendingSelfUpdateKey, widget.newVersion);
+
       final installed = await PackageChecker.installApk(
         savePath,
         androidPackage: 'com.homeroute.home',
@@ -69,7 +77,12 @@ class _UpdateScreenState extends State<UpdateScreen> {
         setState(() => _phase = 'done');
         await PackageChecker.restartApp();
       } else {
-        setState(() => _phase = 'done');
+        // Install was cancelled or failed — clear pending flag
+        await prefs.remove(_pendingSelfUpdateKey);
+        setState(() {
+          _phase = 'error';
+          _error = 'Installation annulée ou échouée';
+        });
       }
     } catch (e) {
       if (mounted) {

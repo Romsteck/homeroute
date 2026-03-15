@@ -171,20 +171,39 @@ class _AppDetailScreenState extends State<AppDetailScreen> {
 
       final androidPkg = _app?['android_package'] as String?;
 
+      // Remember version before install to detect if it actually changed
+      String? versionBefore;
+      if (androidPkg != null && androidPkg.isNotEmpty) {
+        versionBefore = await PackageChecker.getPackageVersion(androidPkg);
+      }
+
       final installed2 = await PackageChecker.installApk(
         savePath,
         androidPackage: androidPkg,
       );
       if (!mounted) return;
 
+      // Verify the install actually succeeded by checking the version
       bool onDevice = installed2;
-      if (!onDevice && androidPkg != null && androidPkg.isNotEmpty) {
+      String? versionAfter;
+      if (androidPkg != null && androidPkg.isNotEmpty) {
+        // Retry a few times — Android may take a moment to register
         for (int attempt = 0; attempt < 3; attempt++) {
-          await Future.delayed(const Duration(seconds: 1));
+          if (attempt > 0) {
+            await Future.delayed(const Duration(seconds: 1));
+          }
           if (!mounted) return;
-          onDevice = await PackageChecker.isPackageInstalled(androidPkg);
-          if (onDevice) break;
+          versionAfter = await PackageChecker.getPackageVersion(androidPkg);
+          if (versionAfter != null && versionAfter != versionBefore) break;
+          if (versionAfter != null && versionBefore == null) break;
         }
+        onDevice = versionAfter != null;
+      }
+
+      // If the package was already installed and the version didn't change,
+      // the install failed (user cancelled, signature mismatch, etc.)
+      if (onDevice && versionBefore != null && versionAfter == versionBefore) {
+        onDevice = false;
       }
 
       if (onDevice) {

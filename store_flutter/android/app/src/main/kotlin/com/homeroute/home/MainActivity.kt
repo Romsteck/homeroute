@@ -42,6 +42,20 @@ class MainActivity : FlutterActivity() {
                         }
                         result.success(installed)
                     }
+                    "getPackageVersion" -> {
+                        val packageName = call.argument<String>("packageName")
+                        if (packageName == null) {
+                            result.error("INVALID_ARG", "packageName is required", null)
+                            return@setMethodCallHandler
+                        }
+                        val version = try {
+                            val info = packageManager.getPackageInfo(packageName, 0)
+                            info.versionName
+                        } catch (e: PackageManager.NameNotFoundException) {
+                            null
+                        }
+                        result.success(version)
+                    }
                     "installApk" -> {
                         val filePath = call.argument<String>("filePath")
                         if (filePath == null) {

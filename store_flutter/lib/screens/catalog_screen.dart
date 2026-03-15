@@ -62,10 +62,51 @@ class _CatalogScreenState extends State<CatalogScreen> {
   }
 
   Future<void> _init() async {
+    _verifySelfUpdate();
     await _fetchApps();
     _checkClientUpdate();
     _checkAppUpdates();
     _loadInstalledSlugs();
+  }
+
+  /// After a self-update, the app is killed and restarted. On next launch,
+  /// verify that the version actually changed to the expected one.
+  Future<void> _verifySelfUpdate() async {
+    const key = 'pending_self_update_version';
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final pendingVersion = prefs.getString(key);
+      if (pendingVersion == null) return;
+
+      // Always clear the flag so we don't check repeatedly
+      await prefs.remove(key);
+
+      final packageInfo = await PackageInfo.fromPlatform();
+      final currentVersion = packageInfo.version;
+
+      if (!mounted) return;
+
+      if (currentVersion == pendingVersion) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Store mis à jour avec succès ✓'),
+            backgroundColor: Color(0xFF059669),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Échec de la mise à jour du Store '
+              '(attendu $pendingVersion, actuel $currentVersion)',
+            ),
+            backgroundColor: AppColors.error,
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    } catch (_) {}
   }
 
   Future<void> _fetchApps() async {

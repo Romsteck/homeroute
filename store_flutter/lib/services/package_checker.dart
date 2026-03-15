@@ -15,6 +15,19 @@ class PackageChecker {
     }
   }
 
+  /// Returns the installed versionName of a package, or null if not installed.
+  static Future<String?> getPackageVersion(String packageName) async {
+    try {
+      final result = await _channel.invokeMethod<String>(
+        'getPackageVersion',
+        {'packageName': packageName},
+      );
+      return result;
+    } on PlatformException {
+      return null;
+    }
+  }
+
   static Future<bool> installApk(String filePath, {String? androidPackage}) async {
     try {
       final result = await _channel.invokeMethod<bool>(
