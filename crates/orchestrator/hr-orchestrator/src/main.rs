@@ -296,7 +296,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── MCP endpoint (optional, requires MCP_TOKEN env var) ─────────
 
-    let mcp_state = mcp::McpState::from_env(registry.clone(), container_manager.clone(), git_service.clone(), edge.clone());
+    let mcp_state = mcp::McpState::from_env(registry.clone(), container_manager.clone(), git_service.clone(), edge.clone(), backup_pipeline.clone());
     if mcp_state.is_some() {
         info!("MCP endpoint enabled (POST /mcp)");
     }

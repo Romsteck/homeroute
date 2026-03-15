@@ -610,8 +610,10 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: WsState) {
     // Pending binary chunk metadata: (transfer_id, sequence, checksum)
     let mut pending_binary_meta: Option<(String, u32, u32)> = None;
 
-    // Heartbeat timeout: agent sends every 5s, detect offline within 10s
-    let heartbeat_timeout = std::time::Duration::from_secs(10);
+    // Heartbeat timeout: agent sends every 5s, detect offline within 30s.
+    // During backup, outgoing data can starve the recv arm, so we also reset
+    // the timeout whenever we successfully send data (proves connection is alive).
+    let heartbeat_timeout = std::time::Duration::from_secs(30);
     let timeout_sleep = tokio::time::sleep(heartbeat_timeout);
     tokio::pin!(timeout_sleep);
 
@@ -635,7 +637,10 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: WsState) {
                     std::time::Duration::from_secs(30),
                     socket.send(ws_msg),
                 ).await {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(())) => {
+                        // Successful send proves connection is alive — reset heartbeat
+                        timeout_sleep.as_mut().reset(tokio::time::Instant::now() + heartbeat_timeout);
+                    }
                     Ok(Err(_)) => break,    // WebSocket send error
                     Err(_) => {             // 30s timeout
                         warn!("WebSocket send timeout for host {host_id}, disconnecting");

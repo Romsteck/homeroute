@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+use crate::backup_pipeline::BackupPipeline;
 use crate::container_manager::ContainerManager;
 
 // ── JSON-RPC types ──────────────────────────────────────────────────
@@ -43,6 +44,7 @@ pub struct McpState {
     pub container_manager: Arc<ContainerManager>,
     pub git: Arc<hr_git::GitService>,
     pub edge: Arc<hr_ipc::EdgeClient>,
+    pub backup: Arc<BackupPipeline>,
 }
 
 impl McpState {
@@ -51,6 +53,7 @@ impl McpState {
         container_manager: Arc<ContainerManager>,
         git: Arc<hr_git::GitService>,
         edge: Arc<hr_ipc::EdgeClient>,
+        backup: Arc<BackupPipeline>,
     ) -> Option<Self> {
         let token = std::env::var("MCP_TOKEN").ok()?;
         if token.is_empty() {
@@ -62,6 +65,7 @@ impl McpState {
             container_manager,
             git,
             edge,
+            backup,
         })
     }
 }
@@ -302,7 +306,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "backup.trigger",
-            "description": "Trigger a rustic backup on the backup server. Requires the backup host to be connected.",
+            "description": "Trigger the backup pipeline on the backup server. Requires the backup host to be connected.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -1133,21 +1137,12 @@ async fn tool_backup_status(id: Value, state: &McpState) -> Value {
 }
 
 async fn tool_backup_trigger(id: Value, state: &McpState) -> Value {
-    if !state.registry.is_host_connected(BACKUP_HOST_ID).await {
-        return tool_error(id, "Backup server is not connected. Use backup.wake to wake it first.");
-    }
-
-    let cmd = "rustic backup /opt/homeroute /data /var/lib/server-dashboard 2>&1".to_string();
-
-    match state.registry.exec_on_host(BACKUP_HOST_ID, vec![cmd]).await {
-        Ok((success, stdout, stderr)) => {
-            tool_success(id, json!({
-                "success": success,
-                "stdout": stdout,
-                "stderr": stderr,
-            }))
-        }
-        Err(e) => tool_error(id, &format!("Backup exec failed: {e}")),
+    match state.backup.trigger().await {
+        Ok(()) => tool_success(id, json!({
+            "message": "Backup pipeline started",
+            "status": "running",
+        })),
+        Err(e) => tool_error(id, &format!("Backup trigger failed: {e}")),
     }
 }
 

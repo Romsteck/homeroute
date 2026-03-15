@@ -472,6 +472,15 @@ async fn run_pipeline(
     let mut repo_messages = Vec::new();
 
     for repo in &repos {
+        // Early abort: if host disconnected, skip remaining repos
+        if !registry.is_host_connected(BACKUP_SERVER_HOST_ID).await {
+            warn!("Backup server disconnected, aborting remaining repos");
+            let msg = format!("Backup FAILED: host disconnected before {}", repo.name);
+            repo_messages.push(format!("{}: {}", repo.name, msg));
+            all_success = false;
+            continue;
+        }
+
         {
             let mut s = status.write().await;
             s.current_message = Some(format!("Backup du repo {}", repo.name));
@@ -561,21 +570,25 @@ async fn run_pipeline(
         repo_messages.push(format!("{}: {}", repo.name, message));
     }
 
-    // ── Sleep backup server ─────────────────────────────────────
-    set_stage(
-        &status,
-        &progress,
-        PipelineStage::PuttingToSleep,
-        BackupPhase::Sleep,
-        "Mise en veille du serveur backup...",
-        &events,
-    )
-    .await;
+    // ── Sleep backup server (only if still connected) ──────────
+    if registry.is_host_connected(BACKUP_SERVER_HOST_ID).await {
+        set_stage(
+            &status,
+            &progress,
+            PipelineStage::PuttingToSleep,
+            BackupPhase::Sleep,
+            "Mise en veille du serveur backup...",
+            &events,
+        )
+        .await;
 
-    let sleep_url = format!("{HOMEROUTE_API_BASE}/api/hosts/{BACKUP_SERVER_HOST_ID}/sleep");
-    match http.post(&sleep_url).send().await {
-        Ok(resp) => info!("Sleep response: {}", resp.status()),
-        Err(e) => warn!("Sleep request failed: {e}"),
+        let sleep_url = format!("{HOMEROUTE_API_BASE}/api/hosts/{BACKUP_SERVER_HOST_ID}/sleep");
+        match http.post(&sleep_url).send().await {
+            Ok(resp) => info!("Sleep response: {}", resp.status()),
+            Err(e) => warn!("Sleep request failed: {e}"),
+        }
+    } else {
+        info!("Backup server already disconnected, skipping sleep step");
     }
 
     let summary = repo_messages.join("; ");
