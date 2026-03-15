@@ -176,3 +176,68 @@ Les agents peuvent parfois ne pas marquer leurs tâches comme complètes. Pour c
 1. **Inclure dans chaque prompt de spawn** : _"Quand tu as terminé : appelle TaskUpdate pour marquer la tâche completed, puis envoie-moi un SendMessage résumant ce que tu as fait."_
 2. **Si un agent semble bloqué** : lui envoyer un SendMessage — _"Où en es-tu ? Si terminé, marque la tâche et résume."_
 3. Les subagents `backend-rust`, `frontend-react` et `agent-updater` incluent déjà ces instructions dans leur system prompt.
+
+## Applications HomeRoute
+
+Les applications tournent dans des conteneurs nspawn gérés par HomeRoute. Le développement se fait sur CloudMaster (10.0.0.10), dans `/ssd_pool/apps/`.
+
+### Apps Axum + Vite/React
+
+| App | Path dev | Conteneur prod | IP prod |
+|-----|----------|----------------|---------|
+| trader | `/ssd_pool/apps/trader/` | hr-v2-trader-prod | 10.0.0.122 |
+| wallet | `/ssd_pool/apps/wallet/` | hr-v2-wallet-prod | 10.0.0.103 |
+| home | `/ssd_pool/apps/home/` | hr-v2-home-prod | 10.0.0.127 |
+| files | `/ssd_pool/apps/files/` | hr-v2-files-prod | 10.0.0.109 |
+
+**Procédure dev :**
+- Backend : `cd /ssd_pool/apps/<name>/ && cargo build --release`
+- Frontend : `cd /ssd_pool/apps/<name>/web && pnpm build`
+- Deploy : copier le binaire et les assets dans le conteneur prod, puis restart le service
+- Test : `curl http://<IP_PROD>:3000/api/health`
+- Logs : `sudo ssh root@10.0.0.254 machinectl shell hr-v2-<name>-prod /bin/journalctl -f`
+
+### Apps Next.js
+
+| App | Path dev | Conteneur prod | IP prod |
+|-----|----------|----------------|---------|
+| padel | `/ssd_pool/apps/padel/` | hr-v2-padel-prod | 10.0.0.117 |
+| www | `/ssd_pool/apps/www/` | hr-v2-www-prod | 10.0.0.125 |
+| forge | `/ssd_pool/apps/forge/forge/` | hr-v2-forge-prod | 10.0.0.128 |
+| aptymus | `/ssd_pool/apps/aptymus/` | hr-v2-aptymus-prod | 10.0.0.119 |
+
+**Procédure dev :**
+- Build : `cd /ssd_pool/apps/<name>/ && pnpm build`
+- Deploy : copier le build dans le conteneur prod
+- Test : `curl http://<IP_PROD>:3000/`
+
+### App Axum + Flutter (MyFrigo)
+
+- Path dev : `/ssd_pool/apps/myfrigo/`
+- Conteneur prod : hr-v2-myfrigo-prod (10.0.0.126)
+- Backend : `cargo build --release`
+- Mobile : `export PATH=/ssd_pool/flutter/bin:$PATH && flutter build apk`
+- Auth : désactivée (attente SSO HomeRoute)
+
+### Store Flutter (app mobile HomeRoute)
+
+- Path : `/opt/homeroute/store_flutter/` (PAS dans `/ssd_pool/apps/`)
+- Build : `export PATH=/ssd_pool/flutter/bin:$PATH && flutter build apk --release`
+- Deploy : `curl --data-binary @build/app/outputs/flutter-apk/app-release.apk http://10.0.0.254:4000/api/store/apps/<id>/upload`
+- Le store est file-based (`catalog.json`), pas SQLite
+- C'est l'app mobile principale — toujours prioriser l'app Flutter pour les changements store
+
+### Calendar App
+
+- Conteneur : hr-v2-calendar-prod (10.0.0.110)
+- Stack : Next.js
+- En pause actuellement
+
+### Règles générales apps
+
+- **JAMAIS** build sur les conteneurs prod — toujours sur CloudMaster
+- **JAMAIS** build sur le routeur (10.0.0.254)
+- Le routeur prod est accessible via : `sudo ssh root@10.0.0.254`
+- Les conteneurs sont dans `/var/lib/machines/` sur le routeur
+- Pour exécuter une commande dans un conteneur : `sudo ssh root@10.0.0.254 machinectl shell hr-v2-<name>-prod /bin/bash -c "commande"`
+- PATH Flutter : `export PATH=/ssd_pool/flutter/bin:$PATH`
