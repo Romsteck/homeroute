@@ -143,11 +143,17 @@ class _CatalogScreenState extends State<CatalogScreen> {
       );
       if (valid.isEmpty) return;
       final data = await ApiClient.instance.checkUpdates(valid);
-      final updates = (data['updates'] as List?)
-              ?.map((e) => (e as Map<String, dynamic>)['slug'] as String?)
-              .whereType<String>()
-              .toSet() ??
-          {};
+      final updateList = data['updates'] as List? ?? [];
+      final updates = <String>{};
+      for (final u in updateList) {
+        final map = u as Map<String, dynamic>;
+        final slug = map['slug'] as String?;
+        if (slug != null) updates.add(slug);
+        // Also mark the originally-installed slug (may differ when
+        // the backend resolved via android_package to a different entry)
+        final installedSlug = map['installed_slug'] as String?;
+        if (installedSlug != null) updates.add(installedSlug);
+      }
       if (mounted) {
         setState(() => _appsWithUpdates = updates);
       }

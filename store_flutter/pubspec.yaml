@@ -1,7 +1,7 @@
 name: homeroute_store
 description: HomeRoute Store - Android app store client
 publish_to: 'none'
-version: 2.1.14+14
+version: 2.1.15+15
 
 environment:
   sdk: '>=3.2.0 <4.0.0'

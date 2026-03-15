@@ -603,19 +603,49 @@ async fn check_updates(Query(query): Query<UpdateQuery>) -> impl IntoResponse {
     let mut updates = Vec::new();
 
     for (slug, current_version) in &installed {
-        if let Some(app) = catalog.apps.iter().find(|a| a.slug == *slug) {
-            if let Some(latest) = app.releases.last() {
-                if version_newer(&latest.version, current_version) {
-                    updates.push(serde_json::json!({
-                        "slug": slug,
-                        "name": app.name,
-                        "current_version": current_version,
-                        "latest_version": latest.version,
-                        "latest_changelog": latest.changelog,
-                        "latest_sha256": latest.sha256,
-                        "latest_size_bytes": latest.size_bytes,
-                    }));
+        // Find the direct slug match to get the android_package
+        let direct_app = catalog.apps.iter().find(|a| a.slug == *slug);
+        let android_pkg = direct_app
+            .and_then(|a| a.android_package.as_deref())
+            .unwrap_or("");
+
+        // Find the best available version across all apps with the same slug
+        // OR the same android_package (handles duplicate/renamed slugs)
+        let best = catalog
+            .apps
+            .iter()
+            .filter(|a| {
+                a.slug == *slug
+                    || (!android_pkg.is_empty()
+                        && a.android_package.as_deref() == Some(android_pkg))
+            })
+            .filter_map(|a| a.releases.last().map(|r| (a, r)))
+            .max_by(|(_, ra), (_, rb)| {
+                if version_newer(&ra.version, &rb.version) {
+                    std::cmp::Ordering::Greater
+                } else if version_newer(&rb.version, &ra.version) {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
                 }
+            });
+
+        if let Some((app, release)) = best {
+            if version_newer(&release.version, current_version) {
+                let mut entry = serde_json::json!({
+                    "slug": app.slug,
+                    "name": app.name,
+                    "current_version": current_version,
+                    "latest_version": release.version,
+                    "latest_changelog": release.changelog,
+                    "latest_sha256": release.sha256,
+                    "latest_size_bytes": release.size_bytes,
+                });
+                // Include original installed slug when it differs (cross-slug match)
+                if app.slug != *slug {
+                    entry["installed_slug"] = serde_json::json!(slug);
+                }
+                updates.push(entry);
             }
         }
     }
