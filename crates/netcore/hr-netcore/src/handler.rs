@@ -4,7 +4,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use hr_adblock::AdblockEngine;
-use hr_common::service_registry::SharedServiceRegistry;
+use hr_common::service_registry::{ServicePriorityLevel, ServiceState, SharedServiceRegistry};
 use hr_ipc::server::IpcHandler;
 use hr_ipc::types::*;
 
@@ -395,16 +395,55 @@ impl NetcoreHandler {
     // ── ServiceStatus ───────────────────────────────────────────────────
 
     async fn handle_service_status(&self) -> IpcResponse {
+        use std::collections::HashMap;
+
         let reg = self.service_registry.read().await;
-        let entries: Vec<ServiceStatusEntry> = reg
-            .values()
-            .map(|s| ServiceStatusEntry {
-                name: s.name.clone(),
-                state: format!("{:?}", s.state).to_lowercase(),
-                priority: format!("{:?}", s.priority).to_lowercase(),
-                restart_count: s.restart_count,
-                last_state_change: s.last_state_change,
-                error: s.error.clone(),
+
+        // Aggregate services: dns-udp:*/dns-tcp:* → "dns", ipv6-pd/ipv6-ra → "ipv6", rest as-is
+        let mut groups: HashMap<String, Vec<&hr_common::service_registry::ServiceStatus>> =
+            HashMap::new();
+        for s in reg.values() {
+            let key = if s.name.starts_with("dns-udp:") || s.name.starts_with("dns-tcp:") {
+                "dns".to_string()
+            } else if s.name == "ipv6-pd" || s.name == "ipv6-ra" {
+                "ipv6".to_string()
+            } else {
+                s.name.clone()
+            };
+            groups.entry(key).or_default().push(s);
+        }
+
+        let entries: Vec<ServiceStatusEntry> = groups
+            .into_iter()
+            .map(|(name, svcs)| {
+                // State: any running → running, else all failed → failed, else all disabled → disabled, else stopped
+                let state = if svcs.iter().any(|s| s.state == ServiceState::Running) {
+                    ServiceState::Running
+                } else if svcs.iter().all(|s| s.state == ServiceState::Failed) {
+                    ServiceState::Failed
+                } else if svcs.iter().all(|s| s.state == ServiceState::Disabled) {
+                    ServiceState::Disabled
+                } else {
+                    ServiceState::Stopped
+                };
+                // Priority: highest = min ordinal (Critical < Important < Background)
+                let priority = svcs
+                    .iter()
+                    .map(|s| s.priority.clone())
+                    .min()
+                    .unwrap_or(ServicePriorityLevel::Background);
+                let restart_count: u32 = svcs.iter().map(|s| s.restart_count).sum();
+                let last_state_change = svcs.iter().map(|s| s.last_state_change).max().unwrap_or(0);
+                let error = svcs.iter().find_map(|s| s.error.clone());
+
+                ServiceStatusEntry {
+                    name,
+                    state: format!("{:?}", state).to_lowercase(),
+                    priority: format!("{:?}", priority).to_lowercase(),
+                    restart_count,
+                    last_state_change,
+                    error,
+                }
             })
             .collect();
         IpcResponse::ok_data(entries)
