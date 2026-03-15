@@ -593,11 +593,16 @@ pub enum HostRegistryMessage {
         repo_name: String,
         transfer_id: String,
     },
-    /// Backup: all chunks sent, finalize the repo backup.
+    /// Backup: all data chunks sent, now sending manifest via binary chunks.
+    BackupManifestStart {
+        repo_name: String,
+        transfer_id: String,
+        manifest_size: u64,
+    },
+    /// Backup: manifest fully sent, finalize the repo backup.
     FinishBackupRepo {
         repo_name: String,
         transfer_id: String,
-        manifest_json: String,
     },
 }
 

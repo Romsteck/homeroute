@@ -150,6 +150,13 @@ async fn run_connection(config: &Config) -> Result<(), String> {
     }
     let mut active_backup_receives: HashMap<String, ActiveBackupReceive> = HashMap::new();
 
+    // Track manifest receiving state (after data transfer, before finalize)
+    struct ManifestReceive {
+        repo_name: String,
+        data: Vec<u8>,
+    }
+    let mut active_manifest_receives: HashMap<String, ManifestReceive> = HashMap::new();
+
     // Read nspawn storage path from config
     let _nspawn_storage_path = config.container_storage_path.clone()
         .unwrap_or_else(|| "/var/lib/machines".to_string());
@@ -1099,13 +1106,25 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                     previous_manifest,
                                 })).await;
                             }
-                            Ok(HostRegistryMessage::FinishBackupRepo { repo_name, transfer_id, manifest_json }) => {
+                            Ok(HostRegistryMessage::BackupManifestStart { repo_name, transfer_id, manifest_size }) => {
+                                info!(repo = %repo_name, transfer_id = %transfer_id, size = manifest_size, "Starting manifest receive");
+                                active_manifest_receives.insert(transfer_id, ManifestReceive {
+                                    repo_name,
+                                    data: Vec::with_capacity(manifest_size as usize),
+                                });
+                            }
+                            Ok(HostRegistryMessage::FinishBackupRepo { repo_name, transfer_id }) => {
                                 info!(repo = %repo_name, transfer_id = %transfer_id, "Finishing backup repo");
+
+                                // Get manifest data
+                                let manifest_json = active_manifest_receives.remove(&transfer_id)
+                                    .map(|m| String::from_utf8_lossy(&m.data).to_string())
+                                    .unwrap_or_else(|| "{}".to_string());
 
                                 let tx_finish = tx.clone();
                                 let tid = transfer_id.clone();
                                 let rname = repo_name.clone();
-                                let mj = manifest_json.clone();
+                                let mj = manifest_json;
 
                                 tokio::spawn(async move {
                                     let base_dir = format!("/backup/{}", rname);
@@ -1206,6 +1225,9 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                 if let Err(e) = backup.tar_stdin.write_all(&data).await {
                                     error!("Failed to write backup chunk for {}: {}", transfer_id, e);
                                 }
+                            } else if let Some(manifest) = active_manifest_receives.get_mut(&transfer_id) {
+                                // Manifest receive
+                                manifest.data.extend_from_slice(&data);
                             } else {
                                 warn!(transfer_id = %transfer_id, "Binary chunk for unknown import");
                             }

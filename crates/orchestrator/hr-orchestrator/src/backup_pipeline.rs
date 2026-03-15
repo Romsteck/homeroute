@@ -840,16 +840,50 @@ async fn run_repo_backup(
         repo_name: repo.name.clone(),
         files: current_files,
     };
-    let manifest_json =
-        serde_json::to_string(&new_manifest).map_err(|e| format!("Manifest serialize: {e}"))?;
+    let manifest_bytes =
+        serde_json::to_vec(&new_manifest).map_err(|e| format!("Manifest serialize: {e}"))?;
 
+    // Stream manifest as binary chunks (can be very large for repos with many files)
+    registry
+        .send_host_command(
+            BACKUP_SERVER_HOST_ID,
+            HostRegistryMessage::BackupManifestStart {
+                repo_name: repo.name.clone(),
+                transfer_id: transfer_id.clone(),
+                manifest_size: manifest_bytes.len() as u64,
+            },
+        )
+        .await
+        .map_err(|e| format!("Failed to send BackupManifestStart: {e}"))?;
+
+    // Send manifest in chunks
+    for chunk in manifest_bytes.chunks(CHUNK_SIZE) {
+        let checksum = xxhash_rust::xxh32::xxh32(chunk, 0);
+        registry
+            .send_host_command(
+                BACKUP_SERVER_HOST_ID,
+                HostRegistryMessage::ReceiveChunkBinary {
+                    transfer_id: transfer_id.clone(),
+                    sequence: 0, // not used for manifest
+                    size: chunk.len() as u32,
+                    checksum,
+                },
+            )
+            .await
+            .map_err(|e| format!("Failed to send manifest chunk metadata: {e}"))?;
+        registry
+            .send_host_binary(BACKUP_SERVER_HOST_ID, chunk.to_vec())
+            .await
+            .map_err(|e| format!("Failed to send manifest chunk: {e}"))?;
+    }
+
+    // Signal finalization
     registry
         .send_host_command(
             BACKUP_SERVER_HOST_ID,
             HostRegistryMessage::FinishBackupRepo {
                 repo_name: repo.name.clone(),
                 transfer_id: transfer_id.clone(),
-                manifest_json,
             },
         )
         .await
