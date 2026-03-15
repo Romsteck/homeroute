@@ -1062,7 +1062,6 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                     error!("Failed to create backup dir {}: {}", current_dir, e);
                                     let _ = tx_backup.send(OutgoingWsMessage::Text(HostAgentMessage::BackupRepoReady {
                                         transfer_id: tid,
-                                        previous_manifest: None,
                                     })).await;
                                     continue;
                                 }
