@@ -3,9 +3,9 @@
 # DEV server: cloudmaster (10.0.0.10) — build only
 # PROD server: 10.0.0.254 — runs homeroute
 
-PROD_HOST := root@10.0.0.254
+PROD_HOST := romain@10.0.0.20
 PROD_DIR  := /opt/homeroute
-PROD_API  := http://10.0.0.254:4000
+PROD_API  := http://10.0.0.20:4000
 
 .PHONY: server netcore edge orchestrator web studio all deploy deploy-prod deploy-netcore deploy-edge deploy-orchestrator test clean store agent agent-prod host-agent host-agent-prod check-prod check-not-prod
 
@@ -22,7 +22,7 @@ check-not-prod:
 # Safety: verify prod is reachable
 check-prod:
 	@echo "Checking production server..."
-	@ssh -o ConnectTimeout=5 -o BatchMode=yes $(PROD_HOST) 'systemctl is-active homeroute' > /dev/null 2>&1 \
+	@ssh -o ConnectTimeout=5 -o BatchMode=yes $(PROD_HOST) 'sudo systemctl is-active homeroute' > /dev/null 2>&1 \
 		|| (echo "⛔ Cannot reach production server or homeroute is not running" && exit 1)
 	@echo "✓ Production server OK"
 
@@ -70,8 +70,8 @@ deploy-prod: check-prod all
 	rsync -az --delete web/dist/ $(PROD_HOST):$(PROD_DIR)/web/dist/
 	rsync -az --delete web-studio/dist/ $(PROD_HOST):$(PROD_DIR)/web-studio/dist/
 	rsync -az systemd/ $(PROD_HOST):$(PROD_DIR)/systemd/
-	ssh $(PROD_HOST) 'cp $(PROD_DIR)/systemd/*.service /etc/systemd/system/ && systemctl daemon-reload'
-	ssh $(PROD_HOST) 'systemctl restart hr-edge && systemctl restart hr-orchestrator && systemctl restart homeroute'
+	ssh $(PROD_HOST) 'sudo cp $(PROD_DIR)/systemd/*.service /etc/systemd/system/ && sudo systemctl daemon-reload'
+	ssh $(PROD_HOST) 'sudo systemctl restart hr-edge && sudo systemctl restart hr-orchestrator && sudo systemctl restart homeroute'
 	@sleep 3
 	@curl -sf $(PROD_API)/api/health | python3 -m json.tool \
 		&& echo "✓ Deploy OK" \
@@ -81,7 +81,7 @@ deploy-prod: check-prod all
 deploy-edge: check-prod edge
 	@echo "Deploying hr-edge to production..."
 	rsync -az --info=progress2 crates/target/release/hr-edge $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-edge
-	ssh $(PROD_HOST) 'systemctl restart hr-edge'
+	ssh $(PROD_HOST) 'sudo systemctl restart hr-edge'
 	@sleep 2
 	@echo "✓ hr-edge deployed"
 
@@ -89,7 +89,7 @@ deploy-edge: check-prod edge
 deploy-orchestrator: check-prod orchestrator
 	@echo "Deploying hr-orchestrator to production..."
 	rsync -az --info=progress2 crates/target/release/hr-orchestrator $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-orchestrator
-	ssh $(PROD_HOST) 'systemctl restart hr-orchestrator'
+	ssh $(PROD_HOST) 'sudo systemctl restart hr-orchestrator'
 	@sleep 2
 	@echo "✓ hr-orchestrator deployed"
 
@@ -97,7 +97,7 @@ deploy-orchestrator: check-prod orchestrator
 deploy-netcore: check-prod netcore
 	@echo "Deploying hr-netcore to production..."
 	rsync -az --info=progress2 crates/target/release/hr-netcore $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-netcore
-	ssh $(PROD_HOST) 'systemctl restart hr-netcore'
+	ssh $(PROD_HOST) 'sudo systemctl restart hr-netcore'
 	@sleep 1
 	@echo "✓ hr-netcore deployed"
 
@@ -125,7 +125,7 @@ agent:
 agent-prod: check-prod
 	@echo "Pushing hr-agent to production..."
 	rsync -az data/agent-binaries/ $(PROD_HOST):$(PROD_DIR)/data/agent-binaries/
-	ssh $(PROD_HOST) 'curl -sf -X POST http://localhost:4000/api/applications/agents/update' \
+	ssh $(PROD_HOST) 'curl -sf -X POST http://127.0.0.1:4000/api/applications/agents/update' \
 		&& echo "✓ Agent update triggered on production" \
 		|| echo "⛔ Agent update failed"
 
