@@ -58,7 +58,8 @@ pub enum MigrationResult {
 }
 
 pub enum BackupSignal {
-    RepoReady { previous_manifest: Option<String> },
+    RepoReady { has_manifest: bool, manifest_size: u64 },
+    ManifestReady,
     RepoComplete { success: bool, message: String, snapshot_name: Option<String> },
 }
 
@@ -99,6 +100,8 @@ pub struct AgentRegistry {
     pub dataverse_schemas: Arc<RwLock<HashMap<String, serde_json::Value>>>,
     /// Backup signals: maps transfer_id → sender for backup responses.
     backup_signals: Arc<RwLock<HashMap<String, tokio::sync::mpsc::Sender<BackupSignal>>>>,
+    /// Backup manifest accumulator: maps transfer_id → accumulated bytes.
+    pub backup_manifest_data: Arc<RwLock<HashMap<String, Vec<u8>>>>,
 }
 
 /// Server-side cache for latest tool versions (avoids GitHub API rate limits from agents).
@@ -151,6 +154,7 @@ impl AgentRegistry {
             latest_versions: Arc::new(RwLock::new(LatestVersionsCache::default())),
             dataverse_schemas: Arc::new(RwLock::new(HashMap::new())),
             backup_signals: Arc::new(RwLock::new(HashMap::new())),
+            backup_manifest_data: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -1110,10 +1114,33 @@ impl AgentRegistry {
         self.backup_signals.write().await.remove(transfer_id);
     }
 
-    pub async fn on_backup_repo_ready(&self, transfer_id: &str, previous_manifest: Option<String>) {
+    pub async fn on_backup_repo_ready(&self, transfer_id: &str, has_manifest: bool, manifest_size: u64) {
         if let Some(tx) = self.backup_signals.read().await.get(transfer_id) {
-            let _ = tx.send(BackupSignal::RepoReady { previous_manifest }).await;
+            let _ = tx.send(BackupSignal::RepoReady { has_manifest, manifest_size }).await;
         }
+    }
+
+    pub async fn on_backup_manifest_ready(&self, transfer_id: &str) {
+        if let Some(tx) = self.backup_signals.read().await.get(transfer_id) {
+            let _ = tx.send(BackupSignal::ManifestReady).await;
+        }
+    }
+
+    pub async fn init_backup_manifest_receive(&self, transfer_id: &str, size_hint: u64) {
+        self.backup_manifest_data.write().await.insert(
+            transfer_id.to_string(),
+            Vec::with_capacity(size_hint as usize),
+        );
+    }
+
+    pub async fn append_backup_manifest_data(&self, transfer_id: &str, data: &[u8]) {
+        if let Some(buf) = self.backup_manifest_data.write().await.get_mut(transfer_id) {
+            buf.extend_from_slice(data);
+        }
+    }
+
+    pub async fn take_backup_manifest_data(&self, transfer_id: &str) -> Option<Vec<u8>> {
+        self.backup_manifest_data.write().await.remove(transfer_id)
     }
 
     pub async fn on_backup_repo_complete(&self, transfer_id: &str, success: bool, message: &str, snapshot_name: Option<String>) {

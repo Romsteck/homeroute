@@ -1358,9 +1358,13 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                                 HostAgentMessage::NspawnContainerList(_) => {
                                     // TODO: track nspawn containers separately if needed
                                 }
-                                HostAgentMessage::BackupRepoReady { transfer_id, previous_manifest } => {
-                                    tracing::info!(transfer_id = %transfer_id, has_manifest = previous_manifest.is_some(), "Backup repo ready");
-                                    registry.on_backup_repo_ready(&transfer_id, previous_manifest).await;
+                                HostAgentMessage::BackupRepoReady { transfer_id, has_manifest, manifest_size } => {
+                                    tracing::info!(transfer_id = %transfer_id, has_manifest, "Backup repo ready");
+                                    registry.on_backup_repo_ready(&transfer_id, has_manifest, manifest_size).await;
+                                }
+                                HostAgentMessage::BackupManifestReady { transfer_id } => {
+                                    tracing::info!(transfer_id = %transfer_id, "Backup manifest ready");
+                                    registry.on_backup_manifest_ready(&transfer_id).await;
                                 }
                                 HostAgentMessage::BackupRepoComplete { transfer_id, repo_name, success, message, snapshot_name } => {
                                     tracing::info!(transfer_id = %transfer_id, repo = %repo_name, success, "Backup repo complete");

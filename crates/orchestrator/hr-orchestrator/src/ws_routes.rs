@@ -1121,15 +1121,28 @@ async fn handle_host_agent_message(
         }
         HostAgentMessage::BackupRepoReady {
             transfer_id,
-            previous_manifest,
+            has_manifest,
+            manifest_size,
         } => {
             info!(
                 transfer_id = %transfer_id,
-                has_manifest = previous_manifest.is_some(),
+                has_manifest,
+                manifest_size,
                 "Backup repo ready"
             );
+            if has_manifest {
+                registry.init_backup_manifest_receive(&transfer_id, manifest_size).await;
+            }
             registry
-                .on_backup_repo_ready(&transfer_id, previous_manifest)
+                .on_backup_repo_ready(&transfer_id, has_manifest, manifest_size)
+                .await;
+        }
+        HostAgentMessage::BackupManifestReady {
+            transfer_id,
+        } => {
+            info!(transfer_id = %transfer_id, "Backup manifest ready");
+            registry
+                .on_backup_manifest_ready(&transfer_id)
                 .await;
         }
         HostAgentMessage::BackupRepoComplete {
@@ -1190,6 +1203,9 @@ async fn handle_host_binary_frame(
                         .await;
                 }
             }
+        } else if registry.backup_manifest_data.read().await.contains_key(&transfer_id) {
+            // Backup manifest receive mode: accumulate data
+            registry.append_backup_manifest_data(&transfer_id, &data).await;
         } else if let Some(transfer) = active_transfers.get_mut(&transfer_id) {
             // Local import mode: write binary data to file
             let data_len = data.len() as u64;

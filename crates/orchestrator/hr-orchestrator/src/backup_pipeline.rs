@@ -640,6 +640,11 @@ async fn run_repo_backup(
     // Register backup signal to receive responses
     let mut signal_rx = registry.register_backup_signal(&transfer_id).await;
 
+    // Verify host is still connected
+    if !registry.is_host_connected(BACKUP_SERVER_HOST_ID).await {
+        return Err("Backup server disconnected before repo backup".to_string());
+    }
+
     // Step 1: Tell host-agent to prepare and send us the previous manifest
     info!(repo = repo.name, "Sending StartBackupRepo");
     registry
@@ -653,19 +658,45 @@ async fn run_repo_backup(
         .await
         .map_err(|e| format!("Failed to send StartBackupRepo: {e}"))?;
 
-    // Wait for BackupRepoReady with previous manifest
-    let previous_manifest = tokio::time::timeout(Duration::from_secs(60), signal_rx.recv())
+    // Wait for BackupRepoReady
+    let (has_manifest, manifest_size) = tokio::time::timeout(Duration::from_secs(60), signal_rx.recv())
         .await
         .map_err(|_| "Timeout waiting for BackupRepoReady".to_string())?
         .ok_or_else(|| "Backup signal channel closed".to_string())
         .and_then(|sig| match sig {
-            BackupSignal::RepoReady { previous_manifest } => Ok(previous_manifest),
+            BackupSignal::RepoReady { has_manifest, manifest_size } => Ok((has_manifest, manifest_size)),
             _ => Err("Unexpected backup signal".to_string()),
         })?;
 
-    let old_manifest: Option<FileManifest> = previous_manifest
-        .as_deref()
-        .and_then(|json| serde_json::from_str(json).ok());
+    // If host-agent has a previous manifest, receive it via binary chunks
+    let old_manifest: Option<FileManifest> = if has_manifest {
+        info!(repo = repo.name, size = manifest_size, "Receiving previous manifest via binary chunks");
+        // Register this transfer_id for receiving binary data on the orchestrator side
+        // The host-agent streams the manifest as TransferChunkBinary + binary frames
+        // Wait for BackupManifestReady signal
+        let manifest_result = tokio::time::timeout(Duration::from_secs(120), signal_rx.recv())
+            .await
+            .map_err(|_| "Timeout waiting for BackupManifestReady".to_string())?
+            .ok_or_else(|| "Backup signal channel closed".to_string())
+            .and_then(|sig| match sig {
+                BackupSignal::ManifestReady => Ok(()),
+                _ => Err("Unexpected backup signal while waiting for manifest".to_string()),
+            });
+
+        match manifest_result {
+            Ok(()) => {
+                // The manifest data was received via the registry's manifest accumulator
+                let data = registry.take_backup_manifest_data(&transfer_id).await;
+                data.and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            }
+            Err(e) => {
+                warn!(repo = repo.name, "Failed to receive manifest: {e}, proceeding as full backup");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     info!(
         repo = repo.name,
@@ -889,9 +920,9 @@ async fn run_repo_backup(
         .await
         .map_err(|e| format!("Failed to send FinishBackupRepo: {e}"))?;
 
-    // Wait for BackupRepoComplete
+    // Wait for BackupRepoComplete (5 min max for finalization)
     let complete_result = tokio::time::timeout(
-        Duration::from_secs(REPO_BACKUP_TIMEOUT_SECS),
+        Duration::from_secs(300),
         signal_rx.recv(),
     )
     .await

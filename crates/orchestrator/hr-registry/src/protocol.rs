@@ -371,11 +371,18 @@ pub enum HostAgentMessage {
         #[serde(default)]
         scan_error: Option<String>,
     },
-    /// Backup: host-agent is ready to receive data, returns previous manifest.
+    /// Backup: host-agent is ready to receive data.
+    /// If has_manifest is true, manifest binary chunks follow before BackupManifestReady.
     BackupRepoReady {
         transfer_id: String,
         #[serde(default)]
-        previous_manifest: Option<String>,
+        has_manifest: bool,
+        #[serde(default)]
+        manifest_size: u64,
+    },
+    /// Backup: previous manifest has been fully sent via binary chunks.
+    BackupManifestReady {
+        transfer_id: String,
     },
     /// Backup: repo backup completed on host-agent side.
     BackupRepoComplete {
