@@ -1302,6 +1302,16 @@ impl AgentRegistry {
 
     // ── Metrics ──────────────────────────────────────────────────
 
+    /// Return all current agent metrics (app_id + metrics) for IPC polling.
+    pub async fn get_all_metrics(&self) -> Vec<(String, AgentMetrics)> {
+        let state = self.state.read().await;
+        state.applications.iter()
+            .filter_map(|app| {
+                app.metrics.as_ref().map(|m| (app.id.clone(), m.clone()))
+            })
+            .collect()
+    }
+
     /// Handle metrics received from an agent: update in-memory state and broadcast to WebSocket.
     pub async fn handle_metrics(&self, app_id: &str, metrics: AgentMetrics) {
         // Update in-memory metrics (not persisted)

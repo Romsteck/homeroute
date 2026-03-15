@@ -785,6 +785,12 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 }
             }
 
+            // ── Agent metrics ────────────────────────────────────
+            OrchestratorRequest::GetAgentMetrics => {
+                let metrics = self.registry.get_all_metrics().await;
+                IpcResponse::ok_data(metrics)
+            }
+
             // ── Agent auth ───────────────────────────────────────
             OrchestratorRequest::AuthenticateAgentToken { token } => {
                 match self.registry.authenticate_by_token(&token).await {

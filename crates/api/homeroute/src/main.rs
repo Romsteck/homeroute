@@ -173,7 +173,44 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Backup live poller → websocket (every ~2s while state changes)
+    // Agent metrics poller -> websocket (every 2s)
+    {
+        let events = events.clone();
+        let orchestrator = orchestrator.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            loop {
+                interval.tick().await;
+
+                let resp = orchestrator
+                    .request(&hr_ipc::orchestrator::OrchestratorRequest::GetAgentMetrics)
+                    .await;
+
+                if let Ok(resp) = resp {
+                    if let Some(data) = resp.data {
+                        if let Some(arr) = data.as_array() {
+                            for item in arr {
+                                if let (Some(app_id), Some(obj)) = (item.get(0).and_then(|v| v.as_str()), item.get(1)) {
+                                    if let (Some(mem), Some(cpu)) = (
+                                        obj.get("memory_bytes").and_then(|v| v.as_u64()),
+                                        obj.get("cpu_percent").and_then(|v| v.as_f64()),
+                                    ) {
+                                        let _ = events.agent_metrics.send(hr_common::events::AgentMetricsEvent {
+                                            app_id: app_id.to_string(),
+                                            memory_bytes: mem,
+                                            cpu_percent: cpu as f32,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Backup live poller -> websocket (every ~2s while state changes)
     {
         let events = events.clone();
         let orchestrator = orchestrator.clone();

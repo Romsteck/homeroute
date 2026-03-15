@@ -100,6 +100,10 @@ pub enum OrchestratorRequest {
     /// Get live backup progress for the currently running repo/phase.
     GetBackupProgress,
 
+    // ── Agent metrics ────────────────────────────────────────
+    /// Get all current agent metrics (lightweight, for polling by homeroute).
+    GetAgentMetrics,
+
     // ── Agent auth (for hr-api cert distribution) ────────────
     /// Authenticate an agent by its bearer token.
     /// Returns {app_id, slug} on success.
