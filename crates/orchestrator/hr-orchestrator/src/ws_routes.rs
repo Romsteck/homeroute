@@ -1121,29 +1121,9 @@ async fn handle_host_agent_message(
         }
         HostAgentMessage::BackupRepoReady {
             transfer_id,
-            has_manifest,
-            manifest_size,
         } => {
-            info!(
-                transfer_id = %transfer_id,
-                has_manifest,
-                manifest_size,
-                "Backup repo ready"
-            );
-            if has_manifest {
-                registry.init_backup_manifest_receive(&transfer_id, manifest_size).await;
-            }
-            registry
-                .on_backup_repo_ready(&transfer_id, has_manifest, manifest_size)
-                .await;
-        }
-        HostAgentMessage::BackupManifestReady {
-            transfer_id,
-        } => {
-            info!(transfer_id = %transfer_id, "Backup manifest ready");
-            registry
-                .on_backup_manifest_ready(&transfer_id)
-                .await;
+            info!(transfer_id = %transfer_id, "Backup repo ready");
+            registry.on_backup_repo_ready(&transfer_id).await;
         }
         HostAgentMessage::BackupRepoComplete {
             transfer_id,

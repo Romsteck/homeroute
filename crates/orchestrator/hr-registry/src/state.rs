@@ -58,8 +58,7 @@ pub enum MigrationResult {
 }
 
 pub enum BackupSignal {
-    RepoReady { has_manifest: bool, manifest_size: u64 },
-    ManifestReady,
+    RepoReady,
     RepoComplete { success: bool, message: String, snapshot_name: Option<String> },
 }
 
@@ -1114,15 +1113,9 @@ impl AgentRegistry {
         self.backup_signals.write().await.remove(transfer_id);
     }
 
-    pub async fn on_backup_repo_ready(&self, transfer_id: &str, has_manifest: bool, manifest_size: u64) {
+    pub async fn on_backup_repo_ready(&self, transfer_id: &str) {
         if let Some(tx) = self.backup_signals.read().await.get(transfer_id) {
-            let _ = tx.send(BackupSignal::RepoReady { has_manifest, manifest_size }).await;
-        }
-    }
-
-    pub async fn on_backup_manifest_ready(&self, transfer_id: &str) {
-        if let Some(tx) = self.backup_signals.read().await.get(transfer_id) {
-            let _ = tx.send(BackupSignal::ManifestReady).await;
+            let _ = tx.send(BackupSignal::RepoReady).await;
         }
     }
 

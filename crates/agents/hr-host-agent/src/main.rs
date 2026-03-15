@@ -1074,13 +1074,9 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                     .await
                                     .ok();
 
-                                let has_manifest = previous_manifest.is_some();
-                                let manifest_size = previous_manifest.as_ref().map(|m| m.len() as u64).unwrap_or(0);
-
                                 info!(
                                     repo = %rname,
-                                    has_manifest,
-                                    manifest_size,
+                                    has_previous = previous_manifest.is_some(),
                                     "Sending BackupRepoReady"
                                 );
 
@@ -1105,31 +1101,10 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                     }
                                 }
 
-                                // Send BackupRepoReady (without manifest data)
+                                // Send BackupRepoReady (manifest is stored locally on orchestrator)
                                 let _ = tx_backup.send(OutgoingWsMessage::Text(HostAgentMessage::BackupRepoReady {
-                                    transfer_id: tid.clone(),
-                                    has_manifest,
-                                    manifest_size,
+                                    transfer_id: tid,
                                 })).await;
-
-                                // If there's a previous manifest, stream it via binary chunks
-                                if let Some(manifest_data) = previous_manifest {
-                                    let chunk_size = 524288usize; // 512KB
-                                    for chunk in manifest_data.as_bytes().chunks(chunk_size) {
-                                        let checksum = xxhash_rust::xxh32::xxh32(chunk, 0);
-                                        let _ = tx_backup.send(OutgoingWsMessage::Text(HostAgentMessage::TransferChunkBinary {
-                                            transfer_id: tid.clone(),
-                                            sequence: 0,
-                                            size: chunk.len() as u32,
-                                            checksum,
-                                        })).await;
-                                        let _ = tx_backup.send(OutgoingWsMessage::Binary(chunk.to_vec())).await;
-                                    }
-                                    // Signal manifest complete
-                                    let _ = tx_backup.send(OutgoingWsMessage::Text(HostAgentMessage::BackupManifestReady {
-                                        transfer_id: tid,
-                                    })).await;
-                                }
                             }
                             Ok(HostRegistryMessage::BackupManifestStart { repo_name, transfer_id, manifest_size }) => {
                                 info!(repo = %repo_name, transfer_id = %transfer_id, size = manifest_size, "Starting manifest receive");

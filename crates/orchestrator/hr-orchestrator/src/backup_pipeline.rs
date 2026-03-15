@@ -659,44 +659,22 @@ async fn run_repo_backup(
         .map_err(|e| format!("Failed to send StartBackupRepo: {e}"))?;
 
     // Wait for BackupRepoReady
-    let (has_manifest, manifest_size) = tokio::time::timeout(Duration::from_secs(60), signal_rx.recv())
+    tokio::time::timeout(Duration::from_secs(60), signal_rx.recv())
         .await
         .map_err(|_| "Timeout waiting for BackupRepoReady".to_string())?
         .ok_or_else(|| "Backup signal channel closed".to_string())
         .and_then(|sig| match sig {
-            BackupSignal::RepoReady { has_manifest, manifest_size } => Ok((has_manifest, manifest_size)),
+            BackupSignal::RepoReady { .. } => Ok(()),
             _ => Err("Unexpected backup signal".to_string()),
         })?;
 
-    // If host-agent has a previous manifest, receive it via binary chunks
-    let old_manifest: Option<FileManifest> = if has_manifest {
-        info!(repo = repo.name, size = manifest_size, "Receiving previous manifest via binary chunks");
-        // Register this transfer_id for receiving binary data on the orchestrator side
-        // The host-agent streams the manifest as TransferChunkBinary + binary frames
-        // Wait for BackupManifestReady signal
-        let manifest_result = tokio::time::timeout(Duration::from_secs(120), signal_rx.recv())
-            .await
-            .map_err(|_| "Timeout waiting for BackupManifestReady".to_string())?
-            .ok_or_else(|| "Backup signal channel closed".to_string())
-            .and_then(|sig| match sig {
-                BackupSignal::ManifestReady => Ok(()),
-                _ => Err("Unexpected backup signal while waiting for manifest".to_string()),
-            });
-
-        match manifest_result {
-            Ok(()) => {
-                // The manifest data was received via the registry's manifest accumulator
-                let data = registry.take_backup_manifest_data(&transfer_id).await;
-                data.and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            }
-            Err(e) => {
-                warn!(repo = repo.name, "Failed to receive manifest: {e}, proceeding as full backup");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // Load previous manifest from local cache (stored after each successful backup)
+    let manifest_dir = PathBuf::from("/var/lib/server-dashboard/backup-manifests");
+    let manifest_path = manifest_dir.join(format!("{}.json", repo.name));
+    let old_manifest: Option<FileManifest> = tokio::fs::read_to_string(&manifest_path)
+        .await
+        .ok()
+        .and_then(|json| serde_json::from_str(&json).ok());
 
     info!(
         repo = repo.name,
@@ -951,6 +929,16 @@ async fn run_repo_backup(
     // Clean up signal
     registry.remove_backup_signal(&transfer_id).await;
     complete_result?;
+
+    // Save manifest locally for future differential comparisons
+    let manifest_dir = PathBuf::from("/var/lib/server-dashboard/backup-manifests");
+    let _ = tokio::fs::create_dir_all(&manifest_dir).await;
+    let manifest_path = manifest_dir.join(format!("{}.json", repo.name));
+    if let Ok(json) = serde_json::to_string(&new_manifest) {
+        if let Err(e) = tokio::fs::write(&manifest_path, &json).await {
+            warn!(repo = repo.name, "Failed to save local manifest: {e}");
+        }
+    }
 
     {
         let mut p = progress.write().await;
