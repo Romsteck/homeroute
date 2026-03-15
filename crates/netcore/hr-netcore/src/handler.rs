@@ -400,8 +400,8 @@ impl NetcoreHandler {
             .values()
             .map(|s| ServiceStatusEntry {
                 name: s.name.clone(),
-                state: format!("{:?}", s.state),
-                priority: format!("{:?}", s.priority),
+                state: format!("{:?}", s.state).to_lowercase(),
+                priority: format!("{:?}", s.priority).to_lowercase(),
                 restart_count: s.restart_count,
                 last_state_change: s.last_state_change,
                 error: s.error.clone(),

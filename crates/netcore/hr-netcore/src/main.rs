@@ -155,6 +155,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting supervised network services...");
 
     // DNS UDP + TCP server (Critical)
+    // Each listen address gets a unique service name to avoid status overwrites
     for addr_str in &dns_dhcp_config.dns.listen_addresses {
         // IPv6 addresses need brackets: [addr]:port
         let addr_formatted = if addr_str.contains(':') {
@@ -162,11 +163,31 @@ async fn main() -> anyhow::Result<()> {
         } else {
             format!("{}:{}", addr_str, dns_dhcp_config.dns.port)
         };
-        let addr: SocketAddr = addr_formatted.parse()?;
+        let addr: SocketAddr = match addr_formatted.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                warn!("Skipping invalid listen address '{}': {}", addr_str, e);
+                continue;
+            }
+        };
+
+        // Quick bind check: skip addresses not available on this host (EADDRNOTAVAIL)
+        // to avoid the supervisor endlessly retrying a permanently unavailable address.
+        match tokio::net::UdpSocket::bind(addr).await {
+            Ok(_sock) => { /* address is available, drop test socket */ }
+            Err(e) if e.raw_os_error() == Some(99) => {
+                warn!("Skipping DNS listen address {} (not available on this host)", addr_str);
+                continue;
+            }
+            Err(_) => { /* other errors (e.g. port in use) — let supervisor handle */ }
+        }
+
+        let udp_name = format!("dns-udp:{}", addr_str);
+        let tcp_name = format!("dns-tcp:{}", addr_str);
 
         let dns_state_c = dns_state.clone();
         let reg = service_registry.clone();
-        spawn_supervised("dns-udp", ServicePriority::Critical, reg, move || {
+        spawn_supervised(&udp_name, ServicePriority::Critical, reg, move || {
             let state = dns_state_c.clone();
             let addr = addr;
             async move { hr_dns::server::run_udp_server(addr, state).await }
@@ -174,7 +195,7 @@ async fn main() -> anyhow::Result<()> {
 
         let dns_state_c = dns_state.clone();
         let reg = service_registry.clone();
-        spawn_supervised("dns-tcp", ServicePriority::Critical, reg, move || {
+        spawn_supervised(&tcp_name, ServicePriority::Critical, reg, move || {
             let state = dns_state_c.clone();
             let addr = addr;
             async move { hr_dns::server::run_tcp_server(addr, state).await }
