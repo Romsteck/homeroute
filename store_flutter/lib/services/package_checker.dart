@@ -42,6 +42,15 @@ class PackageChecker {
     }
   }
 
+  static Future<bool> restartApp() async {
+    try {
+      final result = await _channel.invokeMethod<bool>('restartApp');
+      return result ?? false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
   static Future<void> openAppSettings() async {
     try {
       await _channel.invokeMethod('openAppSettings');

@@ -1,5 +1,8 @@
 package com.homeroute.home
 
+import android.app.AlarmManager
+import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -9,6 +12,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import kotlin.system.exitProcess
 
 class MainActivity : FlutterActivity() {
     companion object {
@@ -59,6 +63,31 @@ class MainActivity : FlutterActivity() {
                             result.success(true)
                         } else {
                             result.success(false)
+                        }
+                    }
+                    "restartApp" -> {
+                        try {
+                            val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+                            if (launchIntent != null) {
+                                launchIntent.addFlags(
+                                    Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+                                )
+                                val pending = PendingIntent.getActivity(
+                                    this, 0, launchIntent,
+                                    PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+                                )
+                                val alarmMgr = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+                                alarmMgr.set(
+                                    AlarmManager.RTC,
+                                    System.currentTimeMillis() + 500,
+                                    pending
+                                )
+                            }
+                            result.success(true)
+                            finishAffinity()
+                            exitProcess(0)
+                        } catch (e: Exception) {
+                            result.error("RESTART_FAILED", e.message, null)
                         }
                     }
                     "openAppSettings" -> {

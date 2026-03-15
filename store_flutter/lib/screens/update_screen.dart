@@ -57,11 +57,20 @@ class _UpdateScreenState extends State<UpdateScreen> {
         _progress = 1.0;
       });
 
+      final installed = await PackageChecker.installApk(
+        savePath,
+        androidPackage: 'com.homeroute.home',
+      );
+
       if (!mounted) return;
-      setState(() {
-        _phase = 'done';
-      });
-      await PackageChecker.installApk(savePath);
+
+      if (installed) {
+        // Self-update: restart the app to load the new version
+        setState(() => _phase = 'done');
+        await PackageChecker.restartApp();
+      } else {
+        setState(() => _phase = 'done');
+      }
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -218,7 +227,7 @@ class _UpdateScreenState extends State<UpdateScreen> {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
               child: Text(
-                "Installation lanc\u00e9e ! Fermez et relancez l'application.",
+                "Installation termin\u00e9e. Red\u00e9marrage en cours\u2026",
                 style: const TextStyle(
                   fontSize: 14,
                   color: AppColors.textPrimary,
