@@ -75,6 +75,8 @@ pub struct ContainerV2Record {
     pub stack: hr_registry::types::AppStack,
     pub status: ContainerV2Status,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub volumes: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -331,6 +333,7 @@ impl ContainerManager {
             stack: req.stack,
             status: ContainerV2Status::Deploying,
             created_at: Utc::now(),
+            volumes: Vec::new(),
         };
 
         // Persist the record
@@ -2358,7 +2361,7 @@ WantedBy=multi-user.target
             }
 
             if let Err(e) =
-                NspawnClient::write_nspawn_unit(new_name, storage, &network_mode, has_workspace)
+                NspawnClient::write_nspawn_unit(new_name, storage, &network_mode, has_workspace, &[])
                     .await
             {
                 warn!(

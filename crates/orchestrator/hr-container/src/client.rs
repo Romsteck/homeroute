@@ -34,7 +34,7 @@ impl NspawnClient {
         }
 
         // Write .nspawn unit
-        Self::write_nspawn_unit(name, storage_path, network_mode, with_workspace).await?;
+        Self::write_nspawn_unit(name, storage_path, network_mode, with_workspace, &[]).await?;
 
         // Write network config inside rootfs
         Self::write_network_config(name, storage_path).await?;
@@ -279,7 +279,14 @@ impl NspawnClient {
     /// Write the .nspawn unit file for a container.
     /// `network_mode` is either "bridge:br-lan" or "macvlan:enp7s0f0".
     /// If `with_workspace` is true, a bind-mount for `/root/workspace` is added.
-    pub async fn write_nspawn_unit(name: &str, storage_path: &Path, network_mode: &str, with_workspace: bool) -> Result<()> {
+    /// `volumes` is a slice of (source_path, mount_point, read_only) tuples for additional bind mounts.
+    pub async fn write_nspawn_unit(
+        name: &str,
+        storage_path: &Path,
+        network_mode: &str,
+        with_workspace: bool,
+        volumes: &[(String, String, bool)],
+    ) -> Result<()> {
         tokio::fs::create_dir_all(NSPAWN_UNIT_DIR).await
             .context("failed to create nspawn unit directory")?;
 
@@ -315,11 +322,23 @@ impl NspawnClient {
             String::new()
         };
 
-        let files_section = if with_workspace {
+        // Build [Files] section: workspace bind + storage volumes
+        let mut files_lines = Vec::new();
+        if with_workspace {
             let ws_path = storage_path.join(format!("{name}-workspace"));
-            format!("[Files]\nBind={}:/root/workspace\n", ws_path.display())
-        } else {
+            files_lines.push(format!("Bind={}:/root/workspace", ws_path.display()));
+        }
+        for (source, mount, read_only) in volumes {
+            if *read_only {
+                files_lines.push(format!("BindReadOnly={source}:{mount}"));
+            } else {
+                files_lines.push(format!("Bind={source}:{mount}"));
+            }
+        }
+        let files_section = if files_lines.is_empty() {
             String::new()
+        } else {
+            format!("[Files]\n{}\n", files_lines.join("\n"))
         };
 
         let content = format!(

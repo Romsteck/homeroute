@@ -64,6 +64,18 @@ impl Default for ContainerV2State {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StorageVolume {
+    pub id: String,
+    pub name: String,
+    pub source_path: String,
+    pub mount_point: String,
+    #[serde(default)]
+    pub read_only: bool,
+    pub zfs_dataset: Option<String>,
+    pub zfs_quota: Option<u64>,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ContainerV2Record {
     pub id: String,
@@ -77,6 +89,8 @@ pub struct ContainerV2Record {
     pub stack: hr_registry::types::AppStack,
     pub status: ContainerV2Status,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub volumes: Vec<StorageVolume>,
 }
 
 #[derive(Deserialize)]
@@ -392,6 +406,268 @@ impl ContainerManager {
         Ok(())
     }
 
+    // ── Volume management ─────────────────────────────────────────
+
+    /// List volumes for a container.
+    pub async fn list_volumes(&self, container_id: &str) -> Result<Vec<StorageVolume>, String> {
+        let state = self.state.read().await;
+        match state.containers.iter().find(|c| c.id == container_id) {
+            Some(c) => Ok(c.volumes.clone()),
+            None => Err("Container not found".to_string()),
+        }
+    }
+
+    /// Attach a new volume to a container. Creates source directory, optionally creates ZFS dataset,
+    /// saves state, regenerates .nspawn unit, and restarts the container.
+    pub async fn attach_volume(
+        &self,
+        container_id: &str,
+        name: String,
+        source_path: String,
+        mount_point: String,
+        read_only: bool,
+        zfs_dataset: Option<String>,
+        zfs_quota: Option<u64>,
+    ) -> Result<StorageVolume, String> {
+        // Verify container exists and is local
+        let (container_name, host_id) = {
+            let state = self.state.read().await;
+            match state.containers.iter().find(|c| c.id == container_id) {
+                Some(c) => (c.container_name.clone(), c.host_id.clone()),
+                None => return Err("Container not found".to_string()),
+            }
+        };
+
+        if host_id != "local" {
+            return Err("Volume management is only supported for local containers".to_string());
+        }
+
+        // Prevent duplicate mount points
+        {
+            let state = self.state.read().await;
+            if let Some(c) = state.containers.iter().find(|c| c.id == container_id) {
+                if c.volumes.iter().any(|v| v.mount_point == mount_point) {
+                    return Err(format!("A volume is already mounted at {mount_point}"));
+                }
+            }
+        }
+
+        // Create source directory
+        tokio::fs::create_dir_all(&source_path)
+            .await
+            .map_err(|e| format!("Failed to create source directory {source_path}: {e}"))?;
+
+        // Optionally create ZFS dataset (best-effort)
+        if let Some(ref dataset) = zfs_dataset {
+            let mut args = vec![
+                "create".to_string(),
+                "-o".to_string(), "compression=lz4".to_string(),
+                "-o".to_string(), "atime=off".to_string(),
+            ];
+            if let Some(quota) = zfs_quota {
+                args.push("-o".to_string());
+                args.push(format!("quota={quota}"));
+            }
+            args.push(dataset.clone());
+
+            let output = tokio::process::Command::new("sudo")
+                .arg("zfs")
+                .args(&args)
+                .output()
+                .await;
+
+            match output {
+                Ok(out) if out.status.success() => {
+                    info!(dataset, "ZFS dataset created for volume");
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    if stderr.contains("dataset already exists") {
+                        info!(dataset, "ZFS dataset already exists, reusing");
+                    } else {
+                        warn!(dataset, stderr = %stderr, "Failed to create ZFS dataset (continuing without ZFS)");
+                    }
+                }
+                Err(e) => {
+                    warn!(dataset, error = %e, "Failed to run zfs create (continuing without ZFS)");
+                }
+            }
+        }
+
+        // Generate volume ID and create the volume struct
+        let volume = StorageVolume {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+            source_path,
+            mount_point,
+            read_only,
+            zfs_dataset,
+            zfs_quota,
+        };
+
+        // Add volume to container record
+        {
+            let mut state = self.state.write().await;
+            if let Some(c) = state.containers.iter_mut().find(|c| c.id == container_id) {
+                c.volumes.push(volume.clone());
+            }
+        }
+        self.save_state().await?;
+
+        // Regenerate .nspawn and restart
+        self.regenerate_nspawn_and_restart(container_id, &container_name).await?;
+
+        info!(container_id, volume_id = %volume.id, "Volume attached");
+        Ok(volume)
+    }
+
+    /// Update an existing volume on a container (name, source_path, mount_point, read_only).
+    /// Saves state, regenerates .nspawn unit, and restarts the container.
+    pub async fn update_volume(
+        &self,
+        container_id: &str,
+        volume_id: &str,
+        updates: serde_json::Value,
+    ) -> Result<StorageVolume, String> {
+        let container_name = {
+            let mut state = self.state.write().await;
+            let container = state.containers.iter_mut().find(|c| c.id == container_id)
+                .ok_or_else(|| "Container not found".to_string())?;
+
+            if container.host_id != "local" {
+                return Err("Volume management is only supported for local containers".to_string());
+            }
+
+            let volume = container.volumes.iter_mut().find(|v| v.id == volume_id)
+                .ok_or_else(|| "Volume not found".to_string())?;
+
+            if let Some(name) = updates.get("name").and_then(|v| v.as_str()) {
+                volume.name = name.to_string();
+            }
+            if let Some(source_path) = updates.get("source_path").and_then(|v| v.as_str()) {
+                volume.source_path = source_path.to_string();
+            }
+            if let Some(mount_point) = updates.get("mount_point").and_then(|v| v.as_str()) {
+                volume.mount_point = mount_point.to_string();
+            }
+            if let Some(read_only) = updates.get("read_only").and_then(|v| v.as_bool()) {
+                volume.read_only = read_only;
+            }
+
+            container.container_name.clone()
+        };
+
+        self.save_state().await?;
+
+        // Get updated volume to return
+        let volume = {
+            let state = self.state.read().await;
+            let container = state.containers.iter().find(|c| c.id == container_id).unwrap();
+            container.volumes.iter().find(|v| v.id == volume_id).cloned()
+                .ok_or_else(|| "Volume not found after update".to_string())?
+        };
+
+        // Regenerate .nspawn and restart
+        self.regenerate_nspawn_and_restart(container_id, &container_name).await?;
+
+        info!(container_id, volume_id, "Volume updated");
+        Ok(volume)
+    }
+
+    /// Detach a volume from a container. Removes from state, regenerates .nspawn, restarts.
+    /// Does NOT delete the source data directory.
+    pub async fn detach_volume(
+        &self,
+        container_id: &str,
+        volume_id: &str,
+    ) -> Result<(), String> {
+        let container_name = {
+            let mut state = self.state.write().await;
+            let container = state.containers.iter_mut().find(|c| c.id == container_id)
+                .ok_or_else(|| "Container not found".to_string())?;
+
+            if container.host_id != "local" {
+                return Err("Volume management is only supported for local containers".to_string());
+            }
+
+            let before_len = container.volumes.len();
+            container.volumes.retain(|v| v.id != volume_id);
+            if container.volumes.len() == before_len {
+                return Err("Volume not found".to_string());
+            }
+
+            container.container_name.clone()
+        };
+
+        self.save_state().await?;
+
+        // Regenerate .nspawn and restart
+        self.regenerate_nspawn_and_restart(container_id, &container_name).await?;
+
+        info!(container_id, volume_id, "Volume detached (data preserved)");
+        Ok(())
+    }
+
+    /// Helper: regenerate the .nspawn unit file for a container and restart it.
+    /// Reads the existing network mode from the .nspawn file instead of recomputing,
+    /// so volume operations don't fail on non-bridge network configs.
+    async fn regenerate_nspawn_and_restart(
+        &self,
+        container_id: &str,
+        container_name: &str,
+    ) -> Result<(), String> {
+        let (host_id, volumes) = {
+            let state = self.state.read().await;
+            let c = state.containers.iter().find(|c| c.id == container_id)
+                .ok_or_else(|| "Container not found".to_string())?;
+            (c.host_id.clone(), c.volumes.clone())
+        };
+
+        let storage_path = self.resolve_storage_path(&host_id).await;
+        let storage = Path::new(&storage_path);
+
+        // Read existing network mode from the .nspawn file to avoid re-resolving
+        let nspawn_path = format!("/etc/systemd/nspawn/{container_name}.nspawn");
+        let network_mode = match tokio::fs::read_to_string(&nspawn_path).await {
+            Ok(content) => {
+                // Parse Bridge= or MACVLAN= from [Network] section
+                let mut mode = None;
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if let Some(val) = trimmed.strip_prefix("Bridge=") {
+                        mode = Some(format!("bridge:{}", val.trim()));
+                    } else if let Some(val) = trimmed.strip_prefix("MACVLAN=") {
+                        mode = Some(format!("macvlan:{}", val.trim()));
+                    }
+                }
+                mode.unwrap_or_else(|| "bridge:br0".to_string())
+            }
+            Err(_) => self.resolve_network_mode(&host_id).await?,
+        };
+
+        let has_workspace = storage
+            .join(format!("{container_name}-workspace"))
+            .exists();
+
+        let vol_binds: Vec<(String, String, bool)> = volumes
+            .iter()
+            .map(|v| (v.source_path.clone(), v.mount_point.clone(), v.read_only))
+            .collect();
+
+        NspawnClient::write_nspawn_unit(container_name, storage, &network_mode, has_workspace, &vol_binds)
+            .await
+            .map_err(|e| format!("Failed to write nspawn unit: {e}"))?;
+
+        // Restart container: stop then start
+        let _ = NspawnClient::stop_container(container_name).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        NspawnClient::start_container(container_name)
+            .await
+            .map_err(|e| format!("Failed to start container after volume change: {e}"))?;
+
+        Ok(())
+    }
+
     // ── CRUD ─────────────────────────────────────────────────────
 
     /// Create a new nspawn container: register in AgentRegistry (headless), create V2 record,
@@ -459,6 +735,7 @@ impl ContainerManager {
             stack: req.stack,
             status: ContainerV2Status::Deploying,
             created_at: Utc::now(),
+            volumes: Vec::new(),
         };
 
         // Persist the record
@@ -2607,8 +2884,17 @@ WantedBy=multi-user.target
                 let _ = tokio::fs::remove_file(&old_machine_link).await;
             }
 
+            // Collect volume binds for the renamed container
+            let vol_binds: Vec<(String, String, bool)> = {
+                let st = self.state.read().await;
+                st.containers.iter()
+                    .find(|c| c.container_name == *new_name)
+                    .map(|c| c.volumes.iter().map(|v| (v.source_path.clone(), v.mount_point.clone(), v.read_only)).collect())
+                    .unwrap_or_default()
+            };
+
             if let Err(e) =
-                NspawnClient::write_nspawn_unit(new_name, storage, &network_mode, has_workspace)
+                NspawnClient::write_nspawn_unit(new_name, storage, &network_mode, has_workspace, &vol_binds)
                     .await
             {
                 warn!(

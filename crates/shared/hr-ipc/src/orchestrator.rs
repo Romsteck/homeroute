@@ -33,6 +33,12 @@ pub enum OrchestratorRequest {
     DeleteContainer { id: String },
     UpdateContainer { id: String, request: serde_json::Value },
 
+    // ── Container volumes ─────────────────────────────────────
+    ListVolumes { container_id: String },
+    AttachVolume { container_id: String, volume: serde_json::Value },
+    UpdateVolume { container_id: String, volume_id: String, updates: serde_json::Value },
+    DetachVolume { container_id: String, volume_id: String },
+
     // ── Container extended ────────────────────────────────────
     MigrateContainer { id: String, target_host_id: String },
     GetMigrationStatus { app_id: String },

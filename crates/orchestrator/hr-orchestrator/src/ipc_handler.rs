@@ -303,6 +303,47 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 }
             }
 
+            // ── Container volumes ─────────────────────────────────
+            OrchestratorRequest::ListVolumes { container_id } => {
+                match self.container_manager.list_volumes(&container_id).await {
+                    Ok(volumes) => IpcResponse::ok_data(volumes),
+                    Err(e) => IpcResponse::err(e),
+                }
+            }
+            OrchestratorRequest::AttachVolume { container_id, volume } => {
+                let name = volume.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let source_path = match volume.get("source_path").and_then(|v| v.as_str()) {
+                    Some(s) => s.to_string(),
+                    None => return IpcResponse::err("source_path is required"),
+                };
+                let mount_point = match volume.get("mount_point").and_then(|v| v.as_str()) {
+                    Some(s) => s.to_string(),
+                    None => return IpcResponse::err("mount_point is required"),
+                };
+                let read_only = volume.get("read_only").and_then(|v| v.as_bool()).unwrap_or(false);
+                let zfs_dataset = volume.get("zfs_dataset").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let zfs_quota = volume.get("zfs_quota").and_then(|v| v.as_u64());
+
+                match self.container_manager.attach_volume(
+                    &container_id, name, source_path, mount_point, read_only, zfs_dataset, zfs_quota,
+                ).await {
+                    Ok(vol) => IpcResponse::ok_data(vol),
+                    Err(e) => IpcResponse::err(e),
+                }
+            }
+            OrchestratorRequest::UpdateVolume { container_id, volume_id, updates } => {
+                match self.container_manager.update_volume(&container_id, &volume_id, updates).await {
+                    Ok(vol) => IpcResponse::ok_data(vol),
+                    Err(e) => IpcResponse::err(e),
+                }
+            }
+            OrchestratorRequest::DetachVolume { container_id, volume_id } => {
+                match self.container_manager.detach_volume(&container_id, &volume_id).await {
+                    Ok(()) => IpcResponse::ok_empty(),
+                    Err(e) => IpcResponse::err(e),
+                }
+            }
+
             // ── Container extended ───────────────────────────────
             OrchestratorRequest::MigrateContainer { id, target_host_id } => {
                 match self.container_manager.migrate_container(

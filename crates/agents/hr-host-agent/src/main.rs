@@ -245,6 +245,9 @@ async fn run_connection(config: &Config) -> Result<(), String> {
         }
     });
 
+    // Reunite split halves into a single stream to avoid BiLock issues.
+    let mut ws_stream = read.reunite(write).expect("reunite split WebSocket");
+
     // WebSocket Ping interval: sends Ping every 15s so the server responds with Pong,
     // which resets the read deadline below and proves the connection is alive.
     let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
@@ -255,44 +258,29 @@ async fn run_connection(config: &Config) -> Result<(), String> {
     let read_deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
     tokio::pin!(read_deadline);
 
-    // Message loop
+    // Message loop — uses biased select to always check for incoming WS messages first,
+    // preventing lost wakeups when the next() future is dropped and recreated.
     loop {
+        use futures_util::{SinkExt, StreamExt};
         tokio::select! {
-            // WebSocket Ping keepalive
-            _ = ping_interval.tick() => {
-                if write.send(Message::Ping(vec![].into())).await.is_err() {
-                    break;
-                }
-            }
-            // Outgoing messages
-            Some(msg) = rx.recv() => {
-                match msg {
-                    OutgoingWsMessage::Text(agent_msg) => {
-                        let text = match serde_json::to_string(&agent_msg) {
-                            Ok(t) => t,
-                            Err(_) => continue,
-                        };
-                        if write.send(Message::Text(text.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    OutgoingWsMessage::Binary(data) => {
-                        if write.send(Message::Binary(data.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-            // Read deadline: no message from server in 30s → reconnect
-            _ = &mut read_deadline => {
-                warn!("No message from server in 30s, reconnecting");
-                break;
-            }
-            // Incoming messages
-            msg = read.next() => {
+            biased;
+
+            // FIRST: Always check incoming messages — this is the critical path
+            msg = ws_stream.next() => {
                 read_deadline.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_secs(30));
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
+                let incoming_msg = match msg {
+                    None => {
+                        info!("WebSocket closed");
+                        break;
+                    }
+                    Some(Err(e)) => {
+                        error!("WebSocket error: {e}");
+                        break;
+                    }
+                    Some(Ok(m)) => m,
+                };
+                match incoming_msg {
+                    Message::Text(text) => {
                         match serde_json::from_str::<HostRegistryMessage>(&text) {
                             Ok(HostRegistryMessage::Shutdown { drain }) => {
                                 info!(drain, "Shutdown requested");
@@ -463,7 +451,7 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                         let sp = std::path::Path::new(&storage_path);
 
                                         // Write .nspawn unit (dev containers get workspace bind, prod don't)
-                                        if let Err(e) = hr_container::NspawnClient::write_nspawn_unit(&container_name, sp, &network_mode, has_workspace).await {
+                                        if let Err(e) = hr_container::NspawnClient::write_nspawn_unit(&container_name, sp, &network_mode, has_workspace, &[]).await {
                                             let _ = tx_finalize.send(OutgoingWsMessage::Text(HostAgentMessage::ImportFailed {
                                                 transfer_id: tid,
                                                 error: format!("Failed to write nspawn unit: {}", e),
@@ -1198,7 +1186,7 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                             }
                         }
                     }
-                    Some(Ok(Message::Binary(data))) => {
+                    Message::Binary(data) => {
                         if let Some((transfer_id, expected_checksum)) = pending_binary_chunk.take() {
                             let actual_checksum = xxhash_rust::xxh32::xxh32(&data, 0);
                             if actual_checksum != expected_checksum {
@@ -1234,19 +1222,39 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                             warn!("Unexpected binary WebSocket frame (no pending metadata)");
                         }
                     }
-                    Some(Ok(Message::Ping(data))) => {
-                        let _ = write.send(Message::Pong(data)).await;
+                    Message::Ping(data) => {
+                        let _ = ws_stream.send(Message::Pong(data)).await;
                     }
-                    Some(Ok(Message::Close(_))) | None => {
-                        info!("WebSocket closed");
-                        break;
-                    }
-                    Some(Err(e)) => {
-                        error!("WebSocket error: {}", e);
-                        break;
-                    }
-                    _ => {}
+                    _ => {} // Pong, etc.
                 }
+            }
+            // Outgoing messages
+            Some(msg) = rx.recv() => {
+                let result = match msg {
+                    OutgoingWsMessage::Text(agent_msg) => {
+                        match serde_json::to_string(&agent_msg) {
+                            Ok(t) => ws_stream.send(Message::Text(t.into())).await,
+                            Err(_) => continue,
+                        }
+                    }
+                    OutgoingWsMessage::Binary(data) => {
+                        ws_stream.send(Message::Binary(data.into())).await
+                    }
+                };
+                if result.is_err() {
+                    break;
+                }
+            }
+            // WebSocket Ping keepalive
+            _ = ping_interval.tick() => {
+                if ws_stream.send(Message::Ping(vec![].into())).await.is_err() {
+                    break;
+                }
+            }
+            // Read deadline: no message from server in 30s → reconnect
+            _ = &mut read_deadline => {
+                warn!("No message from server in 30s, reconnecting");
+                break;
             }
             // Auto-off idle monitoring (sleep or shutdown)
             Ok(()) = cpu_rx.changed() => {

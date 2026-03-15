@@ -625,7 +625,13 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: WsState) {
                 let ws_msg = match msg {
                     hr_registry::OutgoingHostMessage::Text(m) => {
                         match serde_json::to_string(&m) {
-                            Ok(t) => Message::Text(t.into()),
+                            Ok(t) => {
+                                // Log non-heartbeat outgoing messages for debugging
+                                if !t.contains("Heartbeat") {
+                                    info!(host = %host_name, "WS→host: {}", &t[..t.len().min(200)]);
+                                }
+                                Message::Text(t.into())
+                            }
                             Err(_) => continue,
                         }
                     }
@@ -641,7 +647,10 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: WsState) {
                         // Successful send proves connection is alive — reset heartbeat
                         timeout_sleep.as_mut().reset(tokio::time::Instant::now() + heartbeat_timeout);
                     }
-                    Ok(Err(_)) => break,    // WebSocket send error
+                    Ok(Err(e)) => {
+                        warn!(host = %host_name, "WebSocket send error: {e}");
+                        break;
+                    }
                     Err(_) => {             // 30s timeout
                         warn!("WebSocket send timeout for host {host_id}, disconnecting");
                         break;
@@ -1423,6 +1432,7 @@ async fn handle_local_nspawn_import(
         sp,
         &network_mode,
         has_workspace,
+        &[],
     )
     .await
     {

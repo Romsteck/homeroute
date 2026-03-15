@@ -14,6 +14,7 @@ import Button from '../components/Button';
 import PageHeader from '../components/PageHeader';
 import ApplicationCard from '../components/ApplicationCard';
 import CreateContainerModal from '../components/CreateContainerModal';
+import VolumeModal from '../components/VolumeModal';
 import useWebSocket from '../hooks/useWebSocket';
 import {
   getContainers,
@@ -163,6 +164,7 @@ function Containers() {
   const [selectedHostId, setSelectedHostId] = useState('');
   const [migrating, setMigrating] = useState(false);
   const [migrations, setMigrations] = useState({});
+  const [volumeModalContainer, setVolumeModalContainer] = useState(null);
   const [editingApp, setEditingApp] = useState(null);
   const [appEditForm, setAppEditForm] = useState({ name: '', slug: '' });
   const [renameProgress, setRenameProgress] = useState(null);
@@ -511,6 +513,7 @@ function Containers() {
                 onEdit={openEditModal}
                 onDelete={handleDelete}
                 onToggleSecurity={handleToggleSecurity}
+                onVolumes={setVolumeModalContainer}
                 onMigrate={openMigrateModal}
                 onMigrationDismiss={(id) => setMigrations(prev => {
                   const next = { ...prev };
@@ -644,6 +647,11 @@ function Containers() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Volume Modal */}
+      {volumeModalContainer && (
+        <VolumeModal container={volumeModalContainer} onClose={() => setVolumeModalContainer(null)} />
       )}
 
       {/* Terminal Modal */}

@@ -62,6 +62,7 @@ function ApplicationCard({
   onDelete,
   onToggleSecurity,
   onMigrate,
+  onVolumes,
   onMigrationDismiss,
   MigrationProgress,
 }) {
@@ -188,6 +189,9 @@ function ApplicationCard({
         </button>
         <button onClick={() => onMigrate(container)} disabled={isMigrating} className="p-1 text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded transition-colors" title="Migrer">
           <ArrowRightLeft className="w-3.5 h-3.5" />
+        </button>
+        <button onClick={() => onVolumes(container)} className="p-1 text-gray-400 hover:text-purple-400 hover:bg-gray-700 rounded transition-colors" title="Volumes">
+          <HardDrive className="w-3.5 h-3.5" />
         </button>
 
         {/* Edit/Delete visible on hover */}

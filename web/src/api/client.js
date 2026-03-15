@@ -152,6 +152,10 @@ export const getContainersConfig = () => api.get('/containers/config');
 export const updateContainersConfig = (data) => api.put('/containers/config', data);
 export const renameContainer = (id, data) => api.post(`/containers/${id}/rename`, data);
 export const getRenameStatus = (id) => api.get(`/containers/${id}/rename/status`);
+export const getContainerVolumes = (id) => api.get(`/containers/${id}/volumes`);
+export const attachContainerVolume = (id, data) => api.post(`/containers/${id}/volumes`, data);
+export const updateContainerVolume = (id, volId, data) => api.put(`/containers/${id}/volumes/${volId}`, data);
+export const detachContainerVolume = (id, volId) => api.delete(`/containers/${id}/volumes/${volId}`);
 
 // Prod status/logs (queried via dev container's linked prod)
 export const getProdStatus = (devAppId) => api.get(`/applications/${devAppId}/prod/status`);

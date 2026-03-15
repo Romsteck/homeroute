@@ -5,7 +5,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -21,6 +21,8 @@ pub fn router() -> Router<ApiState> {
         .route("/{id}", put(update_container).delete(delete_container))
         .route("/{id}/start", post(start_container))
         .route("/{id}/stop", post(stop_container))
+        .route("/{id}/volumes", get(list_volumes).post(attach_volume))
+        .route("/{id}/volumes/{vol_id}", put(update_volume).delete(detach_volume))
         .route("/{id}/terminal", get(terminal_ws))
         .route("/{id}/migrate", post(migrate_container))
         .route("/{id}/migrate/status", get(migration_status))
@@ -243,6 +245,107 @@ async fn update_config(
         .await
     {
         Ok(resp) => ipc_ok_response(resp),
+        Err(e) => ipc_err_response(e),
+    }
+}
+
+// ── Volume handlers ─────────────────────────────────────────────
+
+async fn list_volumes(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::ListVolumes { container_id: id })
+        .await
+    {
+        Ok(resp) if resp.ok => {
+            Json(serde_json::json!({"success": true, "volumes": resp.data})).into_response()
+        }
+        Ok(resp) => {
+            let err = resp.error.as_deref().unwrap_or("Unknown error");
+            if err.contains("not found") {
+                (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "error": err}))).into_response()
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": err}))).into_response()
+            }
+        }
+        Err(e) => ipc_err_response(e),
+    }
+}
+
+async fn attach_volume(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(volume): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::AttachVolume {
+            container_id: id,
+            volume,
+        })
+        .await
+    {
+        Ok(resp) if resp.ok => {
+            Json(serde_json::json!({"success": true, "volume": resp.data})).into_response()
+        }
+        Ok(resp) => {
+            let err = resp.error.as_deref().unwrap_or("Unknown error");
+            let status = if err.contains("not found") { StatusCode::NOT_FOUND } else { StatusCode::BAD_REQUEST };
+            (status, Json(serde_json::json!({"success": false, "error": err}))).into_response()
+        }
+        Err(e) => ipc_err_response(e),
+    }
+}
+
+async fn update_volume(
+    State(state): State<ApiState>,
+    Path((id, vol_id)): Path<(String, String)>,
+    Json(updates): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::UpdateVolume {
+            container_id: id,
+            volume_id: vol_id,
+            updates,
+        })
+        .await
+    {
+        Ok(resp) if resp.ok => {
+            Json(serde_json::json!({"success": true, "volume": resp.data})).into_response()
+        }
+        Ok(resp) => {
+            let err = resp.error.as_deref().unwrap_or("Unknown error");
+            let status = if err.contains("not found") { StatusCode::NOT_FOUND } else { StatusCode::BAD_REQUEST };
+            (status, Json(serde_json::json!({"success": false, "error": err}))).into_response()
+        }
+        Err(e) => ipc_err_response(e),
+    }
+}
+
+async fn detach_volume(
+    State(state): State<ApiState>,
+    Path((id, vol_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::DetachVolume {
+            container_id: id,
+            volume_id: vol_id,
+        })
+        .await
+    {
+        Ok(resp) if resp.ok => {
+            Json(serde_json::json!({"success": true})).into_response()
+        }
+        Ok(resp) => {
+            let err = resp.error.as_deref().unwrap_or("Unknown error");
+            let status = if err.contains("not found") { StatusCode::NOT_FOUND } else { StatusCode::BAD_REQUEST };
+            (status, Json(serde_json::json!({"success": false, "error": err}))).into_response()
+        }
         Err(e) => ipc_err_response(e),
     }
 }
