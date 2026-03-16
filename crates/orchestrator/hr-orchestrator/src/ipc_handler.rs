@@ -13,6 +13,8 @@ use crate::container_manager::{
     RenameContainerRequest, RenameState, UpdateContainerRequest,
 };
 use hr_common::events::{PowerAction, WakeResult};
+
+const BACKUP_SERVER_HOST_ID: &str = "877bcb76-4fb8-4164-940c-707201adf9bc";
 use hr_git::GitService;
 use hr_registry::protocol::{HostRegistryMessage, RegistryMessage};
 use hr_registry::types::UpdateApplicationRequest;
@@ -744,6 +746,11 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 }
             }
             OrchestratorRequest::HostPowerAction { host_id, action } => {
+                // Guard: never power off the local machine (backup server = router post-migration)
+                if host_id == BACKUP_SERVER_HOST_ID && (action == "shutdown" || action == "poweroff") {
+                    warn!("Blocked PowerOff request for backup server (local machine). This would shut down the router.");
+                    return IpcResponse::ok_data(serde_json::json!({"status": "blocked", "reason": "Cannot power off the local backup server"}));
+                }
                 let power_action = match action.as_str() {
                     "shutdown" => PowerAction::Shutdown,
                     "reboot" => PowerAction::Reboot,

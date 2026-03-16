@@ -13,9 +13,6 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 const BACKUP_SERVER_HOST_ID: &str = "877bcb76-4fb8-4164-940c-707201adf9bc";
-const HOMEROUTE_API_BASE: &str = "http://10.0.0.254:4000";
-const WAKE_TIMEOUT_SECS: u64 = 180;
-const WAKE_POLL_INTERVAL_SECS: u64 = 10;
 const REPO_BACKUP_TIMEOUT_SECS: u64 = 7200;
 const TOTAL_PIPELINE_TIMEOUT_SECS: u64 = 14400;
 const MAX_JOB_HISTORY: usize = 20;
@@ -57,19 +54,14 @@ fn default_repos() -> Vec<RepoConfig> {
             ],
         },
         RepoConfig {
-            name: "containers".to_string(),
-            source_path: "/var/lib/machines".to_string(),
-            excludes: Vec::new(),
-        },
-        RepoConfig {
-            name: "git".to_string(),
-            source_path: "/var/lib/git".to_string(),
-            excludes: Vec::new(),
-        },
-        RepoConfig {
             name: "pixel".to_string(),
             source_path: "/home/romain".to_string(),
             excludes: vec![".cache".to_string()],
+        },
+        RepoConfig {
+            name: "containers".to_string(),
+            source_path: "/var/lib/machines".to_string(),
+            excludes: Vec::new(),
         },
     ]
 }
@@ -87,10 +79,8 @@ pub struct RepoConfig {
 #[serde(rename_all = "snake_case")]
 pub enum PipelineStage {
     Idle,
-    WakingServer,
-    WaitingForServer,
+    CheckingServer,
     RunningBackup,
-    PuttingToSleep,
     Done,
     Failed,
 }
@@ -102,7 +92,6 @@ pub enum BackupPhase {
     Scanning,
     Transferring,
     Verifying,
-    Sleep,
     Done,
     Failed,
 }
@@ -255,8 +244,8 @@ impl BackupPipeline {
         {
             let mut status = self.status.write().await;
             status.running = true;
-            status.stage = PipelineStage::WakingServer;
-            status.current_message = Some("Waking backup server...".to_string());
+            status.stage = PipelineStage::CheckingServer;
+            status.current_message = Some("Checking backup server connection...".to_string());
         }
         {
             let mut progress = self.progress.write().await;
@@ -421,40 +410,34 @@ async fn set_stage(
 async fn run_pipeline(
     status: Arc<RwLock<BackupStatus>>,
     progress: Arc<RwLock<BackupProgress>>,
-    http: reqwest::Client,
+    _http: reqwest::Client,
     events: Arc<EventBus>,
     registry: Arc<AgentRegistry>,
 ) -> Result<String, String> {
     let repos = default_repos();
 
-    // ── Wake backup server ──────────────────────────────────────
+    // NOTE: WOL désactivé post-migration. Le backup server = machine locale.
+    // On vérifie juste que le host-agent est connecté.
     set_stage(
         &status,
         &progress,
-        PipelineStage::WakingServer,
+        PipelineStage::CheckingServer,
         BackupPhase::Idle,
-        "Envoi du paquet WOL...",
+        "Vérification de la connexion du serveur de backup...",
         &events,
     )
     .await;
 
-    let wake_url = format!("{HOMEROUTE_API_BASE}/api/hosts/{BACKUP_SERVER_HOST_ID}/wake");
-    match http.post(&wake_url).send().await {
-        Ok(resp) => info!("WOL response: {}", resp.status()),
-        Err(e) => warn!("WOL request failed (may already be online): {e}"),
+    if !registry.is_host_connected(BACKUP_SERVER_HOST_ID).await {
+        let msg = "Host agent not connected for backup. Aborting.".to_string();
+        error!("{msg}");
+        let mut s = status.write().await;
+        s.stage = PipelineStage::Failed;
+        s.current_message = Some(msg.clone());
+        drop(s);
+        return Err(msg);
     }
-
-    set_stage(
-        &status,
-        &progress,
-        PipelineStage::WaitingForServer,
-        BackupPhase::Idle,
-        "Attente du serveur de backup...",
-        &events,
-    )
-    .await;
-
-    wait_for_host_agent(&registry, &status, &progress).await?;
+    info!("Backup server host-agent connected (local mode)");
 
     // ── Run backups ─────────────────────────────────────────────
     set_stage(
@@ -471,7 +454,12 @@ async fn run_pipeline(
     let mut all_success = true;
     let mut repo_messages = Vec::new();
 
-    for repo in &repos {
+    for (i, repo) in repos.iter().enumerate() {
+        // Small delay between repos to let WebSocket settle after finalization I/O
+        if i > 0 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+
         // Early abort: if host disconnected, skip remaining repos
         if !registry.is_host_connected(BACKUP_SERVER_HOST_ID).await {
             warn!("Backup server disconnected, aborting remaining repos");
@@ -570,25 +558,11 @@ async fn run_pipeline(
         repo_messages.push(format!("{}: {}", repo.name, message));
     }
 
-    // ── Shutdown backup server (only if still connected) ──────────
-    if registry.is_host_connected(BACKUP_SERVER_HOST_ID).await {
-        set_stage(
-            &status,
-            &progress,
-            PipelineStage::PuttingToSleep,
-            BackupPhase::Sleep,
-            "Arrêt du serveur backup...",
-            &events,
-        )
-        .await;
-
-        let shutdown_url = format!("{HOMEROUTE_API_BASE}/api/hosts/{BACKUP_SERVER_HOST_ID}/shutdown");
-        match http.post(&shutdown_url).send().await {
-            Ok(resp) => info!("Shutdown response: {}", resp.status()),
-            Err(e) => warn!("Shutdown request failed: {e}"),
-        }
-    } else {
-        info!("Backup server already disconnected, skipping shutdown step");
+    // NOTE: PowerOff du backup server désactivé post-migration.
+    // Le backup server est maintenant la même machine que le routeur.
+    // Voir audit backup-audit-001 du 2026-03-16.
+    if all_success {
+        info!("Backup pipeline complete. Skipping backup server shutdown (local backup mode).");
     }
 
     let summary = repo_messages.join("; ");
@@ -599,44 +573,6 @@ async fn run_pipeline(
     } else {
         Err(format!("All repos failed. {summary}"))
     }
-}
-
-// ── Wait for host-agent connection ─────────────────────────────────
-
-async fn wait_for_host_agent(
-    registry: &AgentRegistry,
-    status: &Arc<RwLock<BackupStatus>>,
-    progress: &Arc<RwLock<BackupProgress>>,
-) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(WAKE_TIMEOUT_SECS);
-    let mut attempt = 0u32;
-
-    while Instant::now() < deadline {
-        attempt += 1;
-
-        if registry.is_host_connected(BACKUP_SERVER_HOST_ID).await {
-            info!("Backup server host-agent connected (attempt {attempt})");
-            return Ok(());
-        }
-
-        let remaining = deadline.saturating_duration_since(Instant::now()).as_secs();
-        let message = format!(
-            "Attente du serveur backup… tentative {attempt} ({remaining}s restantes)"
-        );
-        {
-            status.write().await.current_message = Some(message.clone());
-            let mut p = progress.write().await;
-            p.detail = Some(message);
-            p.elapsed_secs = WAKE_TIMEOUT_SECS.saturating_sub(remaining);
-            p.remaining_secs = Some(remaining);
-        }
-
-        tokio::time::sleep(Duration::from_secs(WAKE_POLL_INTERVAL_SECS)).await;
-    }
-
-    Err(format!(
-        "Backup server host-agent did not connect within {WAKE_TIMEOUT_SECS}s"
-    ))
 }
 
 // ── Per-repo backup ────────────────────────────────────────────────
@@ -656,6 +592,14 @@ async fn run_repo_backup(
     // Verify host is still connected
     if !registry.is_host_connected(BACKUP_SERVER_HOST_ID).await {
         return Err("Backup server disconnected before repo backup".to_string());
+    }
+
+    // Skip repos with empty/missing source directory
+    let source_path = PathBuf::from(&repo.source_path);
+    if !source_path.exists() {
+        info!(repo = repo.name, path = %repo.source_path, "Source directory does not exist, skipping");
+        registry.remove_backup_signal(&transfer_id).await;
+        return Ok((0, 0));
     }
 
     // Step 1: Tell host-agent to prepare and send us the previous manifest
@@ -756,6 +700,7 @@ async fn run_repo_backup(
         emit_backup_live(&events, &status, &progress).await;
 
         // Send TransferComplete even if no data (to close tar on agent side)
+        info!(repo = repo.name, "Sending TransferComplete (no data)");
         registry
             .send_host_command(
                 BACKUP_SERVER_HOST_ID,
@@ -765,6 +710,7 @@ async fn run_repo_backup(
             )
             .await
             .map_err(|e| format!("Failed to send TransferComplete: {e}"))?;
+        info!(repo = repo.name, "TransferComplete sent OK");
 
         0u64
     } else {
@@ -866,6 +812,7 @@ async fn run_repo_backup(
         serde_json::to_vec(&new_manifest).map_err(|e| format!("Manifest serialize: {e}"))?;
 
     // Stream manifest as binary chunks (can be very large for repos with many files)
+    info!(repo = repo.name, size = manifest_bytes.len(), "Sending BackupManifestStart");
     registry
         .send_host_command(
             BACKUP_SERVER_HOST_ID,
@@ -879,6 +826,8 @@ async fn run_repo_backup(
         .map_err(|e| format!("Failed to send BackupManifestStart: {e}"))?;
 
     // Send manifest in chunks
+    let chunk_count = (manifest_bytes.len() + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    info!(repo = repo.name, chunks = chunk_count, "Sending manifest chunks");
     for chunk in manifest_bytes.chunks(CHUNK_SIZE) {
         let checksum = xxhash_rust::xxh32::xxh32(chunk, 0);
         registry
@@ -900,6 +849,7 @@ async fn run_repo_backup(
     }
 
     // Signal finalization
+    info!(repo = repo.name, "Sending FinishBackupRepo");
     registry
         .send_host_command(
             BACKUP_SERVER_HOST_ID,
@@ -910,6 +860,7 @@ async fn run_repo_backup(
         )
         .await
         .map_err(|e| format!("Failed to send FinishBackupRepo: {e}"))?;
+    info!(repo = repo.name, "FinishBackupRepo sent, waiting for BackupRepoComplete...");
 
     // Wait for BackupRepoComplete (5 min max for finalization)
     let complete_result = tokio::time::timeout(
