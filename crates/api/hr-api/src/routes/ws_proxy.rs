@@ -14,7 +14,6 @@ pub async fn proxy_ws_to_orchestrator(client: WebSocket, path: &str) {
 }
 
 /// Convert axum Message -> tungstenite Message.
-/// Both use Utf8Bytes/Bytes but they are distinct types, so we go through String/Vec<u8>.
 fn axum_to_tungstenite(msg: Message) -> Option<TungsteniteMessage> {
     Some(match msg {
         Message::Text(t) => TungsteniteMessage::Text(t.to_string().into()),
@@ -37,46 +36,71 @@ fn tungstenite_to_axum(msg: TungsteniteMessage) -> Option<Message> {
     })
 }
 
-async fn proxy_ws(client: WebSocket, upstream_url: &str) {
-    // Split the axum WebSocket into separate read/write halves
-    let (mut client_tx, mut client_rx) = client.split();
-
+async fn proxy_ws(mut client: WebSocket, upstream_url: &str) {
     let (ws_stream, _) = match tokio_tungstenite::connect_async(upstream_url).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("WS proxy: failed to connect to {upstream_url}: {e}");
-            let _ = client_tx.send(Message::Close(None)).await;
             return;
         }
     };
 
-    let (mut upstream_tx, mut upstream_rx) = ws_stream.split();
+    // Use channels to bridge the two WebSocket connections without split().
+    // split() creates BiLock-based halves that can cause contention/deadlocks
+    // when both directions are active simultaneously.
+    let (client_out_tx, mut client_out_rx) = tokio::sync::mpsc::channel::<Message>(256);
+    let (upstream_out_tx, mut upstream_out_rx) =
+        tokio::sync::mpsc::channel::<TungsteniteMessage>(256);
 
-    let client_to_upstream = async {
-        while let Some(Ok(msg)) = client_rx.next().await {
-            let Some(tung_msg) = axum_to_tungstenite(msg) else {
-                let _ = upstream_tx.send(TungsteniteMessage::Close(None)).await;
-                break;
-            };
-            if upstream_tx.send(tung_msg).await.is_err() {
-                break;
+    // Handle the upstream (tungstenite) WebSocket in a single task
+    let upstream_handle = tokio::spawn(async move {
+        let (mut upstream_tx, mut upstream_rx) = ws_stream.split();
+
+        // Spawn a writer for the upstream side
+        let write_task = tokio::spawn(async move {
+            while let Some(msg) = upstream_out_rx.recv().await {
+                if upstream_tx.send(msg).await.is_err() {
+                    break;
+                }
             }
-        }
-    };
+        });
 
-    let upstream_to_client = async {
+        // Read from upstream and forward to client channel
         while let Some(Ok(msg)) = upstream_rx.next().await {
             let Some(axum_msg) = tungstenite_to_axum(msg) else {
                 break;
             };
-            if client_tx.send(axum_msg).await.is_err() {
+            if client_out_tx.send(axum_msg).await.is_err() {
                 break;
             }
         }
-    };
 
-    tokio::select! {
-        _ = client_to_upstream => {}
-        _ = upstream_to_client => {}
+        write_task.abort();
+    });
+
+    // Handle the axum WebSocket in the current task (no split needed)
+    // Use a simple loop that alternates between reading and writing
+    loop {
+        tokio::select! {
+            biased;
+
+            // Prioritize reading from client to avoid blocking
+            msg = client.recv() => {
+                match msg {
+                    Some(Ok(msg)) => {
+                        let Some(tung_msg) = axum_to_tungstenite(msg) else { break };
+                        if upstream_out_tx.send(tung_msg).await.is_err() { break }
+                    }
+                    _ => break,
+                }
+            }
+
+            // Forward messages from upstream to client
+            Some(msg) = client_out_rx.recv() => {
+                if client.send(msg).await.is_err() { break }
+            }
+        }
     }
+
+    upstream_handle.abort();
 }

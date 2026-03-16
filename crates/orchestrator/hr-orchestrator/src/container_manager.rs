@@ -971,6 +971,12 @@ impl ContainerManager {
         Ok(true)
     }
 
+    /// List all V2 container records (raw, without enrichment).
+    pub async fn list_container_records(&self) -> Vec<ContainerV2Record> {
+        let state = self.state.read().await;
+        state.containers.clone()
+    }
+
     /// List all V2 containers, enriched with agent status/metrics from registry.
     pub async fn list_containers(&self) -> Vec<serde_json::Value> {
         let state = self.state.read().await;

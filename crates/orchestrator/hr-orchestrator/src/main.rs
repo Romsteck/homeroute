@@ -161,6 +161,31 @@ async fn main() -> anyhow::Result<()> {
         Some(git_service.clone()),
     ));
 
+    // Recover registry state from container configs if state file was lost/corrupted
+    {
+        let records = container_manager.list_container_records().await;
+        let tuples: Vec<_> = records
+            .iter()
+            .map(|c| {
+                (
+                    c.id.clone(),
+                    c.name.clone(),
+                    c.slug.clone(),
+                    c.container_name.clone(),
+                    c.host_id.clone(),
+                    c.environment,
+                    c.stack,
+                    c.created_at,
+                )
+            })
+            .collect();
+        match registry.recover_from_containers(&tuples).await {
+            Ok(0) => {} // nothing to recover
+            Ok(n) => warn!(count = n, "Recovered applications from container configs"),
+            Err(e) => warn!(error = %e, "Failed to recover registry from containers"),
+        }
+    }
+
     // Restore local containers that were running before reboot
     container_manager.restore_local_containers().await;
 
@@ -362,9 +387,16 @@ async fn main() -> anyhow::Result<()> {
     info!("  WS: port {}", ORCHESTRATOR_WS_PORT);
     info!("  MCP: {}", if std::env::var("MCP_TOKEN").is_ok() { "enabled" } else { "disabled (set MCP_TOKEN)" });
 
-    // Wait for shutdown signal
-    tokio::signal::ctrl_c().await?;
-    info!("Shutting down...");
+    // Wait for shutdown signal (SIGINT or SIGTERM)
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())?;
+        let mut sigint = signal(SignalKind::interrupt())?;
+        tokio::select! {
+            _ = sigterm.recv() => info!("Received SIGTERM, shutting down..."),
+            _ = sigint.recv() => info!("Received SIGINT, shutting down..."),
+        }
+    }
 
     // Abort background tasks
     ipc_handle.abort();

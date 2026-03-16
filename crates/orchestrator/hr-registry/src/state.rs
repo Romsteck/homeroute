@@ -16,8 +16,8 @@ use hr_common::events::{AgentMetricsEvent, AgentStatusEvent, AgentUpdateEvent, A
 use crate::protocol::{AgentMetrics, ContainerInfo, HostMetrics, HostRegistryMessage, HostRole, NetworkInterfaceInfo, RegistryMessage};
 use crate::types::{
     AgentNotifyResult, AgentSkipResult, AgentStatus, AgentUpdateStatusInfo,
-    AppStack, Application, CreateApplicationRequest, RegistryState, UpdateApplicationRequest,
-    UpdateBatchResult, UpdateStatusResult,
+    AppStack, Application, CreateApplicationRequest, Environment, FrontendEndpoint,
+    RegistryState, UpdateApplicationRequest, UpdateBatchResult, UpdateStatusResult,
 };
 
 /// Tracks all active WebSocket connections for a single app_id.
@@ -144,6 +144,107 @@ impl AgentRegistry {
             latest_versions: Arc::new(RwLock::new(LatestVersionsCache::default())),
             dataverse_schemas: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Recover registry from container configs when state file is lost.
+    /// Reads agent tokens from /var/lib/machines/{container}/etc/hr-agent.toml.
+    pub async fn recover_from_containers(
+        &self,
+        containers: &[(String, String, String, String, String, Environment, AppStack, DateTime<Utc>)],
+    ) -> Result<usize> {
+        let state = self.state.read().await;
+        if !state.applications.is_empty() {
+            return Ok(0);
+        }
+        drop(state);
+
+        if containers.is_empty() {
+            return Ok(0);
+        }
+
+        warn!(
+            "Registry state is empty but {} containers exist -- attempting recovery",
+            containers.len()
+        );
+
+        let mut recovered = 0;
+        let mut state = self.state.write().await;
+
+        for (id, name, slug, container_name, host_id, environment, stack, created_at) in containers {
+            let config_path =
+                format!("/var/lib/machines/{}/etc/hr-agent.toml", container_name);
+            let config_content = match tokio::fs::read_to_string(&config_path).await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(
+                        container = %container_name,
+                        "Cannot read agent config for recovery: {e}"
+                    );
+                    continue;
+                }
+            };
+
+            // Parse token from TOML config
+            let token = config_content
+                .lines()
+                .find(|l| l.starts_with("token"))
+                .and_then(|l| l.split('=').nth(1))
+                .map(|v| v.trim().trim_matches('"').to_string());
+
+            let Some(token) = token else {
+                warn!(container = %container_name, "No token found in agent config");
+                continue;
+            };
+
+            let token_hash = match hash_token(&token) {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!(container = %container_name, "Failed to hash token: {e}");
+                    continue;
+                }
+            };
+
+            let app = Application {
+                id: id.clone(),
+                name: name.clone(),
+                slug: slug.clone(),
+                host_id: host_id.clone(),
+                environment: *environment,
+                linked_app_id: None,
+                enabled: true,
+                container_name: container_name.clone(),
+                token_hash,
+                ipv4_address: None,
+                status: AgentStatus::Disconnected,
+                last_heartbeat: None,
+                agent_version: None,
+                created_at: *created_at,
+                frontend: FrontendEndpoint {
+                    target_port: 3000,
+                    auth_required: false,
+                    allowed_groups: vec![],
+                    local_only: false,
+                },
+                code_server_enabled: true,
+                stack: *stack,
+                metrics: None,
+            };
+
+            info!(
+                slug = %slug,
+                id = %id,
+                "Recovered application from container config"
+            );
+            state.applications.push(app);
+            recovered += 1;
+        }
+
+        if recovered > 0 {
+            self.persist_inner(&state).await?;
+            info!(count = recovered, "Registry recovery complete");
+        }
+
+        Ok(recovered)
     }
 
     /// Set the ACME manager for per-app wildcard certificate lifecycle.
@@ -1761,6 +1862,18 @@ impl AgentRegistry {
     }
 
     async fn persist_inner(&self, state: &RegistryState) -> Result<()> {
+        // Safety: never overwrite a non-empty state file with empty state
+        if state.applications.is_empty() {
+            if let Ok(meta) = tokio::fs::metadata(&self.state_path).await {
+                if meta.len() > 0 {
+                    warn!(
+                        "Refusing to persist empty registry state over non-empty file ({} bytes)",
+                        meta.len()
+                    );
+                    return Ok(());
+                }
+            }
+        }
         let json = serde_json::to_string_pretty(state)?;
         let tmp = self.state_path.with_extension("json.tmp");
         tokio::fs::write(&tmp, &json).await?;
