@@ -1,41 +1,21 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use hr_common::events::{BackupLiveEvent, EventBus};
-use hr_registry::protocol::HostRegistryMessage;
-use hr_registry::{AgentRegistry, BackupSignal};
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-const BACKUP_SERVER_HOST_ID: &str = "877bcb76-4fb8-4164-940c-707201adf9bc";
-const REPO_BACKUP_TIMEOUT_SECS: u64 = 7200;
 const TOTAL_PIPELINE_TIMEOUT_SECS: u64 = 14400;
 const MAX_JOB_HISTORY: usize = 20;
-const CHUNK_SIZE: usize = 524288; // 512KB
-const EMIT_THROTTLE_MS: u64 = 100;
+const EMIT_THROTTLE_MS: u64 = 200;
 
-// ── Manifest types ─────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileManifest {
-    pub created_at: String,
-    pub repo_name: String,
-    pub files: Vec<ManifestEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ManifestEntry {
-    pub path: String,
-    pub size: u64,
-    pub mtime: i64,
-    #[serde(default)]
-    pub hash: Option<u32>, // xxhash32, computed when mtime is ambiguous
-}
+// ── Borg repo base path ──────────────────────────────────────────
+const BORG_BASE_DIR: &str = "/ssd_pool/backup";
 
 // ── Repo config ────────────────────────────────────────────────────
 
@@ -63,6 +43,11 @@ fn default_repos() -> Vec<RepoConfig> {
             source_path: "/var/lib/machines".to_string(),
             excludes: Vec::new(),
         },
+        RepoConfig {
+            name: "git".to_string(),
+            source_path: "/opt/homeroute/data/git/repos".to_string(),
+            excludes: Vec::new(),
+        },
     ]
 }
 
@@ -79,7 +64,6 @@ pub struct RepoConfig {
 #[serde(rename_all = "snake_case")]
 pub enum PipelineStage {
     Idle,
-    CheckingServer,
     RunningBackup,
     Done,
     Failed,
@@ -89,9 +73,8 @@ pub enum PipelineStage {
 #[serde(rename_all = "snake_case")]
 pub enum BackupPhase {
     Idle,
-    Scanning,
-    Transferring,
-    Verifying,
+    Creating,
+    Pruning,
     Done,
     Failed,
 }
@@ -103,9 +86,10 @@ pub struct RepoStatus {
     pub last_success: Option<bool>,
     pub last_duration_secs: Option<u64>,
     pub last_error: Option<String>,
-    pub last_transferred_bytes: Option<u64>,
-    pub last_files_changed: Option<u64>,
-    pub last_files_total: Option<u64>,
+    pub last_archive_name: Option<String>,
+    pub last_original_size: Option<u64>,
+    pub last_deduplicated_size: Option<u64>,
+    pub last_nfiles: Option<u64>,
 }
 
 impl RepoStatus {
@@ -116,9 +100,10 @@ impl RepoStatus {
             last_success: None,
             last_duration_secs: None,
             last_error: None,
-            last_transferred_bytes: None,
-            last_files_changed: None,
-            last_files_total: None,
+            last_archive_name: None,
+            last_original_size: None,
+            last_deduplicated_size: None,
+            last_nfiles: None,
         }
     }
 }
@@ -132,8 +117,9 @@ pub struct BackupJob {
     pub success: bool,
     pub duration_secs: Option<u64>,
     pub message: String,
-    pub files_changed: Option<u64>,
-    pub bytes_transferred: Option<u64>,
+    pub archive_name: Option<String>,
+    pub original_size: Option<u64>,
+    pub deduplicated_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,13 +161,10 @@ pub struct BackupProgress {
     pub current_repo: Option<String>,
     pub phase: BackupPhase,
     pub progress: f64,
-    pub speed: Option<String>,
-    pub files_changed: Option<u64>,
-    pub files_total: Option<u64>,
-    pub bytes_transferred: u64,
-    pub total_bytes: u64,
+    pub nfiles: Option<u64>,
+    pub original_size: Option<u64>,
+    pub deduplicated_size: Option<u64>,
     pub elapsed_secs: u64,
-    pub remaining_secs: Option<u64>,
     pub started_at: Option<String>,
     pub detail: Option<String>,
 }
@@ -193,13 +176,10 @@ impl Default for BackupProgress {
             current_repo: None,
             phase: BackupPhase::Idle,
             progress: 0.0,
-            speed: None,
-            files_changed: None,
-            files_total: None,
-            bytes_transferred: 0,
-            total_bytes: 0,
+            nfiles: None,
+            original_size: None,
+            deduplicated_size: None,
             elapsed_secs: 0,
-            remaining_secs: None,
             started_at: None,
             detail: None,
         }
@@ -211,23 +191,15 @@ impl Default for BackupProgress {
 pub struct BackupPipeline {
     pub status: Arc<RwLock<BackupStatus>>,
     pub progress: Arc<RwLock<BackupProgress>>,
-    http: reqwest::Client,
     events: Arc<EventBus>,
-    registry: Arc<AgentRegistry>,
 }
 
 impl BackupPipeline {
-    pub fn new(events: Arc<EventBus>, registry: Arc<AgentRegistry>) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .expect("Failed to build HTTP client");
+    pub fn new(events: Arc<EventBus>) -> Self {
         Self {
             status: Arc::new(RwLock::new(BackupStatus::default())),
             progress: Arc::new(RwLock::new(BackupProgress::default())),
-            http,
             events,
-            registry,
         }
     }
 
@@ -244,8 +216,8 @@ impl BackupPipeline {
         {
             let mut status = self.status.write().await;
             status.running = true;
-            status.stage = PipelineStage::CheckingServer;
-            status.current_message = Some("Checking backup server connection...".to_string());
+            status.stage = PipelineStage::RunningBackup;
+            status.current_message = Some("Initialisation du pipeline de backup...".to_string());
         }
         {
             let mut progress = self.progress.write().await;
@@ -262,21 +234,13 @@ impl BackupPipeline {
 
         let status = self.status.clone();
         let progress = self.progress.clone();
-        let http = self.http.clone();
         let events = self.events.clone();
-        let registry = self.registry.clone();
 
         tokio::spawn(async move {
             let started = Instant::now();
             let result = tokio::time::timeout(
                 Duration::from_secs(TOTAL_PIPELINE_TIMEOUT_SECS),
-                run_pipeline(
-                    status.clone(),
-                    progress.clone(),
-                    http,
-                    events.clone(),
-                    registry,
-                ),
+                run_pipeline(status.clone(), progress.clone(), events.clone()),
             )
             .await;
             let elapsed = started.elapsed().as_secs();
@@ -320,7 +284,6 @@ impl BackupPipeline {
                 let mut p = progress.write().await;
                 p.running = false;
                 p.elapsed_secs = elapsed;
-                p.remaining_secs = Some(0);
                 p.phase = if matches!(result, Ok(Ok(_))) {
                     BackupPhase::Done
                 } else {
@@ -383,90 +346,27 @@ async fn emit_backup_live(
     let _ = events.backup_live.send(event);
 }
 
-async fn set_stage(
-    status: &Arc<RwLock<BackupStatus>>,
-    progress: &Arc<RwLock<BackupProgress>>,
-    stage: PipelineStage,
-    phase: BackupPhase,
-    message: &str,
-    events: &EventBus,
-) {
-    {
-        let mut s = status.write().await;
-        s.stage = stage;
-        s.current_message = Some(message.to_string());
-    }
-    {
-        let mut p = progress.write().await;
-        p.phase = phase;
-        p.detail = Some(message.to_string());
-    }
-    info!("Backup pipeline: {message}");
-    emit_backup_live(events, status, progress).await;
-}
-
 // ── Pipeline ───────────────────────────────────────────────────────
 
 async fn run_pipeline(
     status: Arc<RwLock<BackupStatus>>,
     progress: Arc<RwLock<BackupProgress>>,
-    _http: reqwest::Client,
     events: Arc<EventBus>,
-    registry: Arc<AgentRegistry>,
 ) -> Result<String, String> {
     let repos = default_repos();
 
-    // NOTE: WOL désactivé post-migration. Le backup server = machine locale.
-    // On vérifie juste que le host-agent est connecté.
-    set_stage(
-        &status,
-        &progress,
-        PipelineStage::CheckingServer,
-        BackupPhase::Idle,
-        "Vérification de la connexion du serveur de backup...",
-        &events,
-    )
-    .await;
-
-    if !registry.is_host_connected(BACKUP_SERVER_HOST_ID).await {
-        let msg = "Host agent not connected for backup. Aborting.".to_string();
-        error!("{msg}");
-        let mut s = status.write().await;
-        s.stage = PipelineStage::Failed;
-        s.current_message = Some(msg.clone());
-        drop(s);
-        return Err(msg);
-    }
-    info!("Backup server host-agent connected (local mode)");
-
-    // ── Run backups ─────────────────────────────────────────────
-    set_stage(
-        &status,
-        &progress,
-        PipelineStage::RunningBackup,
-        BackupPhase::Idle,
-        "Exécution des sauvegardes...",
-        &events,
-    )
-    .await;
+    // Ensure borg base directory exists
+    tokio::fs::create_dir_all(BORG_BASE_DIR)
+        .await
+        .map_err(|e| format!("Failed to create borg base dir {BORG_BASE_DIR}: {e}"))?;
 
     let mut any_success = false;
     let mut all_success = true;
     let mut repo_messages = Vec::new();
 
     for (i, repo) in repos.iter().enumerate() {
-        // Small delay between repos to let WebSocket settle after finalization I/O
         if i > 0 {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
-
-        // Early abort: if host disconnected, skip remaining repos
-        if !registry.is_host_connected(BACKUP_SERVER_HOST_ID).await {
-            warn!("Backup server disconnected, aborting remaining repos");
-            let msg = format!("Backup FAILED: host disconnected before {}", repo.name);
-            repo_messages.push(format!("{}: {}", repo.name, msg));
-            all_success = false;
-            continue;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
         {
@@ -477,25 +377,21 @@ async fn run_pipeline(
             let mut p = progress.write().await;
             p.running = true;
             p.current_repo = Some(repo.name.clone());
-            p.phase = BackupPhase::Scanning;
+            p.phase = BackupPhase::Creating;
             p.progress = 0.0;
-            p.speed = None;
-            p.files_changed = None;
-            p.files_total = None;
-            p.bytes_transferred = 0;
-            p.total_bytes = 0;
-            p.remaining_secs = None;
-            p.detail = Some(format!("Scan du repo {}", repo.name));
+            p.nfiles = None;
+            p.original_size = None;
+            p.deduplicated_size = None;
+            p.detail = Some(format!("Backup borg de {}", repo.name));
         }
-
         emit_backup_live(&events, &status, &progress).await;
 
         let job_id = format!("{}-{}", repo.name, Utc::now().timestamp_millis());
         let job_started = Utc::now().to_rfc3339();
         let t0 = Instant::now();
+
         let result = run_repo_backup(
             repo,
-            &registry,
             status.clone(),
             progress.clone(),
             events.clone(),
@@ -504,19 +400,20 @@ async fn run_pipeline(
         let duration = t0.elapsed().as_secs();
         let finished_at = Utc::now().to_rfc3339();
 
-        let (success, message, files_changed, bytes_transferred) = match result {
-            Ok((fc, bt)) => {
+        let (success, message, archive_name, nfiles, original_size, deduplicated_size) = match result {
+            Ok(stats) => {
                 any_success = true;
-                (
-                    true,
-                    format!("Backup OK ({fc} fichiers modifiés, {bt} octets transférés)"),
-                    Some(fc),
-                    Some(bt),
-                )
+                let msg = format!(
+                    "OK: {} fichiers, {} original, {} dédupliqué",
+                    stats.nfiles,
+                    format_bytes(stats.original_size),
+                    format_bytes(stats.deduplicated_size),
+                );
+                (true, msg, Some(stats.archive_name), Some(stats.nfiles), Some(stats.original_size), Some(stats.deduplicated_size))
             }
             Err(e) => {
                 all_success = false;
-                (false, format!("Backup FAILED: {e}"), None, None)
+                (false, format!("FAILED: {e}"), None, None, None, None)
             }
         };
 
@@ -526,8 +423,10 @@ async fn run_pipeline(
                 repo_status.last_backup_at = Some(finished_at.clone());
                 repo_status.last_success = Some(success);
                 repo_status.last_duration_secs = Some(duration);
-                repo_status.last_transferred_bytes = bytes_transferred;
-                repo_status.last_files_changed = files_changed;
+                repo_status.last_archive_name = archive_name.clone();
+                repo_status.last_nfiles = nfiles;
+                repo_status.last_original_size = original_size;
+                repo_status.last_deduplicated_size = deduplicated_size;
                 repo_status.last_error = if success {
                     None
                 } else {
@@ -545,8 +444,9 @@ async fn run_pipeline(
                     success,
                     duration_secs: Some(duration),
                     message: message.clone(),
-                    files_changed,
-                    bytes_transferred,
+                    archive_name,
+                    original_size,
+                    deduplicated_size,
                 },
             );
             if s.jobs.len() > MAX_JOB_HISTORY {
@@ -556,13 +456,6 @@ async fn run_pipeline(
 
         emit_backup_live(&events, &status, &progress).await;
         repo_messages.push(format!("{}: {}", repo.name, message));
-    }
-
-    // NOTE: PowerOff du backup server désactivé post-migration.
-    // Le backup server est maintenant la même machine que le routeur.
-    // Voir audit backup-audit-001 du 2026-03-16.
-    if all_success {
-        info!("Backup pipeline complete. Skipping backup server shutdown (local backup mode).");
     }
 
     let summary = repo_messages.join("; ");
@@ -575,522 +468,258 @@ async fn run_pipeline(
     }
 }
 
-// ── Per-repo backup ────────────────────────────────────────────────
+// ── Borg backup stats ──────────────────────────────────────────────
+
+struct BorgStats {
+    archive_name: String,
+    nfiles: u64,
+    original_size: u64,
+    deduplicated_size: u64,
+}
+
+// ── Per-repo backup using borg ─────────────────────────────────────
 
 async fn run_repo_backup(
     repo: &RepoConfig,
-    registry: &Arc<AgentRegistry>,
     status: Arc<RwLock<BackupStatus>>,
     progress: Arc<RwLock<BackupProgress>>,
     events: Arc<EventBus>,
-) -> Result<(u64, u64), String> {
-    let transfer_id = uuid::Uuid::new_v4().to_string();
-
-    // Register backup signal to receive responses
-    let mut signal_rx = registry.register_backup_signal(&transfer_id).await;
-
-    // Verify host is still connected
-    if !registry.is_host_connected(BACKUP_SERVER_HOST_ID).await {
-        return Err("Backup server disconnected before repo backup".to_string());
-    }
-
-    // Skip repos with empty/missing source directory
+) -> Result<BorgStats, String> {
     let source_path = PathBuf::from(&repo.source_path);
     if !source_path.exists() {
         info!(repo = repo.name, path = %repo.source_path, "Source directory does not exist, skipping");
-        registry.remove_backup_signal(&transfer_id).await;
-        return Ok((0, 0));
+        return Ok(BorgStats {
+            archive_name: "skipped".to_string(),
+            nfiles: 0,
+            original_size: 0,
+            deduplicated_size: 0,
+        });
     }
 
-    // Step 1: Tell host-agent to prepare and send us the previous manifest
-    info!(repo = repo.name, "Sending StartBackupRepo");
-    registry
-        .send_host_command(
-            BACKUP_SERVER_HOST_ID,
-            HostRegistryMessage::StartBackupRepo {
-                repo_name: repo.name.clone(),
-                transfer_id: transfer_id.clone(),
-            },
-        )
-        .await
-        .map_err(|e| format!("Failed to send StartBackupRepo: {e}"))?;
+    let borg_repo = format!("{}/{}/borg", BORG_BASE_DIR, repo.name);
 
-    // Wait for BackupRepoReady
-    tokio::time::timeout(Duration::from_secs(60), signal_rx.recv())
-        .await
-        .map_err(|_| "Timeout waiting for BackupRepoReady".to_string())?
-        .ok_or_else(|| "Backup signal channel closed".to_string())
-        .and_then(|sig| match sig {
-            BackupSignal::RepoReady { .. } => Ok(()),
-            _ => Err("Unexpected backup signal".to_string()),
-        })?;
+    // Initialize borg repo if it doesn't exist
+    let repo_path = PathBuf::from(&borg_repo);
+    // Ensure parent directory exists (borg init won't create parents)
+    if let Some(parent) = repo_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("Failed to create parent dir for borg repo: {e}"))?;
+    }
+    if !repo_path.join("config").exists() {
+        info!(repo = repo.name, path = %borg_repo, "Initializing new borg repository");
+        let init_output = tokio::process::Command::new("borg")
+            .args(["init", "--encryption=none", &borg_repo])
+            .env("BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK", "yes")
+            .output()
+            .await
+            .map_err(|e| format!("Failed to spawn borg init: {e}"))?;
 
-    // Load previous manifest from local cache (stored after each successful backup)
-    let manifest_dir = PathBuf::from("/var/lib/server-dashboard/backup-manifests");
-    let manifest_path = manifest_dir.join(format!("{}.json", repo.name));
-    let old_manifest: Option<FileManifest> = tokio::fs::read_to_string(&manifest_path)
-        .await
-        .ok()
-        .and_then(|json| serde_json::from_str(&json).ok());
+        if !init_output.status.success() {
+            let stderr = String::from_utf8_lossy(&init_output.stderr);
+            return Err(format!("borg init failed: {stderr}"));
+        }
+        info!(repo = repo.name, "Borg repository initialized");
+    }
 
-    info!(
-        repo = repo.name,
-        has_previous = old_manifest.is_some(),
-        "Received previous manifest"
+    // Build borg create command
+    let archive_name = format!(
+        "{}::{}",
+        borg_repo,
+        Utc::now().format("%Y-%m-%dT%H:%M:%S")
     );
 
-    // Step 2: Scan local directory
-    {
-        let mut p = progress.write().await;
-        p.phase = BackupPhase::Scanning;
-        p.detail = Some(format!("Scan des fichiers de {}", repo.name));
-    }
-    emit_backup_live(&events, &status, &progress).await;
+    let mut cmd = tokio::process::Command::new("borg");
+    cmd.args(["create", "--progress", "--stats", "--json"]);
 
-    let source_path = PathBuf::from(&repo.source_path);
-    let current_files = scan_directory(&source_path, &repo.excludes).await?;
-    let total_files = current_files.len() as u64;
-
-    // Step 3: Compute diff
-    let old_index: HashMap<String, &ManifestEntry> = old_manifest
-        .as_ref()
-        .map(|m| m.files.iter().map(|e| (e.path.clone(), e)).collect())
-        .unwrap_or_default();
-
-    let mut changed_files: Vec<String> = Vec::new();
-    for entry in &current_files {
-        match old_index.get(&entry.path) {
-            Some(old) if old.size == entry.size && old.mtime == entry.mtime => {
-                // Unchanged
-            }
-            _ => {
-                changed_files.push(entry.path.clone());
-            }
-        }
+    // Add excludes
+    for exclude in &repo.excludes {
+        cmd.args(["--exclude", &format!("*/{exclude}")]);
     }
 
-    let files_changed = changed_files.len() as u64;
-    info!(
-        repo = repo.name,
-        total = total_files,
-        changed = files_changed,
-        "Diff computed"
-    );
+    cmd.arg(&archive_name);
+    cmd.arg(&repo.source_path);
 
-    {
-        let mut p = progress.write().await;
-        p.files_changed = Some(files_changed);
-        p.files_total = Some(total_files);
-        p.detail = Some(format!(
-            "{files_changed} fichiers modifiés sur {total_files} ({})",
-            repo.name
-        ));
-    }
-    emit_backup_live(&events, &status, &progress).await;
+    cmd.env("BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK", "yes");
+    // Prevent borg from asking questions
+    cmd.env("BORG_RELOCATED_REPO_ACCESS_IS_OK", "yes");
 
-    // Step 4: Transfer changed files via binary pipe
-    let bytes_transferred = if changed_files.is_empty() {
-        info!(repo = repo.name, "No changes to transfer");
-        {
-            let mut p = progress.write().await;
-            p.phase = BackupPhase::Transferring;
-            p.progress = 100.0;
-            p.detail = Some(format!("Aucun changement pour {}", repo.name));
-        }
-        emit_backup_live(&events, &status, &progress).await;
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
-        // Send TransferComplete even if no data (to close tar on agent side)
-        info!(repo = repo.name, "Sending TransferComplete (no data)");
-        registry
-            .send_host_command(
-                BACKUP_SERVER_HOST_ID,
-                HostRegistryMessage::TransferComplete {
-                    transfer_id: transfer_id.clone(),
-                },
-            )
-            .await
-            .map_err(|e| format!("Failed to send TransferComplete: {e}"))?;
-        info!(repo = repo.name, "TransferComplete sent OK");
+    info!(repo = repo.name, archive = %archive_name, "Starting borg create");
 
-        0u64
-    } else {
-        {
-            let mut p = progress.write().await;
-            p.phase = BackupPhase::Transferring;
-            p.progress = 0.0;
-            p.detail = Some(format!(
-                "Transfert de {} fichiers pour {}",
-                files_changed, repo.name
-            ));
-        }
-        emit_backup_live(&events, &status, &progress).await;
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn borg create: {e}"))?;
 
-        // Write file list to temp file for tar
-        let file_list_path = format!("/tmp/backup-filelist-{}.txt", transfer_id);
-        let file_list_content = changed_files.join("\n");
-        tokio::fs::write(&file_list_path, &file_list_content)
-            .await
-            .map_err(|e| format!("Failed to write file list: {e}"))?;
+    // Read stderr for progress (borg writes progress to stderr, JSON result to stdout)
+    let stderr = child.stderr.take().ok_or("borg stderr unavailable")?;
+    let stderr_reader = BufReader::new(stderr);
+    let mut lines = stderr_reader.lines();
 
-        // Spawn tar process to create archive of changed files
-        let mut tar_child = tokio::process::Command::new("tar")
-            .args([
-                "cf",
-                "-",
-                "--numeric-owner",
-                "-C",
-                &repo.source_path,
-                "-T",
-                &file_list_path,
-                "--ignore-failed-read",
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn tar: {e}"))?;
+    let progress_clone = progress.clone();
+    let status_clone = status.clone();
+    let events_clone = events.clone();
+    let repo_name = repo.name.clone();
 
-        let mut tar_stdout = tar_child.stdout.take().ok_or("tar stdout unavailable")?;
-
-        // Estimate total bytes from changed files
-        let estimated_bytes: u64 = current_files
-            .iter()
-            .filter(|e| changed_files.contains(&e.path))
-            .map(|e| e.size)
-            .sum();
-
-        {
-            let mut p = progress.write().await;
-            p.total_bytes = estimated_bytes;
-        }
-
-        // Stream chunks to remote host-agent
-        let bytes = stream_backup_to_remote(
-            registry,
-            &transfer_id,
-            &mut tar_stdout,
-            estimated_bytes,
-            &status,
-            &progress,
-            &events,
-            &repo.name,
-        )
-        .await?;
-
-        // Wait for tar to finish
-        let _ = tar_child.wait().await;
-        // Clean up file list
-        let _ = tokio::fs::remove_file(&file_list_path).await;
-
-        // Send TransferComplete
-        registry
-            .send_host_command(
-                BACKUP_SERVER_HOST_ID,
-                HostRegistryMessage::TransferComplete {
-                    transfer_id: transfer_id.clone(),
-                },
-            )
-            .await
-            .map_err(|e| format!("Failed to send TransferComplete: {e}"))?;
-
-        bytes
-    };
-
-    // Step 5: Send new manifest and ask host-agent to finalize
-    {
-        let mut p = progress.write().await;
-        p.phase = BackupPhase::Verifying;
-        p.detail = Some(format!("Finalisation du backup {}", repo.name));
-    }
-    emit_backup_live(&events, &status, &progress).await;
-
-    let new_manifest = FileManifest {
-        created_at: Utc::now().to_rfc3339(),
-        repo_name: repo.name.clone(),
-        files: current_files,
-    };
-    let manifest_bytes =
-        serde_json::to_vec(&new_manifest).map_err(|e| format!("Manifest serialize: {e}"))?;
-
-    // Stream manifest as binary chunks (can be very large for repos with many files)
-    info!(repo = repo.name, size = manifest_bytes.len(), "Sending BackupManifestStart");
-    registry
-        .send_host_command(
-            BACKUP_SERVER_HOST_ID,
-            HostRegistryMessage::BackupManifestStart {
-                repo_name: repo.name.clone(),
-                transfer_id: transfer_id.clone(),
-                manifest_size: manifest_bytes.len() as u64,
-            },
-        )
-        .await
-        .map_err(|e| format!("Failed to send BackupManifestStart: {e}"))?;
-
-    // Send manifest in chunks
-    let chunk_count = (manifest_bytes.len() + CHUNK_SIZE - 1) / CHUNK_SIZE;
-    info!(repo = repo.name, chunks = chunk_count, "Sending manifest chunks");
-    for chunk in manifest_bytes.chunks(CHUNK_SIZE) {
-        let checksum = xxhash_rust::xxh32::xxh32(chunk, 0);
-        registry
-            .send_host_command(
-                BACKUP_SERVER_HOST_ID,
-                HostRegistryMessage::ReceiveChunkBinary {
-                    transfer_id: transfer_id.clone(),
-                    sequence: 0, // not used for manifest
-                    size: chunk.len() as u32,
-                    checksum,
-                },
-            )
-            .await
-            .map_err(|e| format!("Failed to send manifest chunk metadata: {e}"))?;
-        registry
-            .send_host_binary(BACKUP_SERVER_HOST_ID, chunk.to_vec())
-            .await
-            .map_err(|e| format!("Failed to send manifest chunk: {e}"))?;
-    }
-
-    // Signal finalization
-    info!(repo = repo.name, "Sending FinishBackupRepo");
-    registry
-        .send_host_command(
-            BACKUP_SERVER_HOST_ID,
-            HostRegistryMessage::FinishBackupRepo {
-                repo_name: repo.name.clone(),
-                transfer_id: transfer_id.clone(),
-            },
-        )
-        .await
-        .map_err(|e| format!("Failed to send FinishBackupRepo: {e}"))?;
-    info!(repo = repo.name, "FinishBackupRepo sent, waiting for BackupRepoComplete...");
-
-    // Wait for BackupRepoComplete (5 min max for finalization)
-    let complete_result = tokio::time::timeout(
-        Duration::from_secs(300),
-        signal_rx.recv(),
-    )
-    .await
-    .map_err(|_| "Timeout waiting for BackupRepoComplete".to_string())?
-    .ok_or_else(|| "Backup signal channel closed".to_string())
-    .and_then(|sig| match sig {
-        BackupSignal::RepoComplete {
-            success,
-            message,
-            snapshot_name,
-        } => {
-            if success {
-                info!(
-                    repo = repo.name,
-                    snapshot = ?snapshot_name,
-                    "Backup repo complete"
-                );
-                Ok(())
-            } else {
-                Err(format!("Host-agent finalization failed: {message}"))
+    // Spawn a task to read stderr progress lines
+    let progress_task = tokio::spawn(async move {
+        let mut last_emit = Instant::now();
+        while let Ok(Some(line)) = lines.next_line().await {
+            // borg --progress writes lines like:
+            //  123.45 kB O 456 N ... (progress info)
+            // We just use the line as detail
+            if last_emit.elapsed() >= Duration::from_millis(EMIT_THROTTLE_MS) {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    let mut p = progress_clone.write().await;
+                    p.detail = Some(format!("[{}] {}", repo_name, truncate_str(trimmed, 120)));
+                    drop(p);
+                    emit_backup_live(&events_clone, &status_clone, &progress_clone).await;
+                    last_emit = Instant::now();
+                }
             }
         }
-        _ => Err("Unexpected backup signal".to_string()),
     });
 
-    // Clean up signal
-    registry.remove_backup_signal(&transfer_id).await;
-    complete_result?;
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("borg create failed: {e}"))?;
 
-    // Save manifest locally for future differential comparisons
-    let manifest_dir = PathBuf::from("/var/lib/server-dashboard/backup-manifests");
-    let _ = tokio::fs::create_dir_all(&manifest_dir).await;
-    let manifest_path = manifest_dir.join(format!("{}.json", repo.name));
-    if let Ok(json) = serde_json::to_string(&new_manifest) {
-        if let Err(e) = tokio::fs::write(&manifest_path, &json).await {
-            warn!(repo = repo.name, "Failed to save local manifest: {e}");
+    // Wait for progress reader to finish
+    let _ = progress_task.await;
+
+    // borg exit codes: 0 = success, 1 = warning (but backup was created), 2 = error
+    if output.status.code().unwrap_or(2) >= 2 {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("borg create failed (exit {}): {}", output.status, stderr));
+    }
+
+    // Parse JSON output from stdout
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stats = parse_borg_json_output(&stdout, &repo.name)?;
+
+    info!(
+        repo = repo.name,
+        archive = %stats.archive_name,
+        nfiles = stats.nfiles,
+        original = stats.original_size,
+        dedup = stats.deduplicated_size,
+        "Borg create completed"
+    );
+
+    // Update progress
+    {
+        let mut p = progress.write().await;
+        p.phase = BackupPhase::Pruning;
+        p.detail = Some(format!("Pruning des anciennes archives de {}", repo.name));
+    }
+    emit_backup_live(&events, &status, &progress).await;
+
+    // Prune old archives: keep 7 daily, 4 weekly, 6 monthly
+    let prune_output = tokio::process::Command::new("borg")
+        .args([
+            "prune",
+            "--keep-daily=7",
+            "--keep-weekly=4",
+            "--keep-monthly=6",
+            &borg_repo,
+        ])
+        .env("BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK", "yes")
+        .env("BORG_RELOCATED_REPO_ACCESS_IS_OK", "yes")
+        .output()
+        .await
+        .map_err(|e| format!("Failed to spawn borg prune: {e}"))?;
+
+    if !prune_output.status.success() {
+        let stderr = String::from_utf8_lossy(&prune_output.stderr);
+        warn!(repo = repo.name, "borg prune warning: {stderr}");
+        // Don't fail the whole backup for a prune issue
+    } else {
+        info!(repo = repo.name, "Borg prune completed");
+    }
+
+    // Compact (borg 1.2+)
+    let compact_output = tokio::process::Command::new("borg")
+        .args(["compact", &borg_repo])
+        .env("BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK", "yes")
+        .env("BORG_RELOCATED_REPO_ACCESS_IS_OK", "yes")
+        .output()
+        .await;
+
+    match compact_output {
+        Ok(out) if out.status.success() => info!(repo = repo.name, "Borg compact completed"),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            warn!(repo = repo.name, "borg compact warning: {stderr}");
         }
+        Err(e) => warn!(repo = repo.name, "borg compact failed: {e}"),
     }
 
     {
         let mut p = progress.write().await;
         p.progress = 100.0;
+        p.nfiles = Some(stats.nfiles);
+        p.original_size = Some(stats.original_size);
+        p.deduplicated_size = Some(stats.deduplicated_size);
         p.detail = Some(format!("Backup terminé pour {}", repo.name));
     }
     emit_backup_live(&events, &status, &progress).await;
 
-    Ok((files_changed, bytes_transferred))
+    Ok(stats)
 }
 
-// ── Directory scanner ──────────────────────────────────────────────
+// ── Parse borg JSON output ─────────────────────────────────────────
 
-async fn scan_directory(
-    source_path: &Path,
-    excludes: &[String],
-) -> Result<Vec<ManifestEntry>, String> {
-    let source = source_path.to_path_buf();
-    let excludes = excludes.to_vec();
+fn parse_borg_json_output(stdout: &str, repo_name: &str) -> Result<BorgStats, String> {
+    // borg create --json outputs JSON with archive and cache stats
+    let json: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|e| format!("Failed to parse borg JSON: {e} — output: {}", truncate_str(stdout, 500)))?;
 
-    tokio::task::spawn_blocking(move || {
-        let mut entries = Vec::new();
-        scan_dir_recursive(&source, &source, &excludes, &mut entries)?;
-        Ok(entries)
-    })
-    .await
-    .map_err(|e| format!("Scan task failed: {e}"))?
-}
+    let archive = json
+        .get("archive")
+        .ok_or_else(|| "Missing 'archive' in borg output".to_string())?;
 
-fn scan_dir_recursive(
-    base: &Path,
-    dir: &Path,
-    excludes: &[String],
-    entries: &mut Vec<ManifestEntry>,
-) -> Result<(), String> {
-    let read_dir = std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
+    let archive_name = archive
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
 
-    for entry in read_dir {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        let rel_path = path
-            .strip_prefix(base)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .to_string();
+    let stats = archive
+        .get("stats")
+        .ok_or_else(|| "Missing 'archive.stats' in borg output".to_string())?;
 
-        // Check excludes
-        if excludes.iter().any(|ex| {
-            rel_path == *ex
-                || rel_path.starts_with(&format!("{ex}/"))
-                || path.file_name().map_or(false, |n| n.to_string_lossy() == *ex)
-        }) {
-            continue;
-        }
+    let nfiles = stats
+        .get("nfiles")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
-        let ft = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
-        };
+    let original_size = stats
+        .get("original_size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
-        if ft.is_dir() {
-            scan_dir_recursive(base, &path, excludes, entries)?;
-        } else if ft.is_file() || ft.is_symlink() {
-            let meta = match entry.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-
-            entries.push(ManifestEntry {
-                path: rel_path,
-                size: meta.len(),
-                mtime,
-                hash: None,
-            });
-        }
-    }
-    Ok(())
-}
-
-// ── Binary streaming to remote ─────────────────────────────────────
-
-async fn stream_backup_to_remote(
-    registry: &Arc<AgentRegistry>,
-    transfer_id: &str,
-    reader: &mut (impl tokio::io::AsyncRead + Unpin),
-    estimated_bytes: u64,
-    status: &Arc<RwLock<BackupStatus>>,
-    progress: &Arc<RwLock<BackupProgress>>,
-    events: &Arc<EventBus>,
-    repo_name: &str,
-) -> Result<u64, String> {
-    let mut buf = vec![0u8; CHUNK_SIZE];
-    let mut transferred: u64 = 0;
-    let mut sequence: u32 = 0;
-    let mut last_emit = Instant::now();
-    let transfer_start = Instant::now();
-
-    loop {
-        let n = match reader.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) => return Err(format!("Read error: {e}")),
-        };
-
-        let chunk = &buf[..n];
-        let checksum = xxhash_rust::xxh32::xxh32(chunk, 0);
-
-        if let Err(e) = registry
-            .send_host_command(
-                BACKUP_SERVER_HOST_ID,
-                HostRegistryMessage::ReceiveChunkBinary {
-                    transfer_id: transfer_id.to_string(),
-                    sequence,
-                    size: n as u32,
-                    checksum,
-                },
-            )
-            .await
-        {
-            return Err(format!("Send chunk metadata failed: {e}"));
-        }
-
-        if let Err(e) = registry
-            .send_host_binary(BACKUP_SERVER_HOST_ID, chunk.to_vec())
-            .await
-        {
-            return Err(format!("Send binary chunk failed: {e}"));
-        }
-
-        transferred += n as u64;
-        sequence += 1;
-
-        // Update progress with throttle
-        if last_emit.elapsed() >= Duration::from_millis(EMIT_THROTTLE_MS) || transferred >= estimated_bytes {
-            let pct = if estimated_bytes > 0 {
-                (transferred as f64 / estimated_bytes as f64 * 100.0).min(99.9)
-            } else {
-                0.0
-            };
-            let elapsed_secs = transfer_start.elapsed().as_secs_f64();
-            let speed = if elapsed_secs > 0.0 {
-                transferred as f64 / elapsed_secs
-            } else {
-                0.0
-            };
-            let speed_str = format_speed(speed);
-            let remaining = if speed > 0.0 && estimated_bytes > transferred {
-                Some(((estimated_bytes - transferred) as f64 / speed) as u64)
-            } else {
-                None
-            };
-
-            {
-                let mut p = progress.write().await;
-                p.progress = pct;
-                p.bytes_transferred = transferred;
-                p.speed = Some(speed_str);
-                p.remaining_secs = remaining;
-                p.detail = Some(format!(
-                    "Transfert {} : {} / {} ({}%)",
-                    repo_name,
-                    format_bytes(transferred),
-                    format_bytes(estimated_bytes),
-                    pct as u32
-                ));
-            }
-
-            emit_backup_live(events, status, progress).await;
-            last_emit = Instant::now();
-        }
-    }
+    let deduplicated_size = stats
+        .get("deduplicated_size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
     info!(
         repo = repo_name,
-        bytes = transferred,
-        chunks = sequence,
-        "Transfer complete"
+        archive = %archive_name,
+        nfiles,
+        original_size,
+        deduplicated_size,
+        "Parsed borg stats"
     );
-    Ok(transferred)
+
+    Ok(BorgStats {
+        archive_name,
+        nfiles,
+        original_size,
+        deduplicated_size,
+    })
 }
 
 // ── Formatting helpers ─────────────────────────────────────────────
@@ -1107,13 +736,11 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn format_speed(bytes_per_sec: f64) -> String {
-    if bytes_per_sec < 1024.0 {
-        format!("{:.0} B/s", bytes_per_sec)
-    } else if bytes_per_sec < 1024.0 * 1024.0 {
-        format!("{:.1} KB/s", bytes_per_sec / 1024.0)
+fn truncate_str(s: &str, max_len: usize) -> &str {
+    if s.len() <= max_len {
+        s
     } else {
-        format!("{:.1} MB/s", bytes_per_sec / (1024.0 * 1024.0))
+        &s[..max_len]
     }
 }
 
@@ -1137,10 +764,11 @@ pub fn spawn_daily_scheduler(pipeline: Arc<BackupPipeline>) {
     });
 }
 
+/// Schedule at 20:00 UTC = 22:00 Brussels (CEST) / 21:00 Brussels (CET)
 fn next_scheduled_run_secs() -> u64 {
     use chrono::{Timelike, Utc};
     let now = Utc::now();
-    let target_hour = 3u32;
+    let target_hour = 20u32; // 20:00 UTC = ~22h Brussels
     let secs_today_at_target = target_hour as i64 * 3600;
     let secs_now =
         now.hour() as i64 * 3600 + now.minute() as i64 * 60 + now.second() as i64;

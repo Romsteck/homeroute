@@ -258,9 +258,9 @@ async fn main() -> anyhow::Result<()> {
     let renames = Arc::new(RwLock::new(HashMap::new()));
 
     // ── Backup pipeline ──────────────────────────────────────────────────
-    let backup_pipeline = Arc::new(backup_pipeline::BackupPipeline::new(events.clone(), registry.clone()));
+    let backup_pipeline = Arc::new(backup_pipeline::BackupPipeline::new(events.clone()));
     backup_pipeline::spawn_daily_scheduler(backup_pipeline.clone());
-    info!("Backup pipeline initialized (daily at 03:00 UTC)");
+    info!("Backup pipeline initialized (daily at 20:00 UTC / 22h Brussels)");
 
     // ── Container health watcher ──────────────────────────────────────────
     container_watcher::ContainerWatcher::spawn(registry.clone(), events.clone());

@@ -301,17 +301,17 @@ fn tool_definitions() -> Value {
         // ── Backup ──
         {
             "name": "backup.status",
-            "description": "Get backup server status: online/offline, last heartbeat, disk metrics.",
+            "description": "Get local borg backup status: running, last run, per-repo stats.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "backup.trigger",
-            "description": "Trigger the backup pipeline on the backup server. Requires the backup host to be connected.",
+            "description": "Trigger the local borg backup pipeline (4 repos: homeroute, pixel, containers, git).",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "backup.wake",
-            "description": "Wake the backup server via Wake-on-LAN.",
+            "description": "No-op: backup now runs locally. Kept for backward compatibility.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         // ── WWW Articles ──
@@ -1113,51 +1113,38 @@ async fn tool_git_log(id: Value, args: &Value, state: &McpState) -> Value {
 
 // ── Backup tools ─────────────────────────────────────────────────────
 
-const BACKUP_HOST_ID: &str = "877bcb76-4fb8-4164-940c-707201adf9bc";
-
 async fn tool_backup_status(id: Value, state: &McpState) -> Value {
-    let connected = state.registry.is_host_connected(BACKUP_HOST_ID).await;
-    let power = state.registry.get_host_power_state(BACKUP_HOST_ID).await;
-
-    let mut result = json!({
-        "host_id": BACKUP_HOST_ID,
-        "connected": connected,
-        "power_state": format!("{power}"),
-    });
-
-    let conns = state.registry.host_connections.read().await;
-    if let Some(conn) = conns.get(BACKUP_HOST_ID) {
-        result["host_name"] = json!(conn.host_name);
-        result["last_heartbeat"] = json!(conn.last_heartbeat.to_rfc3339());
-        result["version"] = json!(conn.version);
-        result["metrics"] = json!(conn.metrics);
-    }
-
-    tool_success(id, result)
+    let status = state.backup.get_status().await;
+    let progress = state.backup.get_progress().await;
+    tool_success(id, json!({
+        "mode": "local_borg",
+        "borg_base": "/ssd_pool/backup",
+        "running": status.running,
+        "stage": status.stage,
+        "last_run_at": status.last_run_at,
+        "last_run_success": status.last_run_success,
+        "last_run_message": status.last_run_message,
+        "repos": status.repos,
+        "progress": serde_json::to_value(&progress).unwrap_or_default(),
+    }))
 }
 
 async fn tool_backup_trigger(id: Value, state: &McpState) -> Value {
     match state.backup.trigger().await {
         Ok(()) => tool_success(id, json!({
-            "message": "Backup pipeline started",
+            "message": "Backup pipeline started (local borg)",
             "status": "running",
         })),
         Err(e) => tool_error(id, &format!("Backup trigger failed: {e}")),
     }
 }
 
-async fn tool_backup_wake(id: Value, state: &McpState) -> Value {
-    match state.registry.request_wake_host(BACKUP_HOST_ID).await {
-        Ok(result) => {
-            let action = match result {
-                WakeResult::WolSent => "wol_sent",
-                WakeResult::AlreadyOnline => "already_online",
-                WakeResult::AlreadyWaking => "already_waking",
-            };
-            tool_success(id, json!({ "action": action, "host_id": BACKUP_HOST_ID }))
-        }
-        Err(e) => tool_error(id, &e),
-    }
+async fn tool_backup_wake(id: Value, _state: &McpState) -> Value {
+    // No longer needed: backup runs locally on this machine
+    tool_success(id, json!({
+        "message": "Wake not needed: backup runs locally via borg on this machine",
+        "action": "noop",
+    }))
 }
 
 

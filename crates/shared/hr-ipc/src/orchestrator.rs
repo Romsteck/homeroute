@@ -89,7 +89,7 @@ pub enum OrchestratorRequest {
     StoreScanResult { target: serde_json::Value },
 
     // ── Backup pipeline ─────────────────────────────────────
-    /// Trigger the full backup pipeline (WOL → differential backup per repo → sleep).
+    /// Trigger the local borg backup pipeline (4 repos: homeroute, pixel, containers, git).
     TriggerBackup,
     /// Get the current backup pipeline status and last run result.
     GetBackupStatus,

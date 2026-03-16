@@ -1134,28 +1134,19 @@ async fn handle_host_agent_message(
                 },
             );
         }
-        HostAgentMessage::BackupRepoReady {
-            transfer_id,
-        } => {
-            info!(transfer_id = %transfer_id, "Backup repo ready");
-            registry.on_backup_repo_ready(&transfer_id).await;
+        HostAgentMessage::BackupRepoReady { transfer_id } => {
+            // Legacy: backup now runs locally via borg, no host-agent needed
+            warn!(transfer_id = %transfer_id, "Received legacy BackupRepoReady (ignored)");
         }
         HostAgentMessage::BackupRepoComplete {
             transfer_id,
             repo_name,
-            success,
-            message,
-            snapshot_name,
+            success: _,
+            message: _,
+            snapshot_name: _,
         } => {
-            info!(
-                transfer_id = %transfer_id,
-                repo = %repo_name,
-                success,
-                "Backup repo complete"
-            );
-            registry
-                .on_backup_repo_complete(&transfer_id, success, &message, snapshot_name)
-                .await;
+            // Legacy: backup now runs locally via borg, no host-agent needed
+            warn!(transfer_id = %transfer_id, repo = %repo_name, "Received legacy BackupRepoComplete (ignored)");
         }
     }
 }
@@ -1198,9 +1189,6 @@ async fn handle_host_binary_frame(
                         .await;
                 }
             }
-        } else if registry.backup_manifest_data.read().await.contains_key(&transfer_id) {
-            // Backup manifest receive mode: accumulate data
-            registry.append_backup_manifest_data(&transfer_id, &data).await;
         } else if let Some(transfer) = active_transfers.get_mut(&transfer_id) {
             // Local import mode: write binary data to file
             let data_len = data.len() as u64;

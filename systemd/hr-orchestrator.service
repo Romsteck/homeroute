@@ -16,7 +16,7 @@ SyslogIdentifier=hr-orchestrator
 
 # Security hardening
 ProtectSystem=strict
-ReadWritePaths=/var/lib/server-dashboard /var/lib/machines /etc/systemd/nspawn /opt/homeroute/data /run /tmp /data
+ReadWritePaths=/var/lib/server-dashboard /var/lib/machines /etc/systemd/nspawn /opt/homeroute/data /run /tmp /data /ssd_pool/backup
 ReadOnlyPaths=/opt/homeroute/crates/target
 ProtectHome=false
 
