@@ -89,7 +89,7 @@ pub enum OrchestratorRequest {
     StoreScanResult { target: serde_json::Value },
 
     // ── Backup pipeline ─────────────────────────────────────
-    /// Trigger the local borg backup pipeline (4 repos: homeroute, pixel, containers, git).
+    /// Trigger the incremental SSH backup pipeline (4 repos: homeroute, pixel, containers, git).
     TriggerBackup,
     /// Get the current backup pipeline status and last run result.
     GetBackupStatus,
@@ -99,6 +99,8 @@ pub enum OrchestratorRequest {
     GetBackupJobs,
     /// Get live backup progress for the currently running repo/phase.
     GetBackupProgress,
+    /// Cancel the currently running backup pipeline.
+    CancelBackup,
 
     // ── Agent metrics ────────────────────────────────────────
     /// Get all current agent metrics (lightweight, for polling by homeroute).

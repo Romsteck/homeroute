@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Archive, CheckCircle2, Clock3, Loader2, Play, XCircle } from 'lucide-react';
+import { Archive, CheckCircle2, Clock3, Loader2, Play, Square, XCircle } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import Button from '../components/Button';
 import useWebSocket from '../hooks/useWebSocket';
@@ -12,12 +12,14 @@ const getBackupRepos = () => api('/backup/repos');
 const getBackupJobs = () => api('/backup/jobs');
 const getBackupProgress = () => api('/backup/progress');
 const triggerBackup = () => api('/backup/trigger', { method: 'POST' });
+const cancelBackup = () => api('/backup/cancel', { method: 'POST' });
 
 const REPO_LABELS = {
   homeroute: 'HomeRoute',
   containers: 'Containers',
   git: 'Git',
   pixel: 'Pixel',
+  homecloud: 'Home Cloud',
 };
 
 const timeAgo = (dateStr) => {
@@ -66,12 +68,11 @@ const statusBadge = (job) => {
 };
 
 const PIPELINE_STEPS = [
-  { id: 'wol', label: 'Réveil serveur backup', stages: ['waking_server', 'waiting_for_server'] },
   { id: 'homeroute', label: 'Backup HomeRoute', repo: 'homeroute' },
   { id: 'containers', label: 'Backup Containers', repo: 'containers' },
   { id: 'git', label: 'Backup Git', repo: 'git' },
   { id: 'pixel', label: 'Backup Pixel', repo: 'pixel' },
-  { id: 'sleep', label: 'Arrêt serveur backup', stages: ['putting_to_sleep'] },
+  { id: 'homecloud', label: 'Backup Home Cloud', repo: 'homecloud' },
 ];
 
 const formatBytes = (bytes) => {
@@ -156,7 +157,7 @@ function PipelineStep({ step, stepStatus, progress, status, isLast }) {
               <div className="h-full w-full animate-pulse rounded-full bg-gradient-to-r from-blue-500/60 to-cyan-400/60" />
             </div>
             <span className="text-xs text-blue-100/80">Scan des fichiers…</span>
-            {progress?.files_total != null && (
+            {progress?.files_total != null && progress.files_total > 0 && (
               <span className="text-xs text-gray-400">{progress.files_total} fichiers</span>
             )}
           </div>
@@ -175,7 +176,7 @@ function PipelineStep({ step, stepStatus, progress, status, isLast }) {
           <div className="mt-2">
             <div className="h-2 overflow-hidden rounded-full bg-gray-950/60">
               <div
-                className="h-full rounded-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-500"
+                className="h-full rounded-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-150"
                 style={{ width: `${progressPct}%` }}
               />
             </div>
@@ -266,18 +267,19 @@ export default function Backup() {
   });
 
   const handleTrigger = async () => {
-    if (triggering || status?.running || progress?.running) return;
+    if (triggering || isRunning) return;
     setTriggering(true);
+    setStatus(prev => ({ ...prev, running: true, stage: 'running_backup', current_message: 'Demarrage...' }));
     setMessage(null);
     try {
       const res = await triggerBackup();
       if (res?.error) {
+        setStatus(prev => ({ ...prev, running: false, stage: 'idle' }));
         setMessage({ type: 'error', text: res.error });
-      } else {
-        setMessage({ type: 'success', text: res?.message || 'Sauvegarde lancée' });
       }
     } catch {
-      setMessage({ type: 'error', text: 'Erreur réseau' });
+      setStatus(prev => ({ ...prev, running: false, stage: 'idle' }));
+      setMessage({ type: 'error', text: 'Erreur reseau' });
     } finally {
       setTriggering(false);
     }
@@ -312,14 +314,26 @@ export default function Backup() {
             </div>
           </div>
 
-          <Button
-            onClick={handleTrigger}
-            disabled={isRunning || triggering || loading}
-            className="flex h-14 items-center justify-center gap-3 rounded-2xl text-base font-semibold"
-          >
-            {isRunning || triggering ? <Loader2 className="h-5 w-5 animate-spin" /> : <Play className="h-5 w-5" />}
-            {isRunning ? 'Sauvegarde en cours…' : 'Lancer une sauvegarde'}
-          </Button>
+          <div className="flex gap-3">
+            <Button
+              onClick={handleTrigger}
+              disabled={isRunning || triggering || loading}
+              className="flex flex-1 h-14 items-center justify-center gap-3 rounded-2xl text-base font-semibold"
+            >
+              {isRunning || triggering ? <Loader2 className="h-5 w-5 animate-spin" /> : <Play className="h-5 w-5" />}
+              {isRunning ? 'Sauvegarde en cours…' : 'Lancer une sauvegarde'}
+            </Button>
+            {isRunning && (
+              <Button
+                onClick={cancelBackup}
+                variant="danger"
+                className="flex h-14 items-center justify-center gap-3 rounded-2xl px-6 text-base font-semibold"
+              >
+                <Square className="h-5 w-5" />
+                Arrêter
+              </Button>
+            )}
+          </div>
 
           {isRunning && (
             <div className="rounded-2xl border border-gray-700/70 bg-gray-800/70 p-5">

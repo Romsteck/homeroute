@@ -83,6 +83,13 @@ async fn main() -> anyhow::Result<()> {
             .expect("Failed to open update audit log"),
     );
 
+    // Initialize task store (SQLite)
+    let task_store = Arc::new(
+        hr_common::task_store::TaskStore::new(std::path::Path::new("/opt/homeroute/data/tasks.db"))
+            .expect("Failed to open task store"),
+    );
+    info!("Task store initialized");
+
     let api_state = hr_api::state::ApiState {
         auth: auth.clone(),
         acme: acme.clone(),
@@ -104,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
         renames: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         dataverse_schemas: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         update_log,
+        task_store: task_store.clone(),
     };
 
     let api_router = hr_api::build_router(api_state);
@@ -210,16 +218,21 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Backup live poller -> websocket (every ~2s while state changes)
+    // Backup live poller -> websocket (adaptive: 50ms while running, 5s idle)
     {
         let events = events.clone();
         let orchestrator = orchestrator.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
             let mut last_payload: Option<String> = None;
+            let mut was_running = false;
 
             loop {
-                interval.tick().await;
+                let poll_interval = if was_running {
+                    std::time::Duration::from_millis(50)
+                } else {
+                    std::time::Duration::from_secs(5)
+                };
+                tokio::time::sleep(poll_interval).await;
 
                 let status_resp = orchestrator
                     .request(&hr_ipc::orchestrator::OrchestratorRequest::GetBackupStatus)
@@ -250,6 +263,10 @@ async fn main() -> anyhow::Result<()> {
                     Ok(resp) if resp.ok => resp.data.unwrap_or_else(|| serde_json::json!({"running": false})),
                     _ => continue,
                 };
+
+                // Track running state for adaptive polling
+                was_running = status.get("running").and_then(|v| v.as_bool()).unwrap_or(false)
+                    || progress.get("running").and_then(|v| v.as_bool()).unwrap_or(false);
 
                 let repos = repos_val.as_array().cloned().unwrap_or_default();
                 let latest_job = jobs_val.as_array().and_then(|jobs| jobs.first().cloned());
@@ -282,6 +299,34 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Task cleanup (purge tasks older than 30 days, every 6 hours)
+    {
+        let store = task_store.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+            loop {
+                interval.tick().await;
+                store.cleanup_old(30).await;
+            }
+        });
+    }
+
+    // Energy metrics poller (every 3s — local + remote hosts)
+    {
+        let events = events.clone();
+        tokio::spawn(async move {
+            hr_api::routes::energy::energy_metrics_poller(events).await;
+        });
+    }
+
+    // Energy schedule enforcer (every 60s — night mode)
+    {
+        let events = events.clone();
+        tokio::spawn(async move {
+            hr_api::routes::energy::energy_schedule_enforcer(events).await;
+        });
+    }
+
     // Migrate servers.json -> hosts.json if needed
     hr_api::routes::hosts::ensure_hosts_file().await;
 
@@ -295,7 +340,7 @@ async fn main() -> anyhow::Result<()> {
     );
     info!("  Events: OK (broadcast bus)");
     info!("  DNS/DHCP/IPv6/Adblock: delegated to hr-netcore (IPC)");
-    info!("  Proxy/TLS/ACME-writes/CloudRelay: delegated to hr-edge (IPC)");
+    info!("  Proxy/TLS/ACME-writes: delegated to hr-edge (IPC)");
     info!("  Containers/Registry/Git: delegated to hr-orchestrator (IPC)");
     info!("  API: listening on port {}", api_port);
 

@@ -754,7 +754,6 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 let power_action = match action.as_str() {
                     "shutdown" => PowerAction::Shutdown,
                     "reboot" => PowerAction::Reboot,
-                    "suspend" => PowerAction::Suspend,
                     _ => return IpcResponse::err(format!("Unknown power action: {action}")),
                 };
                 if let Err(e) = self.registry.request_power_action(&host_id, power_action).await {
@@ -763,7 +762,7 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 let msg = match action.as_str() {
                     "shutdown" => HostRegistryMessage::PowerOff,
                     "reboot" => HostRegistryMessage::Reboot,
-                    _ => HostRegistryMessage::SuspendHost,
+                    _ => return IpcResponse::err(format!("Unknown power action: {action}")),
                 };
                 match self.registry.send_host_command(&host_id, msg).await {
                     Ok(()) => IpcResponse::ok_empty(),
@@ -834,6 +833,14 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
             OrchestratorRequest::GetBackupProgress => {
                 let progress = self.backup.get_progress().await;
                 IpcResponse::ok_data(progress)
+            }
+            OrchestratorRequest::CancelBackup => {
+                match self.backup.cancel().await {
+                    Ok(()) => IpcResponse::ok_data(serde_json::json!({
+                        "message": "Backup cancelled"
+                    })),
+                    Err(e) => IpcResponse::err(e),
+                }
             }
         }
     }
