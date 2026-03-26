@@ -21,9 +21,6 @@ pub enum OrchestratorRequest {
     GetAgentUpdateStatus,
     FixAgentUpdate { app_id: String },
     UpdateAgentRules { app_ids: Option<Vec<String>> },
-    /// Resolve a dev app to its linked prod (returns prod_id, container_name, host_id)
-    ResolveLinkedProd { dev_id: String },
-
     // ── Container V2 (nspawn) ────────────────────────────────
     ListContainers,
     GetContainer { id: String },
@@ -47,10 +44,6 @@ pub enum OrchestratorRequest {
     GetRenameStatus { app_id: String },
     GetContainerConfig,
     UpdateContainerConfig { config: serde_json::Value },
-
-    // ── Deploy (binary path based -- hr-api writes temp file first) ──
-    DeployToProduction { dev_id: String, binary_path: String },
-    ProdPush { dev_id: String, dest_path: String, archive_path: String },
 
     // ── Git ──────────────────────────────────────────────────
     ListRepos,
@@ -101,6 +94,8 @@ pub enum OrchestratorRequest {
     GetBackupProgress,
     /// Cancel the currently running backup pipeline.
     CancelBackup,
+    /// Get all backup data in a single call (status + repos + jobs + progress).
+    GetBackupLive,
 
     // ── Agent metrics ────────────────────────────────────────
     /// Get all current agent metrics (lightweight, for polling by homeroute).

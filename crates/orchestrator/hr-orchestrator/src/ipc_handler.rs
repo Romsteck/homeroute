@@ -220,29 +220,6 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                     "total": target_apps.len(),
                 }))
             }
-            OrchestratorRequest::ResolveLinkedProd { dev_id } => {
-                let dev_app = match self.registry.get_application(&dev_id).await {
-                    Some(a) => a,
-                    None => return IpcResponse::err("Dev application not found"),
-                };
-
-                let linked_id = match &dev_app.linked_app_id {
-                    Some(id) => id.clone(),
-                    None => return IpcResponse::err("No linked production app"),
-                };
-
-                let prod_app = match self.registry.get_application(&linked_id).await {
-                    Some(a) => a,
-                    None => return IpcResponse::err("Linked production app not found"),
-                };
-
-                IpcResponse::ok_data(serde_json::json!({
-                    "prod_id": prod_app.id,
-                    "container_name": prod_app.container_name,
-                    "host_id": prod_app.host_id,
-                }))
-            }
-
             // ── Containers ───────────────────────────────────────
             OrchestratorRequest::ListContainers => {
                 let containers = self.container_manager.list_containers().await;
@@ -417,141 +394,6 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 match self.container_manager.update_config(cfg).await {
                     Ok(()) => IpcResponse::ok_empty(),
                     Err(e) => IpcResponse::err(e),
-                }
-            }
-
-            // ── Deploy ───────────────────────────────────────────
-            OrchestratorRequest::DeployToProduction { dev_id, binary_path } => {
-                // Resolve linked prod app
-                let dev_app = match self.registry.get_application(&dev_id).await {
-                    Some(a) => a,
-                    None => return IpcResponse::err("Dev application not found"),
-                };
-                let linked_id = match &dev_app.linked_app_id {
-                    Some(id) => id.clone(),
-                    None => return IpcResponse::err("No linked production app"),
-                };
-                let prod_app = match self.registry.get_application(&linked_id).await {
-                    Some(a) => a,
-                    None => return IpcResponse::err("Linked production app not found"),
-                };
-
-                // Verify binary file exists
-                let binary_path_obj = std::path::Path::new(&binary_path);
-                if !binary_path_obj.exists() {
-                    return IpcResponse::err("Binary file not found at specified path");
-                }
-
-                info!(
-                    dev_id = dev_id,
-                    prod_id = prod_app.id,
-                    container = prod_app.container_name,
-                    "Deploy to production initiated via IPC"
-                );
-
-                // For local containers, copy binary via machinectl
-                // For remote containers, the binary needs to be served via HTTP
-                if prod_app.host_id == "local" {
-                    // Copy binary into the container
-                    let copy_result = tokio::process::Command::new("machinectl")
-                        .args(["copy-to", &prod_app.container_name, &binary_path, "/opt/app/app.new"])
-                        .output()
-                        .await;
-
-                    // Clean up temp file
-                    let _ = tokio::fs::remove_file(&binary_path).await;
-
-                    match copy_result {
-                        Ok(out) if out.status.success() => {
-                            // Atomically replace and restart
-                            let swap_cmd = "chmod +x /opt/app/app.new && mv /opt/app/app.new /opt/app/app && systemctl restart app.service";
-                            match tokio::process::Command::new("machinectl")
-                                .args(["shell", &prod_app.container_name, "/bin/bash", "-c", swap_cmd])
-                                .output()
-                                .await
-                            {
-                                Ok(out) if out.status.success() => {
-                                    IpcResponse::ok_data(serde_json::json!({"success": true, "message": "Deployed successfully"}))
-                                }
-                                Ok(out) => {
-                                    let stderr = String::from_utf8_lossy(&out.stderr);
-                                    IpcResponse::err(format!("Restart failed: {stderr}"))
-                                }
-                                Err(e) => IpcResponse::err(format!("Restart exec failed: {e}")),
-                            }
-                        }
-                        Ok(out) => {
-                            let stderr = String::from_utf8_lossy(&out.stderr);
-                            IpcResponse::err(format!("Copy failed: {stderr}"))
-                        }
-                        Err(e) => IpcResponse::err(format!("machinectl copy-to failed: {e}")),
-                    }
-                } else {
-                    // Remote deploy: binary must be served via API, then curl'd
-                    let _ = tokio::fs::remove_file(&binary_path).await;
-                    IpcResponse::err("Remote production deploy not yet implemented in orchestrator IPC")
-                }
-            }
-            OrchestratorRequest::ProdPush { dev_id, dest_path, archive_path } => {
-                // Resolve linked prod app
-                let dev_app = match self.registry.get_application(&dev_id).await {
-                    Some(a) => a,
-                    None => return IpcResponse::err("Dev application not found"),
-                };
-                let linked_id = match &dev_app.linked_app_id {
-                    Some(id) => id.clone(),
-                    None => return IpcResponse::err("No linked production app"),
-                };
-                let prod_app = match self.registry.get_application(&linked_id).await {
-                    Some(a) => a,
-                    None => return IpcResponse::err("Linked production app not found"),
-                };
-
-                let archive = std::path::Path::new(&archive_path);
-                if !archive.exists() {
-                    return IpcResponse::err("Archive file not found");
-                }
-
-                if prod_app.host_id == "local" {
-                    // Copy archive into container, extract, clean up
-                    let tmp_dest = format!("/tmp/push-{}.tar", uuid::Uuid::new_v4());
-                    let copy_result = tokio::process::Command::new("machinectl")
-                        .args(["copy-to", &prod_app.container_name, &archive_path, &tmp_dest])
-                        .output()
-                        .await;
-
-                    let _ = tokio::fs::remove_file(&archive_path).await;
-
-                    match copy_result {
-                        Ok(out) if out.status.success() => {
-                            let extract_cmd = format!(
-                                "mkdir -p '{}' && tar xf '{}' -C '{}' && rm -f '{}'",
-                                dest_path, tmp_dest, dest_path, tmp_dest
-                            );
-                            match tokio::process::Command::new("machinectl")
-                                .args(["shell", &prod_app.container_name, "/bin/bash", "-c", &extract_cmd])
-                                .output()
-                                .await
-                            {
-                                Ok(out) if out.status.success() => {
-                                    IpcResponse::ok_data(serde_json::json!({"success": true}))
-                                }
-                                Ok(out) => {
-                                    let stderr = String::from_utf8_lossy(&out.stderr);
-                                    IpcResponse::err(format!("Extract failed: {stderr}"))
-                                }
-                                Err(e) => IpcResponse::err(format!("Extract exec failed: {e}")),
-                            }
-                        }
-                        Ok(out) => {
-                            let stderr = String::from_utf8_lossy(&out.stderr);
-                            IpcResponse::err(format!("Copy failed: {stderr}"))
-                        }
-                        Err(e) => IpcResponse::err(format!("machinectl copy-to failed: {e}")),
-                    }
-                } else {
-                    let _ = tokio::fs::remove_file(&archive_path).await;
-                    IpcResponse::err("Remote prod push not yet implemented in orchestrator IPC")
                 }
             }
 
@@ -841,6 +683,22 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                     })),
                     Err(e) => IpcResponse::err(e),
                 }
+            }
+            OrchestratorRequest::GetBackupLive => {
+                let status = self.backup.get_status().await;
+                let repos = self.backup.get_repos().await;
+                let jobs = self.backup.get_jobs().await;
+                let progress = self.backup.get_progress().await;
+                let status_val = serde_json::to_value(&status).unwrap_or_default();
+                let repos_val = serde_json::to_value(&repos).unwrap_or_default();
+                let jobs_val = serde_json::to_value(&jobs).unwrap_or_default();
+                let progress_val = serde_json::to_value(&progress).unwrap_or_default();
+                IpcResponse::ok_data(serde_json::json!({
+                    "status": status_val,
+                    "repos": repos_val,
+                    "jobs": jobs_val,
+                    "progress": progress_val,
+                }))
             }
         }
     }

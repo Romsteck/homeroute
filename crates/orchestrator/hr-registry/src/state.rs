@@ -209,7 +209,6 @@ impl AgentRegistry {
                 slug: slug.clone(),
                 host_id: host_id.clone(),
                 environment: *environment,
-                linked_app_id: None,
                 enabled: true,
                 container_name: container_name.clone(),
                 token_hash,
@@ -298,7 +297,6 @@ impl AgentRegistry {
             slug: req.slug,
             host_id: req.host_id.unwrap_or_else(|| "local".to_string()),
             environment: req.environment,
-            linked_app_id: req.linked_app_id.clone(),
             enabled: true,
             container_name: container_name.clone(),
             token_hash,
@@ -315,12 +313,6 @@ impl AgentRegistry {
 
         {
             let mut state = self.state.write().await;
-            // If linked_app_id is set, update the linked app to point back
-            if let Some(ref linked_id) = req.linked_app_id {
-                if let Some(linked_app) = state.applications.iter_mut().find(|a| a.id == *linked_id) {
-                    linked_app.linked_app_id = Some(id.clone());
-                }
-            }
             state.applications.push(app.clone());
         }
         self.persist().await?;
@@ -346,9 +338,6 @@ impl AgentRegistry {
         if let Some(frontend) = req.frontend {
             app.frontend = frontend;
         }
-        if let Some(ref linked_app_id) = req.linked_app_id {
-            app.linked_app_id = Some(linked_app_id.clone());
-        }
         if let Some(code_server_enabled) = req.code_server_enabled {
             app.code_server_enabled = code_server_enabled;
         }
@@ -367,7 +356,7 @@ impl AgentRegistry {
         Ok(Some(app))
     }
 
-    /// Remove an application: disconnect agent, clean up linked_app_id on partner, and remove.
+    /// Remove an application: disconnect agent and remove.
     pub async fn remove_application(&self, id: &str) -> Result<bool> {
         let app = {
             let mut state = self.state.write().await;
@@ -376,12 +365,6 @@ impl AgentRegistry {
                 Some(i) => state.applications.remove(i),
                 None => return Ok(false),
             };
-            // Clean up linked_app_id on the partner container
-            if let Some(ref linked_id) = app.linked_app_id {
-                if let Some(partner) = state.applications.iter_mut().find(|a| a.id == *linked_id) {
-                    partner.linked_app_id = None;
-                }
-            }
             app
         };
 
