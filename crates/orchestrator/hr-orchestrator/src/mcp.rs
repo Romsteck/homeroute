@@ -8,7 +8,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use hr_common::events::{PowerAction, WakeResult};
-use hr_registry::protocol::{DataverseQueryRequest, HostRegistryMessage};
+use hr_registry::protocol::HostRegistryMessage;
 use hr_registry::AgentRegistry;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -291,7 +291,7 @@ fn tool_definitions_core() -> Value {
             "description": "Get the systemd service status (app.service) of a production container. Returns active state, PID, start time, and binary info.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "app_id": { "type": "string", "description": "Application ID (the production app, or dev app with linked prod)" } },
+                "properties": { "app_id": { "type": "string", "description": "Application ID" } },
                 "required": ["app_id"]
             }
         },
@@ -310,7 +310,7 @@ fn tool_definitions_core() -> Value {
         // ── Apps ──
         {
             "name": "apps.list",
-            "description": "List all registered applications with status, environment, linked app, and container name.",
+            "description": "List all registered applications with status and container name.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -344,29 +344,6 @@ fn tool_definitions_core() -> Value {
                     "command": { "type": "string", "description": "Shell command to execute" }
                 },
                 "required": ["app_id", "command"]
-            }
-        },
-        // ── Database (Dataverse) ──
-        {
-            "name": "db.tables",
-            "description": "List all tables in an application's Dataverse SQLite database, with row counts.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "app_id": { "type": "string", "description": "Application ID (agent must be connected)" } },
-                "required": ["app_id"]
-            }
-        },
-        {
-            "name": "db.query",
-            "description": "Execute a read-only SQL SELECT query on an application's Dataverse SQLite database. Only SELECT statements are allowed.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_id": { "type": "string", "description": "Application ID (agent must be connected)" },
-                    "sql": { "type": "string", "description": "SQL SELECT query to execute" },
-                    "limit": { "type": "integer", "description": "Max rows (default 100, max 1000)", "default": 100 }
-                },
-                "required": ["app_id", "sql"]
             }
         },
         // ── Monitoring ──
@@ -444,106 +421,6 @@ fn tool_definitions_core() -> Value {
             "description": "Get the SSH public key used for git mirror operations.",
             "inputSchema": { "type": "object", "properties": {} }
         },
-        // ── Backup ──
-        {
-            "name": "backup.status",
-            "description": "Get local borg backup status: running, last run, per-repo stats.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "backup.trigger",
-            "description": "Trigger the local borg backup pipeline (4 repos: homeroute, pixel, containers, git).",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "backup.wake",
-            "description": "No-op: backup now runs locally. Kept for backward compatibility.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        // ── WWW Articles ──
-        {
-            "name": "www.list_articles",
-            "description": "List all articles on the MYNETWK website with title, slug, category, description, and dates.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "www.get_article",
-            "description": "Get a specific article by slug, including its full content (JSON component array), category, description, and metadata.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "slug": { "type": "string", "description": "Article slug (system_name)" }
-                },
-                "required": ["slug"]
-            }
-        },
-        {
-            "name": "www.create_article",
-            "description": "Create a new article on the MYNETWK website. The article is immediately publicly visible. article_content is a JSON array of components (each has: type, order, content).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Article title" },
-                    "system_name": { "type": "string", "description": "URL slug (auto-generated from name if omitted)" },
-                    "description": { "type": "string", "description": "Short description / summary" },
-                    "category": { "type": "string", "description": "Category name" },
-                    "image_url": { "type": "string", "description": "Featured image filename (from www.upload_image)" },
-                    "article_content": { "type": "string", "description": "JSON array of content components" }
-                },
-                "required": ["name"]
-            }
-        },
-        {
-            "name": "www.edit_article",
-            "description": "Update an existing article. Only provide the fields to change.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "slug": { "type": "string", "description": "Article slug (system_name)" },
-                    "name": { "type": "string", "description": "New title" },
-                    "description": { "type": "string", "description": "New description" },
-                    "category": { "type": "string", "description": "New category" },
-                    "image_url": { "type": "string", "description": "New featured image filename" },
-                    "article_content": { "type": "string", "description": "New JSON array of content components" }
-                },
-                "required": ["slug"]
-            }
-        },
-        {
-            "name": "www.delete_article",
-            "description": "Delete an article by slug.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "slug": { "type": "string", "description": "Article slug (system_name)" }
-                },
-                "required": ["slug"]
-            }
-        },
-        {
-            "name": "www.publish_article",
-            "description": "Touch an article's updated_at timestamp to mark it as freshly published. Note: the WWW app has no draft/published concept — all articles are always public.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "slug": { "type": "string", "description": "Article slug (system_name)" }
-                },
-                "required": ["slug"]
-            }
-        },
-        {
-            "name": "www.upload_image",
-            "description": "Upload an image for use in articles. Provide base64-encoded image data and a filename. Returns the filename to use as image_url in articles.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "filename": { "type": "string", "description": "Filename with extension (e.g. my-photo.jpg)" },
-                    "base64_data": { "type": "string", "description": "Base64-encoded image data" },
-                    "content_type": { "type": "string", "description": "MIME type (e.g. image/jpeg, image/png)", "default": "image/jpeg" }
-                },
-                "required": ["filename", "base64_data"]
-            }
-        }
     ])
 }
 
@@ -613,112 +490,6 @@ fn tool_definitions_extended() -> Value {
             "description": "Get the reverse proxy status and configuration summary.",
             "inputSchema": { "type": "object", "properties": {} }
         },
-        // ── DNS ──
-        {
-            "name": "dns.status",
-            "description": "Get DNS server status and configuration.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "dns.leases",
-            "description": "List all DHCP leases with IP, MAC, hostname, and expiry.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "dns.reload",
-            "description": "Reload DNS/DHCP configuration (sends SIGHUP to hr-netcore).",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "dns.cache_stats",
-            "description": "Get DNS cache statistics: hit/miss ratio, cached entries count.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        // ── ACME ──
-        {
-            "name": "acme.status",
-            "description": "Get ACME/Let's Encrypt status: active challenges, last renewal.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "acme.certificates",
-            "description": "List all managed TLS certificates with domains, expiry dates, and renewal status.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "acme.renew",
-            "description": "Trigger certificate renewal for all eligible certificates.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        // ── Adblock ──
-        {
-            "name": "adblock.stats",
-            "description": "Get adblock statistics: total rules, blocked queries, lists loaded.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "adblock.whitelist_list",
-            "description": "List all whitelisted domains.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "adblock.whitelist_add",
-            "description": "Add a domain to the adblock whitelist.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "domain": { "type": "string", "description": "Domain to whitelist" } },
-                "required": ["domain"]
-            }
-        },
-        {
-            "name": "adblock.whitelist_remove",
-            "description": "Remove a domain from the adblock whitelist.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "domain": { "type": "string", "description": "Domain to remove" } },
-                "required": ["domain"]
-            }
-        },
-        {
-            "name": "adblock.update_lists",
-            "description": "Trigger an update of all adblock filter lists.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "adblock.search",
-            "description": "Search the adblock lists for a domain. Returns whether it's blocked and which list blocked it.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "query": { "type": "string", "description": "Domain or pattern to search" } },
-                "required": ["query"]
-            }
-        },
-        // ── Updates ──
-        {
-            "name": "updates.status",
-            "description": "Get system update status: pending updates, last check time.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "updates.check",
-            "description": "Trigger a check for available system updates.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "updates.upgrade_apt",
-            "description": "Trigger an APT upgrade to install available updates.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "updates.upgrade_status",
-            "description": "Get the status of an ongoing upgrade operation.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "updates.history",
-            "description": "Get the history of past update/upgrade operations.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
         // ── Store ──
         {
             "name": "store.list",
@@ -733,17 +504,6 @@ fn tool_definitions_extended() -> Value {
                 "properties": { "slug": { "type": "string", "description": "App slug" } },
                 "required": ["slug"]
             }
-        },
-        // ── DDNS ──
-        {
-            "name": "ddns.status",
-            "description": "Get dynamic DNS status: current IP, last update, provider.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "ddns.force_update",
-            "description": "Force an immediate DDNS update.",
-            "inputSchema": { "type": "object", "properties": {} }
         },
         // ── Docs ──
         {
@@ -864,9 +624,6 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState) -> Value 
         "apps.get" => tool_apps_get(id, &arguments, state).await,
         "apps.exec" => tool_apps_exec(id, &arguments).await,
         "apps.prod_exec" => tool_apps_prod_exec(id, &arguments).await,
-        // ── Database ──
-        "db.tables" => tool_db_tables(id, &arguments, state).await,
-        "db.query" => tool_db_query(id, &arguments, state).await,
         // ── Monitoring ──
         "monitoring.system_status" => tool_monitoring_system_status(id, state).await,
         "monitoring.host_metrics" => tool_monitoring_host_metrics(id, &arguments, state).await,
@@ -879,18 +636,6 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState) -> Value 
         "git.branches" => tool_git_branches(id, &arguments).await,
         "git.sync" => tool_git_sync(id, &arguments).await,
         "git.ssh_key" => tool_git_ssh_key(id).await,
-        // ── Backup ──
-        "backup.status" => tool_backup_status(id, state).await,
-        "backup.trigger" => tool_backup_trigger(id, state).await,
-        "backup.wake" => tool_backup_wake(id, state).await,
-        // ── WWW Articles ──
-        "www.list_articles" => tool_www_list_articles(id).await,
-        "www.get_article" => tool_www_get_article(id, &arguments).await,
-        "www.create_article" => tool_www_create_article(id, &arguments).await,
-        "www.edit_article" => tool_www_edit_article(id, &arguments).await,
-        "www.delete_article" => tool_www_delete_article(id, &arguments).await,
-        "www.publish_article" => tool_www_publish_article(id, &arguments).await,
-        "www.upload_image" => tool_www_upload_image(id, &arguments).await,
         // ── Reverse Proxy ──
         "reverseproxy.list" => tool_reverseproxy_list(id).await,
         "reverseproxy.add" => tool_reverseproxy_add(id, &arguments).await,
@@ -899,34 +644,9 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState) -> Value 
         "reverseproxy.toggle" => tool_reverseproxy_toggle(id, &arguments).await,
         "reverseproxy.reload" => tool_reverseproxy_reload(id).await,
         "reverseproxy.status" => tool_reverseproxy_status(id).await,
-        // ── DNS ──
-        "dns.status" => tool_dns_status(id).await,
-        "dns.leases" => tool_dns_leases(id).await,
-        "dns.reload" => tool_dns_reload(id).await,
-        "dns.cache_stats" => tool_dns_cache_stats(id).await,
-        // ── ACME ──
-        "acme.status" => tool_acme_status(id).await,
-        "acme.certificates" => tool_acme_certificates(id).await,
-        "acme.renew" => tool_acme_renew(id).await,
-        // ── Adblock ──
-        "adblock.stats" => tool_adblock_stats(id).await,
-        "adblock.whitelist_list" => tool_adblock_whitelist_list(id).await,
-        "adblock.whitelist_add" => tool_adblock_whitelist_add(id, &arguments).await,
-        "adblock.whitelist_remove" => tool_adblock_whitelist_remove(id, &arguments).await,
-        "adblock.update_lists" => tool_adblock_update_lists(id).await,
-        "adblock.search" => tool_adblock_search(id, &arguments).await,
-        // ── Updates ──
-        "updates.status" => tool_updates_status(id).await,
-        "updates.check" => tool_updates_check(id).await,
-        "updates.upgrade_apt" => tool_updates_upgrade_apt(id).await,
-        "updates.upgrade_status" => tool_updates_upgrade_status(id).await,
-        "updates.history" => tool_updates_history(id).await,
         // ── Store ──
         "store.list" => tool_store_list(id).await,
         "store.get" => tool_store_get(id, &arguments).await,
-        // ── DDNS ──
-        "ddns.status" => tool_ddns_status(id).await,
-        "ddns.force_update" => tool_ddns_force_update(id).await,
         // ── Docs ──
         "docs.list" => tool_docs_list(id).await,
         "docs.get" => tool_docs_get(id, &arguments).await,
@@ -1143,91 +863,6 @@ async fn tool_apps_list(id: Value, state: &McpState) -> Value {
         .collect();
 
     tool_success(id, json!(result))
-}
-
-// ── Database tools ──────────────────────────────────────────────────
-
-async fn tool_db_tables(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
-    };
-
-    let query = DataverseQueryRequest::QueryRows {
-        table_name: "_dv_tables".to_string(),
-        filters: vec![],
-        limit: 1000,
-        offset: 0,
-        order_by: Some("name".to_string()),
-        order_desc: false,
-    };
-
-    match state.registry.dataverse_query(app_id, query).await {
-        Ok(tables) => {
-            tool_success(id, json!({
-                "app_id": app_id,
-                "tables": tables,
-            }))
-        }
-        Err(e) => tool_error(id, &format!("Failed to query tables: {e}")),
-    }
-}
-
-async fn tool_db_query(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
-    };
-    let Some(sql) = args.get("sql").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing sql".into());
-    };
-
-    let trimmed = sql.trim();
-    let upper = trimmed.to_uppercase();
-    if !upper.starts_with("SELECT") && !upper.starts_with("PRAGMA") && !upper.starts_with("EXPLAIN") {
-        return tool_error(id, "Only SELECT, PRAGMA, and EXPLAIN queries are allowed (read-only)");
-    }
-
-    if upper.contains("DROP") || upper.contains("DELETE") || upper.contains("INSERT")
-        || upper.contains("UPDATE") || upper.contains("ALTER") || upper.contains("CREATE")
-        || upper.contains("ATTACH") || upper.contains("DETACH")
-    {
-        return tool_error(id, "Query contains forbidden keywords (write operations not allowed)");
-    }
-
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(100).min(1000);
-
-    let app = match state.registry.get_application(app_id).await {
-        Some(a) => a,
-        None => return tool_error(id, &format!("Application not found: {app_id}")),
-    };
-
-    let db_path = match app.environment {
-        hr_registry::types::Environment::Production => "/opt/app/.dataverse/app.db",
-        hr_registry::types::Environment::Development => "/root/workspace/.dataverse/app.db",
-    };
-
-    let query_with_limit = if upper.contains(" LIMIT ") {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed} LIMIT {limit}")
-    };
-
-    let escaped_sql = query_with_limit.replace('\'', "'\\''");
-    let cmd = format!("sqlite3 -json -readonly '{db_path}' '{escaped_sql}'");
-
-    match state.registry.exec_in_remote_container(&app.host_id, &app.container_name, vec![cmd]).await {
-        Ok((success, stdout, stderr)) => {
-            if !success {
-                return tool_error(id, &format!("Query failed: {stderr}"));
-            }
-            let rows: Value = serde_json::from_str(stdout.trim()).unwrap_or(json!([]));
-            tool_success(id, json!({
-                "app_id": app_id,
-                "rows": rows,
-                "row_count": rows.as_array().map(|a| a.len()).unwrap_or(0),
-            }))
-        }
-        Err(e) => tool_error(id, &format!("Exec failed: {e}")),
-    }
 }
 
 // ── Monitoring tools ────────────────────────────────────────────────
@@ -1756,312 +1391,6 @@ async fn tool_git_ssh_key(id: Value) -> Value {
     }
 }
 
-// ── Backup tools ─────────────────────────────────────────────────────
-
-async fn tool_backup_status(id: Value, state: &McpState) -> Value {
-    let status = state.backup.get_status().await;
-    let progress = state.backup.get_progress().await;
-    tool_success(id, json!({
-        "mode": "ssh_incremental",
-        "ssh_target": "romain@10.0.0.30:/backup",
-        "running": status.running,
-        "stage": status.stage,
-        "last_run_at": status.last_run_at,
-        "last_run_success": status.last_run_success,
-        "last_run_message": status.last_run_message,
-        "repos": status.repos,
-        "progress": serde_json::to_value(&progress).unwrap_or_default(),
-    }))
-}
-
-async fn tool_backup_trigger(id: Value, state: &McpState) -> Value {
-    match state.backup.trigger().await {
-        Ok(()) => tool_success(id, json!({
-            "message": "Backup pipeline started (SSH incremental to 10.0.0.30)",
-            "status": "running",
-        })),
-        Err(e) => tool_error(id, &format!("Backup trigger failed: {e}")),
-    }
-}
-
-async fn tool_backup_wake(id: Value, _state: &McpState) -> Value {
-    // No longer needed: backup runs locally on this machine
-    tool_success(id, json!({
-        "message": "Wake not needed: backup server (10.0.0.30) is always on",
-        "action": "noop",
-    }))
-}
-
-
-// ── WWW Article tools ────────────────────────────────────────────────
-
-const WWW_API_BASE: &str = "http://10.0.0.125:3000/api";
-const WWW_AUTH_USER: &str = "pixel";
-const WWW_AUTH_GROUPS: &str = "admins";
-
-fn www_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .unwrap_or_default()
-}
-
-async fn tool_www_list_articles(id: Value) -> Value {
-    let client = www_client();
-    match client
-        .get(format!("{WWW_API_BASE}/admin/articles"))
-        .header("X-Auth-User", WWW_AUTH_USER)
-        .header("X-Auth-Groups", WWW_AUTH_GROUPS)
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<Value>().await {
-                Ok(data) => tool_success(id, data),
-                Err(e) => tool_error(id, &format!("Failed to parse response: {e}")),
-            }
-        }
-        Ok(resp) => tool_error(id, &format!("API returned status {}", resp.status())),
-        Err(e) => tool_error(id, &format!("Request failed: {e}")),
-    }
-}
-
-async fn tool_www_get_article(id: Value, args: &Value) -> Value {
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let client = www_client();
-    match client
-        .get(format!("{WWW_API_BASE}/admin/articles/{slug}"))
-        .header("X-Auth-User", WWW_AUTH_USER)
-        .header("X-Auth-Groups", WWW_AUTH_GROUPS)
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<Value>().await {
-                Ok(data) => tool_success(id, data),
-                Err(e) => tool_error(id, &format!("Failed to parse response: {e}")),
-            }
-        }
-        Ok(resp) if resp.status().as_u16() == 404 => tool_error(id, &format!("Article not found: {slug}")),
-        Ok(resp) => tool_error(id, &format!("API returned status {}", resp.status())),
-        Err(e) => tool_error(id, &format!("Request failed: {e}")),
-    }
-}
-
-async fn tool_www_create_article(id: Value, args: &Value) -> Value {
-    let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing name".into());
-    };
-    let mut body = serde_json::Map::new();
-    body.insert("name".into(), json!(name));
-    if let Some(slug) = args.get("system_name").and_then(|v| v.as_str()) {
-        body.insert("system_name".into(), json!(slug));
-    } else {
-        let auto_slug: String = name.to_lowercase()
-            .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
-            .collect::<String>()
-            .split('-')
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("-");
-        body.insert("system_name".into(), json!(auto_slug));
-    }
-    for field in &["description", "category", "image_url", "article_content"] {
-        if let Some(val) = args.get(*field).and_then(|v| v.as_str()) {
-            body.insert((*field).into(), json!(val));
-        }
-    }
-    let client = www_client();
-    match client
-        .post(format!("{WWW_API_BASE}/admin/articles"))
-        .header("X-Auth-User", WWW_AUTH_USER)
-        .header("X-Auth-Groups", WWW_AUTH_GROUPS)
-        .json(&Value::Object(body))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<Value>().await {
-                Ok(data) => tool_success(id, data),
-                Err(_) => tool_success(id, json!({"status": "created"})),
-            }
-        }
-        Ok(resp) => {
-            let status = resp.status();
-            let body_text = resp.text().await.unwrap_or_default();
-            tool_error(id, &format!("API returned {status}: {body_text}"))
-        }
-        Err(e) => tool_error(id, &format!("Request failed: {e}")),
-    }
-}
-
-async fn tool_www_edit_article(id: Value, args: &Value) -> Value {
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let mut body = serde_json::Map::new();
-    for field in &["name", "description", "category", "image_url", "article_content"] {
-        if let Some(val) = args.get(*field).and_then(|v| v.as_str()) {
-            body.insert((*field).into(), json!(val));
-        }
-    }
-    if body.is_empty() {
-        return tool_error(id, "No fields to update provided");
-    }
-    let client = www_client();
-    match client
-        .patch(format!("{WWW_API_BASE}/admin/articles/{slug}"))
-        .header("X-Auth-User", WWW_AUTH_USER)
-        .header("X-Auth-Groups", WWW_AUTH_GROUPS)
-        .json(&Value::Object(body))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<Value>().await {
-                Ok(data) => tool_success(id, data),
-                Err(_) => tool_success(id, json!({"status": "updated", "slug": slug})),
-            }
-        }
-        Ok(resp) if resp.status().as_u16() == 404 => tool_error(id, &format!("Article not found: {slug}")),
-        Ok(resp) => {
-            let status = resp.status();
-            let body_text = resp.text().await.unwrap_or_default();
-            tool_error(id, &format!("API returned {status}: {body_text}"))
-        }
-        Err(e) => tool_error(id, &format!("Request failed: {e}")),
-    }
-}
-
-async fn tool_www_delete_article(id: Value, args: &Value) -> Value {
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    let client = www_client();
-    match client
-        .delete(format!("{WWW_API_BASE}/admin/articles/{slug}"))
-        .header("X-Auth-User", WWW_AUTH_USER)
-        .header("X-Auth-Groups", WWW_AUTH_GROUPS)
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            tool_success(id, json!({"status": "deleted", "slug": slug}))
-        }
-        Ok(resp) if resp.status().as_u16() == 404 => tool_error(id, &format!("Article not found: {slug}")),
-        Ok(resp) => tool_error(id, &format!("API returned {}", resp.status())),
-        Err(e) => tool_error(id, &format!("Request failed: {e}")),
-    }
-}
-
-async fn tool_www_publish_article(id: Value, args: &Value) -> Value {
-    // Note: the WWW app has no draft/published concept - all articles are always public.
-    // This tool simply touches updated_at to mark it as freshly published.
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    // Use PATCH with a no-op field to trigger updated_at refresh
-    let body = json!({"_touch": true});
-    let client = www_client();
-    match client
-        .patch(format!("{WWW_API_BASE}/admin/articles/{slug}"))
-        .header("X-Auth-User", WWW_AUTH_USER)
-        .header("X-Auth-Groups", WWW_AUTH_GROUPS)
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 400 => {
-            // Even if the API ignores _touch, the intent is noted
-            tool_success(id, json!({
-                "status": "published",
-                "slug": slug,
-                "note": "Article is publicly visible (no draft/publish concept exists in this app)"
-            }))
-        }
-        Ok(resp) if resp.status().as_u16() == 404 => tool_error(id, &format!("Article not found: {slug}")),
-        Ok(resp) => tool_error(id, &format!("API returned {}", resp.status())),
-        Err(e) => tool_error(id, &format!("Request failed: {e}")),
-    }
-}
-
-async fn tool_www_upload_image(id: Value, args: &Value) -> Value {
-    let Some(filename) = args.get("filename").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing filename".into());
-    };
-    let Some(base64_data) = args.get("base64_data").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing base64_data".into());
-    };
-    let content_type = args
-        .get("content_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("image/jpeg")
-        .to_string();
-
-    let image_bytes = match www_base64_decode(base64_data) {
-        Ok(b) => b,
-        Err(e) => return tool_error(id, &format!("Invalid base64 data: {e}")),
-    };
-
-    let part = match reqwest::multipart::Part::bytes(image_bytes)
-        .file_name(filename.to_string())
-        .mime_str(&content_type)
-    {
-        Ok(p) => p,
-        Err(e) => return tool_error(id, &format!("Invalid content_type: {e}")),
-    };
-    let form = reqwest::multipart::Form::new().part("file", part);
-
-    let client = www_client();
-    match client
-        .post(format!("{WWW_API_BASE}/admin/upload"))
-        .header("X-Auth-User", WWW_AUTH_USER)
-        .header("X-Auth-Groups", WWW_AUTH_GROUPS)
-        .multipart(form)
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<Value>().await {
-                Ok(data) => {
-                    let returned_filename = data
-                        .get("filename")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(filename)
-                        .to_string();
-                    tool_success(id, json!({
-                        "filename": returned_filename,
-                        "url": format!("/images/{returned_filename}"),
-                        "note": "Use this filename as image_url in www.create_article or www.edit_article"
-                    }))
-                }
-                Err(_) => tool_success(id, json!({"filename": filename, "status": "uploaded"})),
-            }
-        }
-        Ok(resp) => {
-            let status = resp.status();
-            let body_text = resp.text().await.unwrap_or_default();
-            tool_error(id, &format!("Upload failed {status}: {body_text}"))
-        }
-        Err(e) => tool_error(id, &format!("Request failed: {e}")),
-    }
-}
-
-fn www_base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    use base64::Engine;
-    let data = if let Some(pos) = input.find(',') {
-        &input[pos + 1..]
-    } else {
-        input
-    };
-    base64::engine::general_purpose::STANDARD
-        .decode(data.trim())
-        .map_err(|e| e.to_string())
-}
-
 // ── Reverse Proxy tools ──────────────────────────────────────────────
 
 async fn tool_reverseproxy_list(id: Value) -> Value {
@@ -2154,156 +1483,6 @@ async fn tool_reverseproxy_status(id: Value) -> Value {
     }
 }
 
-// ── DNS tools ────────────────────────────────────────────────────────
-
-async fn tool_dns_status(id: Value) -> Value {
-    match internal_api_get("/dns/status").await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_dns_leases(id: Value) -> Value {
-    match internal_api_get("/dns-dhcp/leases").await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_dns_reload(id: Value) -> Value {
-    match internal_api_post("/dns-dhcp/reload", json!({})).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_dns_cache_stats(id: Value) -> Value {
-    match internal_api_get("/dns/cache-stats").await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-// ── ACME tools ───────────────────────────────────────────────────────
-
-async fn tool_acme_status(id: Value) -> Value {
-    match internal_api_get("/acme/status").await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_acme_certificates(id: Value) -> Value {
-    match internal_api_get("/acme/certificates").await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_acme_renew(id: Value) -> Value {
-    match internal_api_post("/acme/renew", json!({})).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-// ── Adblock tools ────────────────────────────────────────────────────
-
-async fn tool_adblock_stats(id: Value) -> Value {
-    match internal_api_get("/adblock/stats").await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_adblock_whitelist_list(id: Value) -> Value {
-    match internal_api_get("/adblock/whitelist").await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_adblock_whitelist_add(id: Value, args: &Value) -> Value {
-    let Some(domain) = args.get("domain").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing domain".into());
-    };
-    match internal_api_post("/adblock/whitelist", json!({"domain": domain})).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_adblock_whitelist_remove(id: Value, args: &Value) -> Value {
-    let Some(domain) = args.get("domain").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing domain".into());
-    };
-    match internal_api_delete(&format!("/adblock/whitelist/{domain}")).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_adblock_update_lists(id: Value) -> Value {
-    match internal_api_post("/adblock/update", json!({})).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_adblock_search(id: Value, args: &Value) -> Value {
-    let Some(query) = args.get("query").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing query".into());
-    };
-    let encoded: String = query.bytes().map(|b| {
-        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
-            format!("{}", b as char)
-        } else {
-            format!("%{:02X}", b)
-        }
-    }).collect();
-    match internal_api_get(&format!("/adblock/search?q={encoded}")).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-// ── Updates tools ────────────────────────────────────────────────────
-
-async fn tool_updates_status(id: Value) -> Value {
-    match internal_api_get("/updates/status").await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_updates_check(id: Value) -> Value {
-    match internal_api_post("/updates/check", json!({})).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_updates_upgrade_apt(id: Value) -> Value {
-    match internal_api_post("/updates/upgrade/apt", json!({})).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_updates_upgrade_status(id: Value) -> Value {
-    match internal_api_get("/updates/upgrade/status").await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_updates_history(id: Value) -> Value {
-    match internal_api_get("/updates/history").await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
 // ── Store tools ──────────────────────────────────────────────────────
 
 async fn tool_store_list(id: Value) -> Value {
@@ -2318,22 +1497,6 @@ async fn tool_store_get(id: Value, args: &Value) -> Value {
         return error_response(id, INVALID_PARAMS, "Missing slug".into());
     };
     match internal_api_get(&format!("/store/apps/{slug}")).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-// ── DDNS tools ───────────────────────────────────────────────────────
-
-async fn tool_ddns_status(id: Value) -> Value {
-    match internal_api_get("/ddns/status").await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_ddns_force_update(id: Value) -> Value {
-    match internal_api_post("/ddns/update", json!({})).await {
         Ok(data) => tool_success(id, data),
         Err(e) => tool_error(id, &e),
     }
