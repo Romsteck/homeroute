@@ -1,0 +1,30 @@
+[package]
+name = "hr-orchestrator"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hr-orchestrator"
+path = "src/main.rs"
+
+[dependencies]
+hr-common = { path = "../../shared/hr-common" }
+hr-ipc = { path = "../../shared/hr-ipc" }
+hr-registry = { path = "../hr-registry" }
+hr-container = { path = "../hr-container" }
+hr-git = { path = "../hr-git" }
+hr-acme = { path = "../../edge/hr-acme" }
+
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { workspace = true }
+rustls = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+xxhash-rust = { workspace = true }
+reqwest = { workspace = true }
+base64 = { workspace = true }

@@ -280,23 +280,18 @@ impl AgentRegistry {
         self: &Arc<Self>,
         req: CreateApplicationRequest,
     ) -> Result<(Application, String)> {
-        use crate::types::Environment;
-
         let token_clear = generate_token();
         let token_hash = hash_token(&token_clear)?;
 
         let id = uuid::Uuid::new_v4().to_string();
-        let container_name = match req.environment {
-            Environment::Production => format!("hr-v2-{}-prod", req.slug),
-            Environment::Development => format!("hr-v2-{}-dev", req.slug),
-        };
+        let container_name = format!("hr-v2-{}-prod", req.slug);
 
         let app = Application {
             id: id.clone(),
             name: req.name,
             slug: req.slug,
             host_id: req.host_id.unwrap_or_else(|| "local".to_string()),
-            environment: req.environment,
+            environment: Environment::Production,
             enabled: true,
             container_name: container_name.clone(),
             token_hash,

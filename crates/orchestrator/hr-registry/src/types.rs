@@ -7,18 +7,16 @@ use crate::protocol::AgentMetrics;
 /// Port that code-server listens on inside each container.
 pub const CODE_SERVER_PORT: u16 = 13337;
 
-/// Application environment: development or production.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Application environment.
+/// All containers are now production. The Development variant is kept only
+/// for backward-compatible deserialization of legacy JSON data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Environment {
-    Development,
+    #[default]
     Production,
-}
-
-impl Default for Environment {
-    fn default() -> Self {
-        Self::Development
-    }
+    /// Legacy — no longer created, treated identically to Production.
+    Development,
 }
 
 /// Technology stack for a container application.
@@ -72,64 +70,19 @@ pub struct Application {
 }
 
 impl Application {
-    /// Return all domains this application serves.
-    /// Dev: `code.{slug}.{base}` (if code_server_enabled).
-    /// Prod: `{slug}.{base}`.
+    /// Return all domains this application serves: `{slug}.{base}`.
     pub fn domains(&self, base_domain: &str) -> Vec<String> {
-        match self.environment {
-            Environment::Development => {
-                let mut domains = vec![];
-                if self.code_server_enabled {
-                    domains.push(format!("code.{}.{}", self.slug, base_domain));
-                }
-                domains.push(format!("dev.{}.{}", self.slug, base_domain));
-                domains.push(format!("studio.{}.{}", self.slug, base_domain));
-                domains
-            }
-            Environment::Production => {
-                vec![format!("{}.{}", self.slug, base_domain)]
-            }
-        }
+        vec![format!("{}.{}", self.slug, base_domain)]
     }
 
     /// Return all (domain, port, auth_required, allowed_groups) tuples for agent routing.
-    /// Dev: `code.{slug}.{base}` (if code_server_enabled).
-    /// Prod: `{slug}.{base}`.
     pub fn routes(&self, base_domain: &str) -> Vec<RouteInfo> {
-        match self.environment {
-            Environment::Development => {
-                let mut routes = vec![];
-                if self.code_server_enabled {
-                    routes.push(RouteInfo {
-                        domain: format!("code.{}.{}", self.slug, base_domain),
-                        target_port: CODE_SERVER_PORT,
-                        auth_required: true,
-                        allowed_groups: vec![],
-                    });
-                }
-                routes.push(RouteInfo {
-                    domain: format!("dev.{}.{}", self.slug, base_domain),
-                    target_port: 3000,
-                    auth_required: false,
-                    allowed_groups: vec![],
-                });
-                routes.push(RouteInfo {
-                    domain: format!("studio.{}.{}", self.slug, base_domain),
-                    target_port: 443,
-                    auth_required: true,
-                    allowed_groups: vec![],
-                });
-                routes
-            }
-            Environment::Production => {
-                vec![RouteInfo {
-                    domain: format!("{}.{}", self.slug, base_domain),
-                    target_port: self.frontend.target_port,
-                    auth_required: self.frontend.auth_required,
-                    allowed_groups: self.frontend.allowed_groups.clone(),
-                }]
-            }
-        }
+        vec![RouteInfo {
+            domain: format!("{}.{}", self.slug, base_domain),
+            target_port: self.frontend.target_port,
+            auth_required: self.frontend.auth_required,
+            allowed_groups: self.frontend.allowed_groups.clone(),
+        }]
     }
 
     /// Return the wildcard domain for this application's per-app certificate.
@@ -200,8 +153,6 @@ pub struct CreateApplicationRequest {
     #[serde(default)]
     pub host_id: Option<String>,
     pub frontend: FrontendEndpoint,
-    #[serde(default)]
-    pub environment: Environment,
     #[serde(default = "default_true")]
     pub code_server_enabled: bool,
     #[serde(default)]
@@ -311,36 +262,9 @@ mod tests {
 
     #[test]
     fn test_domains() {
-        // Dev with code-server
-        let app = make_test_app(Environment::Development, true);
-        let domains = app.domains("example.com");
-        assert_eq!(domains, vec!["code.myapp.example.com", "dev.myapp.example.com", "studio.myapp.example.com"]);
-
-        // Prod
         let app = make_test_app(Environment::Production, true);
         let domains = app.domains("example.com");
         assert_eq!(domains, vec!["myapp.example.com"]);
-    }
-
-    #[test]
-    fn test_domains_no_code_server() {
-        let app = make_test_app(Environment::Development, false);
-        let domains = app.domains("example.com");
-        assert_eq!(domains, vec!["dev.myapp.example.com", "studio.myapp.example.com"]);
-    }
-
-    #[test]
-    fn test_routes_code_server() {
-        let app = make_test_app(Environment::Development, true);
-        let routes = app.routes("example.com");
-        assert_eq!(routes.len(), 3);
-        assert_eq!(routes[0].domain, "code.myapp.example.com");
-        assert_eq!(routes[0].target_port, CODE_SERVER_PORT);
-        assert!(routes[0].auth_required);
-        assert_eq!(routes[1].domain, "dev.myapp.example.com");
-        assert_eq!(routes[2].domain, "studio.myapp.example.com");
-        assert_eq!(routes[2].target_port, 443);
-        assert!(routes[2].auth_required);
     }
 
     #[test]
@@ -353,33 +277,8 @@ mod tests {
 
     #[test]
     fn test_wildcard_domain() {
-        let app = make_test_app(Environment::Development, true);
+        let app = make_test_app(Environment::Production, true);
         assert_eq!(app.wildcard_domain("example.com"), "*.myapp.example.com");
-    }
-
-    fn make_test_app_with_stack(
-        environment: Environment,
-        code_server_enabled: bool,
-        stack: AppStack,
-    ) -> Application {
-        let mut app = make_test_app(environment, code_server_enabled);
-        app.stack = stack;
-        app
-    }
-
-    #[test]
-    fn test_domains_nextjs() {
-        let app = make_test_app_with_stack(Environment::Development, true, AppStack::NextJs);
-        let domains = app.domains("example.com");
-        // NextJs should NOT have devapi
-        assert_eq!(
-            domains,
-            vec![
-                "code.myapp.example.com",
-                "dev.myapp.example.com",
-                "studio.myapp.example.com",
-            ]
-        );
     }
 
     #[test]

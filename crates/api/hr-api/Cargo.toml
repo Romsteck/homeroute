@@ -1,0 +1,38 @@
+[package]
+name = "hr-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hr-common = { path = "../../shared/hr-common" }
+hr-auth = { path = "../../edge/hr-auth" }
+hr-acme = { path = "../../edge/hr-acme" }
+hr-proxy = { path = "../../edge/hr-proxy" }
+hr-ipc = { path = "../../shared/hr-ipc" }
+
+hr-registry = { path = "../../orchestrator/hr-registry" }
+hr-tunnel = { path = "../../edge/hr-tunnel" }
+hr-container = { path = "../../orchestrator/hr-container" }
+hr-git = { path = "../../orchestrator/hr-git" }
+tokio = { workspace = true }
+axum = { workspace = true }
+axum-extra = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true }
+tokio-stream = { workspace = true }
+ipnet = { workspace = true }
+ring = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+sha2 = "0.10"
+xxhash-rust = { workspace = true }
+rusqlite = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+zip = "2"

@@ -1,0 +1,25 @@
+[Unit]
+Description=HomeRoute API (REST + WebSocket + SPA)
+After=network-online.target hr-edge.service hr-orchestrator.service
+Wants=hr-edge.service hr-orchestrator.service
+
+[Service]
+Type=simple
+ExecStart=/opt/homeroute/crates/target/release/homeroute
+ExecReload=/bin/kill -HUP $MAINPID
+WorkingDirectory=/opt/homeroute
+EnvironmentFile=/opt/homeroute/.env
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=homeroute
+
+# Security hardening
+ProtectSystem=strict
+ReadWritePaths=/var/lib/server-dashboard /opt/homeroute/data /data /var/log/homeroute /opt/homeroute/.env /tmp /var/lib/machines /etc/systemd/nspawn /run
+ReadOnlyPaths=/opt/homeroute/crates/target /opt/homeroute/web/dist /opt/homeroute/web-studio/dist
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target

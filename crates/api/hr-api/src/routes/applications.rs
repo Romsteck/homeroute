@@ -422,8 +422,7 @@ async fn agent_certs(
 // ── DNS record helpers for agent lifecycle ───────────────────
 
 /// Add local DNS A records for an agent via IPC, based on environment:
-/// - Development: `*.{slug}.{base}` -> IPv4 (covers dev.{slug} and code.{slug})
-/// - Production: `{slug}.{base}` -> IPv4
+/// Add DNS A record: `{slug}.{base}` -> IPv4
 async fn add_agent_dns_records(
     netcore: &NetcoreClient,
     slug: &str,
@@ -431,14 +430,7 @@ async fn add_agent_dns_records(
     ipv4: &str,
     environment: hr_registry::types::Environment,
 ) {
-    let (name, record_type) = match environment {
-        hr_registry::types::Environment::Development => {
-            (format!("*.{}.{}", slug, base_domain), "A".to_string())
-        }
-        hr_registry::types::Environment::Production => {
-            (format!("{}.{}", slug, base_domain), "A".to_string())
-        }
-    };
+    let (name, record_type) = (format!("{}.{}", slug, base_domain), "A".to_string());
     if let Err(e) = netcore.dns_add_static_record(name, record_type, ipv4.to_string(), 60).await {
         warn!(slug, ipv4, error = %e, "Failed to add DNS record via IPC");
     } else {

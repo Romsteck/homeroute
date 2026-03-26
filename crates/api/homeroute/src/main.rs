@@ -219,6 +219,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Backup live poller -> websocket (adaptive: 50ms while running, 5s idle)
+    // Single GetBackupLive IPC call instead of 4 separate calls for lower latency
     {
         let events = events.clone();
         let orchestrator = orchestrator.clone();
@@ -234,35 +235,18 @@ async fn main() -> anyhow::Result<()> {
                 };
                 tokio::time::sleep(poll_interval).await;
 
-                let status_resp = orchestrator
-                    .request(&hr_ipc::orchestrator::OrchestratorRequest::GetBackupStatus)
-                    .await;
-                let repos_resp = orchestrator
-                    .request(&hr_ipc::orchestrator::OrchestratorRequest::GetBackupRepos)
-                    .await;
-                let jobs_resp = orchestrator
-                    .request(&hr_ipc::orchestrator::OrchestratorRequest::GetBackupJobs)
-                    .await;
-                let progress_resp = orchestrator
-                    .request(&hr_ipc::orchestrator::OrchestratorRequest::GetBackupProgress)
-                    .await;
-
-                let status = match status_resp {
+                let resp = match orchestrator
+                    .request(&hr_ipc::orchestrator::OrchestratorRequest::GetBackupLive)
+                    .await
+                {
                     Ok(resp) if resp.ok => resp.data.unwrap_or_else(|| serde_json::json!({})),
                     _ => continue,
                 };
-                let repos_val = match repos_resp {
-                    Ok(resp) if resp.ok => resp.data.unwrap_or_else(|| serde_json::json!([])),
-                    _ => continue,
-                };
-                let jobs_val = match jobs_resp {
-                    Ok(resp) if resp.ok => resp.data.unwrap_or_else(|| serde_json::json!([])),
-                    _ => continue,
-                };
-                let progress = match progress_resp {
-                    Ok(resp) if resp.ok => resp.data.unwrap_or_else(|| serde_json::json!({"running": false})),
-                    _ => continue,
-                };
+
+                let status = resp.get("status").cloned().unwrap_or_else(|| serde_json::json!({}));
+                let progress = resp.get("progress").cloned().unwrap_or_else(|| serde_json::json!({"running": false}));
+                let repos_val = resp.get("repos").cloned().unwrap_or_else(|| serde_json::json!([]));
+                let jobs_val = resp.get("jobs").cloned().unwrap_or_else(|| serde_json::json!([]));
 
                 // Track running state for adaptive polling
                 was_running = status.get("running").and_then(|v| v.as_bool()).unwrap_or(false)
@@ -295,6 +279,22 @@ async fn main() -> anyhow::Result<()> {
                     latest_job: Some(payload["latestJob"].clone()).filter(|v| !v.is_null()),
                 };
                 let _ = events.backup_live.send(event);
+            }
+        });
+    }
+
+    // Hourly update scan (resilient: skip silently if orchestrator is down)
+    {
+        let events = events.clone();
+        let orchestrator = orchestrator.clone();
+        tokio::spawn(async move {
+            // Wait 5 minutes after startup before first scan
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                interval.tick().await;
+                info!("Hourly update scan starting...");
+                hr_api::routes::updates::run_background_scan(events.clone(), orchestrator.clone()).await;
             }
         });
     }

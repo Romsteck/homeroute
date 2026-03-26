@@ -1,0 +1,23 @@
+# Build artifacts
+crates/target/
+homeroute
+
+# Web
+web/node_modules/
+web/dist/
+web-studio/node_modules/
+web-studio/dist/
+
+# Flutter
+store_flutter/build/
+store_flutter/.dart_tool/
+
+# IDE
+.vscode/
+
+# Data & config
+data/
+.mcp.json
+
+# Cargo lock (workspace)
+crates/Cargo.lock

@@ -917,7 +917,7 @@ async fn run_repo_backup(
     let mut last_broadcast = Instant::now();
 
     // EMA smoothing for speed (Problem 4)
-    let ema_alpha: f64 = 0.05;
+    let ema_alpha: f64 = 0.1;
     let mut ema_speed: f64 = 0.0; // bytes per second
     let mut last_ema_time = Instant::now();
     let mut last_ema_bytes: u64 = 0;

@@ -1,0 +1,136 @@
+[workspace]
+resolver = "2"
+members = [
+    # shared
+    "shared/hr-common",
+    "shared/hr-ipc",
+    # edge (443, 80)
+    "edge/hr-edge",
+    "edge/hr-proxy",
+    "edge/hr-acme",
+    "edge/hr-auth",
+    "edge/hr-tunnel",
+    # netcore (53, 67)
+    "netcore/hr-netcore",
+    "netcore/hr-dns",
+    "netcore/hr-dhcp",
+    "netcore/hr-adblock",
+    "netcore/hr-ipv6",
+    # orchestrator (4001)
+    "orchestrator/hr-orchestrator",
+    "orchestrator/hr-registry",
+    "orchestrator/hr-container",
+    "orchestrator/hr-git",
+    "orchestrator/hr-dataverse",
+    # api (4000)
+    "api/homeroute",
+    "api/hr-api",
+    # agents
+    "agents/hr-agent",
+    "agents/hr-host-agent",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP framework
+axum = { version = "0.8", features = ["ws", "multipart"] }
+axum-extra = { version = "0.10", features = ["cookie"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
+
+# TLS
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Auth
+argon2 = "0.5"
+
+# Utilities
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+ipnet = "2.9"
+rand = "0.9"
+hex = "0.4"
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream"] }
+
+# Signal handling
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+tokio-stream = "0.1"
+
+# Adblock
+rustc-hash = "2.1"
+
+# HTTP body utilities
+http-body-util = "0.1"
+
+# Raw sockets
+socket2 = { version = "0.5", features = ["all"] }
+
+# Certificate generation
+rcgen = "0.13"
+
+# WebSocket client (for hr-agent)
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+
+# TOML config
+toml = "0.8"
+
+# Crypto (already in tree via rustls)
+ring = "0.17"
+
+# Random (for OsRng)
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+# ACME (Let's Encrypt)
+instant-acme = "0.7"
+base64 = "0.22"
+
+# Dataverse
+hr-dataverse = { path = "orchestrator/hr-dataverse" }
+
+# QUIC
+quinn = "0.11"
+
+# Byte manipulation
+bytes = "1"
+
+# Checksums (for binary transfer protocol)
+xxhash-rust = { version = "0.8", features = ["xxh32"] }
+
+# Embedded static files
+rust-embed = { version = "8", features = ["compression"] }
+
+# File system watcher
+notify = "7"
+
+# PTY (pseudo-terminal)
+pty-process = { version = "0.4", features = ["async"] }

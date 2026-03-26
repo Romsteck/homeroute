@@ -504,6 +504,51 @@ fn tool_definitions_extended() -> Value {
                 },
                 "required": ["app_id"]
             }
+        },
+        // ── Reverse Proxy ──
+        {
+            "name": "reverseproxy.list",
+            "description": "List all reverse proxy routes with their domain, target, enabled status, and options.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "reverseproxy.add",
+            "description": "Add a new reverse proxy route. Specify either subdomain (appended to base domain) or customDomain for a fully custom domain.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "subdomain": { "type": "string", "description": "Subdomain (e.g. 'app' for app.example.com)" },
+                    "customDomain": { "type": "string", "description": "Full custom domain (overrides subdomain)" },
+                    "targetHost": { "type": "string", "description": "Target host IP or hostname (default: localhost)" },
+                    "targetPort": { "type": "integer", "description": "Target port (default: 80)" },
+                    "localOnly": { "type": "boolean", "description": "Restrict to local network only (default: false)" },
+                    "requireAuth": { "type": "boolean", "description": "Require HomeRoute authentication (default: false)" },
+                    "enabled": { "type": "boolean", "description": "Enable route immediately (default: true)" }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "reverseproxy.delete",
+            "description": "Delete a reverse proxy route by its ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Route ID" }
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "reverseproxy.toggle",
+            "description": "Toggle a reverse proxy route on or off.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Route ID" }
+                },
+                "required": ["id"]
+            }
         }
     ])
 }
@@ -575,6 +620,11 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState) -> Value 
         // ── Store ──
         "store.list" => tool_store_list(id).await,
         "store.get" => tool_store_get(id, &arguments).await,
+        // ── Reverse Proxy ──
+        "reverseproxy.list" => tool_reverseproxy_list(id).await,
+        "reverseproxy.add" => tool_reverseproxy_add(id, &arguments).await,
+        "reverseproxy.delete" => tool_reverseproxy_delete(id, &arguments).await,
+        "reverseproxy.toggle" => tool_reverseproxy_toggle(id, &arguments).await,
         // ── Docs ──
         "docs.list" => tool_docs_list(id).await,
         "docs.get" => tool_docs_get(id, &arguments).await,
@@ -1418,6 +1468,64 @@ async fn internal_api_delete(path: &str) -> Result<Value, String> {
     } else {
         let body = resp.text().await.unwrap_or_default();
         Err(format!("API returned {status}: {body}"))
+    }
+}
+
+// ── Reverse Proxy tools ──────────────────────────────────────────────
+
+async fn tool_reverseproxy_list(id: Value) -> Value {
+    match internal_api_get("/reverseproxy/hosts").await {
+        Ok(data) => tool_success(id, data),
+        Err(e) => tool_error(id, &e),
+    }
+}
+
+async fn tool_reverseproxy_add(id: Value, args: &Value) -> Value {
+    let mut body = json!({});
+    if let Some(v) = args.get("subdomain").and_then(|v| v.as_str()) {
+        body["subdomain"] = json!(v);
+    }
+    if let Some(v) = args.get("customDomain").and_then(|v| v.as_str()) {
+        body["customDomain"] = json!(v);
+    }
+    if let Some(v) = args.get("targetHost").and_then(|v| v.as_str()) {
+        body["targetHost"] = json!(v);
+    }
+    if let Some(v) = args.get("targetPort").and_then(|v| v.as_u64()) {
+        body["targetPort"] = json!(v);
+    }
+    if let Some(v) = args.get("localOnly").and_then(|v| v.as_bool()) {
+        body["localOnly"] = json!(v);
+    }
+    if let Some(v) = args.get("requireAuth").and_then(|v| v.as_bool()) {
+        body["requireAuth"] = json!(v);
+    }
+    if let Some(v) = args.get("enabled").and_then(|v| v.as_bool()) {
+        body["enabled"] = json!(v);
+    }
+    match internal_api_post("/reverseproxy/hosts", body).await {
+        Ok(data) => tool_success(id, data),
+        Err(e) => tool_error(id, &e),
+    }
+}
+
+async fn tool_reverseproxy_delete(id: Value, args: &Value) -> Value {
+    let Some(route_id) = args.get("id").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing id".into());
+    };
+    match internal_api_delete(&format!("/reverseproxy/hosts/{route_id}")).await {
+        Ok(data) => tool_success(id, data),
+        Err(e) => tool_error(id, &e),
+    }
+}
+
+async fn tool_reverseproxy_toggle(id: Value, args: &Value) -> Value {
+    let Some(route_id) = args.get("id").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing id".into());
+    };
+    match internal_api_post(&format!("/reverseproxy/hosts/{route_id}/toggle"), json!({})).await {
+        Ok(data) => tool_success(id, data),
+        Err(e) => tool_error(id, &e),
     }
 }
 
