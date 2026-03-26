@@ -790,7 +790,7 @@ async fn proxy_via_reqwest(
 
     // Stream the body
     let body_stream = req.into_body();
-    let body_bytes = axum::body::to_bytes(body_stream, 100 * 1024 * 1024)
+    let body_bytes = axum::body::to_bytes(body_stream, 512 * 1024 * 1024)
         .await
         .map_err(|e| format!("Failed to read request body: {}", e))?;
     if !body_bytes.is_empty() {

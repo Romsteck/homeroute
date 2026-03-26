@@ -34,7 +34,7 @@ pub fn router() -> Router<ApiState> {
             "/repos/{slug_git}/git-receive-pack",
             post(git_receive_pack),
         )
-        .layer(DefaultBodyLimit::max(512 * 1024 * 1024)) // 512 MB for git push
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024)) // 2 GB for git push
 }
 
 // ── IPC Helpers ─────────────────────────────────────────────

@@ -11,6 +11,11 @@ enum OutgoingWsMessage {
 }
 
 mod config;
+mod mcp;
+mod registry;
+mod ssh;
+mod tools;
+
 use config::Config;
 
 #[tokio::main]
@@ -39,6 +44,33 @@ async fn main() {
         target = config.homeroute_url,
         "hr-host-agent starting"
     );
+
+    // ── MCP Project Manager server ──
+    if config.mcp_enabled() {
+        let reg = std::sync::Arc::new(
+            registry::ProjectRegistry::load_or_default(config.registry_path()),
+        );
+        let config_arc = std::sync::Arc::new(config.clone());
+        let mcp_state = mcp::McpState {
+            token: std::sync::Arc::new(config.mcp_token.clone().unwrap()),
+            registry: reg,
+            config: config_arc,
+        };
+        let port = config.mcp_port.unwrap();
+        tokio::spawn(async move {
+            use axum::routing::post;
+            let app = axum::Router::new()
+                .route("/mcp", post(mcp::mcp_handler))
+                .with_state(mcp_state);
+            let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
+                .await
+                .expect("Failed to bind MCP port");
+            info!(port, "MCP Project Manager server started");
+            axum::serve(listener, app).await.expect("MCP server error");
+        });
+    } else {
+        info!("MCP Project Manager disabled (no mcp_port/mcp_token in config)");
+    }
 
     let mut backoff = config.reconnect_interval_secs;
 
