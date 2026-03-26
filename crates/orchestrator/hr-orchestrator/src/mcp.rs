@@ -426,70 +426,6 @@ fn tool_definitions_core() -> Value {
 
 fn tool_definitions_extended() -> Value {
     json!([
-        // ── Reverse Proxy ──
-        {
-            "name": "reverseproxy.list",
-            "description": "List all reverse proxy host entries with domains, targets, and status.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "reverseproxy.add",
-            "description": "Add a new reverse proxy host entry.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "domain": { "type": "string", "description": "Domain name" },
-                    "target_host": { "type": "string", "description": "Target host IP or hostname" },
-                    "target_port": { "type": "integer", "description": "Target port" },
-                    "https": { "type": "boolean", "description": "Enable HTTPS (default true)", "default": true }
-                },
-                "required": ["domain", "target_host", "target_port"]
-            }
-        },
-        {
-            "name": "reverseproxy.update",
-            "description": "Update an existing reverse proxy host entry.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Proxy host ID" },
-                    "domain": { "type": "string", "description": "New domain (optional)" },
-                    "target_host": { "type": "string", "description": "New target host (optional)" },
-                    "target_port": { "type": "integer", "description": "New target port (optional)" },
-                    "https": { "type": "boolean", "description": "Enable/disable HTTPS (optional)" },
-                    "enabled": { "type": "boolean", "description": "Enable/disable entry (optional)" }
-                },
-                "required": ["id"]
-            }
-        },
-        {
-            "name": "reverseproxy.delete",
-            "description": "Delete a reverse proxy host entry.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "id": { "type": "string", "description": "Proxy host ID" } },
-                "required": ["id"]
-            }
-        },
-        {
-            "name": "reverseproxy.toggle",
-            "description": "Toggle a reverse proxy host entry on/off.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "id": { "type": "string", "description": "Proxy host ID" } },
-                "required": ["id"]
-            }
-        },
-        {
-            "name": "reverseproxy.reload",
-            "description": "Reload the reverse proxy configuration (applies changes to hr-edge).",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "reverseproxy.status",
-            "description": "Get the reverse proxy status and configuration summary.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
         // ── Store ──
         {
             "name": "store.list",
@@ -636,14 +572,6 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState) -> Value 
         "git.branches" => tool_git_branches(id, &arguments).await,
         "git.sync" => tool_git_sync(id, &arguments).await,
         "git.ssh_key" => tool_git_ssh_key(id).await,
-        // ── Reverse Proxy ──
-        "reverseproxy.list" => tool_reverseproxy_list(id).await,
-        "reverseproxy.add" => tool_reverseproxy_add(id, &arguments).await,
-        "reverseproxy.update" => tool_reverseproxy_update(id, &arguments).await,
-        "reverseproxy.delete" => tool_reverseproxy_delete(id, &arguments).await,
-        "reverseproxy.toggle" => tool_reverseproxy_toggle(id, &arguments).await,
-        "reverseproxy.reload" => tool_reverseproxy_reload(id).await,
-        "reverseproxy.status" => tool_reverseproxy_status(id).await,
         // ── Store ──
         "store.list" => tool_store_list(id).await,
         "store.get" => tool_store_get(id, &arguments).await,
@@ -1386,98 +1314,6 @@ async fn tool_git_sync(id: Value, args: &Value) -> Value {
 
 async fn tool_git_ssh_key(id: Value) -> Value {
     match internal_api_get("/git/ssh-key").await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-// ── Reverse Proxy tools ──────────────────────────────────────────────
-
-async fn tool_reverseproxy_list(id: Value) -> Value {
-    match internal_api_get("/reverseproxy/hosts").await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_reverseproxy_add(id: Value, args: &Value) -> Value {
-    let Some(domain) = args.get("domain").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing domain".into());
-    };
-    let Some(target_host) = args.get("target_host").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing target_host".into());
-    };
-    let Some(target_port) = args.get("target_port").and_then(|v| v.as_u64()) else {
-        return error_response(id, INVALID_PARAMS, "Missing target_port".into());
-    };
-    let https = args.get("https").and_then(|v| v.as_bool()).unwrap_or(true);
-    match internal_api_post("/reverseproxy/hosts", json!({
-        "domain": domain,
-        "target_host": target_host,
-        "target_port": target_port,
-        "https": https,
-    })).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_reverseproxy_update(id: Value, args: &Value) -> Value {
-    let Some(proxy_id) = args.get("id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing id".into());
-    };
-    let mut body = serde_json::Map::new();
-    for field in &["domain", "target_host"] {
-        if let Some(val) = args.get(*field).and_then(|v| v.as_str()) {
-            body.insert((*field).into(), json!(val));
-        }
-    }
-    if let Some(port) = args.get("target_port").and_then(|v| v.as_u64()) {
-        body.insert("target_port".into(), json!(port));
-    }
-    for field in &["https", "enabled"] {
-        if let Some(val) = args.get(*field).and_then(|v| v.as_bool()) {
-            body.insert((*field).into(), json!(val));
-        }
-    }
-    if body.is_empty() {
-        return tool_error(id, "No fields to update provided");
-    }
-    match internal_api_put(&format!("/reverseproxy/hosts/{proxy_id}"), Value::Object(body)).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_reverseproxy_delete(id: Value, args: &Value) -> Value {
-    let Some(proxy_id) = args.get("id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing id".into());
-    };
-    match internal_api_delete(&format!("/reverseproxy/hosts/{proxy_id}")).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_reverseproxy_toggle(id: Value, args: &Value) -> Value {
-    let Some(proxy_id) = args.get("id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing id".into());
-    };
-    match internal_api_post(&format!("/reverseproxy/hosts/{proxy_id}/toggle"), json!({})).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_reverseproxy_reload(id: Value) -> Value {
-    match internal_api_post("/reverseproxy/reload", json!({})).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_reverseproxy_status(id: Value) -> Value {
-    match internal_api_get("/reverseproxy/status").await {
         Ok(data) => tool_success(id, data),
         Err(e) => tool_error(id, &e),
     }
