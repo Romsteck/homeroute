@@ -52,14 +52,34 @@ crates/
 │   ├── hr-registry/           #   applications, agents WebSocket
 │   ├── hr-container/          #   systemd-nspawn lifecycle
 │   ├── hr-git/                #   bare repos, Smart HTTP
-│   └── hr-dataverse/          #   schémas + requêtes SQLite agents
+│   ├── hr-db/                 #   Dataverse engine (SQLite, shared lib)
+│   ├── hr-environment/        #   types, protocole, config des environnements
+│   └── hr-pipeline/           #   pipelines déploiement (store, runner, migration)
 ├── api/                       # Service homeroute (4000)
 │   ├── homeroute/             #   binaire (thin shell)
 │   └── hr-api/                #   routes axum, WebSocket events
 └── agents/                    # Binaires autonomes
-    ├── hr-agent/              #   agent dans containers nspawn
+    ├── hr-agent/              #   agent dans containers nspawn (legacy)
     ├── hr-host-agent/         #   agent hôte distant
+    └── env-agent/             #   agent environnement (multi-app, DB, studio)
 ```
+
+### Environnements (nouveau)
+
+HomeRoute gère des **environnements** inspirés de Microsoft Power Platform :
+
+- 1 container nspawn = 1 environnement (dev/acc/prod)
+- N apps comme processus dans chaque env
+- `env-agent` pilote chaque env (DB, apps, MCP, studio)
+- Pipelines pour promouvoir entre envs (build → test → migrate DB → deploy → health)
+
+```
+make.mynetwk.biz                →  Maker portal (apps, envs, pipelines)
+studio.dev.mynetwk.biz          →  Studio env DEV (code-server + Claude Code)
+{app}.{env}.mynetwk.biz         →  App dans un env
+```
+
+Voir `PLAN-ENVIRONMENTS.md` pour le plan complet.
 
 ### IPC Sockets
 
@@ -80,6 +100,8 @@ crates/
 | Certificats ACME | `/var/lib/server-dashboard/acme/` |
 | Agent registry | `/var/lib/server-dashboard/agent-registry.json` |
 | Containers V2 | `/var/lib/server-dashboard/containers-v2.json` |
+| Environments | `/var/lib/server-dashboard/environments.json` |
+| Pipelines | `/var/lib/server-dashboard/pipelines.json` |
 | Env config | `/opt/homeroute/.env` |
 
 ## Ports
@@ -116,6 +138,7 @@ make orchestrator    # cargo build --release -p hr-orchestrator
 make netcore         # cargo build --release -p hr-netcore
 make web             # npm run build (web/) seulement
 make agent           # build hr-agent (auto-incrémente version)
+make env-agent       # build env-agent
 make test            # cargo test
 
 # Déploiement vers la production (depuis dev)
@@ -146,6 +169,8 @@ ssh root@10.0.0.254 'systemctl reload hr-netcore'    # hot-reload DNS/DHCP/Adblo
 - **TOUJOURS** `make deploy-orchestrator` si modification de hr-registry, hr-container, hr-git, hr-orchestrator
 - **TOUJOURS** `make deploy-netcore` si modification de hr-dns, hr-dhcp, hr-ipv6, hr-adblock, hr-netcore
 - **TOUJOURS** `make agent && make agent-prod` après modification du crate `hr-agent`
+- **TOUJOURS** `make env-agent` après modification du crate `env-agent`
+- **TOUJOURS** `make deploy-orchestrator` si modification de hr-environment, hr-pipeline, hr-db
 - Exécuter les commandes dans les containers via **`POST /api/applications/{id}/exec`** (pas machinectl)
 - Passer les commandes comme un seul string bash : `command: ["cmd"]`
 
@@ -249,12 +274,12 @@ Le serveur MCP HomeRoute est implémenté dans ce même repo. Claude Code peut d
 
 | Serveur MCP | Fichier source |
 |-------------|---------------|
-| **Orchestrator MCP** (HTTP, tools infra) | `crates/orchestrator/hr-orchestrator/src/mcp.rs` |
-| **Agent MCP** (stdio, Dataverse + Deploy + Store + Studio + Docs) | `crates/agents/hr-agent/src/mcp.rs` |
+| **Orchestrator MCP** (HTTP, tools infra + envs) | `crates/orchestrator/hr-orchestrator/src/mcp.rs` |
+| **Agent MCP** (stdio, Store + Studio + Docs) | `crates/agents/hr-agent/src/mcp.rs` |
+| **Env-Agent MCP** (stdio + HTTP, db.* + app.* + env.*) | `crates/agents/env-agent/src/mcp.rs` |
 
 Fichiers connexes :
 - `crates/agents/hr-agent/src/mcp_instructions.txt` — instructions incluses dans le MCP agent
-- `crates/agents/hr-agent/src/dataverse.rs` — opérations Dataverse utilisées par le MCP agent
 
 ### Ce que Claude Code peut faire
 
@@ -269,3 +294,25 @@ C'est du self-improvement : Claude Code améliore les outils qu'il utilise lui-m
 
 - Si modification de `crates/orchestrator/hr-orchestrator/src/mcp.rs` → `make deploy-orchestrator`
 - Si modification de `crates/agents/hr-agent/src/mcp.rs` → `make agent && make agent-prod`
+- Si modification de `crates/agents/env-agent/src/mcp.rs` → `make env-agent` (puis déployer dans les envs)
+
+## Documentation des Apps
+
+Les applications HomeRoute disposent d'un système de documentation centralisé stocké dans `/opt/homeroute/data/docs/`. Chaque app a 5 sections : `meta` (JSON), `structure`, `features`, `backend`, `notes` (Markdown).
+
+### Outils MCP docs
+
+| Outil | Usage |
+|-------|-------|
+| `docs.list` | Lister les apps documentées avec statut de complétude |
+| `docs.get` | Lire la doc d'une app (params: `app_id`, `section` optionnel) |
+| `docs.create` | Créer le scaffold pour une nouvelle app |
+| `docs.update` | Mettre à jour une section (params: `app_id`, `section`, `content`) |
+| `docs.search` | Recherche full-text dans toutes les docs |
+| `docs.completeness` | Vérifier sections remplies vs vides |
+
+### Règle obligatoire
+
+- **TOUJOURS** lire la doc (`docs.get`) avant de modifier significativement une app
+- **TOUJOURS** mettre à jour la doc après ajout/modification de features, structure, ou backend
+- Descriptions orientées utilisateur, pas techniques

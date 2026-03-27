@@ -48,32 +48,10 @@ pub enum AgentMessage {
     PublishRoutes {
         routes: Vec<AgentRoute>,
     },
-    /// Agent reports its Dataverse schema metadata.
-    #[serde(rename = "schema_metadata")]
-    SchemaMetadata {
-        tables: Vec<SchemaTableInfo>,
-        relations: Vec<SchemaRelationInfo>,
-        version: u64,
-        db_size_bytes: u64,
-    },
     /// Agent reports a new/changed IPv4 address (e.g. after container restart).
     #[serde(rename = "ip_update")]
     IpUpdate {
         ipv4_address: String,
-    },
-    /// Agent responds to a Dataverse query from the registry.
-    #[serde(rename = "dataverse_query_result")]
-    DataverseQueryResult {
-        request_id: String,
-        #[serde(default)]
-        data: Option<serde_json::Value>,
-        #[serde(default)]
-        error: Option<String>,
-    },
-    /// Agent requests schemas of all other apps.
-    #[serde(rename = "get_dataverse_schemas")]
-    GetDataverseSchemas {
-        request_id: String,
     },
     /// Agent reports update scan results.
     #[serde(rename = "update_scan_result")]
@@ -186,18 +164,6 @@ pub enum RegistryMessage {
     /// Certificate has been renewed; agent should re-pull certs.
     #[serde(rename = "cert_renewal")]
     CertRenewal { slug: String },
-    /// Query the agent's Dataverse database (proxy from API).
-    #[serde(rename = "dataverse_query")]
-    DataverseQuery {
-        request_id: String,
-        query: DataverseQueryRequest,
-    },
-    /// Response with schemas of all apps (in response to GetDataverseSchemas).
-    #[serde(rename = "dataverse_schemas")]
-    DataverseSchemas {
-        request_id: String,
-        schemas: Vec<AppSchemaOverview>,
-    },
     /// Push updated .claude/rules/ files to the agent.
     #[serde(rename = "update_rules")]
     UpdateRules {

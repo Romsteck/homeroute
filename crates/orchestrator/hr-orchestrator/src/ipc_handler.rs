@@ -21,6 +21,8 @@ use hr_registry::types::UpdateApplicationRequest;
 use hr_registry::AgentRegistry;
 
 use crate::backup_pipeline::BackupPipeline;
+use crate::db_manager::DbManager;
+use crate::env_manager::EnvironmentManager;
 
 pub struct OrchestratorHandler {
     pub registry: Arc<AgentRegistry>,
@@ -29,6 +31,8 @@ pub struct OrchestratorHandler {
     pub migrations: Arc<RwLock<HashMap<String, MigrationState>>>,
     pub renames: Arc<RwLock<HashMap<String, RenameState>>>,
     pub backup: Arc<BackupPipeline>,
+    pub db: Arc<DbManager>,
+    pub env_manager: Arc<EnvironmentManager>,
 }
 
 impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
@@ -515,29 +519,28 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 }
             }
 
-            // ── Dataverse ────────────────────────────────────────
+            // ── Database (centralized) ─────────────────────────────
             OrchestratorRequest::DataverseQuery { app_id, query } => {
-                // Parse the query JSON into the protocol type
                 let dv_query = match serde_json::from_value(query) {
                     Ok(q) => q,
-                    Err(e) => return IpcResponse::err(format!("Invalid dataverse query: {e}")),
+                    Err(e) => return IpcResponse::err(format!("Invalid query: {e}")),
                 };
-                match self.registry.dataverse_query(&app_id, dv_query).await {
+                match self.db.execute_query(&app_id, dv_query).await {
                     Ok(result) => IpcResponse::ok_data(result),
-                    Err(e) => IpcResponse::err(format!("Dataverse query failed: {e}")),
+                    Err(e) => IpcResponse::err(format!("Query failed: {e}")),
                 }
             }
             OrchestratorRequest::DataverseGetSchema { app_id } => {
-                let schemas = self.registry.dataverse_schemas.read().await;
-                match schemas.get(&app_id) {
-                    Some(schema) => IpcResponse::ok_data(schema),
-                    None => IpcResponse::err("No cached schema for this application"),
+                match self.db.get_schema(&app_id).await {
+                    Ok(schema) => IpcResponse::ok_data(schema),
+                    Err(e) => IpcResponse::err(e),
                 }
             }
             OrchestratorRequest::DataverseOverview => {
-                let schemas = self.registry.dataverse_schemas.read().await;
-                let apps: Vec<serde_json::Value> = schemas.values().cloned().collect();
-                IpcResponse::ok_data(serde_json::json!({ "apps": apps }))
+                match self.db.overview().await {
+                    Ok(data) => IpcResponse::ok_data(data),
+                    Err(e) => IpcResponse::err(e),
+                }
             }
 
             // ── Host operations ──────────────────────────────────
@@ -650,6 +653,155 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 }
             }
 
+            // ── Environments ────────────────────────────────────
+            OrchestratorRequest::ListEnvironments => {
+                let envs = self.env_manager.list_environments().await;
+                IpcResponse::ok_data(envs)
+            }
+            OrchestratorRequest::GetEnvironment { id } => {
+                // Try by ID first, then by slug
+                let env = self.env_manager.get_environment(&id).await
+                    .or(self.env_manager.get_by_slug(&id).await);
+                match env {
+                    Some(env) => IpcResponse::ok_data(env),
+                    None => IpcResponse::err("Environment not found"),
+                }
+            }
+            OrchestratorRequest::CreateEnvironment { request } => {
+                let name = request.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let slug = request.get("slug").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let env_type_str = request.get("env_type").and_then(|v| v.as_str()).unwrap_or("dev");
+                let env_type = match env_type_str {
+                    "prod" | "production" => hr_environment::EnvType::Production,
+                    "acc" | "acceptance" => hr_environment::EnvType::Acceptance,
+                    _ => hr_environment::EnvType::Development,
+                };
+                let host_id = request.get("host_id").and_then(|v| v.as_str()).unwrap_or("medion").to_string();
+                match self.env_manager.create_environment(name, slug, env_type, host_id).await {
+                    Ok((record, token)) => IpcResponse::ok_data(serde_json::json!({
+                        "id": record.id,
+                        "name": record.name,
+                        "slug": record.slug,
+                        "env_type": record.env_type,
+                        "host_id": record.host_id,
+                        "container_name": record.container_name,
+                        "status": record.status,
+                        "token": token,
+                    })),
+                    Err(e) => IpcResponse::err(format!("Failed to create environment: {e}")),
+                }
+            }
+            OrchestratorRequest::DeleteEnvironment { id } => {
+                match self.env_manager.delete_environment(&id).await {
+                    Ok(()) => IpcResponse::ok_empty(),
+                    Err(e) => IpcResponse::err(format!("Failed to delete environment: {e}")),
+                }
+            }
+            OrchestratorRequest::StartEnvironment { id } => {
+                self.env_manager.update_environment_status(&id, hr_environment::EnvStatus::Provisioning).await;
+                IpcResponse::ok_empty()
+            }
+            OrchestratorRequest::StopEnvironment { id } => {
+                self.env_manager.update_environment_status(&id, hr_environment::EnvStatus::Stopped).await;
+                IpcResponse::ok_empty()
+            }
+
+            // ── Environment sub-resources ─────────────────────────
+            OrchestratorRequest::GetEnvironmentApps { env_slug } => {
+                match self.env_manager.get_by_slug(&env_slug).await {
+                    Some(env) => IpcResponse::ok_data(serde_json::json!(env.apps)),
+                    None => IpcResponse::err("Environment not found"),
+                }
+            }
+            OrchestratorRequest::GetEnvironmentMonitoring { env_slug } => {
+                match self.env_manager.get_by_slug(&env_slug).await {
+                    Some(env) => {
+                        // Return env status + apps health summary
+                        let apps_summary: Vec<serde_json::Value> = env.apps.iter().map(|a| {
+                            serde_json::json!({
+                                "slug": a.slug,
+                                "name": a.name,
+                                "running": a.running,
+                                "version": a.version,
+                            })
+                        }).collect();
+                        IpcResponse::ok_data(serde_json::json!({
+                            "slug": env.slug,
+                            "status": env.status,
+                            "agent_connected": env.agent_connected,
+                            "agent_version": env.agent_version,
+                            "last_heartbeat": env.last_heartbeat,
+                            "apps": apps_summary,
+                        }))
+                    }
+                    None => IpcResponse::err("Environment not found"),
+                }
+            }
+            OrchestratorRequest::ControlEnvironmentApp { env_slug, app_slug, action } => {
+                let action = match action.as_str() {
+                    "start" => hr_environment::AppControlAction::Start,
+                    "stop" => hr_environment::AppControlAction::Stop,
+                    "restart" => hr_environment::AppControlAction::Restart,
+                    _ => return IpcResponse::err(format!("Invalid action: {action}. Use start, stop, or restart")),
+                };
+                match self.env_manager.send_to_env(
+                    &env_slug,
+                    hr_environment::EnvOrchestratorMessage::AppControl { app_slug, action },
+                ).await {
+                    Ok(()) => IpcResponse::ok_empty(),
+                    Err(e) => IpcResponse::err(format!("Failed to send control command: {e}")),
+                }
+            }
+            OrchestratorRequest::GetEnvironmentAppLogs { env_slug, app_slug, lines } => {
+                // Proxy to env-agent MCP for app logs
+                let args = serde_json::json!({
+                    "app_slug": app_slug,
+                    "lines": lines.unwrap_or(100),
+                });
+                match self.env_mcp_call(&env_slug, "app.logs", args).await {
+                    Ok(data) => IpcResponse::ok_data(data),
+                    Err(e) => IpcResponse::err(format!("Failed to get app logs: {e}")),
+                }
+            }
+            OrchestratorRequest::GetEnvironmentDbTables { env_slug } => {
+                match self.env_mcp_call(&env_slug, "db.list_tables", serde_json::json!({})).await {
+                    Ok(data) => IpcResponse::ok_data(data),
+                    Err(e) => IpcResponse::err(format!("Failed to list DB tables: {e}")),
+                }
+            }
+            OrchestratorRequest::QueryEnvironmentDb { env_slug, query } => {
+                match self.env_mcp_call(&env_slug, "db.query_data", query).await {
+                    Ok(data) => IpcResponse::ok_data(data),
+                    Err(e) => IpcResponse::err(format!("Failed to query DB: {e}")),
+                }
+            }
+            OrchestratorRequest::GetEnvironmentsMonitoringSummary => {
+                let envs = self.env_manager.list_environments().await;
+                let summary: Vec<serde_json::Value> = envs.iter().map(|env| {
+                    let running_apps = env.apps.iter().filter(|a| a.running).count();
+                    serde_json::json!({
+                        "slug": env.slug,
+                        "name": env.name,
+                        "env_type": env.env_type,
+                        "status": env.status,
+                        "agent_connected": env.agent_connected,
+                        "apps_running": running_apps,
+                        "apps_total": env.apps.len(),
+                    })
+                }).collect();
+                IpcResponse::ok_data(serde_json::json!(summary))
+            }
+
+            // ── Multi-host environments (7.6) ─────────────────────
+            OrchestratorRequest::ListEnvironmentsByHost { host_id } => {
+                let envs = self.env_manager.list_by_host(&host_id).await;
+                IpcResponse::ok_data(envs)
+            }
+            OrchestratorRequest::GetHostCapacity { host_id } => {
+                let capacity = self.env_manager.get_host_capacity(&host_id).await;
+                IpcResponse::ok_data(capacity)
+            }
+
             // ── Backup pipeline ───────────────────────────────────
             OrchestratorRequest::TriggerBackup => {
                 match self.backup.trigger().await {
@@ -701,5 +853,54 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 }))
             }
         }
+    }
+}
+
+impl OrchestratorHandler {
+    /// Call an MCP tool on an env-agent's HTTP endpoint (port 4010).
+    async fn env_mcp_call(
+        &self,
+        env_slug: &str,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let env = self.env_manager.get_by_slug(env_slug).await
+            .ok_or_else(|| anyhow::anyhow!("Environment {env_slug} not found"))?;
+
+        let ip = env.ipv4_address
+            .ok_or_else(|| anyhow::anyhow!("Environment {env_slug} has no IP address"))?;
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": tool,
+                "arguments": arguments,
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()?;
+
+        let resp = client
+            .post(format!("http://{}:4010/mcp", ip))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("MCP call to env-agent {env_slug} failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            anyhow::bail!("Env-agent MCP returned status {}", resp.status());
+        }
+
+        let json: serde_json::Value = resp.json().await?;
+
+        if let Some(err) = json.get("error") {
+            anyhow::bail!("Env-agent MCP error: {err}");
+        }
+
+        Ok(json.get("result").cloned().unwrap_or(serde_json::Value::Null))
     }
 }

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Container,
   Plus,
@@ -8,6 +9,8 @@ import {
   X,
   Terminal,
   Loader2,
+  ArrowRight,
+  Layers,
 } from 'lucide-react';
 import Button from '../components/Button';
 import PageHeader from '../components/PageHeader';
@@ -464,7 +467,7 @@ function Containers() {
 
   return (
     <div>
-      <PageHeader title="Applications" icon={Container}>
+      <PageHeader title="Applications (Legacy)" icon={Container}>
         <span className="text-sm text-gray-400 hidden sm:inline">
           {prodContainers.length} application{prodContainers.length !== 1 ? 's' : ''} · {connectedCount} connectee{connectedCount !== 1 ? 's' : ''}
         </span>
@@ -473,6 +476,37 @@ function Containers() {
           Nouvelle application
         </Button>
       </PageHeader>
+
+      {/* Migration notice */}
+      <div className="mx-4 mt-4 p-4 bg-blue-900/30 border border-blue-700/50 rounded-lg">
+        <div className="flex items-start gap-3">
+          <Layers className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="text-sm text-blue-300 font-medium">Les applications sont desormais gerees via les Environnements</p>
+            <p className="text-xs text-blue-400/70 mt-1">
+              Cette page reste accessible en lecture seule. Pour gerer vos applications, utilisez la nouvelle page Environnements ou le Maker Portal.
+            </p>
+            <div className="flex flex-wrap gap-3 mt-3">
+              <Link
+                to="/environments"
+                className="inline-flex items-center gap-1.5 text-sm text-blue-400 hover:text-blue-300 transition-colors"
+              >
+                <ArrowRight className="w-3.5 h-3.5" />
+                Environnements
+              </Link>
+              <a
+                href="https://make.mynetwk.biz"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 text-sm text-blue-400 hover:text-blue-300 transition-colors"
+              >
+                <ArrowRight className="w-3.5 h-3.5" />
+                Maker Portal
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
 
       {/* Message */}
       {message && (

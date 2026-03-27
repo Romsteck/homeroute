@@ -55,7 +55,7 @@ A unified home server gateway that manages all network services from a single Ru
 │  hr-acme         │ hr-registry │ hr-container     │
 │  Let's Encrypt   │ Agent mgmt  │ nspawn lifecycle │
 ├──────────────────┼─────────────┼─────────────────┤
-│  hr-tunnel       │ hr-cloud-relay │ hr-dataverse  │
+│  hr-tunnel       │ hr-cloud-relay │ hr-db         │
 │  QUIC protocol   │ Remote gateway │ Data engine   │
 ├──────────────────┴─────────────┴─────────────────┤
 │  hr-agent (in containers)  │  hr-host-agent      │
@@ -84,7 +84,7 @@ crates/
 ├── hr-host-agent/     # Host-level agent for native services
 ├── hr-tunnel/         # QUIC tunnel protocol + crypto
 ├── hr-cloud-relay/    # Cloud relay gateway (QUIC + TCP)
-└── hr-dataverse/      # Data engine (schema, queries, migrations)
+└── hr-db/             # Data engine (schema, queries, migrations)
 ```
 
 ## Ports

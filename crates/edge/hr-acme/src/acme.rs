@@ -378,6 +378,12 @@ impl AcmeManager {
         self.request_wildcard(WildcardType::Global).await
     }
 
+    /// Request a wildcard certificate for a specific environment.
+    /// Issues `*.{slug}.{base_domain}` via DNS-01 challenge.
+    pub async fn request_env_wildcard(&self, slug: &str) -> AcmeResult<CertificateInfo> {
+        self.request_wildcard(WildcardType::Environment { slug: slug.to_string() }).await
+    }
+
 
     /// Request a wildcard certificate for a specific application.
     /// DEPRECATED: Per-app wildcards are no longer issued. Returns an error.

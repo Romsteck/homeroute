@@ -28,6 +28,7 @@ pub enum EdgeRequest {
     AcmeStatus,
     AcmeListCertificates,
     AcmeRequestAppWildcard { slug: String },
+    AcmeRequestEnvWildcard { env_slug: String },
     AcmeRenewAll,
 
     // Auth
@@ -93,5 +94,15 @@ impl EdgeClient {
 
     pub async fn remove_app_route(&self, domain: &str) -> Result<IpcResponse> {
         self.request(&EdgeRequest::RemoveAppRoute { domain: domain.to_string() }).await
+    }
+
+    /// Request a wildcard TLS certificate for an environment (e.g., *.dev.mynetwk.biz).
+    /// Uses ACME DNS-01 challenge via Cloudflare. This is a long-running operation
+    /// (may take 30-60s) so it uses a longer timeout.
+    pub async fn request_env_wildcard_cert(&self, env_slug: &str) -> Result<IpcResponse> {
+        self.request_with_timeout(
+            &EdgeRequest::AcmeRequestEnvWildcard { env_slug: env_slug.to_string() },
+            Duration::from_secs(120),
+        ).await
     }
 }

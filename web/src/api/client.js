@@ -203,6 +203,14 @@ export const getBackupRepos = () => api.get('/backup/repos');
 export const getBackupJobs = () => api.get('/backup/jobs');
 export const triggerBackup = () => api.post('/backup/trigger');
 
+// ========== Environments ==========
+export const getEnvironments = () => api.get('/environments');
+export const getEnvironment = (slug) => api.get(`/environments/${slug}`);
+export const createEnvironment = (data) => api.post('/environments', data);
+export const startEnvironment = (slug) => api.post(`/environments/${slug}/start`);
+export const stopEnvironment = (slug) => api.post(`/environments/${slug}/stop`);
+export const deleteEnvironment = (slug) => api.delete(`/environments/${slug}`);
+
 // ========== Docs ==========
 export const getDocsList = () => api.get('/docs');
 export const getDocsApp = (appId) => api.get(`/docs/${appId}`);

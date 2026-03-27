@@ -150,6 +150,21 @@ impl IpcHandler<EdgeRequest, IpcResponse> for EdgeHandler {
                     Err(e) => IpcResponse::err(format!("{}", e)),
                 }
             }
+            EdgeRequest::AcmeRequestEnvWildcard { env_slug } => {
+                match self.acme.request_env_wildcard(&env_slug).await {
+                    Ok(cert) => {
+                        // Load the new cert into the TLS manager
+                        let domain = format!("*.{}.{}", env_slug, self.env.base_domain);
+                        let cert_path = std::path::Path::new(&cert.cert_path);
+                        let key_path = std::path::Path::new(&cert.key_path);
+                        if let Ok(certified_key) = self.tls_manager.load_cert_from_files(cert_path, key_path) {
+                            self.tls_manager.add_cert(&domain, certified_key);
+                        }
+                        IpcResponse::ok_data(cert)
+                    }
+                    Err(e) => IpcResponse::err(format!("{}", e)),
+                }
+            }
             EdgeRequest::AcmeRenewAll => {
                 IpcResponse::ok_data("renewal triggered")
             }

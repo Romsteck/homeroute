@@ -38,12 +38,43 @@ pub struct Project {
     pub name: String,
     pub stack: ProjectStack,
     pub dev_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontend_dir: Option<String>,
     pub prod: ProjectProd,
     pub git_remote: Option<String>,
     pub domain: Option<String>,
     pub created_at: String,
     pub last_deployed_at: Option<String>,
     pub last_deploy_commit: Option<String>,
+}
+
+impl Project {
+    /// Repertoire contenant Cargo.toml (dev_path ou dev_path/backend_dir)
+    pub fn cargo_dir(&self) -> String {
+        let base = self.dev_path.trim_end_matches('/');
+        match &self.backend_dir {
+            Some(sub) => format!("{base}/{sub}"),
+            None => base.to_string(),
+        }
+    }
+
+    /// Repertoire contenant le frontend (package.json + vite)
+    pub fn web_dir(&self) -> Option<String> {
+        let base = self.dev_path.trim_end_matches('/');
+        match &self.frontend_dir {
+            Some(sub) => Some(format!("{base}/{sub}")),
+            None => {
+                let default = format!("{base}/web");
+                if std::path::Path::new(&default).exists() {
+                    Some(default)
+                } else {
+                    None
+                }
+            }
+        }
+    }
 }
 
 pub struct ProjectRegistry {

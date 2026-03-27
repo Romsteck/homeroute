@@ -12,8 +12,9 @@ import ReverseProxy from './pages/ReverseProxy';
 import Updates from './pages/Updates';
 import Hosts from './pages/Hosts';
 import Certificates from './pages/Certificates';
-import DataBrowser from './pages/DataBrowser';
-import Containers from './pages/Containers';
+// Legacy pages removed from routing (files kept for rollback):
+// import DataBrowser from './pages/DataBrowser';
+// import Containers from './pages/Containers';
 import Store from './pages/Store';
 import Git from './pages/Git';
 import Monitoring from './pages/Monitoring';
@@ -22,6 +23,7 @@ import Profile from './pages/Profile';
 import Backup from './pages/Backup';
 import Energy from './pages/Energy';
 import Docs from './pages/Docs';
+import Environments from './pages/Environments';
 
 // Component to protect routes that require authentication
 function ProtectedRoute({ children }) {
@@ -105,8 +107,7 @@ function AppRoutes() {
               <Route path="/reverseproxy" element={<ReverseProxy />} />
               <Route path="/updates" element={<Updates />} />
               <Route path="/hosts" element={<Hosts />} />
-              <Route path="/containers" element={<Containers />} />
-              <Route path="/data-browser" element={<DataBrowser />} />
+              {/* Legacy routes removed: /containers, /data-browser */}
               <Route path="/certificates" element={<Certificates />} />
               <Route path="/store" element={<Store />} />
               <Route path="/git" element={<Git />} />
@@ -114,6 +115,7 @@ function AppRoutes() {
               <Route path="/energy" element={<Energy />} />
               <Route path="/tasks" element={<Tasks />} />
               <Route path="/tasks/:id" element={<TaskDetail />} />
+              <Route path="/environments" element={<Environments />} />
               <Route path="/docs" element={<Docs />} />
               <Route path="/docs/:appId" element={<Docs />} />
             </Routes>

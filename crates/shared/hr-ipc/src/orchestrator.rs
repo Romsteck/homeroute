@@ -105,6 +105,36 @@ pub enum OrchestratorRequest {
     /// Authenticate an agent by its bearer token.
     /// Returns {app_id, slug} on success.
     AuthenticateAgentToken { token: String },
+
+    // ── Environments ─────────────────────────────────────────
+    ListEnvironments,
+    GetEnvironment { id: String },
+    CreateEnvironment { request: serde_json::Value },
+    DeleteEnvironment { id: String },
+    StartEnvironment { id: String },
+    StopEnvironment { id: String },
+
+    // ── Environment sub-resources ──────────────────────────
+    /// List apps deployed in an environment.
+    GetEnvironmentApps { env_slug: String },
+    /// Get monitoring data for an environment (CPU, memory, disk, app health).
+    GetEnvironmentMonitoring { env_slug: String },
+    /// Control an app inside an environment (start, stop, restart).
+    ControlEnvironmentApp { env_slug: String, app_slug: String, action: String },
+    /// Get recent logs for an app in an environment.
+    GetEnvironmentAppLogs { env_slug: String, app_slug: String, lines: Option<u64> },
+    /// List database tables in an environment.
+    GetEnvironmentDbTables { env_slug: String },
+    /// Query data from an environment database.
+    QueryEnvironmentDb { env_slug: String, query: serde_json::Value },
+    /// Get a summary of all environments' monitoring data.
+    GetEnvironmentsMonitoringSummary,
+
+    // ── Multi-host environments (7.6) ─────────────────────
+    /// List environments running on a specific host.
+    ListEnvironmentsByHost { host_id: String },
+    /// Get capacity info for a host (env count, running count, etc.).
+    GetHostCapacity { host_id: String },
 }
 
 // ── OrchestratorClient ───────────────────────────────────────

@@ -83,14 +83,10 @@ pub struct AgentRegistry {
     pub acme: RwLock<Option<Arc<AcmeManager>>>,
     /// Terminal sessions: maps session_id → sender for data from host-agent to API WS handler.
     terminal_sessions: Arc<RwLock<HashMap<String, mpsc::Sender<Vec<u8>>>>>,
-    /// Dataverse query signals: maps request_id → oneshot sender for query results.
-    dataverse_query_signals: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>>>>,
     /// Cached update scan results per target.
     pub scan_results: Arc<RwLock<HashMap<String, UpdateTarget>>>,
     /// Cached latest versions (fetched server-side to avoid GitHub rate limits).
     pub latest_versions: Arc<RwLock<LatestVersionsCache>>,
-    /// Cached Dataverse schemas keyed by app_id (populated by agent SchemaMetadata messages).
-    pub dataverse_schemas: Arc<RwLock<HashMap<String, serde_json::Value>>>,
 }
 
 /// Server-side cache for latest tool versions (avoids GitHub API rate limits from agents).
@@ -138,10 +134,8 @@ impl AgentRegistry {
             host_power_states: Arc::new(RwLock::new(HashMap::new())),
             acme: RwLock::new(None),
             terminal_sessions: Arc::new(RwLock::new(HashMap::new())),
-            dataverse_query_signals: Arc::new(RwLock::new(HashMap::new())),
             scan_results: Arc::new(RwLock::new(HashMap::new())),
             latest_versions: Arc::new(RwLock::new(LatestVersionsCache::default())),
-            dataverse_schemas: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -1327,7 +1321,7 @@ impl AgentRegistry {
 
         let rules = vec![
             ("homeroute-deploy.md".to_string(), render(deploy_rules)),
-            ("homeroute-dataverse.md".to_string(), render(include_str!("rules/homeroute-dataverse.md"))),
+            ("homeroute-db.md".to_string(), render(include_str!("rules/homeroute-db.md"))),
             ("homeroute-store.md".to_string(), render(include_str!("rules/homeroute-store.md"))),
             ("homeroute-studio-todos.md".to_string(), render(include_str!("rules/homeroute-studio-todos.md"))),
             ("homeroute-docs.md".to_string(), render(include_str!("rules/homeroute-docs.md"))),
@@ -1390,124 +1384,6 @@ impl AgentRegistry {
             let _ = self.persist().await;
             // Push fresh Config so the agent re-publishes routes with the new IP
             self.push_config_to_agent(&app).await;
-        }
-    }
-
-    /// Handle schema metadata received from an agent: cache and broadcast to WebSocket.
-    pub async fn handle_schema_metadata(
-        &self,
-        app_id: &str,
-        tables: Vec<crate::protocol::SchemaTableInfo>,
-        relations: Vec<crate::protocol::SchemaRelationInfo>,
-        version: u64,
-        db_size_bytes: u64,
-    ) {
-        // Look up the app slug and environment
-        let (slug, environment) = {
-            let state = self.state.read().await;
-            state.applications.iter()
-                .find(|a| a.id == app_id)
-                .map(|a| (a.slug.clone(), a.environment))
-                .unwrap_or_default()
-        };
-
-        // Broadcast to WebSocket
-        use hr_common::events::{DataverseSchemaEvent, DataverseTableSummary};
-        let table_summaries: Vec<DataverseTableSummary> = tables.iter().map(|t| {
-            DataverseTableSummary {
-                name: t.name.clone(),
-                slug: t.slug.clone(),
-                columns_count: t.columns.len(),
-                rows_count: t.row_count,
-            }
-        }).collect();
-
-        let _ = self.events.dataverse_schema.send(DataverseSchemaEvent {
-            app_id: app_id.to_string(),
-            slug: slug.clone(),
-            tables: table_summaries,
-            relations_count: relations.len(),
-            version,
-        });
-
-        // Cache schema for IPC overview/get_schema queries
-        let cached = serde_json::json!({
-            "appId": app_id,
-            "slug": slug,
-            "environment": environment,
-            "tables": tables.iter().map(|t| serde_json::json!({
-                "name": t.name,
-                "slug": t.slug,
-                "columns": t.columns.iter().map(|c| serde_json::json!({
-                    "name": c.name,
-                    "fieldType": c.field_type,
-                    "required": c.required,
-                    "unique": c.unique,
-                    "choices": c.choices,
-                })).collect::<Vec<_>>(),
-                "rowsCount": t.row_count,
-            })).collect::<Vec<_>>(),
-            "relations": relations.iter().map(|r| serde_json::json!({
-                "fromTable": r.from_table,
-                "fromColumn": r.from_column,
-                "toTable": r.to_table,
-                "toColumn": r.to_column,
-                "relationType": r.relation_type,
-            })).collect::<Vec<_>>(),
-            "version": version,
-            "dbSizeBytes": db_size_bytes,
-        });
-        self.dataverse_schemas.write().await.insert(app_id.to_string(), cached);
-    }
-
-    /// Proxy a Dataverse query to an agent and wait for the result.
-    pub async fn dataverse_query(
-        &self,
-        app_id: &str,
-        query: crate::protocol::DataverseQueryRequest,
-    ) -> Result<serde_json::Value> {
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.dataverse_query_signals.write().await.insert(request_id.clone(), tx);
-
-        // Send the query to the agent
-        let connections = self.connections.read().await;
-        let conn = connections.get(app_id)
-            .ok_or_else(|| anyhow::anyhow!("Agent not connected for app {}", app_id))?;
-        conn.tx.send(RegistryMessage::DataverseQuery {
-            request_id: request_id.clone(),
-            query,
-        }).await.map_err(|_| anyhow::anyhow!("Failed to send query to agent"))?;
-        drop(connections);
-
-        // Wait for response with timeout
-        match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
-            Ok(Ok(Ok(data))) => Ok(data),
-            Ok(Ok(Err(e))) => anyhow::bail!("Dataverse query error: {}", e),
-            Ok(Err(_)) => {
-                self.dataverse_query_signals.write().await.remove(&request_id);
-                anyhow::bail!("Dataverse query channel closed")
-            }
-            Err(_) => {
-                self.dataverse_query_signals.write().await.remove(&request_id);
-                anyhow::bail!("Dataverse query timeout after 30s")
-            }
-        }
-    }
-
-    /// Handle a Dataverse query result from an agent.
-    pub async fn on_dataverse_query_result(
-        &self,
-        request_id: &str,
-        data: Option<serde_json::Value>,
-        error: Option<String>,
-    ) {
-        if let Some(tx) = self.dataverse_query_signals.write().await.remove(request_id) {
-            let result = match error {
-                Some(e) => Err(e),
-                None => Ok(data.unwrap_or(serde_json::Value::Null)),
-            };
-            let _ = tx.send(result);
         }
     }
 
@@ -1807,15 +1683,6 @@ impl AgentRegistry {
             let removed = before - relays.len();
             if removed > 0 {
                 tracing::info!("Cleaned up {} stale transfer relay target mappings", removed);
-            }
-        }
-        {
-            let mut signals = self.dataverse_query_signals.write().await;
-            let before = signals.len();
-            signals.retain(|_rid, tx| !tx.is_closed());
-            let removed = before - signals.len();
-            if removed > 0 {
-                tracing::info!("Cleaned up {} stale dataverse query signals", removed);
             }
         }
     }

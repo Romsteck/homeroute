@@ -4,6 +4,8 @@
 // as the deploy pipeline migrates from hr-api.
 #[allow(dead_code)]
 mod container_manager;
+mod db_manager;
+mod env_manager;
 mod ipc_handler;
 mod mcp;
 mod backup_pipeline;
@@ -292,6 +294,31 @@ async fn main() -> anyhow::Result<()> {
     container_watcher::ContainerWatcher::spawn(registry.clone(), events.clone());
     info!("Container health watcher spawned (60s interval, auto-recovery)");
 
+    // ── Database Manager (centralized per-app SQLite) ───────────────
+    let db_dir = PathBuf::from("/opt/homeroute/data/db");
+    let db_manager = Arc::new(db_manager::DbManager::new(db_dir));
+    info!("Database manager initialized");
+
+    // ── Environment Manager ───────────────────────────────────────
+    let env_state_path = PathBuf::from("/var/lib/server-dashboard/environments.json");
+    let env_manager = Arc::new(env_manager::EnvironmentManager::new(env_state_path));
+    info!(
+        "Environment manager initialized ({} environments)",
+        env_manager.list_environments().await.len()
+    );
+
+    // Heartbeat monitor for env-agents
+    {
+        let em = env_manager.clone();
+        tokio::spawn(async move {
+            em.run_heartbeat_monitor().await;
+        });
+    }
+
+    // ── Pipeline Engine ───────────────────────────────────────────
+    let pipeline_engine = Arc::new(hr_pipeline::PipelineEngine::new());
+    info!("Pipeline engine initialized");
+
     let handler = Arc::new(OrchestratorHandler {
         registry: registry.clone(),
         container_manager: container_manager.clone(),
@@ -299,6 +326,8 @@ async fn main() -> anyhow::Result<()> {
         migrations,
         renames,
         backup: backup_pipeline.clone(),
+        db: db_manager.clone(),
+        env_manager: env_manager.clone(),
     });
 
     let ipc_handle = tokio::spawn({
@@ -322,7 +351,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── MCP endpoint (optional, requires MCP_TOKEN env var) ─────────
 
-    let mcp_state = mcp::McpState::from_env(registry.clone(), container_manager.clone(), git_service.clone(), edge.clone(), backup_pipeline.clone());
+    let mcp_state = mcp::McpState::from_env(registry.clone(), container_manager.clone(), git_service.clone(), edge.clone(), backup_pipeline.clone(), db_manager.clone(), env_manager.clone(), pipeline_engine.clone());
     if mcp_state.is_some() {
         info!("MCP endpoint enabled (POST /mcp)");
     }
@@ -332,10 +361,12 @@ async fn main() -> anyhow::Result<()> {
     let ws_state = ws_routes::WsState {
         registry: registry.clone(),
         container_manager: container_manager.clone(),
+        env_manager: env_manager.clone(),
         env: Arc::new(env.clone()),
         events: events.clone(),
         edge: edge.clone(),
         netcore,
+        pipeline_engine: pipeline_engine.clone(),
     };
 
     let ws_router = axum::Router::new()
@@ -346,6 +377,7 @@ async fn main() -> anyhow::Result<()> {
             }),
         )
         .route("/agents/ws", axum::routing::get(ws_routes::agent_ws))
+        .route("/envs/ws", axum::routing::get(ws_routes::env_agent_ws))
         .route("/host-agents/ws", axum::routing::get(ws_routes::host_agent_ws))
         // Alias: host agents connect via legacy path /api/hosts/agent/ws
         .route("/api/hosts/agent/ws", axum::routing::get(ws_routes::host_agent_ws))

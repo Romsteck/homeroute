@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Database, Table2, Loader2 } from 'lucide-react';
+import { Database, Table2, Loader2, ArrowRight } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import SitemapPanel from '../components/databrowser/SitemapPanel';
 import CommandBar from '../components/databrowser/CommandBar';
@@ -263,9 +263,28 @@ function DataBrowser() {
 
   return (
     <div className="h-full flex flex-col">
-      <PageHeader icon={Table2} title="Data Browser">
+      <PageHeader icon={Table2} title="Data Browser (Legacy)">
 
       </PageHeader>
+
+      {/* Migration notice */}
+      <div className="mx-4 mt-2 mb-2 p-3 bg-blue-900/30 border border-blue-700/50 rounded-lg">
+        <div className="flex items-center gap-3">
+          <Database className="w-4 h-4 text-blue-400 flex-shrink-0" />
+          <p className="text-xs text-blue-300 flex-1">
+            Les bases de donnees sont desormais gerees par environnement via le Maker Portal.
+          </p>
+          <a
+            href="https://make.mynetwk.biz"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors whitespace-nowrap"
+          >
+            Maker Portal
+            <ArrowRight className="w-3 h-3" />
+          </a>
+        </div>
+      </div>
 
       <div className="flex-1 min-h-0 flex">
         {/* Left panel: Sitemap */}

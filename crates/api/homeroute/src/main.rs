@@ -109,13 +109,16 @@ async fn main() -> anyhow::Result<()> {
         git: Some(Arc::new(GitService::new())),
         migrations: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         renames: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        dataverse_schemas: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         update_log,
         task_store: task_store.clone(),
     };
 
-    let api_router = hr_api::build_router(api_state);
+    let api_router = hr_api::build_router(api_state.clone());
+    let make_router = hr_api::build_make_router(api_state.clone());
+    let studio_router = hr_api::build_studio_router(api_state);
     let api_port = env.api_port;
+    let make_port = 4002u16;
+    let studio_port = 4003u16;
 
     let reg = service_registry.clone();
     spawn_supervised("api", ServicePriority::Important, reg, move || {
@@ -125,6 +128,34 @@ async fn main() -> anyhow::Result<()> {
             let addr: SocketAddr = format!("[::]:{}", port).parse()?;
             let listener = tokio::net::TcpListener::bind(addr).await?;
             info!("Management API listening on {}", addr);
+            axum::serve(listener, router).await?;
+            Ok(())
+        }
+    });
+
+    // Maker Portal on a dedicated port (make.mynetwk.biz → proxy → :4002)
+    let reg = service_registry.clone();
+    spawn_supervised("maker-portal", ServicePriority::Important, reg, move || {
+        let router = make_router.clone();
+        let port = make_port;
+        async move {
+            let addr: SocketAddr = format!("[::]:{}", port).parse()?;
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            info!("Maker Portal listening on {}", addr);
+            axum::serve(listener, router).await?;
+            Ok(())
+        }
+    });
+
+    // Studio on a dedicated port (studio.{env}.mynetwk.biz → proxy → :4003)
+    let reg = service_registry.clone();
+    spawn_supervised("studio", ServicePriority::Important, reg, move || {
+        let router = studio_router.clone();
+        let port = studio_port;
+        async move {
+            let addr: SocketAddr = format!("[::]:{}", port).parse()?;
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            info!("Studio listening on {}", addr);
             axum::serve(listener, router).await?;
             Ok(())
         }

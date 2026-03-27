@@ -1,5 +1,5 @@
 [package]
-name = "hr-dataverse"
+name = "hr-db"
 version.workspace = true
 edition.workspace = true
 

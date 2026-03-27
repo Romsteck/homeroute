@@ -12,15 +12,17 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use hr_common::config::EnvConfig;
 use hr_common::events::EventBus;
 use hr_ipc::{EdgeClient, NetcoreClient};
+use hr_environment::{EnvAgentMessage, EnvOrchestratorMessage};
 use hr_registry::protocol::{AgentMessage, HostAgentMessage, HostRegistryMessage, RegistryMessage};
 use hr_registry::AgentRegistry;
 
 use crate::container_manager::ContainerManager;
+use crate::env_manager::EnvironmentManager;
 
 // ── Transfer types for host-agent migration relay ────────────────────
 
@@ -52,10 +54,12 @@ struct ActiveTransfer {
 pub struct WsState {
     pub registry: Arc<AgentRegistry>,
     pub container_manager: Arc<ContainerManager>,
+    pub env_manager: Arc<EnvironmentManager>,
     pub env: Arc<EnvConfig>,
     pub events: Arc<EventBus>,
     pub edge: Arc<EdgeClient>,
     pub netcore: Arc<NetcoreClient>,
+    pub pipeline_engine: Arc<hr_pipeline::PipelineEngine>,
 }
 
 // ── Constants ────────────────────────────────────────────────────────
@@ -250,45 +254,6 @@ async fn handle_agent_message(
             // (restores Connected status after host recovery)
             registry.handle_heartbeat(app_id).await;
             registry.handle_metrics(app_id, m).await;
-        }
-        Ok(AgentMessage::SchemaMetadata {
-            tables,
-            relations,
-            version,
-            db_size_bytes,
-        }) => {
-            info!(
-                app_id,
-                tables = tables.len(),
-                version,
-                "Agent reported schema metadata"
-            );
-            registry
-                .handle_schema_metadata(app_id, tables, relations, version, db_size_bytes)
-                .await;
-        }
-        Ok(AgentMessage::DataverseQueryResult {
-            request_id,
-            data,
-            error,
-        }) => {
-            registry
-                .on_dataverse_query_result(&request_id, data, error)
-                .await;
-        }
-        Ok(AgentMessage::GetDataverseSchemas { request_id }) => {
-            // Schema cache lives in hr-api's ApiState. In hr-orchestrator we
-            // return an empty list; agents will still get schemas via hr-api
-            // until the migration is complete.
-            let _ = registry
-                .send_to_agent(
-                    app_id,
-                    RegistryMessage::DataverseSchemas {
-                        request_id,
-                        schemas: vec![],
-                    },
-                )
-                .await;
         }
         Ok(AgentMessage::IpUpdate { ipv4_address }) => {
             info!(app_id, ipv4_address, "Agent reported IP update");
@@ -1871,5 +1836,314 @@ async fn update_host_last_seen(host_id: &str) {
     if let Some(host) = find_host_mut(&mut data, host_id) {
         host["lastSeen"] = json!(chrono::Utc::now().to_rfc3339());
         let _ = save_hosts(&data).await;
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Env-Agent WebSocket (/envs/ws)
+// ══════════════════════════════════════════════════════════════════════
+
+pub async fn env_agent_ws(
+    State(state): State<WsState>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_env_agent_ws(state, socket))
+}
+
+async fn handle_env_agent_ws(state: WsState, mut socket: WebSocket) {
+    let env_manager = &state.env_manager;
+
+    // Wait for Auth message with a timeout
+    let auth_msg = tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await;
+
+    let (token, env_slug, version, reported_ipv4) = match auth_msg {
+        Ok(Some(Ok(Message::Text(text)))) => {
+            match serde_json::from_str::<EnvAgentMessage>(&text) {
+                Ok(EnvAgentMessage::Auth {
+                    token,
+                    env_slug,
+                    version,
+                    ipv4_address,
+                }) => (token, env_slug, version, ipv4_address),
+                _ => {
+                    warn!("Env-Agent WS: expected Auth message, got something else");
+                    let _ = socket.send(Message::Close(None)).await;
+                    return;
+                }
+            }
+        }
+        _ => {
+            warn!("Env-Agent WS: auth timeout or connection error");
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    // Authenticate
+    let Some(env_id) = env_manager.verify_token(&env_slug, &token).await else {
+        let reject = EnvOrchestratorMessage::AuthResult {
+            success: false,
+            error: Some("Invalid credentials".into()),
+            env_id: None,
+        };
+        let _ = socket
+            .send(Message::Text(
+                serde_json::to_string(&reject).unwrap().into(),
+            ))
+            .await;
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    };
+
+    let ipv4: Option<std::net::Ipv4Addr> = reported_ipv4
+        .as_deref()
+        .and_then(|s| s.parse().ok());
+
+    info!(
+        env_id = env_id,
+        env_slug = env_slug,
+        ipv4 = ?ipv4,
+        "Env-agent authenticated"
+    );
+
+    // Mark agent as connected
+    env_manager
+        .update_agent_connected(&env_slug, true, Some(version), ipv4)
+        .await;
+
+    // Send auth success
+    let success = EnvOrchestratorMessage::AuthResult {
+        success: true,
+        error: None,
+        env_id: Some(env_id.clone()),
+    };
+    if socket
+        .send(Message::Text(
+            serde_json::to_string(&success).unwrap().into(),
+        ))
+        .await
+        .is_err()
+    {
+        env_manager
+            .update_agent_connected(&env_slug, false, None, None)
+            .await;
+        return;
+    }
+
+    // Add DNS wildcard for this environment — points to hr-edge IP (not the container)
+    // so that TLS termination happens at the proxy level.
+    {
+        let env_domain = format!("*.{}.{}", env_slug, state.env.base_domain);
+        // hr-edge listens on the secondary IP (10.0.0.254 typically). Use the same IP
+        // that the base domain resolves to — this is the machine's proxy address.
+        let proxy_ip = "10.0.0.254".to_string();
+        if let Err(e) = state.netcore.dns_add_static_record(env_domain, "A".into(), proxy_ip.clone(), 60).await {
+            warn!(env_slug, error = %e, "Failed to add env DNS wildcard");
+        } else {
+            info!(env_slug, proxy_ip, "Added DNS wildcard for environment (pointing to hr-edge)");
+        }
+    }
+
+    // Request TLS wildcard certificate for this environment (*.{env}.mynetwk.biz)
+    // if not already available. This is async and non-blocking — runs in background.
+    {
+        let edge = state.edge.clone();
+        let slug = env_slug.clone();
+        tokio::spawn(async move {
+            match edge.request_env_wildcard_cert(&slug).await {
+                Ok(resp) if resp.ok => {
+                    info!(env_slug = slug, "Env wildcard TLS certificate ready");
+                }
+                Ok(resp) => {
+                    warn!(env_slug = slug, error = ?resp.error, "Env wildcard cert request returned error");
+                }
+                Err(e) => {
+                    warn!(env_slug = slug, error = %e, "Failed to request env wildcard cert via edge IPC");
+                }
+            }
+        });
+    }
+
+    // Create mpsc channel for orchestrator -> env-agent messages
+    let (tx, mut rx) = mpsc::channel::<EnvOrchestratorMessage>(32);
+
+    // Register the connection with the env manager
+    if let Err(e) = env_manager.register_connection(&env_slug, tx).await {
+        warn!(env_slug, error = %e, "Failed to register env-agent connection");
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    }
+
+    // Bidirectional message loop
+    loop {
+        tokio::select! {
+            // Orchestrator -> Env-Agent
+            Some(msg) = rx.recv() => {
+                let json = match serde_json::to_string(&msg) {
+                    Ok(j) => j,
+                    Err(_) => continue,
+                };
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    warn!(env_slug, "Failed to forward message to env-agent WebSocket");
+                    break;
+                }
+            }
+            // Env-Agent -> Orchestrator
+            ws_msg = socket.recv() => {
+                match ws_msg {
+                    Some(Ok(Message::Text(text))) => {
+                        handle_env_agent_message(&state, &env_slug, &text).await;
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Remove edge app routes and DNS records for this environment
+    if let Some(env_record) = env_manager.get_by_slug(&env_slug).await {
+        let base_domain = &state.env.base_domain;
+
+        // Remove app routes
+        for app in &env_record.apps {
+            let domain = format!("{}.{}.{}", app.slug, env_slug, base_domain);
+            if let Err(e) = state.edge.remove_app_route(&domain).await {
+                warn!(domain, error = %e, "Failed to remove env app route on disconnect");
+            }
+        }
+
+        // Remove studio route
+        let studio_domain = format!("studio.{}.{}", env_slug, base_domain);
+        if let Err(e) = state.edge.remove_app_route(&studio_domain).await {
+            warn!(domain = studio_domain, error = %e, "Failed to remove env studio route on disconnect");
+        }
+
+        // Remove DNS wildcard records for this env
+        if let Some(ip) = env_record.ipv4_address {
+            remove_agent_dns_records(&state.netcore, &ip.to_string()).await;
+        }
+    }
+
+    // Unregister connection and mark as disconnected
+    env_manager.unregister_connection(&env_slug).await;
+    info!(env_slug, "Env-agent WebSocket closed (routes + DNS removed)");
+}
+
+/// Process a single env-agent message.
+async fn handle_env_agent_message(
+    state: &WsState,
+    env_slug: &str,
+    text: &str,
+) {
+    let env_manager = &state.env_manager;
+    let pipeline_engine = &state.pipeline_engine;
+
+    match serde_json::from_str::<EnvAgentMessage>(text) {
+        Ok(EnvAgentMessage::Heartbeat { apps_running, apps_total, .. }) => {
+            env_manager.update_heartbeat(env_slug, apps_running, apps_total).await;
+        }
+        Ok(EnvAgentMessage::AppDiscovery { apps }) => {
+            info!(env_slug, count = apps.len(), "Env-agent app discovery");
+
+            // Create edge app routes for each discovered app
+            if let Some(env_record) = env_manager.get_by_slug(env_slug).await {
+                if let Some(env_ip) = env_record.ipv4_address {
+                    let base_domain = &state.env.base_domain;
+                    let ip_str = env_ip.to_string();
+
+                    for app in &apps {
+                        let domain = format!("{}.{}.{}", app.slug, env_slug, base_domain);
+                        if let Err(e) = state.edge.set_app_route(
+                            domain.clone(),
+                            format!("env-{}-{}", env_slug, app.slug),
+                            env_record.host_id.clone(),
+                            ip_str.clone(),
+                            app.port,
+                            false,
+                            vec![],
+                            false,
+                        ).await {
+                            warn!(
+                                domain,
+                                error = %e,
+                                "Failed to set env app route via edge IPC"
+                            );
+                        } else {
+                            info!(domain, env_slug, app_slug = app.slug, "Set env app route");
+                        }
+                    }
+
+                    // Studio route → homeroute port 4003 (Rust SPA with code-server iframe)
+                    let studio_domain = format!("studio.{}.{}", env_slug, base_domain);
+                    if let Err(e) = state.edge.set_app_route(
+                        studio_domain.clone(),
+                        format!("env-{}-studio", env_slug),
+                        "local".to_string(),
+                        "10.0.0.20".to_string(),
+                        4003,
+                        false,
+                        vec![],
+                        false,
+                    ).await {
+                        warn!(
+                            domain = studio_domain,
+                            error = %e,
+                            "Failed to set env studio route via edge IPC"
+                        );
+                    } else {
+                        info!(domain = studio_domain, env_slug, "Set env studio route");
+                    }
+
+                    // code-server route → env container:8443 (direct proxy for iframe)
+                    let code_domain = format!("code.{}.{}", env_slug, base_domain);
+                    if let Err(e) = state.edge.set_app_route(
+                        code_domain.clone(),
+                        format!("env-{}-code", env_slug),
+                        env_record.host_id.clone(),
+                        env_ip.to_string(),
+                        8443,
+                        false,
+                        vec![],
+                        false,
+                    ).await {
+                        warn!(domain = code_domain, error = %e, "Failed to set code-server route");
+                    } else {
+                        info!(domain = code_domain, env_slug, "Set code-server route");
+                    }
+                }
+            }
+
+            env_manager.update_apps(env_slug, apps).await;
+        }
+        Ok(EnvAgentMessage::AppStatus {
+            app_slug, running, ..
+        }) => {
+            info!(env_slug, app_slug, running, "Env-agent app status change");
+        }
+        Ok(EnvAgentMessage::Metrics(_)) => {
+            // Store metrics if needed in the future
+        }
+        Ok(EnvAgentMessage::Error { message }) => {
+            warn!(env_slug, message, "Env-agent reported error");
+        }
+        Ok(EnvAgentMessage::Auth { .. }) => {
+            // Duplicate auth, ignore
+        }
+        Ok(EnvAgentMessage::PipelineProgress { pipeline_id, step, success, message }) => {
+            info!(env_slug, pipeline_id, step, success, ?message, "Pipeline progress");
+            pipeline_engine.on_pipeline_progress(&pipeline_id, &step, success, message).await;
+        }
+        Ok(EnvAgentMessage::MigrationResult { pipeline_id, app_slug, success, migrations_applied, error }) => {
+            info!(env_slug, pipeline_id, app_slug, success, "Migration result");
+            pipeline_engine.on_migration_result(&pipeline_id, &app_slug, success, migrations_applied, error).await;
+        }
+        Ok(EnvAgentMessage::HostMetrics { hostname, total_memory_mb, available_memory_mb, cpu_usage_percent }) => {
+            debug!(env_slug, hostname, total_memory_mb, available_memory_mb, cpu_usage_percent, "Env-agent host metrics");
+            // Host metrics from env-agent — can be stored for cross-host capacity planning
+        }
+        Err(e) => {
+            warn!(env_slug, error = %e, "Failed to parse env-agent message");
+        }
     }
 }

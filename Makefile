@@ -7,7 +7,7 @@ PROD_HOST := romain@10.0.0.20
 PROD_DIR  := /opt/homeroute
 PROD_API  := http://10.0.0.20:4000
 
-.PHONY: server netcore edge orchestrator web studio all deploy deploy-prod deploy-netcore deploy-edge deploy-orchestrator test clean store agent agent-prod host-agent host-agent-prod check-prod check-not-prod
+.PHONY: server netcore edge orchestrator web web-make studio all deploy deploy-prod deploy-netcore deploy-edge deploy-orchestrator test clean store agent agent-prod host-agent host-agent-prod check-prod check-not-prod env-agent provision-env-dev provision-env-prod deploy-web-make
 
 SHELL := /bin/bash
 
@@ -45,6 +45,16 @@ server:
 # Build Vite React frontend
 web:
 	cd web && npm run build
+
+# Build Maker Portal frontend (environments, pipelines, DB explorer)
+web-make:
+	cd web-make && pnpm install --frozen-lockfile && pnpm build
+
+# Deploy Maker Portal to production (static files served by homeroute)
+deploy-web-make: check-prod web-make
+	@echo "Deploying Maker Portal to production..."
+	rsync -az --delete web-make/dist/ $(PROD_HOST):$(PROD_DIR)/web-make/dist/
+	@echo "✓ Maker Portal deployed"
 
 # Build Studio frontend (Claude Code headless UI)
 studio:
@@ -171,6 +181,26 @@ store:
 	APK_SIZE=$$(stat -c%s /opt/homeroute/data/store/client/homeroute-store.apk) && \
 	echo "{\"version\":\"$$NEW_NAME\",\"changelog\":\"\",\"size_bytes\":$$APK_SIZE}" > /opt/homeroute/data/store/client/version.json && \
 	echo "Deployed store v$$NEW_NAME → /api/store/client/apk"
+
+# Build env-agent binary (environment agent for nspawn containers)
+env-agent:
+	cd crates && cargo build --release -p env-agent
+	@echo "env-agent built → crates/target/release/env-agent"
+	@echo "Copy to agent-binaries: cp crates/target/release/env-agent data/agent-binaries/env-agent"
+
+# Provision dev environment on Medion (info only — run script on router)
+provision-env-dev:
+	@echo "To provision the DEV environment (env-dev, 10.0.0.200):"
+	@echo "  On the router:  ./scripts/provision-env-dev.sh"
+	@echo "  From dev:       ssh root@10.0.0.254 'bash -s' < scripts/provision-env-dev.sh"
+	@echo "  Dry run:        ./scripts/provision-env-dev.sh --dry-run"
+
+# Provision prod environment on Medion (info only — run script on router)
+provision-env-prod:
+	@echo "To provision the PROD environment (env-prod, 10.0.0.202):"
+	@echo "  On the router:  ./scripts/provision-env-prod.sh"
+	@echo "  From dev:       ssh root@10.0.0.254 'bash -s' < scripts/provision-env-prod.sh"
+	@echo "  Dry run:        ./scripts/provision-env-prod.sh --dry-run"
 
 # Clean build artifacts
 clean:

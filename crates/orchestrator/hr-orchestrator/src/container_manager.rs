@@ -1360,38 +1360,34 @@ impl ContainerManager {
                 .replace("{{domain}}", base_domain)
         };
 
-        let mcp_config = r#"{
-  "mcpServers": {
-    "dataverse": {
-      "command": "/usr/local/bin/hr-agent",
-      "args": ["mcp"],
-      "autoApprove": [
-        "list_tables","describe_table","create_table","add_column","remove_column",
-        "drop_table","create_relation","query_data","insert_data","update_data",
-        "delete_data","count_rows","get_schema","get_db_info"
-      ]
-    },
-    "deploy": {
+        let mcp_token = std::env::var("MCP_TOKEN").unwrap_or_default();
+        let mcp_config = format!(r#"{{
+  "mcpServers": {{
+    "homeroute": {{
+      "type": "http",
+      "url": "http://10.0.0.254:4001/mcp",
+      "headers": {{ "Authorization": "Bearer {mcp_token}" }}
+    }},
+    "deploy": {{
       "command": "/usr/local/bin/hr-agent",
       "args": ["mcp-deploy"],
       "autoApprove": [
         "deploy_status","prod_logs"
       ]
-    },
-    "store": {
+    }},
+    "store": {{
       "command": "/usr/local/bin/hr-agent",
       "args": ["mcp-store"],
       "autoApprove": [
         "list_store_apps","get_app_info","check_updates","publish_release"
       ]
-    }
-  }
-}
-"#;
+    }}
+  }}
+}}"#);
 
         let dev_md_content = render_rules(include_str!("../../hr-registry/src/rules/homeroute-dev-nextjs.md"));
         let deploy_md_content = render_rules(include_str!("../../hr-registry/src/rules/homeroute-deploy-nextjs.md"));
-        let dataverse_md = render_rules(include_str!("../../hr-registry/src/rules/homeroute-dataverse.md"));
+        let db_md = render_rules(include_str!("../../hr-registry/src/rules/homeroute-db.md"));
         let store_md = render_rules(include_str!("../../hr-registry/src/rules/homeroute-store.md"));
         let todos_md = render_rules(include_str!("../../hr-registry/src/rules/homeroute-studio-todos.md"));
         let gitignore = "node_modules/\ntarget/\n.env\n*.db\n*.db-shm\n*.db-wal\ndist/\n.cache/\ntmp/\n";
@@ -1399,10 +1395,10 @@ impl ContainerManager {
         if host_id == "local" {
             // Write directly to workspace bind mount
             let ws_dir = storage_path.join(format!("{container_name}-workspace"));
-            let _ = tokio::fs::write(ws_dir.join(".mcp.json"), mcp_config).await;
+            let _ = tokio::fs::write(ws_dir.join(".mcp.json"), &mcp_config).await;
             let rules_dir = ws_dir.join(".claude/rules");
             let _ = tokio::fs::create_dir_all(&rules_dir).await;
-            let _ = tokio::fs::write(rules_dir.join("homeroute-dataverse.md"), &dataverse_md).await;
+            let _ = tokio::fs::write(rules_dir.join("homeroute-db.md"), &db_md).await;
             let _ = tokio::fs::write(rules_dir.join("homeroute-deploy.md"), &deploy_md_content).await;
             let _ = tokio::fs::write(rules_dir.join("homeroute-dev.md"), &dev_md_content).await;
             let _ = tokio::fs::write(rules_dir.join("homeroute-store.md"), &store_md).await;
@@ -1410,9 +1406,9 @@ impl ContainerManager {
             let _ = tokio::fs::write(ws_dir.join(".gitignore"), gitignore).await;
         } else {
             // Write via exec inside the container
-            let _ = self.container_push_text(host_id, container_name, mcp_config, "/root/workspace/.mcp.json").await;
+            let _ = self.container_push_text(host_id, container_name, &mcp_config, "/root/workspace/.mcp.json").await;
             let _ = self.container_exec(host_id, container_name, "mkdir -p /root/workspace/.claude/rules").await;
-            let _ = self.container_push_text(host_id, container_name, &dataverse_md, "/root/workspace/.claude/rules/homeroute-dataverse.md").await;
+            let _ = self.container_push_text(host_id, container_name, &db_md, "/root/workspace/.claude/rules/homeroute-db.md").await;
             let _ = self.container_push_text(host_id, container_name, &deploy_md_content, "/root/workspace/.claude/rules/homeroute-deploy.md").await;
             let _ = self.container_push_text(host_id, container_name, &dev_md_content, "/root/workspace/.claude/rules/homeroute-dev.md").await;
             let _ = self.container_push_text(host_id, container_name, &store_md, "/root/workspace/.claude/rules/homeroute-store.md").await;

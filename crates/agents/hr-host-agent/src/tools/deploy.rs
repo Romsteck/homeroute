@@ -20,6 +20,14 @@ pub async fn tool_deploy(id: Value, args: &Value, state: &McpState) -> Value {
         return tool_error(id, &format!("DEV directory not found: {}", project.dev_path));
     }
 
+    // Validate service name
+    if project.prod.service.is_empty() || !project.prod.service.contains('.') {
+        return tool_error(id, &format!(
+            "Invalid service name '{}' for '{}'. Expected format: 'name.service'",
+            project.prod.service, slug
+        ));
+    }
+
     info!(slug, stack = project.stack.as_str(), "Starting deploy");
 
     let ssh = SshClient::from_config(&state.config);
@@ -65,16 +73,16 @@ async fn deploy_axum_vite_react(
     ssh: &SshClient,
     steps: &mut Vec<Value>,
 ) -> Result<(), String> {
-    let dev = &project.dev_path;
+    let cargo_dir = project.cargo_dir();
     let container = &project.prod.container_name;
     let binary = project.prod.binary.as_deref().unwrap_or("/opt/app/app");
     let static_dir = project.prod.static_dir.as_deref().unwrap_or("/opt/app/dist");
 
     // 1. Cargo build
-    steps.push(json!({ "step": "cargo build --release" }));
+    steps.push(json!({ "step": format!("cargo build --release (in {cargo_dir})") }));
     let output = Command::new("cargo")
         .args(["build", "--release"])
-        .current_dir(dev)
+        .current_dir(&cargo_dir)
         .output()
         .await
         .map_err(|e| format!("cargo build failed: {e}"))?;
@@ -85,13 +93,12 @@ async fn deploy_axum_vite_react(
     steps.push(json!({ "step": "cargo build done" }));
 
     // Find the binary name from Cargo.toml
-    let binary_name = find_binary_name(dev).await?;
-    let local_binary = format!("{dev}/target/release/{binary_name}");
+    let binary_name = find_binary_name(&cargo_dir).await?;
+    let local_binary = format!("{cargo_dir}/target/release/{binary_name}");
 
     // 2. Build frontend
-    let web_dir = format!("{dev}/web");
-    if Path::new(&web_dir).exists() {
-        steps.push(json!({ "step": "pnpm build (frontend)" }));
+    if let Some(web_dir) = project.web_dir() {
+        steps.push(json!({ "step": format!("pnpm build (frontend in {web_dir})") }));
         let output = Command::new("pnpm")
             .args(["build"])
             .current_dir(&web_dir)
@@ -115,14 +122,16 @@ async fn deploy_axum_vite_react(
     ssh.copy_to_container(container, &tmp_binary, binary).await?;
 
     // 5. Copy frontend dist if built
-    let local_dist = format!("{dev}/web/dist/");
-    if Path::new(&local_dist).exists() {
-        let tmp_dist = format!("/tmp/{}-dist", project.slug);
-        steps.push(json!({ "step": "rsync dist to prod" }));
-        ssh.rsync(&local_dist, &tmp_dist).await?;
+    if let Some(web_dir) = project.web_dir() {
+        let local_dist = format!("{web_dir}/dist/");
+        if Path::new(&local_dist).exists() {
+            let tmp_dist = format!("/tmp/{}-dist", project.slug);
+            steps.push(json!({ "step": "rsync dist to prod" }));
+            ssh.rsync(&local_dist, &tmp_dist).await?;
 
-        steps.push(json!({ "step": "copy dist into container" }));
-        ssh.copy_to_container(container, &tmp_dist, static_dir).await?;
+            steps.push(json!({ "step": "copy dist into container" }));
+            ssh.copy_to_container(container, &tmp_dist, static_dir).await?;
+        }
     }
 
     // 6. Restart service
@@ -224,15 +233,15 @@ async fn deploy_axum_flutter(
     ssh: &SshClient,
     steps: &mut Vec<Value>,
 ) -> Result<(), String> {
-    let dev = &project.dev_path;
+    let cargo_dir = project.cargo_dir();
     let container = &project.prod.container_name;
     let binary = project.prod.binary.as_deref().unwrap_or("/opt/app/app");
 
     // 1. Cargo build
-    steps.push(json!({ "step": "cargo build --release" }));
+    steps.push(json!({ "step": format!("cargo build --release (in {cargo_dir})") }));
     let output = Command::new("cargo")
         .args(["build", "--release"])
-        .current_dir(dev)
+        .current_dir(&cargo_dir)
         .output()
         .await
         .map_err(|e| format!("cargo build failed: {e}"))?;
@@ -242,8 +251,8 @@ async fn deploy_axum_flutter(
     }
     steps.push(json!({ "step": "cargo build done" }));
 
-    let binary_name = find_binary_name(dev).await?;
-    let local_binary = format!("{dev}/target/release/{binary_name}");
+    let binary_name = find_binary_name(&cargo_dir).await?;
+    let local_binary = format!("{cargo_dir}/target/release/{binary_name}");
 
     // 2. SCP to prod
     let tmp_binary = format!("/tmp/{binary_name}");

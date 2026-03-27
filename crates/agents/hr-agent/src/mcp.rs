@@ -1,28 +1,12 @@
-//! MCP (Model Context Protocol) stdio server for Dataverse operations.
+//! MCP (Model Context Protocol) stdio servers for Store, Studio, and Docs operations.
 
-use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::sync::Arc;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::info;
-
-use hr_dataverse::engine::DataverseEngine;
-use hr_dataverse::query::*;
-use hr_dataverse::schema::*;
-use hr_registry::protocol::{AgentMessage, AppSchemaOverview};
-
-use crate::dataverse::LocalDataverse;
-
-/// Shared map for pending schema query responses.
-/// The MCP tool registers a oneshot sender here before sending the request,
-/// and the main WebSocket loop resolves it when the response arrives.
-pub type SchemaQuerySignals =
-    Arc<RwLock<HashMap<String, oneshot::Sender<Vec<AppSchemaOverview>>>>>;
 
 #[derive(Deserialize)]
 struct JsonRpcRequest {
@@ -60,19 +44,10 @@ pub struct StoreContext {
     pub api_base_url: String,
 }
 
-/// Run the MCP stdio server for Dataverse tools.
-///
-/// When `outbound_tx` and `schema_signals` are provided, the server can
-/// send requests to the registry via the WebSocket and wait for responses
-/// (used by the `list_other_apps_schemas` tool).
-pub async fn run_mcp_server_with_registry(
-    outbound_tx: Option<mpsc::Sender<AgentMessage>>,
-    schema_signals: Option<SchemaQuerySignals>,
-) -> Result<()> {
-    info!("Starting MCP Dataverse server");
-
-    let dataverse = LocalDataverse::open()?;
-    let engine = dataverse.engine().clone();
+/// Run a minimal MCP stdio server (legacy "mcp" subcommand, now a no-op).
+/// Database operations are now handled by the orchestrator's homeroute MCP server.
+pub async fn run_mcp_server() -> Result<()> {
+    info!("Starting MCP server (legacy — no local Dataverse tools)");
 
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -110,45 +85,19 @@ pub async fn run_mcp_server_with_registry(
                     "tools": {}
                 },
                 "serverInfo": {
-                    "name": "hr-dataverse",
+                    "name": "hr-agent",
                     "version": "0.1.0"
                 },
                 "instructions": include_str!("mcp_instructions.txt")
             })),
             "notifications/initialized" => {
-                // No response needed for notifications
                 continue;
             }
             "tools/list" => {
-                let tools = get_tool_definitions();
-                Ok(json!({ "tools": tools }))
+                Ok(json!({ "tools": [] }))
             },
             "tools/call" => {
-                let tool_name = request
-                    .params
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let arguments = request
-                    .params
-                    .get("arguments")
-                    .cloned()
-                    .unwrap_or(json!({}));
-
-                // Registry-backed tools (async, no engine lock needed)
-                if tool_name == "list_other_apps_schemas" {
-                    handle_list_other_apps_schemas(
-                        outbound_tx.as_ref(),
-                        schema_signals.as_ref(),
-                    )
-                    .await
-                } else {
-                    // Local Dataverse tools (need engine lock)
-                    let engine_guard = engine.lock().await;
-                    let res = handle_tool_call(&engine_guard, tool_name, &arguments);
-                    drop(engine_guard);
-                    res
-                }
+                Err("No tools available. Database operations are now handled by the homeroute MCP server.".to_string())
             }
             _ => Err(format!("Method not found: {}", request.method)),
         };
@@ -177,11 +126,6 @@ pub async fn run_mcp_server_with_registry(
     }
 
     Ok(())
-}
-
-/// Run the MCP stdio server without registry communication (standalone mode).
-pub async fn run_mcp_server() -> Result<()> {
-    run_mcp_server_with_registry(None, None).await
 }
 
 /// Run the Store MCP stdio server (separate from Dataverse and Deploy).
@@ -277,564 +221,6 @@ pub async fn run_store_mcp_server(ctx: StoreContext) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn get_tool_definitions() -> Vec<Value> {
-    vec![
-        json!({
-            "name": "list_tables",
-            "description": "List all tables in the Dataverse database with their column counts and row counts.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }),
-        json!({
-            "name": "describe_table",
-            "description": "Get the full schema of a table including all columns and their types.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "table_name": { "type": "string", "description": "Name of the table to describe" }
-                },
-                "required": ["table_name"]
-            }
-        }),
-        json!({
-            "name": "create_table",
-            "description": "Create a new table with the specified columns. Each table automatically gets id, created_at, and updated_at columns.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Table name (alphanumeric + underscore)" },
-                    "slug": { "type": "string", "description": "URL-friendly slug for the table" },
-                    "description": { "type": "string", "description": "Optional table description" },
-                    "columns": {
-                        "type": "array",
-                        "description": "Column definitions",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": { "type": "string" },
-                                "field_type": { "type": "string", "enum": ["text", "number", "decimal", "boolean", "date_time", "date", "time", "email", "url", "phone", "currency", "percent", "duration", "json", "uuid", "auto_increment", "choice", "multi_choice", "lookup", "formula"] },
-                                "required": { "type": "boolean", "default": false },
-                                "unique": { "type": "boolean", "default": false },
-                                "default_value": { "type": "string" },
-                                "description": { "type": "string" },
-                                "choices": { "type": "array", "items": { "type": "string" } }
-                            },
-                            "required": ["name", "field_type"]
-                        }
-                    }
-                },
-                "required": ["name", "slug", "columns"]
-            }
-        }),
-        json!({
-            "name": "add_column",
-            "description": "Add a new column to an existing table.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "table_name": { "type": "string" },
-                    "name": { "type": "string" },
-                    "field_type": { "type": "string" },
-                    "required": { "type": "boolean", "default": false },
-                    "unique": { "type": "boolean", "default": false },
-                    "default_value": { "type": "string" }
-                },
-                "required": ["table_name", "name", "field_type"]
-            }
-        }),
-        json!({
-            "name": "remove_column",
-            "description": "Remove a column from a table.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "table_name": { "type": "string" },
-                    "column_name": { "type": "string" }
-                },
-                "required": ["table_name", "column_name"]
-            }
-        }),
-        json!({
-            "name": "drop_table",
-            "description": "Drop (delete) a table and all its data. This action is irreversible.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "table_name": { "type": "string" },
-                    "confirm": { "type": "boolean", "description": "Must be true to confirm deletion" }
-                },
-                "required": ["table_name", "confirm"]
-            }
-        }),
-        json!({
-            "name": "query_data",
-            "description": "Query rows from a table with optional filters and pagination.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "table_name": { "type": "string" },
-                    "filters": { "type": "array", "items": { "type": "object", "properties": { "column": {"type":"string"}, "op": {"type":"string","enum":["eq","ne","gt","lt","gte","lte","like","in","is_null","is_not_null"]}, "value": {} } } },
-                    "limit": { "type": "integer", "default": 100 },
-                    "offset": { "type": "integer", "default": 0 },
-                    "order_by": { "type": "string" },
-                    "order_desc": { "type": "boolean", "default": false }
-                },
-                "required": ["table_name"]
-            }
-        }),
-        json!({
-            "name": "insert_data",
-            "description": "Insert one or more rows into a table.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "table_name": { "type": "string" },
-                    "rows": { "type": "array", "items": { "type": "object" }, "description": "Array of row objects (key=column, value=data)" }
-                },
-                "required": ["table_name", "rows"]
-            }
-        }),
-        json!({
-            "name": "update_data",
-            "description": "Update rows in a table matching the given filters.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "table_name": { "type": "string" },
-                    "updates": { "type": "object", "description": "Column-value pairs to update" },
-                    "filters": { "type": "array", "items": { "type": "object" } }
-                },
-                "required": ["table_name", "updates", "filters"]
-            }
-        }),
-        json!({
-            "name": "delete_data",
-            "description": "Delete rows from a table matching the given filters.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "table_name": { "type": "string" },
-                    "filters": { "type": "array", "items": { "type": "object" } }
-                },
-                "required": ["table_name", "filters"]
-            }
-        }),
-        json!({
-            "name": "get_schema",
-            "description": "Get the full database schema as JSON, including all tables, columns, and relations.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }),
-        json!({
-            "name": "get_db_info",
-            "description": "Get database statistics: file size, table count, total row count.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }),
-        json!({
-            "name": "create_relation",
-            "description": "Create a relation between two tables.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "from_table": {"type":"string"}, "from_column": {"type":"string"},
-                    "to_table": {"type":"string"}, "to_column": {"type":"string"},
-                    "relation_type": {"type":"string","enum":["one_to_many","many_to_many","self_referential"]},
-                    "on_delete": {"type":"string","enum":["cascade","set_null","restrict"],"default":"restrict"},
-                    "on_update": {"type":"string","enum":["cascade","set_null","restrict"],"default":"cascade"}
-                },
-                "required": ["from_table","from_column","to_table","to_column","relation_type"]
-            }
-        }),
-        json!({
-            "name": "count_rows",
-            "description": "Count rows in a table, optionally with filters.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "table_name": { "type": "string" },
-                    "filters": { "type": "array", "items": { "type": "object" } }
-                },
-                "required": ["table_name"]
-            }
-        }),
-        json!({
-            "name": "list_other_apps_schemas",
-            "description": "List the database schemas (tables, columns, relations) of all other applications in the HomeRoute network. Useful for understanding what data other apps have and how to integrate with them.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }),
-    ]
-}
-
-fn handle_tool_call(engine: &DataverseEngine, tool: &str, args: &Value) -> Result<Value, String> {
-    let text_result = |text: String| -> Value {
-        json!({ "content": [{ "type": "text", "text": text }] })
-    };
-
-    match tool {
-        "list_tables" => {
-            let schema = engine.get_schema().map_err(|e| e.to_string())?;
-            let mut tables_info = Vec::new();
-            for t in &schema.tables {
-                let rows = engine.count_rows(&t.name).unwrap_or(0);
-                tables_info.push(json!({
-                    "name": t.name,
-                    "slug": t.slug,
-                    "columns": t.columns.len(),
-                    "rows": rows,
-                    "description": t.description,
-                }));
-            }
-            Ok(text_result(
-                serde_json::to_string_pretty(&tables_info).unwrap(),
-            ))
-        }
-
-        "describe_table" => {
-            let name = args
-                .get("table_name")
-                .and_then(|v| v.as_str())
-                .ok_or("table_name required")?;
-            let table = engine
-                .get_table(name)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Table '{}' not found", name))?;
-            Ok(text_result(serde_json::to_string_pretty(&table).unwrap()))
-        }
-
-        "create_table" => {
-            let name = args
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or("name required")?
-                .to_string();
-            let slug = args
-                .get("slug")
-                .and_then(|v| v.as_str())
-                .ok_or("slug required")?
-                .to_string();
-            let desc = args
-                .get("description")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let cols_val = args.get("columns").ok_or("columns required")?;
-            let columns: Vec<ColumnDefinition> = serde_json::from_value(cols_val.clone())
-                .map_err(|e| format!("Invalid columns: {}", e))?;
-
-            let now = chrono::Utc::now();
-            let table = TableDefinition {
-                name: name.clone(),
-                slug,
-                columns,
-                description: desc,
-                created_at: now,
-                updated_at: now,
-            };
-            let version = engine.create_table(&table).map_err(|e| e.to_string())?;
-            Ok(text_result(format!(
-                "Table '{}' created (schema version {})",
-                name, version
-            )))
-        }
-
-        "add_column" => {
-            let table = args
-                .get("table_name")
-                .and_then(|v| v.as_str())
-                .ok_or("table_name required")?;
-            let name = args
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or("name required")?
-                .to_string();
-            let ft_str = args
-                .get("field_type")
-                .and_then(|v| v.as_str())
-                .ok_or("field_type required")?;
-            let field_type: FieldType = serde_json::from_str(&format!("\"{}\"", ft_str))
-                .map_err(|_| format!("Invalid field_type: {}", ft_str))?;
-            let required = args
-                .get("required")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let unique = args
-                .get("unique")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let default_value = args
-                .get("default_value")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-
-            let col = ColumnDefinition {
-                name: name.clone(),
-                field_type,
-                required,
-                unique,
-                default_value,
-                description: None,
-                choices: vec![],
-            };
-            let version = engine.add_column(table, &col).map_err(|e| e.to_string())?;
-            Ok(text_result(format!(
-                "Column '{}' added to '{}' (schema version {})",
-                name, table, version
-            )))
-        }
-
-        "remove_column" => {
-            let table = args
-                .get("table_name")
-                .and_then(|v| v.as_str())
-                .ok_or("table_name required")?;
-            let col = args
-                .get("column_name")
-                .and_then(|v| v.as_str())
-                .ok_or("column_name required")?;
-            let version = engine
-                .remove_column(table, col)
-                .map_err(|e| e.to_string())?;
-            Ok(text_result(format!(
-                "Column '{}' removed from '{}' (schema version {})",
-                col, table, version
-            )))
-        }
-
-        "drop_table" => {
-            let name = args
-                .get("table_name")
-                .and_then(|v| v.as_str())
-                .ok_or("table_name required")?;
-            let confirm = args
-                .get("confirm")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if !confirm {
-                return Err("Set confirm=true to confirm table deletion".to_string());
-            }
-            let version = engine.drop_table(name).map_err(|e| e.to_string())?;
-            Ok(text_result(format!(
-                "Table '{}' dropped (schema version {})",
-                name, version
-            )))
-        }
-
-        "query_data" => {
-            let table = args
-                .get("table_name")
-                .and_then(|v| v.as_str())
-                .ok_or("table_name required")?;
-            let filters: Vec<Filter> = args
-                .get("filters")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
-            let pagination = Pagination {
-                limit: args
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(100),
-                offset: args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0),
-                order_by: args
-                    .get("order_by")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                order_desc: args
-                    .get("order_desc")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-            };
-            let rows = query_rows(engine.connection(), table, &filters, &pagination)
-                .map_err(|e| e.to_string())?;
-            Ok(text_result(serde_json::to_string_pretty(&rows).unwrap()))
-        }
-
-        "insert_data" => {
-            let table = args
-                .get("table_name")
-                .and_then(|v| v.as_str())
-                .ok_or("table_name required")?;
-            let rows: Vec<Value> = args
-                .get("rows")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .ok_or("rows required (array)")?;
-            let count =
-                insert_rows(engine.connection(), table, &rows).map_err(|e| e.to_string())?;
-            Ok(text_result(format!(
-                "{} row(s) inserted into '{}'",
-                count, table
-            )))
-        }
-
-        "update_data" => {
-            let table = args
-                .get("table_name")
-                .and_then(|v| v.as_str())
-                .ok_or("table_name required")?;
-            let updates = args.get("updates").ok_or("updates required")?;
-            let filters: Vec<Filter> = args
-                .get("filters")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
-            let count = update_rows(engine.connection(), table, updates, &filters)
-                .map_err(|e| e.to_string())?;
-            Ok(text_result(format!(
-                "{} row(s) updated in '{}'",
-                count, table
-            )))
-        }
-
-        "delete_data" => {
-            let table = args
-                .get("table_name")
-                .and_then(|v| v.as_str())
-                .ok_or("table_name required")?;
-            let filters: Vec<Filter> = args
-                .get("filters")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
-            let count = delete_rows(engine.connection(), table, &filters)
-                .map_err(|e| e.to_string())?;
-            Ok(text_result(format!(
-                "{} row(s) deleted from '{}'",
-                count, table
-            )))
-        }
-
-        "get_schema" => {
-            let schema = engine.get_schema().map_err(|e| e.to_string())?;
-            Ok(text_result(serde_json::to_string_pretty(&schema).unwrap()))
-        }
-
-        "get_db_info" => {
-            let schema = engine.get_schema().map_err(|e| e.to_string())?;
-            let mut total_rows: u64 = 0;
-            for t in &schema.tables {
-                total_rows += engine.count_rows(&t.name).unwrap_or(0);
-            }
-            let info = json!({
-                "tables": schema.tables.len(),
-                "relations": schema.relations.len(),
-                "total_rows": total_rows,
-                "schema_version": schema.version,
-            });
-            Ok(text_result(serde_json::to_string_pretty(&info).unwrap()))
-        }
-
-        "create_relation" => {
-            let rel = RelationDefinition {
-                from_table: args
-                    .get("from_table")
-                    .and_then(|v| v.as_str())
-                    .ok_or("from_table required")?
-                    .to_string(),
-                from_column: args
-                    .get("from_column")
-                    .and_then(|v| v.as_str())
-                    .ok_or("from_column required")?
-                    .to_string(),
-                to_table: args
-                    .get("to_table")
-                    .and_then(|v| v.as_str())
-                    .ok_or("to_table required")?
-                    .to_string(),
-                to_column: args
-                    .get("to_column")
-                    .and_then(|v| v.as_str())
-                    .ok_or("to_column required")?
-                    .to_string(),
-                relation_type: serde_json::from_str(&format!(
-                    "\"{}\"",
-                    args.get("relation_type")
-                        .and_then(|v| v.as_str())
-                        .ok_or("relation_type required")?
-                ))
-                .map_err(|e| format!("Invalid relation_type: {}", e))?,
-                cascade: CascadeRules {
-                    on_delete: args
-                        .get("on_delete")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| serde_json::from_str(&format!("\"{}\"", s)).ok())
-                        .unwrap_or_default(),
-                    on_update: args
-                        .get("on_update")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| serde_json::from_str(&format!("\"{}\"", s)).ok())
-                        .unwrap_or_default(),
-                },
-            };
-            let version = engine
-                .create_relation(&rel)
-                .map_err(|e| e.to_string())?;
-            Ok(text_result(format!(
-                "Relation created: {}.{} -> {}.{} (schema version {})",
-                rel.from_table, rel.from_column, rel.to_table, rel.to_column, version
-            )))
-        }
-
-        "count_rows" => {
-            let table = args
-                .get("table_name")
-                .and_then(|v| v.as_str())
-                .ok_or("table_name required")?;
-            let count = engine.count_rows(table).map_err(|e| e.to_string())?;
-            Ok(text_result(format!("{}", count)))
-        }
-
-        // list_other_apps_schemas is handled separately in the async path above
-        _ => Err(format!("Unknown tool: {}", tool)),
-    }
-}
-
-/// Handle the `list_other_apps_schemas` tool call by sending a request to the
-/// registry via the WebSocket and waiting for the response.
-async fn handle_list_other_apps_schemas(
-    outbound_tx: Option<&mpsc::Sender<AgentMessage>>,
-    schema_signals: Option<&SchemaQuerySignals>,
-) -> Result<Value, String> {
-    let text_result = |text: String| -> Value {
-        json!({ "content": [{ "type": "text", "text": text }] })
-    };
-
-    let outbound_tx = outbound_tx
-        .ok_or_else(|| "Registry connection not available (running in standalone MCP mode)".to_string())?;
-    let schema_signals = schema_signals
-        .ok_or_else(|| "Schema signals not available".to_string())?;
-
-    let request_id = uuid::Uuid::new_v4().to_string();
-
-    // Register a oneshot channel to receive the response
-    let (tx, rx) = oneshot::channel();
-    {
-        let mut signals = schema_signals.write().await;
-        signals.insert(request_id.clone(), tx);
-    }
-
-    // Send the request to the registry
-    outbound_tx
-        .send(AgentMessage::GetDataverseSchemas {
-            request_id: request_id.clone(),
-        })
-        .await
-        .map_err(|_| "Failed to send request to registry (connection closed)".to_string())?;
-
-    // Wait for the response with a 10s timeout
-    match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
-        Ok(Ok(schemas)) => {
-            let json_output = serde_json::to_string_pretty(&schemas)
-                .map_err(|e| format!("Failed to serialize schemas: {}", e))?;
-            Ok(text_result(json_output))
-        }
-        Ok(Err(_)) => {
-            // Oneshot sender was dropped (e.g., connection lost)
-            Err("Registry connection lost while waiting for schemas".to_string())
-        }
-        Err(_) => {
-            // Timeout — clean up the signal
-            let mut signals = schema_signals.write().await;
-            signals.remove(&request_id);
-            Err("Timeout waiting for schemas from registry (10s)".to_string())
-        }
-    }
 }
 
 // ── Store tools (all environments) ──────────────
@@ -1049,20 +435,23 @@ async fn handle_store_tool_call(
 }
 
 /// Generate the `.mcp.json` content with all tools listed in `autoApprove`.
-/// When `is_dev` is true, includes the deploy MCP server.
-pub fn generate_mcp_json() -> String {
-    let dataverse_tools: Vec<String> = get_tool_definitions()
-        .iter()
-        .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
-        .collect();
-
+pub fn generate_mcp_json(token: &str) -> String {
     let mut servers = serde_json::Map::new();
+
+    // Orchestrator MCP server (database + infrastructure tools)
+    let db_tools: Vec<String> = vec![
+        "db_overview", "db_list_tables", "db_describe_table", "db_create_table",
+        "db_add_column", "db_remove_column", "db_drop_table", "db_create_relation",
+        "db_get_schema", "db_get_db_info", "db_query_data", "db_insert_data",
+        "db_update_data", "db_delete_data", "db_count_rows",
+    ].into_iter().map(String::from).collect();
     servers.insert(
-        "dataverse".to_string(),
+        "homeroute".to_string(),
         json!({
-            "command": "/usr/local/bin/hr-agent",
-            "args": ["mcp"],
-            "autoApprove": dataverse_tools
+            "type": "http",
+            "url": "http://10.0.0.254:4001/mcp",
+            "headers": { "Authorization": format!("Bearer {}", token) },
+            "autoApprove": db_tools
         }),
     );
 
@@ -1113,11 +502,15 @@ pub fn generate_mcp_json() -> String {
 pub fn generate_settings_json() -> String {
     let mut allow: Vec<String> = Vec::new();
 
-    // Dataverse tools
-    for t in get_tool_definitions() {
-        if let Some(name) = t.get("name").and_then(|n| n.as_str()) {
-            allow.push(format!("mcp__dataverse__{name}"));
-        }
+    // Orchestrator database tools (homeroute MCP server)
+    let db_tools = [
+        "db_overview", "db_list_tables", "db_describe_table", "db_create_table",
+        "db_add_column", "db_remove_column", "db_drop_table", "db_create_relation",
+        "db_get_schema", "db_get_db_info", "db_query_data", "db_insert_data",
+        "db_update_data", "db_delete_data", "db_count_rows",
+    ];
+    for name in &db_tools {
+        allow.push(format!("mcp__homeroute__{name}"));
     }
 
     // Store tools
@@ -1614,298 +1007,6 @@ async fn handle_studio_tool_call(tool: &str, args: &Value) -> Result<Value, Stri
     }
 }
 
-/// Helper to execute a shell command on the linked production container via the API.
-async fn exec_on_prod(ctx: &DeployContext, command: &str) -> Result<String, String> {
-    let url = format!(
-        "{}/api/applications/{}/prod/exec",
-        ctx.api_base_url, ctx.app_id
-    );
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
-    let resp = client
-        .post(&url)
-        .json(&json!({"command": command}))
-        .send()
-        .await
-        .map_err(|e| format!("Failed to send exec request: {e}"))?;
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {e}"))?;
-    let success = body
-        .get("success")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let stdout = body
-        .get("stdout")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let stderr = body
-        .get("stderr")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if !success {
-        return Err(format!(
-            "Command failed:\nSTDOUT: {stdout}\nSTDERR: {stderr}"
-        ));
-    }
-    Ok(if stdout.is_empty() { stderr } else { stdout })
-}
-
-/// Parse CREATE TABLE statements from raw SQLite .schema output.
-/// Returns a map of table_name -> Vec<(column_name, column_type)>.
-fn parse_schema_tables(schema_text: &str) -> HashMap<String, Vec<(String, String)>> {
-    let mut tables: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    let text = schema_text;
-
-    // Simple approach: find "CREATE TABLE" then extract table name and columns
-    for segment in text.split("CREATE TABLE") {
-        let segment = segment.trim();
-        if segment.is_empty() {
-            continue;
-        }
-
-        // Skip internal/system tables
-        if segment.starts_with("IF NOT EXISTS") {
-            // "IF NOT EXISTS tablename (...)"
-            let rest = segment.trim_start_matches("IF NOT EXISTS").trim();
-            if rest.starts_with("_dv_") || rest.starts_with("sqlite_") {
-                continue;
-            }
-        }
-
-        // Extract table name: everything before the first '('
-        let paren_pos = match segment.find('(') {
-            Some(p) => p,
-            None => continue,
-        };
-        let table_name = segment[..paren_pos]
-            .trim()
-            .trim_matches('"')
-            .trim_matches('`')
-            .trim_start_matches("IF NOT EXISTS ")
-            .trim()
-            .trim_matches('"')
-            .trim_matches('`')
-            .to_string();
-
-        if table_name.starts_with("_dv_") || table_name.starts_with("sqlite_") {
-            continue;
-        }
-
-        // Find matching closing paren
-        let body_start = paren_pos + 1;
-        let mut depth = 1;
-        let mut body_end = body_start;
-        let segment_bytes = segment.as_bytes();
-        for j in body_start..segment.len() {
-            if segment_bytes[j] == b'(' {
-                depth += 1;
-            } else if segment_bytes[j] == b')' {
-                depth -= 1;
-                if depth == 0 {
-                    body_end = j;
-                    break;
-                }
-            }
-        }
-
-        let body = &segment[body_start..body_end];
-        let mut columns = Vec::new();
-
-        for col_def in body.split(',') {
-            let col_def = col_def.trim();
-            if col_def.is_empty() {
-                continue;
-            }
-            // Skip constraints like PRIMARY KEY, UNIQUE, FOREIGN KEY, CHECK
-            let upper = col_def.to_uppercase();
-            if upper.starts_with("PRIMARY KEY")
-                || upper.starts_with("UNIQUE")
-                || upper.starts_with("FOREIGN KEY")
-                || upper.starts_with("CHECK")
-                || upper.starts_with("CONSTRAINT")
-            {
-                continue;
-            }
-
-            // Column definition: "name TYPE ..."
-            let parts: Vec<&str> = col_def.split_whitespace().collect();
-            if parts.is_empty() {
-                continue;
-            }
-            let col_name = parts[0].trim_matches('"').trim_matches('`').to_string();
-            let col_type = if parts.len() > 1 {
-                parts[1].trim_matches('"').trim_matches('`').to_uppercase()
-            } else {
-                "TEXT".to_string()
-            };
-
-            columns.push((col_name, col_type));
-        }
-
-        if !table_name.is_empty() {
-            tables.insert(table_name, columns);
-        }
-    }
-
-    tables
-}
-
-/// Compute schema diff between dev and prod tables.
-struct SchemaDiff {
-    new_tables: Vec<(String, Vec<(String, String)>)>,
-    new_columns: Vec<(String, String, String)>,   // (table, col_name, col_type)
-    removed_columns: Vec<(String, String)>,         // (table, col_name)
-    type_changes: Vec<(String, String, String, String)>, // (table, col, old_type, new_type)
-}
-
-fn compute_schema_diff(
-    dev_tables: &HashMap<String, Vec<(String, String)>>,
-    prod_tables: &HashMap<String, Vec<(String, String)>>,
-) -> SchemaDiff {
-    let mut new_tables = Vec::new();
-    let mut new_columns = Vec::new();
-    let mut removed_columns = Vec::new();
-    let mut type_changes = Vec::new();
-
-    for (table_name, dev_cols) in dev_tables {
-        match prod_tables.get(table_name) {
-            None => {
-                // Entire table is new
-                new_tables.push((table_name.clone(), dev_cols.clone()));
-            }
-            Some(prod_cols) => {
-                let prod_map: HashMap<&str, &str> = prod_cols
-                    .iter()
-                    .map(|(n, t)| (n.as_str(), t.as_str()))
-                    .collect();
-                let dev_map: HashMap<&str, &str> = dev_cols
-                    .iter()
-                    .map(|(n, t)| (n.as_str(), t.as_str()))
-                    .collect();
-
-                // New columns in dev
-                for (col_name, col_type) in dev_cols {
-                    match prod_map.get(col_name.as_str()) {
-                        None => {
-                            new_columns.push((
-                                table_name.clone(),
-                                col_name.clone(),
-                                col_type.clone(),
-                            ));
-                        }
-                        Some(&prod_type) => {
-                            if prod_type != col_type.as_str() {
-                                type_changes.push((
-                                    table_name.clone(),
-                                    col_name.clone(),
-                                    prod_type.to_string(),
-                                    col_type.clone(),
-                                ));
-                            }
-                        }
-                    }
-                }
-
-                // Removed columns (in prod but not in dev)
-                for (col_name, _) in prod_cols {
-                    if !dev_map.contains_key(col_name.as_str()) {
-                        removed_columns.push((table_name.clone(), col_name.clone()));
-                    }
-                }
-            }
-        }
-    }
-
-    SchemaDiff {
-        new_tables,
-        new_columns,
-        removed_columns,
-        type_changes,
-    }
-}
-
-fn format_schema_diff(diff: &SchemaDiff) -> String {
-    let mut output = String::new();
-
-    if diff.new_tables.is_empty()
-        && diff.new_columns.is_empty()
-        && diff.removed_columns.is_empty()
-        && diff.type_changes.is_empty()
-    {
-        return "Schemas are identical. No differences found.".to_string();
-    }
-
-    if !diff.new_tables.is_empty() {
-        output.push_str("## New Tables\n\n");
-        for (name, cols) in &diff.new_tables {
-            output.push_str(&format!("- **{}** ({} columns)\n", name, cols.len()));
-            for (col_name, col_type) in cols {
-                output.push_str(&format!("  - {} {}\n", col_name, col_type));
-            }
-        }
-        output.push('\n');
-    }
-
-    if !diff.new_columns.is_empty() {
-        output.push_str("## New Columns\n\n");
-        for (table, col, typ) in &diff.new_columns {
-            output.push_str(&format!("- **{}**.{} ({})\n", table, col, typ));
-        }
-        output.push('\n');
-    }
-
-    if !diff.removed_columns.is_empty() {
-        output.push_str("## Removed Columns (in PROD but not in DEV)\n\n");
-        for (table, col) in &diff.removed_columns {
-            output.push_str(&format!("- **{}**.{}\n", table, col));
-        }
-        output.push_str("\n> Note: SQLite does not support DROP COLUMN in older versions. These columns will be left in place.\n\n");
-    }
-
-    if !diff.type_changes.is_empty() {
-        output.push_str("## Type Changes\n\n");
-        for (table, col, old_type, new_type) in &diff.type_changes {
-            output.push_str(&format!(
-                "- **{}**.{}: {} → {}\n",
-                table, col, old_type, new_type
-            ));
-        }
-        output.push_str("\n> Note: SQLite does not support ALTER COLUMN. Type changes require manual migration.\n\n");
-    }
-
-    output
-}
-
-fn generate_migration_sql(diff: &SchemaDiff) -> Vec<String> {
-    let mut statements = Vec::new();
-
-    for (table_name, columns) in &diff.new_tables {
-        let cols_sql: Vec<String> = columns
-            .iter()
-            .map(|(name, typ)| format!("\"{}\" {}", name, typ))
-            .collect();
-        statements.push(format!(
-            "CREATE TABLE IF NOT EXISTS \"{}\" ({});",
-            table_name,
-            cols_sql.join(", ")
-        ));
-    }
-
-    for (table, col_name, col_type) in &diff.new_columns {
-        statements.push(format!(
-            "ALTER TABLE \"{}\" ADD COLUMN \"{}\" {};",
-            table, col_name, col_type
-        ));
-    }
-
-    statements
-}
 
 // ── Docs MCP Server ────────────────────────────────────────────────────
 

@@ -9,7 +9,6 @@ use hr_ipc::orchestrator::OrchestratorClient;
 use hr_git::GitService;
 
 use hr_registry::AgentRegistry;
-use hr_registry::types::Environment;
 use crate::container_manager::{ContainerManager, RenameState};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -33,46 +32,6 @@ pub struct MigrationState {
     /// Cancel flag: set by the cancel endpoint, checked by the migration task.
     #[serde(skip)]
     pub cancelled: Arc<AtomicBool>,
-}
-
-/// Cached Dataverse schema metadata for an application.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct CachedDataverseSchema {
-    pub app_id: String,
-    pub slug: String,
-    pub environment: Environment,
-    pub tables: Vec<CachedTableInfo>,
-    pub relations: Vec<CachedRelationInfo>,
-    pub version: u64,
-    pub db_size_bytes: u64,
-    pub last_updated: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct CachedTableInfo {
-    pub name: String,
-    pub slug: String,
-    pub columns: Vec<CachedColumnInfo>,
-    pub row_count: u64,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct CachedColumnInfo {
-    pub name: String,
-    pub field_type: String,
-    pub required: bool,
-    pub unique: bool,
-    #[serde(default)]
-    pub choices: Vec<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct CachedRelationInfo {
-    pub from_table: String,
-    pub from_column: String,
-    pub to_table: String,
-    pub to_column: String,
-    pub relation_type: String,
 }
 
 /// Shared application state for all API routes.
@@ -100,9 +59,6 @@ pub struct ApiState {
 
     /// Active slug renames keyed by rename_id.
     pub renames: Arc<RwLock<HashMap<String, RenameState>>>,
-
-    /// Cached Dataverse schemas keyed by app_id.
-    pub dataverse_schemas: Arc<RwLock<HashMap<String, CachedDataverseSchema>>>,
 
     /// Update audit log.
     pub update_log: Arc<crate::routes::updates::UpdateAuditLog>,

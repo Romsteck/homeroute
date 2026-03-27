@@ -2,8 +2,8 @@ import { NavLink, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Server, Shield, Globe, Settings,
   ArrowLeftRight, RefreshCw, LogOut, Activity,
-  User, HardDrive, Lock, Container, Table2,
-  Store as StoreIcon, GitBranch, Archive, X, ListTodo, Zap, BookOpen
+  User, HardDrive, Lock, Layers,
+  Store as StoreIcon, GitBranch, Archive, X, ListTodo, Zap, BookOpen, ExternalLink
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useEffect, useState } from 'react';
@@ -33,8 +33,8 @@ const navGroups = [
   {
     label: 'Applications',
     items: [
-      { to: '/containers', icon: Container, label: 'Applications' },
-      { to: '/data-browser', icon: Table2, label: 'Database' },
+      { to: '/environments', icon: Layers, label: 'Environnements', highlight: true },
+      { href: 'https://make.mynetwk.biz', icon: ExternalLink, label: 'Maker Portal', external: true },
       { to: '/store', icon: StoreIcon, label: 'Store' },
       { to: '/git', icon: GitBranch, label: 'Git' },
       { to: '/docs', icon: BookOpen, label: 'Docs' },
@@ -101,28 +101,47 @@ function Sidebar({ onClose }) {
               </div>
             )}
             <ul className="space-y-0.5">
-              {group.items.map(({ to, icon: Icon, label }) => (
-                <li key={to}>
-                  <NavLink
-                    to={to}
-                    className={({ isActive }) =>
-                      `flex items-center gap-3 px-4 py-2 transition-[background-color,color] duration-300 ease-out hover:duration-0 text-sm ${
-                        isActive
-                          ? 'border-l-3 border-blue-400 bg-gray-700/50 text-white'
-                          : 'border-l-3 border-transparent text-gray-300 hover:bg-gray-700/30'
-                      }`
-                    }
-                  >
-                    <Icon className="w-5 h-5" />
-                    <span className="flex-1">{label}</span>
-                    {to === '/updates' && updateCount > 0 && (
-                      <span className="ml-auto bg-red-500 text-white text-xs font-bold rounded-full min-w-[20px] h-5 flex items-center justify-center px-1.5">
-                        {updateCount}
-                      </span>
-                    )}
-                  </NavLink>
-                </li>
-              ))}
+              {group.items.map((item) => {
+                const { icon: Icon, label, highlight, external, href, to } = item;
+                if (external) {
+                  return (
+                    <li key={href}>
+                      <a
+                        href={href}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-3 px-4 py-2 transition-[background-color,color] duration-300 ease-out hover:duration-0 text-sm border-l-3 border-transparent text-gray-300 hover:bg-gray-700/30"
+                      >
+                        <Icon className="w-5 h-5" />
+                        <span className="flex-1">{label}</span>
+                        <ExternalLink className="w-3.5 h-3.5 text-gray-500" />
+                      </a>
+                    </li>
+                  );
+                }
+                return (
+                  <li key={to}>
+                    <NavLink
+                      to={to}
+                      className={({ isActive }) =>
+                        `flex items-center gap-3 px-4 py-2 transition-[background-color,color] duration-300 ease-out hover:duration-0 text-sm ${
+                          isActive
+                            ? 'border-l-3 border-blue-400 bg-gray-700/50 text-white'
+                            : 'border-l-3 border-transparent text-gray-300 hover:bg-gray-700/30'
+                        }`
+                      }
+                    >
+                      <Icon className={`w-5 h-5${highlight ? ' text-blue-400' : ''}`} />
+                      <span className="flex-1">{label}</span>
+                      {to === '/updates' && updateCount > 0 && (
+                        <span className="ml-auto bg-red-500 text-white text-xs font-bold rounded-full min-w-[20px] h-5 flex items-center justify-center px-1.5">
+                          {updateCount}
+                        </span>
+                      )}
+                    </NavLink>
+                  </li>
+                );
+              })}
             </ul>
           </div>
         ))}

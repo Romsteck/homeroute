@@ -25,3 +25,4 @@ pub mod ws_proxy;
 pub mod backup;
 pub mod tasks;
 pub mod docs;
+pub mod environments;
