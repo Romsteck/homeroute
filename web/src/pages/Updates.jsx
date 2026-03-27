@@ -183,10 +183,9 @@ function Updates() {
   const agentsOutdated = targetList.filter(t =>
     t.agent_version && t.agent_version_latest && t.agent_version !== t.agent_version_latest
   ).length;
-  const mainHost = targets['main'];
-  const remoteHosts = targetList.filter(t => t.target_type === 'remote_host');
+  const hosts = targetList.filter(t => t.target_type === 'remote_host' || t.target_type === 'main_host');
   const prodContainers = targetList.filter(t => t.target_type === 'container' && t.environment === 'production');
-  const hostsWithUpdates = [mainHost, ...remoteHosts].filter(t => t && t.os_upgradable > 0).length;
+  const hostsWithUpdates = hosts.filter(t => t.os_upgradable > 0).length;
   const containersWithUpdates = prodContainers.filter(t => t.os_upgradable > 0).length;
 
   if (loading) {
@@ -262,32 +261,14 @@ function Updates() {
           </div>
         )}
 
-        {/* Main host */}
-        {mainHost && (
-          <Section title="Hôte principal">
+        {/* Hosts */}
+        {hosts.length > 0 && (
+          <Section title={`Hôtes (${hosts.length})`}>
             <div className="overflow-x-auto">
               <table className="w-full text-sm min-w-[500px]">
                 <UpdateTableHead />
                 <tbody>
-                  <UpdateTableRow
-                    target={mainHost}
-                    upgradeState={upgradeStates['main'] || {}}
-                    onUpgrade={handleUpgrade}
-                  />
-                </tbody>
-              </table>
-            </div>
-          </Section>
-        )}
-
-        {/* Remote hosts */}
-        {remoteHosts.length > 0 && (
-          <Section title={`Hôtes distants (${remoteHosts.length})`}>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm min-w-[500px]">
-                <UpdateTableHead />
-                <tbody>
-                  {remoteHosts.map(t => (
+                  {hosts.map(t => (
                     <UpdateTableRow
                       key={t.id}
                       target={t}

@@ -413,36 +413,7 @@ pub async fn run_background_scan(
 
     let scan_id_clone = scan_id.clone();
     tokio::spawn(async move {
-        let (os_upgradable, os_security, scan_error) = scan_main_host_apt().await;
-        let target = hr_common::events::UpdateTarget {
-            id: "main".to_string(),
-            name: "Hôte principal".to_string(),
-            target_type: "main_host".to_string(),
-            environment: None,
-            online: true,
-            os_upgradable,
-            os_security,
-            agent_version: None,
-            agent_version_latest: None,
-            claude_cli_installed: None,
-            claude_cli_latest: None,
-            code_server_installed: None,
-            code_server_latest: None,
-            claude_ext_installed: None,
-            claude_ext_latest: None,
-            scan_error,
-            scanned_at: chrono::Utc::now().to_rfc3339(),
-        };
-        let _ = events.update_scan.send(
-            hr_common::events::UpdateScanEvent::TargetScanned {
-                scan_id: scan_id_clone.clone(),
-                target: target.clone(),
-            }
-        );
-        let _ = orchestrator.request(&OrchestratorRequest::StoreScanResult {
-            target: serde_json::to_value(&target).unwrap_or_default(),
-        }).await;
-
+        // Fan-out to all agents and host-agents via orchestrator
         let resp = orchestrator.request_long(&OrchestratorRequest::ScanUpdates).await;
         let expected = resp.ok()
             .and_then(|r| r.data)
@@ -451,7 +422,6 @@ pub async fn run_background_scan(
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut seen = std::collections::HashSet::new();
-        seen.insert("main".to_string());
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             if let Ok(r) = orchestrator.request(&OrchestratorRequest::GetScanResults).await {
@@ -468,7 +438,7 @@ pub async fn run_background_scan(
                             }
                         }
                     }
-                    if expected > 0 && seen.len() >= expected + 1 {
+                    if expected > 0 && seen.len() >= expected {
                         break;
                     }
                 }
@@ -488,54 +458,20 @@ async fn scan_all(State(state): State<ApiState>) -> Json<Value> {
         hr_common::events::UpdateScanEvent::ScanStarted { scan_id: scan_id.clone() }
     );
 
-    // 1. Scan main host (reuse existing apt-check logic)
+    // Fan-out to all agents and host-agents via orchestrator
     let scan_id_clone = scan_id.clone();
     let events = state.events.clone();
     let orchestrator = state.orchestrator.clone();
     tokio::spawn(async move {
-        let (os_upgradable, os_security, scan_error) = scan_main_host_apt().await;
-        let target = hr_common::events::UpdateTarget {
-            id: "main".to_string(),
-            name: "Hôte principal".to_string(),
-            target_type: "main_host".to_string(),
-            environment: None,
-            online: true,
-            os_upgradable,
-            os_security,
-            agent_version: None,
-            agent_version_latest: None,
-            claude_cli_installed: None,
-            claude_cli_latest: None,
-            code_server_installed: None,
-            code_server_latest: None,
-            claude_ext_installed: None,
-            claude_ext_latest: None,
-            scan_error,
-            scanned_at: chrono::Utc::now().to_rfc3339(),
-        };
-        // Emit to frontend WebSocket
-        let _ = events.update_scan.send(
-            hr_common::events::UpdateScanEvent::TargetScanned {
-                scan_id: scan_id_clone.clone(),
-                target: target.clone(),
-            }
-        );
-        // Store in orchestrator for persistence across page refreshes
-        let _ = orchestrator.request(&OrchestratorRequest::StoreScanResult {
-            target: serde_json::to_value(&target).unwrap_or_default(),
-        }).await;
-
-        // 2. Fan-out to agents and host-agents via IPC
         let resp = orchestrator.request_long(&OrchestratorRequest::ScanUpdates).await;
         let expected = resp.ok()
             .and_then(|r| r.data)
             .and_then(|d| d.get("agents_scanned").and_then(|v| v.as_u64()))
             .unwrap_or(0) as usize;
 
-        // 3. Poll orchestrator for results and relay to frontend via events
+        // Poll orchestrator for results and relay to frontend via events
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut seen = std::collections::HashSet::new();
-        seen.insert("main".to_string()); // already emitted above
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             if let Ok(r) = orchestrator.request(&OrchestratorRequest::GetScanResults).await {
@@ -552,8 +488,7 @@ async fn scan_all(State(state): State<ApiState>) -> Json<Value> {
                             }
                         }
                     }
-                    // +1 for main host
-                    if expected > 0 && seen.len() >= expected + 1 {
+                    if expected > 0 && seen.len() >= expected {
                         break;
                     }
                 }
@@ -567,9 +502,9 @@ async fn scan_all(State(state): State<ApiState>) -> Json<Value> {
     // Get targets count from orchestrator
     let targets_count = match state.orchestrator.request(&OrchestratorRequest::GetScanResults).await {
         Ok(r) if r.ok => {
-            r.data.and_then(|d| d.as_object().map(|o| o.len())).unwrap_or(0) + 1
+            r.data.and_then(|d| d.as_object().map(|o| o.len())).unwrap_or(0)
         }
-        _ => 1, // at least main host
+        _ => 0,
     };
 
     Json(json!({
@@ -577,34 +512,6 @@ async fn scan_all(State(state): State<ApiState>) -> Json<Value> {
         "scan_id": scan_id,
         "targets_count": targets_count
     }))
-}
-
-async fn scan_main_host_apt() -> (u32, u32, Option<String>) {
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        tokio::process::Command::new("bash")
-            .args(["-c", "/usr/lib/update-notifier/apt-check 2>&1"])
-            .output(),
-    )
-    .await;
-
-    match result {
-        Ok(Ok(output)) => {
-            let text = String::from_utf8_lossy(&output.stdout);
-            let text = text.trim();
-            if let Some((total, security)) = text.split_once(';') {
-                (
-                    total.parse().unwrap_or(0),
-                    security.parse().unwrap_or(0),
-                    None,
-                )
-            } else {
-                (0, 0, Some(format!("apt-check unexpected: {text}")))
-            }
-        }
-        Ok(Err(e)) => (0, 0, Some(format!("apt-check error: {e}"))),
-        Err(_) => (0, 0, Some("apt-check timed out".into())),
-    }
 }
 
 async fn scan_all_results(State(state): State<ApiState>) -> Json<Value> {
@@ -642,31 +549,7 @@ async fn upgrade_target(
         }
     );
 
-    if req.target_id == "main" && req.category == "apt" {
-        // Main host APT upgrade -- reuse existing logic
-        let events = state.events.clone();
-        let update_log = state.update_log.clone();
-        tokio::spawn(async move {
-            let result = tokio::process::Command::new("bash")
-                .args(["-c", "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"])
-                .output()
-                .await;
-            let (success, error) = match result {
-                Ok(out) if out.status.success() => (true, None),
-                Ok(out) => (false, Some(String::from_utf8_lossy(&out.stderr).to_string())),
-                Err(e) => (false, Some(e.to_string())),
-            };
-            let _ = events.update_scan.send(
-                hr_common::events::UpdateScanEvent::UpgradeComplete {
-                    target_id: "main".to_string(),
-                    category: "apt".to_string(),
-                    success,
-                    error: error.clone(),
-                }
-            );
-            let _ = update_log.update_status("main", "apt", if success { "success" } else { "failed" }, error.as_deref());
-        });
-    } else if req.category == "hr_agent" {
+    if req.category == "hr_agent" {
         // Agent binary update — use TriggerAgentUpdate (pushes binary + restart)
         let target_id = req.target_id.clone();
         let events = state.events.clone();
@@ -745,16 +628,35 @@ async fn upgrade_target(
             );
         });
     } else {
-        // Container/host agent -- send RunUpgrade via IPC to orchestrator
-        info!(target_id = %req.target_id, category = %req.category, "Sending RunUpgrade to agent via IPC");
-        let msg = json!({
-            "type": "run_upgrade",
-            "category": req.category,
-        });
-        let send_result = state.orchestrator.request(&OrchestratorRequest::SendToAgent {
-            app_id: req.target_id.clone(),
-            message: msg,
-        }).await;
+        // Determine if target is a host-agent or container agent from scan results
+        let is_host = match state.orchestrator.request(&OrchestratorRequest::GetScanResults).await {
+            Ok(r) => r.data.as_ref()
+                .and_then(|d| d.get(&req.target_id))
+                .and_then(|t| t.get("target_type").and_then(|v| v.as_str()).map(|s| s == "remote_host" || s == "main_host"))
+                .unwrap_or(false),
+            _ => false,
+        };
+
+        let send_result = if is_host && req.category == "apt" {
+            // Host-agent — send RunAptUpgrade via SendHostCommand
+            info!(target_id = %req.target_id, category = %req.category, "Sending RunAptUpgrade to host-agent via IPC");
+            let cmd = json!({"type": "RunAptUpgrade", "data": {"full_upgrade": false}});
+            state.orchestrator.request(&OrchestratorRequest::SendHostCommand {
+                host_id: req.target_id.clone(),
+                command: cmd,
+            }).await
+        } else {
+            // Container agent — send RunUpgrade via SendToAgent
+            info!(target_id = %req.target_id, category = %req.category, "Sending RunUpgrade to agent via IPC");
+            let msg = json!({
+                "type": "run_upgrade",
+                "category": req.category,
+            });
+            state.orchestrator.request(&OrchestratorRequest::SendToAgent {
+                app_id: req.target_id.clone(),
+                message: msg,
+            }).await
+        };
 
         // Check for IPC transport error or orchestrator-level error
         let ipc_err = match &send_result {
@@ -1005,45 +907,11 @@ async fn upgrade_hosts(State(state): State<ApiState>) -> Json<Value> {
     };
 
     let mut launched = vec![];
-    // Main host
-    if let Some(main_target) = targets.get("main") {
-        if main_target.get("os_upgradable").and_then(|v| v.as_u64()).unwrap_or(0) > 0 {
-            let _ = state.update_log.insert("main", "Hôte principal", "apt", None, "started", None);
-            let _ = state.events.update_scan.send(
-                hr_common::events::UpdateScanEvent::UpgradeStarted {
-                    target_id: "main".to_string(),
-                    category: "apt".to_string(),
-                }
-            );
-            let events = state.events.clone();
-            let update_log = state.update_log.clone();
-            tokio::spawn(async move {
-                let result = tokio::process::Command::new("bash")
-                    .args(["-c", "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"])
-                    .output()
-                    .await;
-                let (success, error) = match result {
-                    Ok(out) if out.status.success() => (true, None),
-                    Ok(out) => (false, Some(String::from_utf8_lossy(&out.stderr).to_string())),
-                    Err(e) => (false, Some(e.to_string())),
-                };
-                let _ = events.update_scan.send(
-                    hr_common::events::UpdateScanEvent::UpgradeComplete {
-                        target_id: "main".to_string(),
-                        category: "apt".to_string(),
-                        success,
-                        error: error.clone(),
-                    }
-                );
-                let _ = update_log.update_status("main", "apt", if success { "success" } else { "failed" }, error.as_deref());
-            });
-            launched.push("main".to_string());
-        }
-    }
-    // Remote hosts
+    // All hosts (remote_host and main_host) — upgrade via host-agent
     if let Some(obj) = targets.as_object() {
         for (id, t) in obj {
-            let is_host = t.get("target_type").and_then(|v| v.as_str()) == Some("remote_host");
+            let tt = t.get("target_type").and_then(|v| v.as_str()).unwrap_or("");
+            let is_host = tt == "remote_host" || tt == "main_host";
             let has_updates = t.get("os_upgradable").and_then(|v| v.as_u64()).unwrap_or(0) > 0;
             if is_host && has_updates {
                 let target_name = t.get("name").and_then(|v| v.as_str()).unwrap_or(id).to_string();
@@ -1054,10 +922,10 @@ async fn upgrade_hosts(State(state): State<ApiState>) -> Json<Value> {
                         category: "apt".to_string(),
                     }
                 );
-                let msg = json!({"type": "run_upgrade", "category": "apt"});
-                let _ = state.orchestrator.request(&OrchestratorRequest::SendToAgent {
-                    app_id: id.clone(),
-                    message: msg,
+                let cmd = json!({"type": "RunAptUpgrade", "data": {"full_upgrade": false}});
+                let _ = state.orchestrator.request(&OrchestratorRequest::SendHostCommand {
+                    host_id: id.clone(),
+                    command: cmd,
                 }).await;
                 launched.push(id.clone());
             }
