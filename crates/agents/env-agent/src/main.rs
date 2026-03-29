@@ -5,6 +5,7 @@ mod db_manager;
 mod discovery;
 mod mcp;
 mod port_registry;
+mod proxy;
 mod secrets;
 mod supervisor;
 
@@ -105,8 +106,6 @@ async fn main() -> Result<()> {
         base_domain: "mynetwk.biz".to_string(),
         apps_path: cfg.apps_path.clone(),
         mcp_port: cfg.mcp_port,
-        homeroute_address: cfg.homeroute_address.clone(),
-        homeroute_port: cfg.homeroute_port,
     });
     if let Err(e) = context_gen.refresh_all(&cfg.apps) {
         warn!("Failed to generate initial context files: {e}");
@@ -124,6 +123,7 @@ async fn main() -> Result<()> {
         config: Arc::new(cfg.clone()),
         context: Arc::clone(&context_gen),
         secrets: Arc::clone(&secrets),
+        http_client: reqwest::Client::new(),
     };
 
     let discovery_router = discovery::router(discovery_state);

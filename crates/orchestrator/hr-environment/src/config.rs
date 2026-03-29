@@ -29,6 +29,13 @@ pub struct EnvAgentConfig {
     /// Base path where databases are stored.
     #[serde(default = "default_db_path")]
     pub db_path: String,
+    /// Hub API base URL (for proxying todos/jobs).
+    #[serde(default = "default_hub_url")]
+    pub hub_url: String,
+    /// MCP token for authenticating to the orchestrator MCP (Bearer token).
+    /// If absent, uses the env-agent token as fallback.
+    #[serde(default)]
+    pub mcp_token: Option<String>,
     /// Apps managed by this env-agent.
     #[serde(default)]
     pub apps: Vec<EnvAgentAppConfig>,
@@ -120,6 +127,10 @@ fn default_db_path() -> String {
     "/opt/env-agent/data/db".to_string()
 }
 
+fn default_hub_url() -> String {
+    "http://10.0.0.20:3500".to_string()
+}
+
 fn default_app_port() -> u16 {
     3000
 }
@@ -180,6 +191,7 @@ mod tests {
             code_server_port: 8443,
             apps_path: "/apps".into(),
             db_path: "/opt/env-agent/data/db".into(),
+            hub_url: "http://10.0.0.20:3500".into(),
             apps: vec![],
         };
         assert_eq!(config.orchestrator_ws_url(), "ws://10.0.0.254:4001/envs/ws");

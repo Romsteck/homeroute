@@ -44,6 +44,8 @@ BRIDGE="br0"
 DNS_SERVER="10.0.0.254"
 HOMEROUTE_ADDRESS="10.0.0.254"
 HOMEROUTE_PORT=4001
+HUB_URL="http://10.0.0.20:3500"
+MCP_TOKEN="REDACTED_SECRET"
 AGENT_BINARY_SRC="/opt/homeroute/data/agent-binaries/env-agent"
 CODE_SERVER_PORT=8443
 DEV_TOOLS=false
@@ -389,7 +391,27 @@ apps_path = "/apps"
 
 # Database directory (one SQLite DB per app)
 db_path = "/opt/env-agent/data/db"
+
+# Hub URL (for proxying todos/jobs to unified MCP)
+hub_url = "${HUB_URL}"
+
+# MCP token for authenticating to the orchestrator MCP
+mcp_token = "${MCP_TOKEN}"
 TOMLEOF
+
+    # Write global Claude Code MCP settings
+    mkdir -p "${ROOTFS}/root/.claude"
+    cat > "${ROOTFS}/root/.claude/settings.json" <<CLAUDEEOF
+{
+  "mcpServers": {
+    "env": {
+      "type": "http",
+      "url": "http://localhost:${MCP_PORT:-4010}/mcp"
+    }
+  }
+}
+CLAUDEEOF
+    log "Claude Code MCP settings written"
 
     log "env-agent.toml written (token: ${TOKEN:0:8}...)"
     log "IMPORTANT: Save this token — you will need it to register the env-agent in HomeRoute:"

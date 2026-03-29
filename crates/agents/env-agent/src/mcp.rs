@@ -49,14 +49,18 @@ pub struct McpState {
     pub config: Arc<hr_environment::config::EnvAgentConfig>,
     pub context: Arc<ContextGenerator>,
     pub secrets: Arc<SecretsManager>,
+    pub http_client: reqwest::Client,
 }
 
 // ── HTTP Handler ────────────────────────────────────────────────────
 
 pub async fn mcp_handler(
     State(state): State<McpState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     body: String,
 ) -> impl IntoResponse {
+    let project_slug = params.get("project").cloned();
+
     let request: JsonRpcRequest = match serde_json::from_str(&body) {
         Ok(r) => r,
         Err(e) => {
@@ -73,13 +77,13 @@ pub async fn mcp_handler(
 
     let id = request.id.clone().unwrap_or(Value::Null);
 
-    debug!(method = %request.method, "MCP request");
+    debug!(method = %request.method, project = ?project_slug, "MCP request");
 
     let response = match request.method.as_str() {
         "initialize" => handle_initialize(id, &state),
         "notifications/initialized" => return (StatusCode::OK, Json(json!({}))),
         "tools/list" => handle_tools_list(id, &state),
-        "tools/call" => handle_tools_call(id, request.params, &state).await,
+        "tools/call" => handle_tools_call(id, request.params, &state, project_slug).await,
         _ => error_response(
             id,
             METHOD_NOT_FOUND,
@@ -104,8 +108,12 @@ fn handle_initialize(id: Value, state: &McpState) -> Value {
                 "version": env!("CARGO_PKG_VERSION")
             },
             "instructions": format!(
-                "env-agent MCP server for environment '{}' (type: {}).\n\
-                 Tools: db.* (database), app.* (lifecycle), env.* (introspection), studio.* (context).\n\
+                "env-agent unified MCP server for environment '{}' (type: {}).\n\
+                 Local tools: db.* (database), app.* (lifecycle), env.* (introspection), \
+                 studio.* (context), secrets.* (env vars).\n\
+                 Proxied tools: pipeline.* (promotion), deploy.* (status), docs.* (documentation), \
+                 git.* (repos), todos.* (task tracking), jobs.* (job reporting).\n\
+                 Use ?project=<slug> query param to scope proxied tools to a specific app.\n\
                  Permissions are enforced based on the environment type.",
                 state.config.env_slug, env_type
             )
@@ -542,19 +550,229 @@ fn build_tool_definitions(perms: &EnvPermissions, include_studio: bool) -> Value
         ]);
     }
 
+    // ── Proxied tools (available via HTTP handler, auto-scoped by ?project=) ──
+    if include_studio {
+        tools.extend([
+            // ── pipeline.* ──
+            json!({
+                "name": "pipeline.promote",
+                "description": "Promote the current app to a target environment via deployment pipeline.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "target_env": { "type": "string", "description": "Target environment slug (e.g. acc, prod)" },
+                        "version": { "type": "string", "description": "Version to promote (default: latest)" }
+                    },
+                    "required": ["target_env"]
+                }
+            }),
+            json!({
+                "name": "pipeline.status",
+                "description": "Get the status of a pipeline run.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Pipeline run ID" }
+                    },
+                    "required": ["id"]
+                }
+            }),
+            json!({
+                "name": "pipeline.history",
+                "description": "Get pipeline history for the current app.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer", "description": "Number of entries (default 10)" }
+                    }
+                }
+            }),
+            // ── deploy.* ──
+            json!({
+                "name": "deploy.status",
+                "description": "Get deployment status for the current app (auto-scoped).",
+                "inputSchema": { "type": "object", "properties": {} }
+            }),
+            json!({
+                "name": "deploy.logs",
+                "description": "Get deployment logs for the current app.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "lines": { "type": "integer", "description": "Number of log lines (default 50)" }
+                    }
+                }
+            }),
+            // ── docs.* ──
+            json!({
+                "name": "docs.get",
+                "description": "Get documentation for the current app.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "section": { "type": "string", "description": "Section: meta, structure, features, backend, or notes (optional, all if omitted)" }
+                    }
+                }
+            }),
+            json!({
+                "name": "docs.update",
+                "description": "Update a documentation section for the current app.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "section": { "type": "string", "description": "Section: meta, structure, features, backend, or notes" },
+                        "content": { "type": "string", "description": "New content for the section" }
+                    },
+                    "required": ["section", "content"]
+                }
+            }),
+            json!({
+                "name": "docs.completeness",
+                "description": "Check documentation completeness for the current app.",
+                "inputSchema": { "type": "object", "properties": {} }
+            }),
+            // ── git.* ──
+            json!({
+                "name": "git.log",
+                "description": "Get git log for the current app's repository.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer", "description": "Number of commits (default 20)" }
+                    }
+                }
+            }),
+            json!({
+                "name": "git.branches",
+                "description": "List branches for the current app's repository.",
+                "inputSchema": { "type": "object", "properties": {} }
+            }),
+            // ── todos.* ──
+            json!({
+                "name": "todos.list",
+                "description": "List todos for the current app/project.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "status": { "type": "string", "description": "Filter by status (default: todo)" }
+                    }
+                }
+            }),
+            json!({
+                "name": "todos.create",
+                "description": "Create a todo for the current app/project.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string", "description": "Todo title" },
+                        "priority": { "type": "string", "description": "Priority: high, medium, low (default: medium)" }
+                    },
+                    "required": ["title"]
+                }
+            }),
+            json!({
+                "name": "todos.update",
+                "description": "Update a todo's description.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Todo ID" },
+                        "description": { "type": "string", "description": "Updated description" }
+                    },
+                    "required": ["id"]
+                }
+            }),
+            json!({
+                "name": "todos.complete",
+                "description": "Mark a todo as complete.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Todo ID" }
+                    },
+                    "required": ["id"]
+                }
+            }),
+            json!({
+                "name": "todos.delete",
+                "description": "Delete a todo.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Todo ID" }
+                    },
+                    "required": ["id"]
+                }
+            }),
+            // ── jobs.* ──
+            json!({
+                "name": "jobs.create",
+                "description": "Create a job for status reporting.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": { "type": "string", "description": "Job description/prompt" }
+                    },
+                    "required": ["prompt"]
+                }
+            }),
+            json!({
+                "name": "jobs.list",
+                "description": "List running jobs.",
+                "inputSchema": { "type": "object", "properties": {} }
+            }),
+            json!({
+                "name": "jobs.get",
+                "description": "Get details of a specific job.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Job ID" }
+                    },
+                    "required": ["id"]
+                }
+            }),
+            json!({
+                "name": "jobs.update",
+                "description": "Update a job's progress with a step description.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Job ID" },
+                        "step": { "type": "string", "description": "Current step description" }
+                    },
+                    "required": ["id", "step"]
+                }
+            }),
+            json!({
+                "name": "jobs.complete",
+                "description": "Mark a job as complete.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Job ID" },
+                        "status": { "type": "string", "description": "Final status: done or failed" },
+                        "summary": { "type": "string", "description": "Summary of what was done" }
+                    },
+                    "required": ["id", "status"]
+                }
+            }),
+        ]);
+    }
+
     json!(tools)
 }
 
 // ── Tool dispatch (HTTP) ────────────────────────────────────────────
 
-async fn handle_tools_call(id: Value, params: Value, state: &McpState) -> Value {
+async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_slug: Option<String>) -> Value {
     let tool_name = match params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
         None => return error_response(id, -32602, "Missing tool name".into()),
     };
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
-    debug!(tool = tool_name, "Tool call");
+    debug!(tool = tool_name, project = ?project_slug, "Tool call");
 
     match tool_name {
         "env.info" => tool_env_info(id, state),
@@ -577,10 +795,166 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState) -> Value 
         }
         "studio.refresh_context" => tool_studio_refresh(id, &arguments, state).await,
         "studio.refresh_all" => tool_studio_refresh_all(id, state).await,
+
+        // ── Proxied tools: pipeline.* → orchestrator ──
+        "pipeline.promote" => {
+            let slug = project_slug.clone().unwrap_or_default();
+            let mut args = arguments.clone();
+            args["app_slug"] = json!(slug);
+            args["source_env"] = json!(state.config.env_slug);
+            if args.get("version").and_then(|v| v.as_str()).is_none() {
+                args["version"] = json!("latest");
+            }
+            proxy_orchestrator_tool(id, state, "pipeline.promote", args).await
+        }
+        "pipeline.status" => {
+            let mut args = arguments.clone();
+            args["app_slug"] = json!(project_slug.clone().unwrap_or_default());
+            proxy_orchestrator_tool(id, state, "pipeline.status", args).await
+        }
+        "pipeline.history" => {
+            let mut args = arguments.clone();
+            args["app_slug"] = json!(project_slug.clone().unwrap_or_default());
+            args["source_env"] = json!(state.config.env_slug);
+            if args.get("limit").is_none() {
+                args["limit"] = json!(10);
+            }
+            proxy_orchestrator_tool(id, state, "pipeline.history", args).await
+        }
+
+        // ── Proxied tools: deploy.* → orchestrator ──
+        "deploy.status" => {
+            let mut args = arguments.clone();
+            args["app_id"] = json!(project_slug.clone().unwrap_or_default());
+            args["env_slug"] = json!(state.config.env_slug);
+            proxy_orchestrator_tool(id, state, "deploy.status", args).await
+        }
+        "deploy.logs" => {
+            let mut args = arguments.clone();
+            args["app_id"] = json!(project_slug.clone().unwrap_or_default());
+            args["env_slug"] = json!(state.config.env_slug);
+            if args.get("lines").is_none() {
+                args["lines"] = json!(50);
+            }
+            proxy_orchestrator_tool(id, state, "deploy.logs", args).await
+        }
+
+        // ── Proxied tools: docs.* → orchestrator ──
+        "docs.get" => {
+            let mut args = arguments.clone();
+            args["app_id"] = json!(project_slug.clone().unwrap_or_default());
+            proxy_orchestrator_tool(id, state, "docs.get", args).await
+        }
+        "docs.update" => {
+            let mut args = arguments.clone();
+            args["app_id"] = json!(project_slug.clone().unwrap_or_default());
+            proxy_orchestrator_tool(id, state, "docs.update", args).await
+        }
+        "docs.completeness" => {
+            let mut args = arguments.clone();
+            args["app_id"] = json!(project_slug.clone().unwrap_or_default());
+            proxy_orchestrator_tool(id, state, "docs.completeness", args).await
+        }
+
+        // ── Proxied tools: git.* → orchestrator ──
+        "git.log" => {
+            let mut args = arguments.clone();
+            args["repo"] = json!(project_slug.clone().unwrap_or_default());
+            if args.get("limit").is_none() {
+                args["limit"] = json!(20);
+            }
+            proxy_orchestrator_tool(id, state, "git.log", args).await
+        }
+        "git.branches" => {
+            let mut args = arguments.clone();
+            args["repo"] = json!(project_slug.clone().unwrap_or_default());
+            proxy_orchestrator_tool(id, state, "git.branches", args).await
+        }
+
+        // ── Proxied tools: todos.* → hub ──
+        "todos.list" => {
+            let slug = project_slug.clone().unwrap_or_default();
+            let mut args = arguments.clone();
+            args["context"] = json!(slug);
+            if args.get("status").is_none() {
+                args["status"] = json!("todo");
+            }
+            proxy_hub_tool(id, state, "todos.list", args).await
+        }
+        "todos.create" => {
+            let slug = project_slug.clone().unwrap_or_default();
+            let mut args = arguments.clone();
+            args["context"] = json!(slug);
+            if args.get("priority").is_none() {
+                args["priority"] = json!("medium");
+            }
+            proxy_hub_tool(id, state, "todos.create", args).await
+        }
+        "todos.update" => {
+            let mut args = arguments.clone();
+            args["context"] = json!(project_slug.clone().unwrap_or_default());
+            proxy_hub_tool(id, state, "todos.update", args).await
+        }
+        "todos.complete" => {
+            proxy_hub_tool(id, state, "todos.complete", arguments).await
+        }
+        "todos.delete" => {
+            proxy_hub_tool(id, state, "todos.delete", arguments).await
+        }
+
+        // ── Proxied tools: jobs.* → hub ──
+        "jobs.create" => {
+            let slug = project_slug.clone().unwrap_or_default();
+            let mut args = arguments.clone();
+            args["working_dir"] = json!(format!("/apps/{}", slug));
+            proxy_hub_tool(id, state, "jobs.create", args).await
+        }
+        "jobs.list" => {
+            proxy_hub_tool(id, state, "jobs.list", arguments).await
+        }
+        "jobs.get" => {
+            proxy_hub_tool(id, state, "jobs.get", arguments).await
+        }
+        "jobs.update" => {
+            proxy_hub_tool(id, state, "jobs.update", arguments).await
+        }
+        "jobs.complete" => {
+            proxy_hub_tool(id, state, "jobs.complete", arguments).await
+        }
+
         _ => {
             warn!(tool = tool_name, "Unknown tool");
             error_response(id, METHOD_NOT_FOUND, format!("Tool not found: {tool_name}"))
         }
+    }
+}
+
+// ── Proxy helpers ──────────────────────────────────────────────────
+
+async fn proxy_orchestrator_tool(id: Value, state: &McpState, tool_name: &str, args: Value) -> Value {
+    let token = state.config.mcp_token.as_deref().unwrap_or(&state.config.token);
+    match crate::proxy::proxy_to_orchestrator(
+        &state.http_client,
+        &state.config.homeroute_address,
+        state.config.homeroute_port,
+        token,
+        tool_name,
+        args,
+    ).await {
+        Ok(result) => tool_result(id, &serde_json::to_string_pretty(&result).unwrap_or_default()),
+        Err(e) => tool_error(id, &e),
+    }
+}
+
+async fn proxy_hub_tool(id: Value, state: &McpState, tool_name: &str, args: Value) -> Value {
+    match crate::proxy::proxy_to_hub(
+        &state.http_client,
+        &state.config.hub_url,
+        tool_name,
+        args,
+    ).await {
+        Ok(result) => tool_result(id, &serde_json::to_string_pretty(&result).unwrap_or_default()),
+        Err(e) => tool_error(id, &e),
     }
 }
 
@@ -1447,6 +1821,10 @@ fn error_response(id: Value, code: i32, message: String) -> Value {
 
 fn tool_success(id: Value, data: Value) -> Value {
     success_response(id, json!({ "content": [{ "type": "text", "text": data.to_string() }] }))
+}
+
+fn tool_result(id: Value, text: &str) -> Value {
+    success_response(id, json!({ "content": [{ "type": "text", "text": text }] }))
 }
 
 fn tool_error(id: Value, message: &str) -> Value {

@@ -2,12 +2,15 @@
 //!
 //! Generates per-app context files so that Claude Code running in the studio
 //! has full project awareness:
-//!   - {apps_path}/{slug}/CLAUDE.md           — project identity, DB schema, commands
-//!   - {apps_path}/{slug}/.claude/settings.json — MCP servers (env-agent, homeroute, hub)
+//!   - {apps_path}/{slug}/CLAUDE.md                  — project identity, DB schema
+//!   - {apps_path}/{slug}/.claude/settings.json      — single MCP server (project-scoped)
+//!   - {apps_path}/{slug}/.claude/rules/env-rules.md — permissions for this env type
+//!   - {apps_path}/{slug}/.claude/rules/mcp-tools.md — MCP tools documentation
+//!   - {apps_path}/{slug}/.claude/rules/workflow.md  — development workflow
 //!
 //! Also generates global context at the apps root:
 //!   - {apps_path}/CLAUDE.md                      — environment overview, all apps
-//!   - {apps_path}/.claude/settings.json          — MCP servers
+//!   - {apps_path}/.claude/settings.json          — single MCP server (no project scoping)
 //!   - {apps_path}/.claude/rules/env-rules.md     — permissions for this env type
 
 use std::fs;
@@ -26,8 +29,6 @@ pub struct ContextGenerator {
     pub base_domain: String,
     pub apps_path: String,
     pub mcp_port: u16,
-    pub homeroute_address: String,
-    pub homeroute_port: u16,
 }
 
 impl ContextGenerator {
@@ -39,25 +40,35 @@ impl ContextGenerator {
         db_tables: Option<Vec<String>>,
     ) -> anyhow::Result<()> {
         let app_dir = PathBuf::from(&self.apps_path).join(&app.slug);
-
-        // Ensure directories exist
         let claude_dir = app_dir.join(".claude");
-        fs::create_dir_all(&claude_dir)?;
+        let rules_dir = claude_dir.join("rules");
+        fs::create_dir_all(&rules_dir)?;
 
         // 1. CLAUDE.md
         let claude_md = self.render_claude_md(app, all_apps, &db_tables);
         write_if_changed(&app_dir.join("CLAUDE.md"), &claude_md)?;
 
-        // 2. .claude/settings.json
-        let settings = self.render_settings_json();
+        // 2. .claude/settings.json (single MCP server, project-scoped)
+        let settings = self.render_settings_json_for_app(&app.slug);
         write_if_changed(&claude_dir.join("settings.json"), &settings)?;
 
-        info!(
-            app = %app.slug,
-            env = %self.env_slug,
-            "context files generated"
-        );
+        // 3. .claude/rules/env-rules.md (permissions)
+        let env_rules = self.render_env_rules_md();
+        write_if_changed(&rules_dir.join("env-rules.md"), &env_rules)?;
 
+        // 4. .claude/rules/mcp-tools.md (tool documentation)
+        let mcp_tools = self.render_mcp_tools_md(app);
+        write_if_changed(&rules_dir.join("mcp-tools.md"), &mcp_tools)?;
+
+        // 5. .claude/rules/workflow.md (development workflow)
+        let workflow = self.render_workflow_md(app);
+        write_if_changed(&rules_dir.join("workflow.md"), &workflow)?;
+
+        // 6. .mcp.json (Claude Code VS Code extension reads this for MCP servers)
+        let mcp_json = self.render_mcp_json_for_app(&app.slug);
+        write_if_changed(&app_dir.join(".mcp.json"), &mcp_json)?;
+
+        info!(app = %app.slug, env = %self.env_slug, "context files generated");
         Ok(())
     }
 
@@ -136,12 +147,12 @@ impl ContextGenerator {
         let claude_md = self.render_global_claude_md(apps);
         write_if_changed(&root.join("CLAUDE.md"), &claude_md)?;
 
-        // 2. /apps/.claude/settings.json
-        let settings = self.render_settings_json();
+        // 2. /apps/.claude/settings.json (no project scoping at root level)
+        let settings = self.render_settings_json_global();
         write_if_changed(&claude_dir.join("settings.json"), &settings)?;
 
         // 3. /apps/.claude/rules/env-rules.md
-        let rules = self.render_global_rules_md();
+        let rules = self.render_env_rules_md();
         write_if_changed(&rules_dir.join("env-rules.md"), &rules)?;
 
         info!(env = %self.env_slug, "global context files generated");
@@ -243,11 +254,9 @@ impl ContextGenerator {
              - Run: `{run_command}`\n\
              {service_section}\n\
              \n\
-             ## Commandes MCP\n\
-             - `app.restart {slug}` — restart le service\n\
-             - `app.logs {slug}` — voir les logs\n\
-             - `app.health {slug}` — health check\n\
-             - Health direct: `curl http://localhost:{port}{health_path}`\n\
+             ## MCP\n\
+             Voir `.claude/rules/mcp-tools.md` pour la liste complete des outils disponibles.\n\
+             Tous les outils sont scopes automatiquement a ce projet.\n\
              \n\
              ## Autres apps dans l'environnement\n\
              {other_apps}\n",
@@ -263,7 +272,6 @@ impl ContextGenerator {
             build_cmd = build_cmd,
             run_command = app.run_command,
             service_section = service_section,
-            health_path = app.health_path,
             other_apps = other_apps_section,
         )
     }
@@ -321,24 +329,46 @@ impl ContextGenerator {
         )
     }
 
-    fn render_settings_json(&self) -> String {
+    /// Settings for a specific app (single MCP server with ?project= scoping).
+    fn render_settings_json_for_app(&self, app_slug: &str) -> String {
         let settings = serde_json::json!({
             "mcpServers": {
                 "env": {
-                    "url": format!("http://localhost:{}/mcp", self.mcp_port)
-                },
-                "homeroute": {
-                    "url": format!("http://{}:{}/mcp", self.homeroute_address, self.homeroute_port)
-                },
-                "hub": {
-                    "url": "http://10.0.0.20:3500/mcp"
+                    "type": "http",
+                    "url": format!("http://localhost:{}/mcp?project={}", self.mcp_port, app_slug)
                 }
             }
         });
         serde_json::to_string_pretty(&settings).expect("JSON serialization cannot fail")
     }
 
-    fn render_global_rules_md(&self) -> String {
+    /// Settings for global context (no project scoping, fallback).
+    fn render_settings_json_global(&self) -> String {
+        let settings = serde_json::json!({
+            "mcpServers": {
+                "env": {
+                    "type": "http",
+                    "url": format!("http://localhost:{}/mcp", self.mcp_port)
+                }
+            }
+        });
+        serde_json::to_string_pretty(&settings).expect("JSON serialization cannot fail")
+    }
+
+    /// Render .mcp.json for Claude Code VS Code extension (per-app, project-scoped).
+    fn render_mcp_json_for_app(&self, app_slug: &str) -> String {
+        let mcp = serde_json::json!({
+            "mcpServers": {
+                "env": {
+                    "type": "http",
+                    "url": format!("http://localhost:{}/mcp?project={}", self.mcp_port, app_slug)
+                }
+            }
+        });
+        serde_json::to_string_pretty(&mcp).expect("JSON serialization cannot fail")
+    }
+
+    fn render_env_rules_md(&self) -> String {
         let perms = EnvPermissions::for_type(self.env_type);
         let env_label = env_type_label(self.env_type);
 
@@ -435,6 +465,131 @@ impl ContextGenerator {
         lines.push(String::new());
         lines.join("\n")
     }
+
+    fn render_mcp_tools_md(&self, app: &EnvAgentAppConfig) -> String {
+        format!(
+            "# Outils MCP — {name}\n\
+             \n\
+             Tous les outils sont automatiquement scopes a ce projet ({slug}).\n\
+             Tu n'as PAS besoin de passer app_id, context ou slug.\n\
+             \n\
+             ## Base de donnees (db.*)\n\
+             - `db.list_tables` — lister les tables\n\
+             - `db.describe_table` — schema d'une table\n\
+             - `db.query_data` — requeter avec filtres, tri, pagination\n\
+             - `db.insert_data` — inserer des lignes\n\
+             - `db.update_data` — mettre a jour avec filtres\n\
+             - `db.delete_data` — supprimer avec filtres\n\
+             - `db.create_table` — creer une table\n\
+             - `db.add_column` — ajouter une colonne\n\
+             - `db.remove_column` — supprimer une colonne\n\
+             - `db.get_schema` — schema complet en JSON\n\
+             \n\
+             ## App (app.*)\n\
+             - `app.status` — verifier si le service tourne\n\
+             - `app.restart` — redemarrer apres modification\n\
+             - `app.logs` — consulter les logs recents\n\
+             - `app.health` — health check HTTP\n\
+             \n\
+             ## Todos (todos.*)\n\
+             - `todos.list` — lister les todos du projet\n\
+             - `todos.create` — creer un todo\n\
+             - `todos.complete` — marquer termine\n\
+             - `todos.update` — mettre a jour\n\
+             - `todos.delete` — supprimer\n\
+             \n\
+             ## Pipeline (pipeline.*)\n\
+             - `pipeline.promote` — deployer vers l'env suivant\n\
+             - `pipeline.status` — statut d'un deploiement\n\
+             - `pipeline.history` — historique des deploiements\n\
+             \n\
+             ## Documentation (docs.*)\n\
+             - `docs.get` — lire la doc du projet\n\
+             - `docs.update` — mettre a jour une section (meta, structure, features, backend, notes)\n\
+             - `docs.completeness` — verifier les sections remplies\n\
+             \n\
+             ## Git (git.*)\n\
+             - `git.log` — derniers commits\n\
+             - `git.branches` — lister les branches\n\
+             \n\
+             ## Secrets (secrets.*)\n\
+             - `secrets.list` — lister les variables d'env\n\
+             - `secrets.get` — lire une variable\n\
+             - `secrets.set` — definir une variable\n\
+             - `secrets.delete` — supprimer une variable\n\
+             \n\
+             ## Jobs (jobs.*)\n\
+             - `jobs.create` — lancer un job en arriere-plan\n\
+             - `jobs.list` — lister les jobs\n\
+             - `jobs.get` — details d'un job\n\
+             - `jobs.complete` — marquer un job termine\n",
+            name = app.name,
+            slug = app.slug,
+        )
+    }
+
+    fn render_workflow_md(&self, app: &EnvAgentAppConfig) -> String {
+        let build_cmd = app
+            .build_command
+            .as_deref()
+            .unwrap_or_else(|| app.stack.default_build_command());
+
+        let env_section = if self.env_type == EnvType::Development {
+            format!(
+                "- Watch: `{slug}-watch.service` (rebuild continu)\n\
+                 \n\
+                 ## Developpement\n\
+                 - Les modifications de code sont rebuildes automatiquement par le service watch\n\
+                 - Verifier les logs: `app.logs`\n\
+                 - Verifier la sante: `app.health`\n\
+                 - Redemarrer manuellement: `app.restart`\n\
+                 \n\
+                 ## Deploiement\n\
+                 - `pipeline.promote` pour deployer vers acceptance ou production\n\
+                 - `pipeline.status` pour suivre le deploiement\n\
+                 - `pipeline.history` pour l'historique",
+                slug = app.slug,
+            )
+        } else {
+            let label = env_type_label(self.env_type);
+            format!(
+                "\n\
+                 ## Environnement {label}\n\
+                 - Code en lecture seule. Ne pas modifier le code directement.\n\
+                 - Deploye via pipeline uniquement.",
+            )
+        };
+
+        format!(
+            "# Workflow — {name} ({stack})\n\
+             \n\
+             ## Service systemd\n\
+             - Service: `{slug}.service`\n\
+             - Run: `{run_command}`\n\
+             - Build: `{build_cmd}`\n\
+             {env_section}\n\
+             \n\
+             ## Base de donnees\n\
+             - Utiliser `db.*` pour toutes les operations\n\
+             - Ne JAMAIS acceder aux fichiers .db directement\n\
+             - Faire un snapshot avant les modifications de schema: `db.snapshot`\n\
+             \n\
+             ## Todos\n\
+             - Consulter `todos.list` en debut de session\n\
+             - Creer des todos pour le travail de suivi: `todos.create`\n\
+             - Marquer complete quand termine: `todos.complete`\n\
+             \n\
+             ## Documentation\n\
+             - Lire la doc avant de modifier l'app: `docs.get`\n\
+             - Mettre a jour apres modification: `docs.update`\n",
+            name = app.name,
+            stack = app.stack.display_name(),
+            slug = app.slug,
+            run_command = app.run_command,
+            build_cmd = build_cmd,
+            env_section = env_section,
+        )
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -472,8 +627,6 @@ mod tests {
             base_domain: "mynetwk.biz".to_string(),
             apps_path: "/tmp/ctx-test-apps".to_string(),
             mcp_port: 4010,
-            homeroute_address: "10.0.0.254".to_string(),
-            homeroute_port: 4001,
         }
     }
 
@@ -530,22 +683,22 @@ mod tests {
         assert!(claude_md.contains("`trades`"));
         assert!(claude_md.contains("cargo build --release"));
         assert!(claude_md.contains("Service principal:"));
-        assert!(claude_md.contains("app.restart trader"));
+        assert!(claude_md.contains("mcp-tools.md"));
 
+        // Single MCP server with project scoping
         let settings =
             fs::read_to_string(base.join("trader/.claude/settings.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&settings).unwrap();
-        assert!(parsed["mcpServers"]["env"]["url"]
-            .as_str()
-            .unwrap()
-            .contains("4010"));
-        assert!(parsed["mcpServers"]["homeroute"]["url"]
-            .as_str()
-            .unwrap()
-            .contains("10.0.0.254"));
+        let env_url = parsed["mcpServers"]["env"]["url"].as_str().unwrap();
+        assert!(env_url.contains("4010"));
+        assert!(env_url.contains("?project=trader"));
+        // Only 1 MCP server now
+        assert_eq!(parsed["mcpServers"].as_object().unwrap().len(), 1);
 
-        // Per-app env-context.md should NOT exist anymore
-        assert!(!base.join("trader/.claude/rules/env-context.md").exists());
+        // Per-app rules files should exist
+        assert!(base.join("trader/.claude/rules/env-rules.md").exists());
+        assert!(base.join("trader/.claude/rules/mcp-tools.md").exists());
+        assert!(base.join("trader/.claude/rules/workflow.md").exists());
 
         // Clean up
         let _ = fs::remove_dir_all(&base);
@@ -568,7 +721,7 @@ mod tests {
             ..test_generator()
         };
 
-        let rules_md = ctx.render_global_rules_md();
+        let rules_md = ctx.render_env_rules_md();
         assert!(rules_md.contains("PRODUCTION"));
         assert!(rules_md.contains("| Modifier le code source | Non |"));
         assert!(rules_md.contains("| Rollback | Oui |"));
@@ -678,13 +831,13 @@ mod tests {
         assert!(claude_md.contains("oui")); // trader has_db
         assert!(claude_md.contains("Stacks supportees"));
 
-        // Check settings.json
+        // Check settings.json (single MCP server, no project scoping)
         let settings = fs::read_to_string(root.join(".claude/settings.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&settings).unwrap();
-        assert!(parsed["mcpServers"]["env"]["url"]
-            .as_str()
-            .unwrap()
-            .contains("4010"));
+        let env_url = parsed["mcpServers"]["env"]["url"].as_str().unwrap();
+        assert!(env_url.contains("4010"));
+        assert!(!env_url.contains("?project="), "global settings should not have project scoping");
+        assert_eq!(parsed["mcpServers"].as_object().unwrap().len(), 1);
 
         // Check env-rules.md
         let rules = fs::read_to_string(root.join(".claude/rules/env-rules.md")).unwrap();
@@ -715,5 +868,75 @@ mod tests {
         assert_eq!(mtime1, mtime2, "file should not be rewritten if unchanged");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_render_settings_json_for_app() {
+        let ctx = test_generator();
+        let json = ctx.render_settings_json_for_app("trader");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let url = parsed["mcpServers"]["env"]["url"].as_str().unwrap();
+        assert_eq!(url, "http://localhost:4010/mcp?project=trader");
+        assert_eq!(parsed["mcpServers"].as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_render_settings_json_global() {
+        let ctx = test_generator();
+        let json = ctx.render_settings_json_global();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let url = parsed["mcpServers"]["env"]["url"].as_str().unwrap();
+        assert_eq!(url, "http://localhost:4010/mcp");
+        assert!(!url.contains("?project="));
+    }
+
+    #[test]
+    fn test_render_mcp_tools_md() {
+        let ctx = test_generator();
+        let app = test_app();
+        let md = ctx.render_mcp_tools_md(&app);
+        assert!(md.contains("# Outils MCP — Trader"));
+        assert!(md.contains("scopes a ce projet (trader)"));
+        assert!(md.contains("## Base de donnees (db.*)"));
+        assert!(md.contains("db.list_tables"));
+        assert!(md.contains("## App (app.*)"));
+        assert!(md.contains("app.restart"));
+        assert!(md.contains("## Todos (todos.*)"));
+        assert!(md.contains("## Pipeline (pipeline.*)"));
+        assert!(md.contains("## Documentation (docs.*)"));
+        assert!(md.contains("## Git (git.*)"));
+        assert!(md.contains("## Secrets (secrets.*)"));
+        assert!(md.contains("## Jobs (jobs.*)"));
+    }
+
+    #[test]
+    fn test_render_workflow_md_dev() {
+        let ctx = test_generator();
+        let app = test_app();
+        let md = ctx.render_workflow_md(&app);
+        assert!(md.contains("# Workflow — Trader (Axum + Vite/React)"));
+        assert!(md.contains("trader.service"));
+        assert!(md.contains("trader-watch.service"));
+        assert!(md.contains("## Developpement"));
+        assert!(md.contains("## Deploiement"));
+        assert!(md.contains("pipeline.promote"));
+        assert!(md.contains("## Base de donnees"));
+        assert!(md.contains("## Todos"));
+        assert!(md.contains("## Documentation"));
+    }
+
+    #[test]
+    fn test_render_workflow_md_prod() {
+        let ctx = ContextGenerator {
+            env_type: EnvType::Production,
+            ..test_generator()
+        };
+        let app = test_app();
+        let md = ctx.render_workflow_md(&app);
+        assert!(md.contains("# Workflow — Trader"));
+        assert!(!md.contains("watch.service"));
+        assert!(md.contains("Environnement Production"));
+        assert!(md.contains("lecture seule"));
+        assert!(md.contains("pipeline uniquement"));
     }
 }
