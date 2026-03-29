@@ -18,6 +18,7 @@ store_flutter/.dart_tool/
 
 # IDE
 .vscode/
+.claude/
 
 # Data & config
 data/
