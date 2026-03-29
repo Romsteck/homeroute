@@ -31,7 +31,10 @@ pub enum EnvAgentMessage {
 
     /// Agent reports system metrics.
     #[serde(rename = "metrics")]
-    Metrics(EnvAgentMetrics),
+    Metrics {
+        #[serde(flatten)]
+        data: EnvAgentMetrics,
+    },
 
     /// Agent reports host-level metrics (for multi-host tracking).
     #[serde(rename = "host_metrics")]
@@ -81,6 +84,8 @@ pub enum EnvAgentMessage {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EnvAgentMetrics {
     pub memory_bytes: u64,
+    #[serde(default)]
+    pub memory_total_bytes: u64,
     pub cpu_percent: f32,
     pub disk_used_bytes: u64,
     pub disk_total_bytes: u64,

@@ -147,6 +147,7 @@ make deploy-edge         # build + rsync + restart hr-edge seul
 make deploy-orchestrator # build + rsync + restart hr-orchestrator seul
 make deploy-netcore      # build + rsync + restart hr-netcore (rare)
 make agent-prod          # push hr-agent vers les containers de prod
+make deploy-env-agent    # build + deploy env-agent vers TOUS les containers d'env
 
 # Déploiement local (UNIQUEMENT sur le serveur de prod lui-même)
 make deploy          # build all + systemctl restart (bloqué sur dev)
@@ -169,7 +170,7 @@ ssh root@10.0.0.254 'systemctl reload hr-netcore'    # hot-reload DNS/DHCP/Adblo
 - **TOUJOURS** `make deploy-orchestrator` si modification de hr-registry, hr-container, hr-git, hr-orchestrator
 - **TOUJOURS** `make deploy-netcore` si modification de hr-dns, hr-dhcp, hr-ipv6, hr-adblock, hr-netcore
 - **TOUJOURS** `make agent && make agent-prod` après modification du crate `hr-agent`
-- **TOUJOURS** `make env-agent` après modification du crate `env-agent`
+- **TOUJOURS** `make deploy-env-agent` après modification du crate `env-agent` (build + deploy vers tous les containers d'env)
 - **TOUJOURS** `make deploy-orchestrator` si modification de hr-environment, hr-pipeline, hr-db
 - Exécuter les commandes dans les containers via **`POST /api/applications/{id}/exec`** (pas machinectl)
 - Passer les commandes comme un seul string bash : `command: ["cmd"]`

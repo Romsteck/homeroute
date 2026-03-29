@@ -207,6 +207,7 @@ export const triggerBackup = () => api.post('/backup/trigger');
 export const getEnvironments = () => api.get('/environments');
 export const getEnvironment = (slug) => api.get(`/environments/${slug}`);
 export const createEnvironment = (data) => api.post('/environments', data);
+export const updateEnvironment = (slug, data) => api.put(`/environments/${slug}`, data);
 export const startEnvironment = (slug) => api.post(`/environments/${slug}/start`);
 export const stopEnvironment = (slug) => api.post(`/environments/${slug}/stop`);
 export const deleteEnvironment = (slug) => api.delete(`/environments/${slug}`);

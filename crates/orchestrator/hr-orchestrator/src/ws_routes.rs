@@ -1975,6 +1975,7 @@ async fn handle_env_agent_ws(state: WsState, mut socket: WebSocket) {
     }
 
     // Bidirectional message loop
+    info!(env_slug, "Starting bidirectional WS loop");
     loop {
         tokio::select! {
             // Orchestrator -> Env-Agent
@@ -1994,12 +1995,23 @@ async fn handle_env_agent_ws(state: WsState, mut socket: WebSocket) {
                     Some(Ok(Message::Text(text))) => {
                         handle_env_agent_message(&state, &env_slug, &text).await;
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    _ => {}
+                    Some(Ok(Message::Close(reason))) => {
+                        info!(env_slug, ?reason, "Env WS closed by client");
+                        break;
+                    }
+                    None => {
+                        info!(env_slug, "Env WS stream ended (None)");
+                        break;
+                    }
+                    other => {
+                        tracing::debug!(env_slug, ?other, "Env WS non-text message");
+                    }
                 }
             }
         }
     }
+
+    info!(env_slug, "Env WS loop exited, cleaning up");
 
     // Remove edge app routes and DNS records for this environment
     if let Some(env_record) = env_manager.get_by_slug(&env_slug).await {
@@ -2121,8 +2133,8 @@ async fn handle_env_agent_message(
         }) => {
             info!(env_slug, app_slug, running, "Env-agent app status change");
         }
-        Ok(EnvAgentMessage::Metrics(_)) => {
-            // Store metrics if needed in the future
+        Ok(EnvAgentMessage::Metrics { data: metrics }) => {
+            env_manager.update_metrics(env_slug, metrics).await;
         }
         Ok(EnvAgentMessage::Error { message }) => {
             warn!(env_slug, message, "Env-agent reported error");
@@ -2140,7 +2152,8 @@ async fn handle_env_agent_message(
         }
         Ok(EnvAgentMessage::HostMetrics { hostname, total_memory_mb, available_memory_mb, cpu_usage_percent }) => {
             debug!(env_slug, hostname, total_memory_mb, available_memory_mb, cpu_usage_percent, "Env-agent host metrics");
-            // Host metrics from env-agent — can be stored for cross-host capacity planning
+            // Store total memory for the environment (convert MB to bytes)
+            env_manager.update_host_memory(env_slug, total_memory_mb * 1024 * 1024).await;
         }
         Err(e) => {
             warn!(env_slug, error = %e, "Failed to parse env-agent message");

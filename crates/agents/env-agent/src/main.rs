@@ -150,6 +150,81 @@ async fn main() -> Result<()> {
             .send(EnvAgentMessage::AppDiscovery { apps: apps_info })
             .await;
 
+        // Spawn metrics sender (every 5 seconds) — uses cgroups for container-accurate metrics
+        let metrics_tx = outbound_tx.clone();
+        let metrics_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            let mut prev_cpu_usec: Option<(u64, std::time::Instant)> = None;
+            loop {
+                interval.tick().await;
+
+                // CPU usage from cgroup cpu.stat (usage_usec / elapsed wall time)
+                let cpu_percent = {
+                    let now = std::time::Instant::now();
+                    let usage_usec = std::fs::read_to_string("/sys/fs/cgroup/cpu.stat").ok()
+                        .and_then(|s| s.lines().find(|l| l.starts_with("usage_usec"))
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .and_then(|v| v.parse::<u64>().ok()));
+                    let pct = match (prev_cpu_usec, usage_usec) {
+                        (Some((prev_usec, prev_time)), Some(cur_usec)) => {
+                            let delta_usec = cur_usec.saturating_sub(prev_usec) as f64;
+                            let delta_wall = now.duration_since(prev_time).as_micros() as f64;
+                            // Normalize by number of CPUs for percentage
+                            let num_cpus = num_cpus().unwrap_or(1) as f64;
+                            if delta_wall > 0.0 {
+                                ((delta_usec / delta_wall / num_cpus) * 1000.0).round() / 10.0
+                            } else { 0.0 }
+                        }
+                        _ => 0.0,
+                    };
+                    if let Some(usec) = usage_usec {
+                        prev_cpu_usec = Some((usec, now));
+                    }
+                    pct as f32
+                };
+
+                // Memory from cgroup (container-specific, not host)
+                let mem_used = read_u64_file("/sys/fs/cgroup/memory.current").unwrap_or(0);
+                let mem_max = read_u64_file("/sys/fs/cgroup/memory.max");
+                // If memory.max is "max" (unlimited), fall back to host MemTotal
+                let mem_total = mem_max.unwrap_or_else(|| {
+                    std::fs::read_to_string("/proc/meminfo").ok()
+                        .and_then(|s| s.lines().find(|l| l.starts_with("MemTotal:"))
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .and_then(|v| v.parse::<u64>().ok()))
+                        .map(|kb| kb * 1024)
+                        .unwrap_or(0)
+                });
+
+                // Disk usage from df (container shares host disk but shows its own overlay)
+                let (disk_used, disk_total) = {
+                    std::process::Command::new("df")
+                        .args(["-B1", "--output=used,size", "/"])
+                        .output().ok()
+                        .and_then(|o| {
+                            let text = String::from_utf8_lossy(&o.stdout);
+                            let line = text.lines().nth(1)?;
+                            let p: Vec<&str> = line.split_whitespace().collect();
+                            Some((p.first()?.parse().ok()?, p.get(1)?.parse().ok()?))
+                        })
+                        .unwrap_or((0, 0))
+                };
+
+                let metrics = hr_environment::protocol::EnvAgentMetrics {
+                    memory_bytes: mem_used,
+                    memory_total_bytes: mem_total,
+                    cpu_percent,
+                    disk_used_bytes: disk_used,
+                    disk_total_bytes: disk_total,
+                    apps_memory_bytes: 0,
+                };
+
+                if metrics_tx.send(EnvAgentMessage::Metrics { data: metrics }).await.is_err() {
+                    break;
+                }
+            }
+        });
+
         // ── Message loop ─────────────────────────────────────────────
         let mut connected = false;
         loop {
@@ -194,6 +269,9 @@ async fn main() -> Result<()> {
                 }
             }
         }
+
+        // Cancel metrics sender
+        metrics_handle.abort();
 
         // Wait before reconnecting
         info!(secs = backoff, "Waiting before reconnect...");
@@ -396,4 +474,19 @@ async fn build_app_discovery(supervisor: &AppSupervisor) -> Vec<EnvApp> {
             has_db: false, // TODO: check DbManager
         })
         .collect()
+}
+
+/// Read a u64 from a cgroup file (e.g., memory.current).
+/// Returns None if file doesn't exist or contains "max".
+fn read_u64_file(path: &str) -> Option<u64> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let trimmed = content.trim();
+    if trimmed == "max" { return None; }
+    trimmed.parse().ok()
+}
+
+/// Get number of CPUs available (for normalizing cgroup CPU usage).
+fn num_cpus() -> Option<u32> {
+    let content = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+    Some(content.matches("processor").count() as u32)
 }

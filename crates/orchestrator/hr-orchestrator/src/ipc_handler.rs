@@ -691,6 +691,14 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                     Err(e) => IpcResponse::err(format!("Failed to create environment: {e}")),
                 }
             }
+            OrchestratorRequest::UpdateEnvironment { id, request } => {
+                let name = request.get("name").and_then(|v| v.as_str()).map(String::from);
+                let slug = request.get("slug").and_then(|v| v.as_str()).map(String::from);
+                match self.env_manager.update_environment(&id, name, slug).await {
+                    Ok(()) => IpcResponse::ok_empty(),
+                    Err(e) => IpcResponse::err(format!("Failed to update environment: {e}")),
+                }
+            }
             OrchestratorRequest::DeleteEnvironment { id } => {
                 match self.env_manager.delete_environment(&id).await {
                     Ok(()) => IpcResponse::ok_empty(),

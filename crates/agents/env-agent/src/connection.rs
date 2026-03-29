@@ -121,7 +121,10 @@ pub async fn run_connection(
         }
     });
 
-    // Main message loop
+    // Main message loop with keepalive ping every 15s
+    let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+    ping_interval.tick().await; // skip first immediate tick
+
     loop {
         tokio::select! {
             // Incoming messages from orchestrator
@@ -180,12 +183,20 @@ pub async fn run_connection(
                 let uptime = start_time.elapsed().as_secs();
                 let hb = EnvAgentMessage::Heartbeat {
                     uptime_secs: uptime,
-                    apps_running: 0, // TODO: query supervisor for actual count
+                    apps_running: 0,
                     apps_total,
                 };
                 let json = serde_json::to_string(&hb)?;
                 if ws_sink.send(Message::Text(json.into())).await.is_err() {
                     error!("Failed to send heartbeat");
+                    break;
+                }
+            }
+
+            // WebSocket keepalive ping (detects dead connections)
+            _ = ping_interval.tick() => {
+                if ws_sink.send(Message::Ping(vec![].into())).await.is_err() {
+                    error!("Failed to send WebSocket ping — connection dead");
                     break;
                 }
             }

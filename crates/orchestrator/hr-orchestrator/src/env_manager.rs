@@ -13,6 +13,7 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 
 use hr_environment::protocol::EnvOrchestratorMessage;
+use hr_environment::protocol::EnvAgentMetrics;
 use hr_environment::types::{EnvApp, EnvStatus, EnvType, EnvironmentRecord};
 
 // ── Types ────────────────────────────────────────────────────────
@@ -130,6 +131,11 @@ impl EnvironmentManager {
             last_heartbeat: None,
             apps: Vec::new(),
             created_at: Utc::now(),
+            cpu_percent: None,
+            memory_used_bytes: None,
+            memory_total_bytes: None,
+            disk_used_bytes: None,
+            disk_total_bytes: None,
         };
 
         let stored = StoredEnvRecord {
@@ -182,6 +188,68 @@ impl EnvironmentManager {
         self.persist().await;
         info!(slug, "Environment deleted by slug");
         Ok(())
+    }
+
+    /// Update environment properties (name, slug).
+    pub async fn update_environment(
+        &self,
+        id_or_slug: &str,
+        name: Option<String>,
+        slug: Option<String>,
+    ) -> Result<(), String> {
+        let mut envs = self.environments.write().await;
+
+        // Find the index of the target environment
+        let idx = envs
+            .iter()
+            .position(|e| e.record.id == id_or_slug || e.record.slug == id_or_slug)
+            .ok_or_else(|| format!("Environment not found: {id_or_slug}"))?;
+
+        // Check slug uniqueness if changing
+        if let Some(ref new_slug) = slug {
+            if new_slug != &envs[idx].record.slug {
+                let already_exists = envs
+                    .iter()
+                    .enumerate()
+                    .any(|(i, e)| i != idx && e.record.slug == *new_slug);
+                if already_exists {
+                    return Err(format!("Slug '{}' already in use", new_slug));
+                }
+            }
+        }
+
+        if let Some(new_name) = name {
+            envs[idx].record.name = new_name;
+        }
+        if let Some(new_slug) = slug {
+            envs[idx].record.slug = new_slug;
+        }
+
+        drop(envs);
+        self.persist().await;
+        info!(id_or_slug, "Environment updated");
+        Ok(())
+    }
+
+    /// Update metrics for an environment (from env-agent Metrics message).
+    /// Does NOT persist to disk (too frequent) — in-memory only.
+    pub async fn update_metrics(&self, env_slug: &str, metrics: EnvAgentMetrics) {
+        let mut envs = self.environments.write().await;
+        if let Some(env) = envs.iter_mut().find(|e| e.record.slug == env_slug) {
+            env.record.cpu_percent = Some(metrics.cpu_percent);
+            env.record.memory_used_bytes = Some(metrics.memory_bytes);
+            env.record.memory_total_bytes = Some(metrics.memory_total_bytes);
+            env.record.disk_used_bytes = Some(metrics.disk_used_bytes);
+            env.record.disk_total_bytes = Some(metrics.disk_total_bytes);
+        }
+    }
+
+    /// Update total memory from host metrics.
+    pub async fn update_host_memory(&self, env_slug: &str, total_memory_bytes: u64) {
+        let mut envs = self.environments.write().await;
+        if let Some(env) = envs.iter_mut().find(|e| e.record.slug == env_slug) {
+            env.record.memory_total_bytes = Some(total_memory_bytes);
+        }
     }
 
     /// Update the status of an environment by ID.

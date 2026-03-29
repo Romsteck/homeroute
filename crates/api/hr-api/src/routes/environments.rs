@@ -17,7 +17,7 @@ use crate::state::ApiState;
 pub fn router() -> Router<ApiState> {
     Router::new()
         .route("/environments", get(list_environments).post(create_environment))
-        .route("/environments/{slug}", get(get_environment).delete(destroy_environment))
+        .route("/environments/{slug}", get(get_environment).put(update_environment).delete(destroy_environment))
         .route("/environments/{slug}/start", post(start_environment))
         .route("/environments/{slug}/stop", post(stop_environment))
         .route("/environments/{slug}/apps", get(get_environment_apps))
@@ -198,6 +198,35 @@ async fn destroy_environment(
 ) -> impl IntoResponse {
     info!(slug = slug, "Destroying environment");
     match state.orchestrator.request(&OrchestratorRequest::DeleteEnvironment { id: slug }).await {
+        Ok(resp) => ipc_ok_response(resp),
+        Err(e) => ipc_err_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateEnvironmentRequest {
+    name: Option<String>,
+    slug: Option<String>,
+}
+
+/// PUT /api/environments/:slug
+async fn update_environment(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+    Json(req): Json<UpdateEnvironmentRequest>,
+) -> impl IntoResponse {
+    let request = serde_json::json!({
+        "name": req.name,
+        "slug": req.slug,
+    });
+
+    info!(slug = slug, "Updating environment");
+
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::UpdateEnvironment { id: slug, request })
+        .await
+    {
         Ok(resp) => ipc_ok_response(resp),
         Err(e) => ipc_err_response(e),
     }

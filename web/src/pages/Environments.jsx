@@ -14,6 +14,7 @@ import {
   Loader2,
   RefreshCw,
   Check,
+  Pencil,
 } from 'lucide-react';
 import Button from '../components/Button';
 import PageHeader from '../components/PageHeader';
@@ -21,6 +22,7 @@ import StatusBadge from '../components/StatusBadge';
 import {
   getEnvironments,
   createEnvironment,
+  updateEnvironment,
   startEnvironment,
   stopEnvironment,
   deleteEnvironment,
@@ -35,6 +37,10 @@ function Environments() {
   const [creating, setCreating] = useState(false);
   const [formData, setFormData] = useState({ name: '', slug: '', env_type: 'dev' });
   const [formError, setFormError] = useState('');
+  const [editEnv, setEditEnv] = useState(null);
+  const [editData, setEditData] = useState({ name: '', slug: '' });
+  const [editError, setEditError] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const fetchData = useCallback(async () => {
     try {
@@ -51,6 +57,14 @@ function Environments() {
 
   useEffect(() => {
     fetchData();
+  }, [fetchData]);
+
+  // Auto-refresh every 5 seconds for metrics
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetchData();
+    }, 5000);
+    return () => clearInterval(interval);
   }, [fetchData]);
 
   // Listen for real-time environment status updates
@@ -148,6 +162,36 @@ function Environments() {
     }
   }
 
+  function openEdit(env) {
+    setEditEnv(env);
+    setEditData({ name: env.name || '', slug: env.slug || '' });
+    setEditError('');
+  }
+
+  async function handleEdit(e) {
+    e.preventDefault();
+    if (!editData.name || !editData.slug) {
+      setEditError('Nom et slug requis');
+      return;
+    }
+    setSaving(true);
+    setEditError('');
+    try {
+      const res = await updateEnvironment(editEnv.slug, editData);
+      if (res.data.success) {
+        setEditEnv(null);
+        setMessage({ type: 'success', text: 'Environnement mis a jour' });
+        fetchData();
+      } else {
+        setEditError(res.data.error || 'Erreur');
+      }
+    } catch (error) {
+      setEditError(error.response?.data?.error || 'Erreur de mise a jour');
+    } finally {
+      setSaving(false);
+    }
+  }
+
   // ── Helpers ─────────────────────────────────
 
   function getEnvStatusBadge(status) {
@@ -194,6 +238,19 @@ function Environments() {
       case 'staging': return 'STAGING';
       default: return (envType || 'DEV').toUpperCase();
     }
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes) return '--';
+    const gb = bytes / 1073741824;
+    return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / 1048576).toFixed(0)} MB`;
+  }
+
+  function metricColor(percent) {
+    if (percent == null) return 'text-gray-500';
+    if (percent < 60) return 'text-green-400';
+    if (percent < 80) return 'text-yellow-400';
+    return 'text-red-400';
   }
 
   function getAgentIcon(env) {
@@ -258,6 +315,8 @@ function Environments() {
                     <th className="px-3 py-2 font-medium">Statut</th>
                     <th className="px-3 py-2 font-medium">Agent</th>
                     <th className="px-3 py-2 font-medium hidden lg:table-cell">IP</th>
+                    <th className="px-3 py-2 font-medium hidden lg:table-cell">CPU</th>
+                    <th className="px-3 py-2 font-medium hidden lg:table-cell">RAM</th>
                     <th className="px-3 py-2 font-medium hidden lg:table-cell">Apps</th>
                     <th className="px-3 py-2 font-medium hidden xl:table-cell">Hote</th>
                     <th className="px-3 py-2 font-medium">Actions</th>
@@ -294,6 +353,24 @@ function Environments() {
                         <span className="text-sm font-mono text-gray-400">
                           {env.ipv4_address || env.ip || env.container_ip || '--'}
                         </span>
+                      </td>
+                      {/* CPU */}
+                      <td className="px-3 py-2.5 hidden lg:table-cell">
+                        <span className={`text-sm font-mono ${metricColor(env.cpu_percent)}`}>
+                          {env.cpu_percent != null ? `${Math.round(env.cpu_percent)}%` : '--'}
+                        </span>
+                      </td>
+                      {/* RAM */}
+                      <td className="px-3 py-2.5 hidden lg:table-cell">
+                        {env.memory_used_bytes != null ? (
+                          <span className={`text-sm font-mono ${metricColor(
+                            env.memory_total_bytes ? (env.memory_used_bytes / env.memory_total_bytes) * 100 : null
+                          )}`}>
+                            {formatBytes(env.memory_used_bytes)}/{formatBytes(env.memory_total_bytes)}
+                          </span>
+                        ) : (
+                          <span className="text-sm font-mono text-gray-500">--</span>
+                        )}
                       </td>
                       {/* App count */}
                       <td className="px-3 py-2.5 hidden lg:table-cell">
@@ -350,6 +427,13 @@ function Environments() {
                             </a>
                           )}
                           <button
+                            onClick={() => openEdit(env)}
+                            className="p-1.5 text-blue-400 hover:bg-blue-600/20"
+                            title="Modifier"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                          <button
                             onClick={() => handleDelete(env)}
                             className="p-1.5 text-red-400 hover:bg-red-600/20"
                             title="Supprimer"
@@ -392,6 +476,22 @@ function Environments() {
                       <span className="text-gray-500 text-xs">IP</span>
                       <div className="mt-0.5 font-mono text-gray-300 text-sm">
                         {env.ipv4_address || env.ip || env.container_ip || '--'}
+                      </div>
+                    </div>
+                    <div>
+                      <span className="text-gray-500 text-xs">CPU</span>
+                      <div className={`mt-0.5 font-mono text-sm ${metricColor(env.cpu_percent)}`}>
+                        {env.cpu_percent != null ? `${Math.round(env.cpu_percent)}%` : '--'}
+                      </div>
+                    </div>
+                    <div>
+                      <span className="text-gray-500 text-xs">RAM</span>
+                      <div className={`mt-0.5 font-mono text-sm ${metricColor(
+                        env.memory_total_bytes ? (env.memory_used_bytes / env.memory_total_bytes) * 100 : null
+                      )}`}>
+                        {env.memory_used_bytes != null
+                          ? `${formatBytes(env.memory_used_bytes)}/${formatBytes(env.memory_total_bytes)}`
+                          : '--'}
                       </div>
                     </div>
                     <div>
@@ -524,6 +624,60 @@ function Environments() {
                 <Button type="submit" disabled={creating} loading={creating} className="flex-1">
                   <Check className="w-3.5 h-3.5" />
                   Creer
+                </Button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Environment Modal */}
+      {editEnv && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-800 p-4 w-full max-w-md border border-gray-700 rounded-lg">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-bold text-white">Modifier l'environnement</h2>
+              <button onClick={() => { setEditEnv(null); setEditError(''); }} className="text-gray-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleEdit} className="space-y-3">
+              <div>
+                <label className="block text-xs text-gray-400 mb-0.5">Nom *</label>
+                <input
+                  type="text"
+                  value={editData.name}
+                  onChange={(e) => setEditData({ ...editData, name: e.target.value })}
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 text-sm text-white focus:outline-none focus:border-blue-500"
+                  placeholder="Nom de l'environnement"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs text-gray-400 mb-0.5">Slug</label>
+                <input
+                  type="text"
+                  value={editData.slug}
+                  disabled
+                  className="w-full px-2 py-1.5 bg-gray-900/50 border border-gray-700 text-sm text-gray-500 font-mono cursor-not-allowed"
+                  title="Le slug ne peut pas etre modifie (implique DNS, certificats, routes proxy)"
+                />
+                <p className="text-[10px] text-gray-600 mt-0.5">Non modifiable (DNS, certs, routes)</p>
+              </div>
+
+              {editError && (
+                <div className="px-3 py-2 bg-red-900/20 border border-red-600 text-red-400 text-sm">{editError}</div>
+              )}
+
+              <div className="flex gap-2 pt-1">
+                <Button type="button" variant="secondary" onClick={() => { setEditEnv(null); setEditError(''); }} className="flex-1">
+                  Annuler
+                </Button>
+                <Button type="submit" disabled={saving} loading={saving} className="flex-1">
+                  <Check className="w-3.5 h-3.5" />
+                  Enregistrer
                 </Button>
               </div>
             </form>

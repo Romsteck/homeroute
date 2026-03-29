@@ -185,8 +185,26 @@ store:
 # Build env-agent binary (environment agent for nspawn containers)
 env-agent:
 	cd crates && cargo build --release -p env-agent
+	@cp crates/target/release/env-agent data/agent-binaries/env-agent 2>/dev/null || true
 	@echo "env-agent built → crates/target/release/env-agent"
-	@echo "Copy to agent-binaries: cp crates/target/release/env-agent data/agent-binaries/env-agent"
+
+# Deploy env-agent to ALL environment containers on Medion
+# Binary path: /usr/bin/env-agent (standardized across all envs)
+ENV_CONTAINERS := env-dev env-prod
+deploy-env-agent: env-agent
+	@for ENV in $(ENV_CONTAINERS); do \
+		echo "Deploying env-agent to $$ENV..."; \
+		LEADER=$$(ssh $(PROD_HOST) "sudo machinectl show $$ENV -p Leader --value 2>/dev/null"); \
+		if [ -z "$$LEADER" ]; then \
+			echo "  ⚠ $$ENV not running, skipping"; \
+			continue; \
+		fi; \
+		ssh $(PROD_HOST) "sudo nsenter -t $$LEADER -m -u -i -n -p -- systemctl stop env-agent 2>/dev/null"; \
+		rsync -az crates/target/release/env-agent $(PROD_HOST):/var/lib/machines/$$ENV/usr/bin/env-agent --rsync-path="sudo rsync"; \
+		ssh $(PROD_HOST) "sudo nsenter -t $$LEADER -m -u -i -n -p -- systemctl start env-agent"; \
+		echo "  ✓ $$ENV updated"; \
+	done
+	@echo "All env-agents deployed"
 
 # Provision dev environment on Medion (info only — run script on router)
 provision-env-dev:

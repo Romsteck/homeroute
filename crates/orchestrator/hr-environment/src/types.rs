@@ -53,6 +53,21 @@ pub struct EnvironmentRecord {
     pub apps: Vec<EnvApp>,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
+    /// CPU usage percentage (from env-agent metrics).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<f32>,
+    /// Memory used in bytes (from env-agent metrics).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_used_bytes: Option<u64>,
+    /// Memory total in bytes (from env-agent host metrics).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_total_bytes: Option<u64>,
+    /// Disk used in bytes (from env-agent metrics).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_used_bytes: Option<u64>,
+    /// Disk total in bytes (from env-agent metrics).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_total_bytes: Option<u64>,
 }
 
 /// Status of an environment.
@@ -231,6 +246,11 @@ mod tests {
             last_heartbeat: Some(chrono::Utc::now()),
             apps: vec![],
             created_at: chrono::Utc::now(),
+            cpu_percent: None,
+            memory_used_bytes: None,
+            memory_total_bytes: None,
+            disk_used_bytes: None,
+            disk_total_bytes: None,
         };
         let json = serde_json::to_string(&env).unwrap();
         let parsed: EnvironmentRecord = serde_json::from_str(&json).unwrap();

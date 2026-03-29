@@ -110,6 +110,7 @@ pub enum OrchestratorRequest {
     ListEnvironments,
     GetEnvironment { id: String },
     CreateEnvironment { request: serde_json::Value },
+    UpdateEnvironment { id: String, request: serde_json::Value },
     DeleteEnvironment { id: String },
     StartEnvironment { id: String },
     StopEnvironment { id: String },
