@@ -124,7 +124,7 @@ function Dashboard() {
   }, []);
 
   const quickLinks = [
-    { to: '/containers', icon: Box, label: 'Containers', color: 'text-purple-400' },
+    { to: '/environments', icon: Box, label: 'Environments', color: 'text-purple-400' },
     { to: '/dns', icon: Globe, label: 'DNS / DHCP', color: 'text-blue-400' },
     { to: '/reverseproxy', icon: Server, label: 'Reverse Proxy', color: 'text-cyan-400' },
     { to: '/adblock', icon: ShieldCheck, label: 'AdBlock', color: 'text-green-400' },
@@ -186,11 +186,11 @@ function Dashboard() {
               </div>
               <StatCard
                 icon={Container}
-                label="Containers"
+                label="Environments"
                 value={data?.containers_running != null ? `${data.containers_running}/${data.containers_total}` : '-'}
                 sub="actifs"
                 color="text-purple-400"
-                to="/containers"
+                to="/environments"
               />
             </>
           )}
@@ -215,7 +215,7 @@ function Dashboard() {
                 value={data?.apps_running != null ? `${data.apps_running}/${data.apps_total}` : '-'}
                 sub="connectees"
                 color="text-cyan-400"
-                to="/containers"
+                to="/environments"
               />
               <StatCard
                 icon={Wifi}

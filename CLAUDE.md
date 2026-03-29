@@ -98,8 +98,7 @@ Voir `PLAN-ENVIRONMENTS.md` pour le plan complet.
 | Hosts JSON | `/data/hosts.json` |
 | Config proxy/DNS/DHCP | `/var/lib/server-dashboard/*.json` |
 | Certificats ACME | `/var/lib/server-dashboard/acme/` |
-| Agent registry | `/var/lib/server-dashboard/agent-registry.json` |
-| Containers V2 | `/var/lib/server-dashboard/containers-v2.json` |
+| Agent registry (legacy) | `/var/lib/server-dashboard/agent-registry.json` |
 | Environments | `/var/lib/server-dashboard/environments.json` |
 | Pipelines | `/var/lib/server-dashboard/pipelines.json` |
 | Env config | `/opt/homeroute/.env` |
@@ -146,7 +145,6 @@ make deploy-prod         # build all + rsync + restart homeroute + health check
 make deploy-edge         # build + rsync + restart hr-edge seul
 make deploy-orchestrator # build + rsync + restart hr-orchestrator seul
 make deploy-netcore      # build + rsync + restart hr-netcore (rare)
-make agent-prod          # push hr-agent vers les containers de prod
 make deploy-env-agent    # build + deploy env-agent vers TOUS les containers d'env
 
 # Déploiement local (UNIQUEMENT sur le serveur de prod lui-même)
@@ -169,7 +167,7 @@ ssh root@10.0.0.254 'systemctl reload hr-netcore'    # hot-reload DNS/DHCP/Adblo
 - **TOUJOURS** `make deploy-edge` si modification de hr-proxy, hr-acme, hr-auth, hr-tunnel, hr-edge
 - **TOUJOURS** `make deploy-orchestrator` si modification de hr-registry, hr-container, hr-git, hr-orchestrator
 - **TOUJOURS** `make deploy-netcore` si modification de hr-dns, hr-dhcp, hr-ipv6, hr-adblock, hr-netcore
-- **TOUJOURS** `make agent && make agent-prod` après modification du crate `hr-agent`
+- **TOUJOURS** `make agent` après modification du crate `hr-agent` (legacy, calendar uniquement)
 - **TOUJOURS** `make deploy-env-agent` après modification du crate `env-agent` (build + deploy vers tous les containers d'env)
 - **TOUJOURS** `make deploy-orchestrator` si modification de hr-environment, hr-pipeline, hr-db
 - Exécuter les commandes dans les containers via **`POST /api/applications/{id}/exec`** (pas machinectl)
@@ -204,67 +202,45 @@ Les agents peuvent parfois ne pas marquer leurs tâches comme complètes. Pour c
 
 ## Applications HomeRoute
 
-Les applications tournent dans des conteneurs nspawn gérés par HomeRoute. Le développement se fait sur CloudMaster (10.0.0.10), dans `/ssd_pool/apps/`.
+Les applications sont gérées via des **environnements** (env-dev, env-prod). Chaque environnement est un container nspawn piloté par un env-agent. Les anciens containers per-app (hr-v2-*) ont été supprimés.
 
-### Apps Axum + Vite/React
+### Environnements actifs
 
-| App | Path dev | Conteneur prod | IP prod |
-|-----|----------|----------------|---------|
-| trader | `/ssd_pool/apps/trader/` | hr-v2-trader-prod | 10.0.0.122 |
-| wallet | `/ssd_pool/apps/wallet/` | hr-v2-wallet-prod | 10.0.0.103 |
-| home | `/ssd_pool/apps/home/` | hr-v2-home-prod | 10.0.0.127 |
-| files | `/ssd_pool/apps/files/` | hr-v2-files-prod | 10.0.0.109 |
+| Env | Container | IP | Apps | Studio |
+|-----|-----------|-----|------|--------|
+| dev | env-dev | 10.0.0.105 | 10 apps | studio.dev.mynetwk.biz |
+| prod | env-prod | 10.0.0.112 | 0 apps (à déployer) | studio.prod.mynetwk.biz |
 
-**Procédure dev :**
-- Backend : `cd /ssd_pool/apps/<name>/ && cargo build --release`
-- Frontend : `cd /ssd_pool/apps/<name>/web && pnpm build`
-- Deploy : copier le binaire et les assets dans le conteneur prod, puis restart le service
-- Test : `curl http://<IP_PROD>:3000/api/health`
-- Logs : `sudo ssh root@10.0.0.254 machinectl shell hr-v2-<name>-prod /bin/journalctl -f`
+### Développement (sources sur CloudMaster)
 
-### Apps Next.js
+- Sources : `/ssd_pool/apps/<name>/`
+- Les sources sont copiées dans env-dev : `/apps/<name>/`
+- DBs dans env-dev : `/opt/env-agent/data/db/<name>.db`
 
-| App | Path dev | Conteneur prod | IP prod |
-|-----|----------|----------------|---------|
-| padel | `/ssd_pool/apps/padel/` | hr-v2-padel-prod | 10.0.0.117 |
-| www | `/ssd_pool/apps/www/` | hr-v2-www-prod | 10.0.0.125 |
-| forge | `/ssd_pool/apps/forge/forge/` | hr-v2-forge-prod | 10.0.0.128 |
-| aptymus | `/ssd_pool/apps/aptymus/` | hr-v2-aptymus-prod | 10.0.0.119 |
+### Déploiement apps dans les envs
 
-**Procédure dev :**
-- Build : `cd /ssd_pool/apps/<name>/ && pnpm build`
-- Deploy : copier le build dans le conteneur prod
-- Test : `curl http://<IP_PROD>:3000/`
+- Build sur CloudMaster, deploy via pipeline ou manuellement dans l'env
+- `make deploy-env-agent` pour mettre à jour l'env-agent dans tous les containers
 
-### App Axum + Flutter (MyFrigo)
+### Portails
 
-- Path dev : `/ssd_pool/apps/myfrigo/`
-- Conteneur prod : hr-v2-myfrigo-prod (10.0.0.126)
-- Backend : `cargo build --release`
-- Mobile : `export PATH=/ssd_pool/flutter/bin:$PATH && flutter build apk`
-- Auth : désactivée (attente SSO HomeRoute)
+| URL | Rôle |
+|-----|------|
+| `hub.mynetwk.biz` | Admin center (infra, DNS, proxy, envs) |
+| `make.mynetwk.biz` | Maker portal (apps, pipelines, env switcher) |
+| `studio.<env>.mynetwk.biz` | Studio (code-server, board, docs, DB, logs) |
+| `<app>.<env>.mynetwk.biz` | App dans un env |
 
 ### Store Flutter (app mobile HomeRoute)
 
-- Path : `/opt/homeroute/store_flutter/` (PAS dans `/ssd_pool/apps/`)
+- Path : `/opt/homeroute/store_flutter/`
 - Build : `export PATH=/ssd_pool/flutter/bin:$PATH && flutter build apk --release`
 - Deploy : `curl --data-binary @build/app/outputs/flutter-apk/app-release.apk http://10.0.0.254:4000/api/store/apps/<id>/upload`
-- Le store est file-based (`catalog.json`), pas SQLite
-- C'est l'app mobile principale — toujours prioriser l'app Flutter pour les changements store
-
-### Calendar App
-
-- Conteneur : hr-v2-calendar-prod (10.0.0.110)
-- Stack : Next.js
-- En pause actuellement
 
 ### Règles générales apps
 
-- **JAMAIS** build sur les conteneurs prod — toujours sur CloudMaster
+- **JAMAIS** build sur les conteneurs — toujours sur CloudMaster
 - **JAMAIS** build sur le routeur (10.0.0.254)
-- Le routeur prod est accessible via : `sudo ssh root@10.0.0.254`
-- Les conteneurs sont dans `/var/lib/machines/` sur le routeur
-- Pour exécuter une commande dans un conteneur : `sudo ssh root@10.0.0.254 machinectl shell hr-v2-<name>-prod /bin/bash -c "commande"`
 - PATH Flutter : `export PATH=/ssd_pool/flutter/bin:$PATH`
 
 ## MCP Self-Improvement

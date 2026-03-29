@@ -1,7 +1,7 @@
 //! MCP (Model Context Protocol) HTTP endpoint for hr-orchestrator.
 //!
 //! Implements JSON-RPC 2.0 over HTTP POST, with Bearer token authentication.
-//! Tools: hosts.*, containers.*, deploy.*, apps.*, db.*, monitoring.*, git.*
+//! Tools: hosts.*, deploy.*, apps.*, monitoring.*, git.*, envs.*, pipeline.*, store.*, reverseproxy.*
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -16,8 +16,6 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::backup_pipeline::BackupPipeline;
-use crate::container_manager::ContainerManager;
-use crate::db_manager::DbManager;
 
 // ── JSON-RPC types ──────────────────────────────────────────────────
 
@@ -42,11 +40,9 @@ const INVALID_PARAMS: i32 = -32602;
 pub struct McpState {
     pub token: Arc<String>,
     pub registry: Arc<AgentRegistry>,
-    pub container_manager: Arc<ContainerManager>,
     pub git: Arc<hr_git::GitService>,
     pub edge: Arc<hr_ipc::EdgeClient>,
     pub backup: Arc<BackupPipeline>,
-    pub db: Arc<DbManager>,
     pub env_manager: Arc<crate::env_manager::EnvironmentManager>,
     pub pipeline_engine: Arc<hr_pipeline::PipelineEngine>,
 }
@@ -54,11 +50,9 @@ pub struct McpState {
 impl McpState {
     pub fn from_env(
         registry: Arc<AgentRegistry>,
-        container_manager: Arc<ContainerManager>,
         git: Arc<hr_git::GitService>,
         edge: Arc<hr_ipc::EdgeClient>,
         backup: Arc<BackupPipeline>,
-        db: Arc<DbManager>,
         env_manager: Arc<crate::env_manager::EnvironmentManager>,
         pipeline_engine: Arc<hr_pipeline::PipelineEngine>,
     ) -> Option<Self> {
@@ -69,11 +63,9 @@ impl McpState {
         Some(Self {
             token: Arc::new(token),
             registry,
-            container_manager,
             git,
             edge,
             backup,
-            db,
             env_manager,
             pipeline_engine,
         })
@@ -226,76 +218,6 @@ fn tool_definitions_core() -> Value {
                 "required": ["host_id", "mac"]
             }
         },
-        // ── Containers ──
-        {
-            "name": "containers.list",
-            "description": "List all containers with status, IP, agent version, and metrics.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "containers.start",
-            "description": "Start a stopped container.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "id": { "type": "string", "description": "Container ID" } },
-                "required": ["id"]
-            }
-        },
-        {
-            "name": "containers.stop",
-            "description": "Stop a running container.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "id": { "type": "string", "description": "Container ID" } },
-                "required": ["id"]
-            }
-        },
-        {
-            "name": "containers.restart",
-            "description": "Restart a container (stop then start).",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "id": { "type": "string", "description": "Container ID" } },
-                "required": ["id"]
-            }
-        },
-        {
-            "name": "containers.create",
-            "description": "Create a new container.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Container name" },
-                    "host_id": { "type": "string", "description": "Host ID to create container on" },
-                    "ip": { "type": "string", "description": "IP address (optional, auto-assigned if omitted)" },
-                    "description": { "type": "string", "description": "Description (optional)" }
-                },
-                "required": ["name", "host_id"]
-            }
-        },
-        {
-            "name": "containers.delete",
-            "description": "Delete a container.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "id": { "type": "string", "description": "Container ID" } },
-                "required": ["id"]
-            }
-        },
-        {
-            "name": "containers.update",
-            "description": "Update container configuration.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Container ID" },
-                    "name": { "type": "string", "description": "New name (optional)" },
-                    "ip": { "type": "string", "description": "New IP (optional)" },
-                    "description": { "type": "string", "description": "New description (optional)" }
-                },
-                "required": ["id"]
-            }
-        },
         // ── Deploy ──
         {
             "name": "deploy.status",
@@ -365,7 +287,7 @@ fn tool_definitions_core() -> Value {
         },
         {
             "name": "monitoring.host_metrics",
-            "description": "Detailed metrics for a specific host: CPU, memory, disk, load averages, network interfaces, and managed containers.",
+            "description": "Detailed metrics for a specific host: CPU, memory, disk, load averages, and network interfaces.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "host_id": { "type": "string", "description": "Host ID" } },
@@ -566,263 +488,6 @@ fn tool_definitions_extended() -> Value {
                 "required": ["id"]
             }
         },
-        // ── Database ──
-        {
-            "name": "db.overview",
-            "description": "List all apps that have a database, with table counts and sizes.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "db.list_tables",
-            "description": "List all tables in an app's database with column counts and row counts.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "app_id": { "type": "string", "description": "App slug (e.g. trader, wallet, home)" } },
-                "required": ["app_id"]
-            }
-        },
-        {
-            "name": "db.describe_table",
-            "description": "Get full schema of a table (columns, types, constraints).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_id": { "type": "string", "description": "App slug" },
-                    "table_name": { "type": "string", "description": "Table name" }
-                },
-                "required": ["app_id", "table_name"]
-            }
-        },
-        {
-            "name": "db.create_table",
-            "description": "Create a new table with columns. Auto-adds id, created_at, updated_at.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_id": { "type": "string", "description": "App slug" },
-                    "name": { "type": "string", "description": "Table name (snake_case)" },
-                    "slug": { "type": "string", "description": "URL slug (kebab-case)" },
-                    "description": { "type": "string", "description": "Table description" },
-                    "columns": {
-                        "type": "array",
-                        "description": "Column definitions",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": { "type": "string" },
-                                "field_type": { "type": "string", "description": "text, number, decimal, boolean, date_time, date, email, url, json, uuid, choice, lookup, etc." },
-                                "required": { "type": "boolean" },
-                                "unique": { "type": "boolean" },
-                                "default_value": { "type": "string" },
-                                "choices": { "type": "array", "items": { "type": "string" } }
-                            },
-                            "required": ["name", "field_type"]
-                        }
-                    }
-                },
-                "required": ["app_id", "name", "slug", "columns"]
-            }
-        },
-        {
-            "name": "db.add_column",
-            "description": "Add a column to an existing table.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_id": { "type": "string", "description": "App slug" },
-                    "table_name": { "type": "string" },
-                    "name": { "type": "string", "description": "Column name" },
-                    "field_type": { "type": "string", "description": "text, number, decimal, boolean, date_time, etc." },
-                    "required": { "type": "boolean" },
-                    "unique": { "type": "boolean" },
-                    "default_value": { "type": "string" }
-                },
-                "required": ["app_id", "table_name", "name", "field_type"]
-            }
-        },
-        {
-            "name": "db.remove_column",
-            "description": "Remove a column from a table.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_id": { "type": "string", "description": "App slug" },
-                    "table_name": { "type": "string" },
-                    "column_name": { "type": "string" }
-                },
-                "required": ["app_id", "table_name", "column_name"]
-            }
-        },
-        {
-            "name": "db.drop_table",
-            "description": "Drop a table and all its data. Requires confirm=true.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_id": { "type": "string", "description": "App slug" },
-                    "table_name": { "type": "string" },
-                    "confirm": { "type": "boolean", "description": "Must be true to confirm deletion" }
-                },
-                "required": ["app_id", "table_name", "confirm"]
-            }
-        },
-        {
-            "name": "db.create_relation",
-            "description": "Create a foreign key relationship between two tables.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_id": { "type": "string", "description": "App slug" },
-                    "from_table": { "type": "string" },
-                    "from_column": { "type": "string" },
-                    "to_table": { "type": "string" },
-                    "to_column": { "type": "string" },
-                    "relation_type": { "type": "string", "description": "one_to_many, many_to_many, or self_referential" },
-                    "on_delete": { "type": "string", "description": "cascade, set_null, or restrict (default: restrict)" },
-                    "on_update": { "type": "string", "description": "cascade, set_null, or restrict (default: cascade)" }
-                },
-                "required": ["app_id", "from_table", "from_column", "to_table", "to_column", "relation_type"]
-            }
-        },
-        {
-            "name": "db.get_schema",
-            "description": "Get the full database schema as JSON (tables, columns, relations).",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "app_id": { "type": "string", "description": "App slug" } },
-                "required": ["app_id"]
-            }
-        },
-        {
-            "name": "db.get_db_info",
-            "description": "Get database statistics: table count, total rows, schema version.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "app_id": { "type": "string", "description": "App slug" } },
-                "required": ["app_id"]
-            }
-        },
-        {
-            "name": "db.query_data",
-            "description": "Query rows from a table with optional filters, pagination, and sorting.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_id": { "type": "string", "description": "App slug" },
-                    "table_name": { "type": "string" },
-                    "filters": {
-                        "type": "array",
-                        "description": "Filter conditions",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "column": { "type": "string" },
-                                "op": { "type": "string", "description": "eq, ne, gt, lt, gte, lte, like, in, is_null, is_not_null" },
-                                "value": {}
-                            },
-                            "required": ["column", "op"]
-                        }
-                    },
-                    "limit": { "type": "integer", "description": "Max rows (default 100, max 1000)" },
-                    "offset": { "type": "integer", "description": "Skip N rows" },
-                    "order_by": { "type": "string", "description": "Column to sort by" },
-                    "order_desc": { "type": "boolean", "description": "Sort descending" }
-                },
-                "required": ["app_id", "table_name"]
-            }
-        },
-        {
-            "name": "db.insert_data",
-            "description": "Insert one or more rows into a table.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_id": { "type": "string", "description": "App slug" },
-                    "table_name": { "type": "string" },
-                    "rows": {
-                        "type": "array",
-                        "description": "Array of objects to insert",
-                        "items": { "type": "object" }
-                    }
-                },
-                "required": ["app_id", "table_name", "rows"]
-            }
-        },
-        {
-            "name": "db.update_data",
-            "description": "Update rows matching filters.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_id": { "type": "string", "description": "App slug" },
-                    "table_name": { "type": "string" },
-                    "updates": { "type": "object", "description": "Key-value pairs to update" },
-                    "filters": {
-                        "type": "array",
-                        "description": "Filter conditions (at least one required)",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "column": { "type": "string" },
-                                "op": { "type": "string" },
-                                "value": {}
-                            },
-                            "required": ["column", "op"]
-                        }
-                    }
-                },
-                "required": ["app_id", "table_name", "updates", "filters"]
-            }
-        },
-        {
-            "name": "db.delete_data",
-            "description": "Delete rows matching filters.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_id": { "type": "string", "description": "App slug" },
-                    "table_name": { "type": "string" },
-                    "filters": {
-                        "type": "array",
-                        "description": "Filter conditions (at least one required)",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "column": { "type": "string" },
-                                "op": { "type": "string" },
-                                "value": {}
-                            },
-                            "required": ["column", "op"]
-                        }
-                    }
-                },
-                "required": ["app_id", "table_name", "filters"]
-            }
-        },
-        {
-            "name": "db.count_rows",
-            "description": "Count rows in a table, optionally with filters.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_id": { "type": "string", "description": "App slug" },
-                    "table_name": { "type": "string" },
-                    "filters": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "column": { "type": "string" },
-                                "op": { "type": "string" },
-                                "value": {}
-                            },
-                            "required": ["column", "op"]
-                        }
-                    }
-                },
-                "required": ["app_id", "table_name"]
-            }
-        }
     ])
 }
 
@@ -862,14 +527,6 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState) -> Value 
         "hosts.create" => tool_hosts_create(id, &arguments).await,
         "hosts.delete" => tool_hosts_delete(id, &arguments).await,
         "hosts.set_wol_mac" => tool_hosts_set_wol_mac(id, &arguments).await,
-        // ── Containers ──
-        "containers.list" => tool_containers_list(id, state).await,
-        "containers.start" => tool_container_action(id, &arguments, state, "start").await,
-        "containers.stop" => tool_container_action(id, &arguments, state, "stop").await,
-        "containers.restart" => tool_container_action(id, &arguments, state, "restart").await,
-        "containers.create" => tool_containers_create(id, &arguments).await,
-        "containers.delete" => tool_containers_delete(id, &arguments).await,
-        "containers.update" => tool_containers_update(id, &arguments).await,
         // ── Deploy ──
         "deploy.status" => tool_deploy_status(id, &arguments, state).await,
         "deploy.logs" => tool_deploy_logs(id, &arguments, state).await,
@@ -907,7 +564,6 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState) -> Value 
         "docs.search" => tool_docs_search(id, &arguments).await,
         "docs.completeness" => tool_docs_completeness(id, &arguments).await,
         // ── Database ──
-        t if t.starts_with("db.") => handle_db_tool(id, t, &arguments, &state.db).await,
         // ── Environments ──
         "envs.list" => tool_envs_list(id, state).await,
         "envs.get" => tool_envs_get(id, &arguments, state).await,
@@ -999,38 +655,6 @@ async fn tool_hosts_power(id: Value, args: &Value, state: &McpState, action: Pow
             };
             tool_success(id, json!({ "action": action_name, "host_id": host_id }))
         }
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-// ── Container tools ─────────────────────────────────────────────────
-
-async fn tool_containers_list(id: Value, state: &McpState) -> Value {
-    let containers = state.container_manager.list_containers().await;
-    tool_success(id, json!(containers))
-}
-
-async fn tool_container_action(id: Value, args: &Value, state: &McpState, action: &str) -> Value {
-    let Some(container_id) = args.get("id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing id".into());
-    };
-
-    let result = match action {
-        "start" => state.container_manager.start_container(container_id).await,
-        "stop" => state.container_manager.stop_container(container_id).await,
-        "restart" => {
-            match state.container_manager.stop_container(container_id).await {
-                Ok(true) => state.container_manager.start_container(container_id).await,
-                Ok(false) => return tool_error(id, "Container not found"),
-                Err(e) => return tool_error(id, &e),
-            }
-        }
-        _ => unreachable!(),
-    };
-
-    match result {
-        Ok(true) => tool_success(id, json!({ "action": action, "id": container_id })),
-        Ok(false) => tool_error(id, &format!("Container not found: {container_id}")),
         Err(e) => tool_error(id, &e),
     }
 }
@@ -1504,57 +1128,6 @@ async fn tool_hosts_set_wol_mac(id: Value, args: &Value) -> Value {
         return error_response(id, INVALID_PARAMS, "Missing mac".into());
     };
     match internal_api_post(&format!("/hosts/{host_id}/wol-mac"), json!({"mac": mac})).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-// ── New container tools (via internal API) ───────────────────────────
-
-async fn tool_containers_create(id: Value, args: &Value) -> Value {
-    let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing name".into());
-    };
-    let Some(host_id) = args.get("host_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing host_id".into());
-    };
-    let mut body = json!({"name": name, "host_id": host_id});
-    if let Some(ip) = args.get("ip").and_then(|v| v.as_str()) {
-        body["ip"] = json!(ip);
-    }
-    if let Some(desc) = args.get("description").and_then(|v| v.as_str()) {
-        body["description"] = json!(desc);
-    }
-    match internal_api_post("/containers", body).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_containers_delete(id: Value, args: &Value) -> Value {
-    let Some(container_id) = args.get("id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing id".into());
-    };
-    match internal_api_delete(&format!("/containers/{container_id}")).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_containers_update(id: Value, args: &Value) -> Value {
-    let Some(container_id) = args.get("id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing id".into());
-    };
-    let mut body = serde_json::Map::new();
-    for field in &["name", "ip", "description"] {
-        if let Some(val) = args.get(*field) {
-            body.insert((*field).into(), val.clone());
-        }
-    }
-    if body.is_empty() {
-        return tool_error(id, "No fields to update provided");
-    }
-    match internal_api_put(&format!("/containers/{container_id}"), Value::Object(body)).await {
         Ok(data) => tool_success(id, data),
         Err(e) => tool_error(id, &e),
     }
@@ -2100,403 +1673,9 @@ async fn tool_docs_completeness(id: Value, args: &Value) -> Value {
     }))
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────
+// (db tools removed -- now managed per-environment by env-agent)
+// (db tools removed -- now managed per-environment by env-agent)
 
-// ── Database tools ──────────────────────────────────────────────────
-
-async fn handle_db_tool(id: Value, tool: &str, args: &Value, db: &DbManager) -> Value {
-    use hr_db::engine::DataverseEngine;
-    use hr_db::query::*;
-    use hr_db::schema::*;
-
-    let get_app_id = || -> Result<&str, Value> {
-        args.get("app_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| tool_error(id.clone(), "app_id required"))
-    };
-
-    match tool {
-        "db.overview" => {
-            match db.overview().await {
-                Ok(data) => tool_success(id, data),
-                Err(e) => tool_error(id, &e),
-            }
-        }
-
-        "db.list_tables" => {
-            let app_id = match get_app_id() { Ok(v) => v, Err(e) => return e };
-            let engine = match db.get_engine(app_id).await {
-                Ok(e) => e,
-                Err(e) => return tool_error(id, &e),
-            };
-            let engine = engine.lock().await;
-            match engine.get_schema() {
-                Ok(schema) => {
-                    let tables: Vec<Value> = schema.tables.iter().map(|t| {
-                        let rows = engine.count_rows(&t.name).unwrap_or(0);
-                        json!({
-                            "name": t.name,
-                            "slug": t.slug,
-                            "columns": t.columns.len(),
-                            "rows": rows,
-                            "description": t.description,
-                        })
-                    }).collect();
-                    tool_success(id, json!(tables))
-                }
-                Err(e) => tool_error(id, &e.to_string()),
-            }
-        }
-
-        "db.describe_table" => {
-            let app_id = match get_app_id() { Ok(v) => v, Err(e) => return e };
-            let name = match args.get("table_name").and_then(|v| v.as_str()) {
-                Some(n) => n,
-                None => return tool_error(id, "table_name required"),
-            };
-            let engine = match db.get_engine(app_id).await {
-                Ok(e) => e,
-                Err(e) => return tool_error(id, &e),
-            };
-            let engine = engine.lock().await;
-            match engine.get_table(name) {
-                Ok(Some(table)) => tool_success(id, serde_json::to_value(&table).unwrap_or(json!(null))),
-                Ok(None) => tool_error(id, &format!("Table '{}' not found", name)),
-                Err(e) => tool_error(id, &e.to_string()),
-            }
-        }
-
-        "db.create_table" => {
-            let app_id = match get_app_id() { Ok(v) => v, Err(e) => return e };
-            let name = match args.get("name").and_then(|v| v.as_str()) {
-                Some(n) => n.to_string(),
-                None => return tool_error(id, "name required"),
-            };
-            let slug = match args.get("slug").and_then(|v| v.as_str()) {
-                Some(s) => s.to_string(),
-                None => return tool_error(id, "slug required"),
-            };
-            let desc = args.get("description").and_then(|v| v.as_str()).map(String::from);
-            let cols_val = match args.get("columns") {
-                Some(v) => v,
-                None => return tool_error(id, "columns required"),
-            };
-            let columns: Vec<ColumnDefinition> = match serde_json::from_value(cols_val.clone()) {
-                Ok(c) => c,
-                Err(e) => return tool_error(id, &format!("Invalid columns: {}", e)),
-            };
-
-            let now = chrono::Utc::now();
-            let table = TableDefinition {
-                name: name.clone(),
-                slug,
-                columns,
-                description: desc,
-                created_at: now,
-                updated_at: now,
-            };
-            let engine = match db.get_engine(app_id).await {
-                Ok(e) => e,
-                Err(e) => return tool_error(id, &e),
-            };
-            let engine = engine.lock().await;
-            match engine.create_table(&table) {
-                Ok(version) => tool_success(id, json!({
-                    "message": format!("Table '{}' created (schema version {})", name, version)
-                })),
-                Err(e) => tool_error(id, &e.to_string()),
-            }
-        }
-
-        "db.add_column" => {
-            let app_id = match get_app_id() { Ok(v) => v, Err(e) => return e };
-            let table = match args.get("table_name").and_then(|v| v.as_str()) {
-                Some(t) => t,
-                None => return tool_error(id, "table_name required"),
-            };
-            let name = match args.get("name").and_then(|v| v.as_str()) {
-                Some(n) => n.to_string(),
-                None => return tool_error(id, "name required"),
-            };
-            let ft_str = match args.get("field_type").and_then(|v| v.as_str()) {
-                Some(f) => f,
-                None => return tool_error(id, "field_type required"),
-            };
-            let field_type: FieldType = match serde_json::from_str(&format!("\"{}\"", ft_str)) {
-                Ok(ft) => ft,
-                Err(_) => return tool_error(id, &format!("Invalid field_type: {}", ft_str)),
-            };
-            let col = ColumnDefinition {
-                name: name.clone(),
-                field_type,
-                required: args.get("required").and_then(|v| v.as_bool()).unwrap_or(false),
-                unique: args.get("unique").and_then(|v| v.as_bool()).unwrap_or(false),
-                default_value: args.get("default_value").and_then(|v| v.as_str()).map(String::from),
-                description: None,
-                choices: vec![],
-            };
-            let engine = match db.get_engine(app_id).await {
-                Ok(e) => e,
-                Err(e) => return tool_error(id, &e),
-            };
-            let engine = engine.lock().await;
-            match engine.add_column(table, &col) {
-                Ok(version) => tool_success(id, json!({
-                    "message": format!("Column '{}' added to '{}' (schema version {})", name, table, version)
-                })),
-                Err(e) => tool_error(id, &e.to_string()),
-            }
-        }
-
-        "db.remove_column" => {
-            let app_id = match get_app_id() { Ok(v) => v, Err(e) => return e };
-            let table = match args.get("table_name").and_then(|v| v.as_str()) {
-                Some(t) => t,
-                None => return tool_error(id, "table_name required"),
-            };
-            let col = match args.get("column_name").and_then(|v| v.as_str()) {
-                Some(c) => c,
-                None => return tool_error(id, "column_name required"),
-            };
-            let engine = match db.get_engine(app_id).await {
-                Ok(e) => e,
-                Err(e) => return tool_error(id, &e),
-            };
-            let engine = engine.lock().await;
-            match engine.remove_column(table, col) {
-                Ok(version) => tool_success(id, json!({
-                    "message": format!("Column '{}' removed from '{}' (schema version {})", col, table, version)
-                })),
-                Err(e) => tool_error(id, &e.to_string()),
-            }
-        }
-
-        "db.drop_table" => {
-            let app_id = match get_app_id() { Ok(v) => v, Err(e) => return e };
-            let name = match args.get("table_name").and_then(|v| v.as_str()) {
-                Some(n) => n,
-                None => return tool_error(id, "table_name required"),
-            };
-            let confirm = args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
-            if !confirm {
-                return tool_error(id, "Set confirm=true to confirm table deletion");
-            }
-            let engine = match db.get_engine(app_id).await {
-                Ok(e) => e,
-                Err(e) => return tool_error(id, &e),
-            };
-            let engine = engine.lock().await;
-            match engine.drop_table(name) {
-                Ok(version) => tool_success(id, json!({
-                    "message": format!("Table '{}' dropped (schema version {})", name, version)
-                })),
-                Err(e) => tool_error(id, &e.to_string()),
-            }
-        }
-
-        "db.create_relation" => {
-            let app_id = match get_app_id() { Ok(v) => v, Err(e) => return e };
-            let rel = RelationDefinition {
-                from_table: match args.get("from_table").and_then(|v| v.as_str()) {
-                    Some(v) => v.to_string(),
-                    None => return tool_error(id, "from_table required"),
-                },
-                from_column: match args.get("from_column").and_then(|v| v.as_str()) {
-                    Some(v) => v.to_string(),
-                    None => return tool_error(id, "from_column required"),
-                },
-                to_table: match args.get("to_table").and_then(|v| v.as_str()) {
-                    Some(v) => v.to_string(),
-                    None => return tool_error(id, "to_table required"),
-                },
-                to_column: match args.get("to_column").and_then(|v| v.as_str()) {
-                    Some(v) => v.to_string(),
-                    None => return tool_error(id, "to_column required"),
-                },
-                relation_type: match args.get("relation_type").and_then(|v| v.as_str()) {
-                    Some(rt) => match serde_json::from_str(&format!("\"{}\"", rt)) {
-                        Ok(r) => r,
-                        Err(e) => return tool_error(id, &format!("Invalid relation_type: {}", e)),
-                    },
-                    None => return tool_error(id, "relation_type required"),
-                },
-                cascade: CascadeRules {
-                    on_delete: args.get("on_delete").and_then(|v| v.as_str())
-                        .and_then(|s| serde_json::from_str(&format!("\"{}\"", s)).ok())
-                        .unwrap_or_default(),
-                    on_update: args.get("on_update").and_then(|v| v.as_str())
-                        .and_then(|s| serde_json::from_str(&format!("\"{}\"", s)).ok())
-                        .unwrap_or_default(),
-                },
-            };
-            let engine = match db.get_engine(app_id).await {
-                Ok(e) => e,
-                Err(e) => return tool_error(id, &e),
-            };
-            let engine = engine.lock().await;
-            match engine.create_relation(&rel) {
-                Ok(version) => tool_success(id, json!({
-                    "message": format!("Relation {}.{} -> {}.{} created (schema version {})",
-                        rel.from_table, rel.from_column, rel.to_table, rel.to_column, version)
-                })),
-                Err(e) => tool_error(id, &e.to_string()),
-            }
-        }
-
-        "db.get_schema" => {
-            let app_id = match get_app_id() { Ok(v) => v, Err(e) => return e };
-            match db.get_schema(app_id).await {
-                Ok(schema) => tool_success(id, schema),
-                Err(e) => tool_error(id, &e),
-            }
-        }
-
-        "db.get_db_info" => {
-            let app_id = match get_app_id() { Ok(v) => v, Err(e) => return e };
-            let engine = match db.get_engine(app_id).await {
-                Ok(e) => e,
-                Err(e) => return tool_error(id, &e),
-            };
-            let engine = engine.lock().await;
-            match engine.get_schema() {
-                Ok(schema) => {
-                    let mut total_rows: u64 = 0;
-                    for t in &schema.tables {
-                        total_rows += engine.count_rows(&t.name).unwrap_or(0);
-                    }
-                    let db_path = db.db_dir().join(format!("{}.db", app_id));
-                    tool_success(id, json!({
-                        "tables": schema.tables.len(),
-                        "relations": schema.relations.len(),
-                        "total_rows": total_rows,
-                        "schema_version": schema.version,
-                        "db_size_bytes": DataverseEngine::db_size_bytes(&db_path),
-                    }))
-                }
-                Err(e) => tool_error(id, &e.to_string()),
-            }
-        }
-
-        "db.query_data" => {
-            let app_id = match get_app_id() { Ok(v) => v, Err(e) => return e };
-            let table = match args.get("table_name").and_then(|v| v.as_str()) {
-                Some(t) => t,
-                None => return tool_error(id, "table_name required"),
-            };
-            let filters: Vec<Filter> = args.get("filters")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
-            let pagination = Pagination {
-                limit: args.get("limit").and_then(|v| v.as_u64()).unwrap_or(100),
-                offset: args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0),
-                order_by: args.get("order_by").and_then(|v| v.as_str()).map(String::from),
-                order_desc: args.get("order_desc").and_then(|v| v.as_bool()).unwrap_or(false),
-            };
-            let engine = match db.get_engine(app_id).await {
-                Ok(e) => e,
-                Err(e) => return tool_error(id, &e),
-            };
-            let engine = engine.lock().await;
-            match query_rows(engine.connection(), table, &filters, &pagination) {
-                Ok(rows) => tool_success(id, json!(rows)),
-                Err(e) => tool_error(id, &e.to_string()),
-            }
-        }
-
-        "db.insert_data" => {
-            let app_id = match get_app_id() { Ok(v) => v, Err(e) => return e };
-            let table = match args.get("table_name").and_then(|v| v.as_str()) {
-                Some(t) => t,
-                None => return tool_error(id, "table_name required"),
-            };
-            let rows: Vec<Value> = match args.get("rows").and_then(|v| v.as_array()) {
-                Some(r) => r.clone(),
-                None => return tool_error(id, "rows required (array)"),
-            };
-            let engine = match db.get_engine(app_id).await {
-                Ok(e) => e,
-                Err(e) => return tool_error(id, &e),
-            };
-            let engine = engine.lock().await;
-            match insert_rows(engine.connection(), table, &rows) {
-                Ok(count) => tool_success(id, json!({
-                    "message": format!("{} row(s) inserted into '{}'", count, table)
-                })),
-                Err(e) => tool_error(id, &e.to_string()),
-            }
-        }
-
-        "db.update_data" => {
-            let app_id = match get_app_id() { Ok(v) => v, Err(e) => return e };
-            let table = match args.get("table_name").and_then(|v| v.as_str()) {
-                Some(t) => t,
-                None => return tool_error(id, "table_name required"),
-            };
-            let updates = match args.get("updates") {
-                Some(u) => u,
-                None => return tool_error(id, "updates required"),
-            };
-            let filters: Vec<Filter> = args.get("filters")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
-            let engine = match db.get_engine(app_id).await {
-                Ok(e) => e,
-                Err(e) => return tool_error(id, &e),
-            };
-            let engine = engine.lock().await;
-            match update_rows(engine.connection(), table, updates, &filters) {
-                Ok(count) => tool_success(id, json!({
-                    "message": format!("{} row(s) updated in '{}'", count, table)
-                })),
-                Err(e) => tool_error(id, &e.to_string()),
-            }
-        }
-
-        "db.delete_data" => {
-            let app_id = match get_app_id() { Ok(v) => v, Err(e) => return e };
-            let table = match args.get("table_name").and_then(|v| v.as_str()) {
-                Some(t) => t,
-                None => return tool_error(id, "table_name required"),
-            };
-            let filters: Vec<Filter> = args.get("filters")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
-            let engine = match db.get_engine(app_id).await {
-                Ok(e) => e,
-                Err(e) => return tool_error(id, &e),
-            };
-            let engine = engine.lock().await;
-            match delete_rows(engine.connection(), table, &filters) {
-                Ok(count) => tool_success(id, json!({
-                    "message": format!("{} row(s) deleted from '{}'", count, table)
-                })),
-                Err(e) => tool_error(id, &e.to_string()),
-            }
-        }
-
-        "db.count_rows" => {
-            let app_id = match get_app_id() { Ok(v) => v, Err(e) => return e };
-            let table = match args.get("table_name").and_then(|v| v.as_str()) {
-                Some(t) => t,
-                None => return tool_error(id, "table_name required"),
-            };
-            let engine = match db.get_engine(app_id).await {
-                Ok(e) => e,
-                Err(e) => return tool_error(id, &e),
-            };
-            let engine = engine.lock().await;
-            match engine.count_rows(table) {
-                Ok(count) => tool_success(id, json!({ "count": count })),
-                Err(e) => tool_error(id, &e.to_string()),
-            }
-        }
-
-        _ => {
-            warn!(tool, "Unknown db tool");
-            error_response(id, METHOD_NOT_FOUND, format!("Tool not found: {tool}"))
-        }
-    }
-}
 
 fn success_response(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
@@ -2690,7 +1869,7 @@ async fn tool_envs_action(id: Value, args: &Value, state: &McpState, action: &st
     match action {
         "start" => {
             state.env_manager.update_environment_status(slug, hr_environment::EnvStatus::Provisioning).await;
-            match state.container_manager.start_container(&container_name).await {
+            match hr_container::NspawnClient::start_container(&container_name).await {
                 Ok(_) => tool_success(id, json!({"action": action, "slug": slug, "status": "ok"})),
                 Err(e) => tool_error(id, &format!("Failed to start environment '{}': {}", slug, e)),
             }
@@ -2699,7 +1878,7 @@ async fn tool_envs_action(id: Value, args: &Value, state: &McpState, action: &st
             let _ = state.env_manager.send_to_env(slug, hr_environment::EnvOrchestratorMessage::Shutdown).await;
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             state.env_manager.update_environment_status(slug, hr_environment::EnvStatus::Stopped).await;
-            match state.container_manager.stop_container(&container_name).await {
+            match hr_container::NspawnClient::stop_container(&container_name).await {
                 Ok(_) => tool_success(id, json!({"action": action, "slug": slug, "status": "ok"})),
                 Err(e) => tool_error(id, &format!("Failed to stop environment '{}': {}", slug, e)),
             }

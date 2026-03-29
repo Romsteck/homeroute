@@ -1,4 +1,3 @@
-pub mod container_manager;
 pub mod routes;
 pub mod state;
 
@@ -127,8 +126,6 @@ fn api_routes() -> Router<ApiState> {
         .nest("/services", routes::services::router())
 
         .nest("/applications", routes::applications::router())
-        .nest("/containers", routes::containers::router())
-        .nest("/dataverse", routes::dataverse::router())
         .nest("/edge/stats", routes::edge_stats::router())
         .nest("/store", routes::store::router())
         .nest("/git", routes::git::router())

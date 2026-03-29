@@ -8,7 +8,6 @@ use serde_json::json;
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
-use hr_common::events::MigrationPhase;
 use crate::state::ApiState;
 
 pub fn router() -> Router<ApiState> {
@@ -30,40 +29,12 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut agent_rx = state.events.agent_status.subscribe();
     let mut metrics_rx = state.events.agent_metrics.subscribe();
     let mut agent_update_rx = state.events.agent_update.subscribe();
-    let mut migration_rx = state.events.migration_progress.subscribe();
-    let mut dv_schema_rx = state.events.dataverse_schema.subscribe();
-    let mut dv_data_rx = state.events.dataverse_data.subscribe();
     let mut host_metrics_rx = state.events.host_metrics.subscribe();
     let mut host_power_rx = state.events.host_power.subscribe();
     let mut update_scan_rx = state.events.update_scan.subscribe();
     let mut backup_live_rx = state.events.backup_live.subscribe();
     let mut task_update_rx = state.events.task_update.subscribe();
     let mut energy_metrics_rx = state.events.energy_metrics.subscribe();
-
-    // Send current active migrations so reconnecting clients get up-to-date state
-    {
-        let migrations = state.migrations.read().await;
-        for m in migrations.values() {
-            if !matches!(m.phase, MigrationPhase::Complete | MigrationPhase::Failed) {
-                let msg = json!({
-                    "type": "migration:progress",
-                    "data": {
-                        "appId": m.app_id,
-                        "transferId": m.transfer_id,
-                        "phase": m.phase,
-                        "progressPct": m.progress_pct,
-                        "bytesTransferred": m.bytes_transferred,
-                        "totalBytes": m.total_bytes,
-                        "error": m.error,
-                    }
-                });
-                if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
-                    debug!("WebSocket client disconnected during migration sync");
-                    return;
-                }
-            }
-        }
-    }
 
     loop {
         tokio::select! {
@@ -240,83 +211,6 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("WebSocket agent_update lagged by {}", n);
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-
-            // Migration progress events
-            result = migration_rx.recv() => {
-                match result {
-                    Ok(event) => {
-                        let msg = json!({
-                            "type": "migration:progress",
-                            "data": {
-                                "appId": event.app_id,
-                                "transferId": event.transfer_id,
-                                "phase": event.phase,
-                                "progressPct": event.progress_pct,
-                                "bytesTransferred": event.bytes_transferred,
-                                "totalBytes": event.total_bytes,
-                                "error": event.error,
-                            }
-                        });
-                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("WebSocket migration_progress lagged by {}", n);
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-
-            // Dataverse schema events
-            result = dv_schema_rx.recv() => {
-                match result {
-                    Ok(event) => {
-                        let msg = json!({
-                            "type": "dataverse:schema",
-                            "data": {
-                                "appId": event.app_id,
-                                "slug": event.slug,
-                                "tables": event.tables,
-                                "relationsCount": event.relations_count,
-                                "version": event.version,
-                            }
-                        });
-                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("WebSocket dataverse_schema lagged by {}", n);
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-
-            // Dataverse data events
-            result = dv_data_rx.recv() => {
-                match result {
-                    Ok(event) => {
-                        let msg = json!({
-                            "type": "dataverse:data",
-                            "data": {
-                                "appId": event.app_id,
-                                "slug": event.slug,
-                                "tableName": event.table_name,
-                                "operation": event.operation,
-                                "rowCount": event.row_count,
-                            }
-                        });
-                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("WebSocket dataverse_data lagged by {}", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

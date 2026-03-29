@@ -12,9 +12,6 @@ import ReverseProxy from './pages/ReverseProxy';
 import Updates from './pages/Updates';
 import Hosts from './pages/Hosts';
 import Certificates from './pages/Certificates';
-// Legacy pages removed from routing (files kept for rollback):
-// import DataBrowser from './pages/DataBrowser';
-// import Containers from './pages/Containers';
 import Store from './pages/Store';
 import Git from './pages/Git';
 import Monitoring from './pages/Monitoring';
@@ -107,7 +104,6 @@ function AppRoutes() {
               <Route path="/reverseproxy" element={<ReverseProxy />} />
               <Route path="/updates" element={<Updates />} />
               <Route path="/hosts" element={<Hosts />} />
-              {/* Legacy routes removed: /containers, /data-browser */}
               <Route path="/certificates" element={<Certificates />} />
               <Route path="/store" element={<Store />} />
               <Route path="/git" element={<Git />} />

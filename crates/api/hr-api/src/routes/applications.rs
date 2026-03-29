@@ -1,8 +1,6 @@
 //! REST API + WebSocket routes for application management.
 //! Most handlers delegate to hr-orchestrator via IPC (OrchestratorClient).
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -10,14 +8,13 @@ use axum::http::header;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use tokio::io::AsyncReadExt;
 use tracing::{error, info, warn};
-use hr_registry::protocol::{AgentMessage, HostRegistryMessage};
+use hr_registry::protocol::AgentMessage;
 use hr_acme::types::WildcardType;
 use hr_ipc::NetcoreClient;
 use hr_ipc::orchestrator::OrchestratorRequest;
 
-use crate::state::{ApiState, MigrationState};
+use crate::state::ApiState;
 
 pub fn router() -> Router<ApiState> {
     Router::new()
@@ -685,114 +682,3 @@ async fn handle_agent_ws(state: ApiState, mut socket: WebSocket) {
         info!(app_id, "Agent WebSocket closed (other connections still active, routes preserved)");
     }
 }
-
-// ── Migration orchestration ──────────────────────────────────
-
-// Helper to update migration state and emit event
-pub(crate) async fn update_migration_phase(
-    migrations: &Arc<tokio::sync::RwLock<std::collections::HashMap<String, MigrationState>>>,
-    events: &Arc<hr_common::events::EventBus>,
-    app_id: &str,
-    transfer_id: &str,
-    phase: hr_common::events::MigrationPhase,
-    pct: u8,
-    transferred: u64,
-    total: u64,
-    error: Option<String>,
-) {
-    {
-        let mut m = migrations.write().await;
-        if let Some(state) = m.get_mut(transfer_id) {
-            state.phase = phase.clone();
-            state.progress_pct = pct;
-            state.bytes_transferred = transferred;
-            state.total_bytes = total;
-            state.error = error.clone();
-        }
-    }
-    let _ = events.migration_progress.send(hr_common::events::MigrationProgressEvent {
-        app_id: app_id.to_string(),
-        transfer_id: transfer_id.to_string(),
-        phase,
-        progress_pct: pct,
-        bytes_transferred: transferred,
-        total_bytes: total,
-        error,
-    });
-}
-
-/// Stream data from an AsyncRead source to a remote host-agent in 512KB binary chunks.
-/// Returns total bytes transferred and final sequence number.
-pub(crate) async fn stream_to_remote(
-    registry: &Arc<hr_registry::AgentRegistry>,
-    target_host_id: &str,
-    transfer_id: &str,
-    reader: &mut (impl tokio::io::AsyncRead + Unpin),
-    total_bytes: u64,
-    cancelled: &Arc<AtomicBool>,
-    migrations: &Arc<tokio::sync::RwLock<std::collections::HashMap<String, MigrationState>>>,
-    events: &Arc<hr_common::events::EventBus>,
-    app_id: &str,
-    pct_start: u8,
-    pct_end: u8,
-    phase: hr_common::events::MigrationPhase,
-) -> Result<(u64, u32), String> {
-    let mut buf = vec![0u8; 524288]; // 512KB
-    let mut transferred: u64 = 0;
-    let mut sequence: u32 = 0;
-    loop {
-        if cancelled.load(Ordering::SeqCst) {
-            let _ = registry.send_host_command(
-                target_host_id,
-                HostRegistryMessage::CancelTransfer { transfer_id: transfer_id.to_string() },
-            ).await;
-            return Err("Migration cancelled by user".to_string());
-        }
-
-        let n = match reader.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) => return Err(format!("Read error: {e}")),
-        };
-
-        let chunk = &buf[..n];
-        let checksum = xxhash_rust::xxh32::xxh32(chunk, 0);
-
-        if let Err(e) = registry.send_host_command(
-            target_host_id,
-            HostRegistryMessage::ReceiveChunkBinary {
-                transfer_id: transfer_id.to_string(),
-                sequence,
-                size: n as u32,
-                checksum,
-            },
-        ).await {
-            return Err(format!("Send chunk metadata failed: {e}"));
-        }
-
-        if let Err(e) = registry.send_host_binary(
-            target_host_id,
-            chunk.to_vec(),
-        ).await {
-            return Err(format!("Send binary chunk failed: {e}"));
-        }
-
-        transferred += n as u64;
-        sequence += 1;
-        let pct = (pct_start as u64 + (transferred * (pct_end - pct_start) as u64 / total_bytes.max(1))) as u8;
-
-        if sequence % 4 == 0 || transferred >= total_bytes {
-            update_migration_phase(migrations, events, app_id, transfer_id, phase.clone(), pct.min(pct_end), transferred, total_bytes, None).await;
-        } else {
-            let mut m = migrations.write().await;
-            if let Some(state) = m.get_mut(transfer_id) {
-                state.progress_pct = pct.min(pct_end);
-                state.bytes_transferred = transferred;
-            }
-        }
-    }
-
-    Ok((transferred, sequence))
-}
-
-// Inter-host nspawn migration is in container_manager.rs

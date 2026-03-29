@@ -21,29 +21,6 @@ pub enum OrchestratorRequest {
     GetAgentUpdateStatus,
     FixAgentUpdate { app_id: String },
     UpdateAgentRules { app_ids: Option<Vec<String>> },
-    // ── Container V2 (nspawn) ────────────────────────────────
-    ListContainers,
-    GetContainer { id: String },
-    CreateContainer { request: serde_json::Value },
-    StartContainer { id: String },
-    StopContainer { id: String },
-    DeleteContainer { id: String },
-    UpdateContainer { id: String, request: serde_json::Value },
-
-    // ── Container volumes ─────────────────────────────────────
-    ListVolumes { container_id: String },
-    AttachVolume { container_id: String, volume: serde_json::Value },
-    UpdateVolume { container_id: String, volume_id: String, updates: serde_json::Value },
-    DetachVolume { container_id: String, volume_id: String },
-
-    // ── Container extended ────────────────────────────────────
-    MigrateContainer { id: String, target_host_id: String },
-    GetMigrationStatus { app_id: String },
-    CancelMigration { app_id: String },
-    RenameContainer { id: String, request: serde_json::Value },
-    GetRenameStatus { app_id: String },
-    GetContainerConfig,
-    UpdateContainerConfig { config: serde_json::Value },
 
     // ── Git ──────────────────────────────────────────────────
     ListRepos,
@@ -60,13 +37,6 @@ pub enum OrchestratorRequest {
     GenerateSshKey,
     GetGitConfig,
     UpdateGitConfig { config: serde_json::Value },
-
-    // ── Dataverse ────────────────────────────────────────────
-    DataverseQuery { app_id: String, query: serde_json::Value },
-    DataverseGetSchema { app_id: String },
-
-    // ── Dataverse extended ───────────────────────────────────
-    DataverseOverview,
 
     // ── Host operations ──────────────────────────────────────
     ListHostConnections,

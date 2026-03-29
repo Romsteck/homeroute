@@ -244,18 +244,11 @@ struct UpdateLocalConfigRequest {
 }
 
 async fn update_local_config(
-    State(state): State<ApiState>,
-    Json(body): Json<UpdateLocalConfigRequest>,
+    State(_state): State<ApiState>,
+    Json(_body): Json<UpdateLocalConfigRequest>,
 ) -> Json<Value> {
-    let config = json!({
-        "lan_interface": body.lan_interface,
-        "container_storage_path": body.container_storage_path,
-    });
-    match state.orchestrator.request(&OrchestratorRequest::UpdateContainerConfig { config }).await {
-        Ok(r) if r.ok => Json(json!({"success": true})),
-        Ok(r) => Json(json!({"success": false, "error": r.error.unwrap_or_else(|| "Failed to update config".to_string())})),
-        Err(e) => Json(json!({"success": false, "error": format!("IPC error: {e}")})),
-    }
+    // Legacy container config has been removed; return success for backward compat.
+    Json(json!({"success": true}))
 }
 
 // ── Host CRUD (continued) ────────────────────────────────────────────────
@@ -897,11 +890,6 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
     // Mark host online
     update_host_status(&host_id, "online", &state.events.host_status).await;
 
-    // Restore containers that should be running on this host
-    if let Some(cm) = &state.container_manager {
-        cm.restore_host_containers(&host_id).await;
-    }
-
     // Track which transfer_ids are being relayed (remote→remote)
     let mut relay_transfers: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -1026,20 +1014,10 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                                         let file_path = format!("/tmp/{}.tar.gz", transfer_id);
                                         match tokio::fs::File::create(&file_path).await {
                                             Ok(file) => {
-                                                // Resolve storage path and network mode for local
-                                                let (storage_path, network_mode) = if let Some(cm) = &state.container_manager {
-                                                    let sp = cm.resolve_storage_path("local").await;
-                                                    let nm = cm.resolve_network_mode("local").await
-                                                        .unwrap_or_else(|_| "bridge:br-lan".to_string());
-                                                    (sp, nm)
-                                                } else {
-                                                    ("/var/lib/machines".to_string(), "bridge:br-lan".to_string())
-                                                };
-                                                // Look up app_id from migration state
-                                                let app_id = {
-                                                    let m = state.migrations.read().await;
-                                                    m.get(&transfer_id).map(|s| s.app_id.clone()).unwrap_or_default()
-                                                };
+                                                // Use default storage path and network mode
+                                                let storage_path = "/var/lib/machines".to_string();
+                                                let network_mode = "bridge:br-lan".to_string();
+                                                let app_id = String::new();
                                                 tracing::info!(transfer_id = %transfer_id, container = %cname, size_bytes, "Setting up local nspawn import receiver");
                                                 active_transfers.insert(transfer_id.clone(), ActiveTransfer {
                                                     container_name: cname,
@@ -1243,26 +1221,6 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                                         // Update progress tracking
                                         transfer.bytes_received += data_len;
                                         transfer.chunk_count += 1;
-                                        if transfer.chunk_count % 4 == 0 && transfer.total_bytes > 0 && !transfer.app_id.is_empty() {
-                                            // Container data: 10% → 85%, workspace: 85% → 92%
-                                            let (pct_start, pct_end) = match transfer.phase {
-                                                TransferPhase::ReceivingContainer => (10u8, 85u8),
-                                                TransferPhase::ReceivingWorkspace => (85u8, 92u8),
-                                            };
-                                            let ratio = (transfer.bytes_received as f64 / transfer.total_bytes as f64).min(1.0);
-                                            let pct = pct_start + (ratio * (pct_end - pct_start) as f64) as u8;
-                                            crate::routes::applications::update_migration_phase(
-                                                &state.migrations,
-                                                &state.events,
-                                                &transfer.app_id,
-                                                &transfer.transfer_id,
-                                                hr_common::events::MigrationPhase::Importing,
-                                                pct,
-                                                transfer.bytes_received,
-                                                transfer.total_bytes,
-                                                None,
-                                            ).await;
-                                        }
                                     }
                                 }
                             }

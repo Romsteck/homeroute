@@ -131,9 +131,9 @@ agent:
 	echo "hr-agent v$$NEW_VERSION → data/agent-binaries/" && \
 	echo "Run: make agent-prod   (to push to production containers)"
 
-# Deploy hr-agent to production containers
+# Deploy hr-agent (LEGACY — only used by calendar if still running)
 agent-prod: check-prod
-	@echo "Pushing hr-agent to production..."
+	@echo "⚠ Legacy: pushing hr-agent to production (use deploy-env-agent for environments)"
 	rsync -az data/agent-binaries/ $(PROD_HOST):$(PROD_DIR)/data/agent-binaries/
 	ssh $(PROD_HOST) 'curl -sf -X POST http://127.0.0.1:4000/api/applications/agents/update' \
 		&& echo "✓ Agent update triggered on production" \

@@ -16,8 +16,6 @@ pub mod services;
 pub mod ws;
 
 pub mod applications;
-pub mod containers;
-pub mod dataverse;
 pub mod edge_stats;
 pub mod store;
 pub mod git;

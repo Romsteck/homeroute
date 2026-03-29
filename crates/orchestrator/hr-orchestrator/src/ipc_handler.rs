@@ -1,17 +1,11 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use hr_ipc::orchestrator::OrchestratorRequest;
 use hr_ipc::server::IpcHandler;
 use hr_ipc::types::IpcResponse;
 
-use crate::container_manager::{
-    ContainerManager, CreateContainerRequest, MigrationState,
-    RenameContainerRequest, RenameState, UpdateContainerRequest,
-};
 use hr_common::events::{PowerAction, WakeResult};
 
 const BACKUP_SERVER_HOST_ID: &str = "877bcb76-4fb8-4164-940c-707201adf9bc";
@@ -21,17 +15,12 @@ use hr_registry::types::UpdateApplicationRequest;
 use hr_registry::AgentRegistry;
 
 use crate::backup_pipeline::BackupPipeline;
-use crate::db_manager::DbManager;
 use crate::env_manager::EnvironmentManager;
 
 pub struct OrchestratorHandler {
     pub registry: Arc<AgentRegistry>,
-    pub container_manager: Arc<ContainerManager>,
     pub git: Arc<GitService>,
-    pub migrations: Arc<RwLock<HashMap<String, MigrationState>>>,
-    pub renames: Arc<RwLock<HashMap<String, RenameState>>>,
     pub backup: Arc<BackupPipeline>,
-    pub db: Arc<DbManager>,
     pub env_manager: Arc<EnvironmentManager>,
 }
 
@@ -173,7 +162,7 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                         Err(e) => IpcResponse::err(format!("Failed to fix agent: {e}")),
                     }
                 } else {
-                    let api_port = self.container_manager.env.api_port;
+                    let api_port = 4000u16;
                     let cmd = vec![
                         format!(
                             "curl -fsSL http://10.0.0.254:{}/api/applications/agents/binary \
@@ -224,183 +213,6 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                     "total": target_apps.len(),
                 }))
             }
-            // ── Containers ───────────────────────────────────────
-            OrchestratorRequest::ListContainers => {
-                let containers = self.container_manager.list_containers().await;
-                IpcResponse::ok_data(containers)
-            }
-            OrchestratorRequest::GetContainer { id } => {
-                match self.container_manager.get_container(&id).await {
-                    Some(container) => IpcResponse::ok_data(container),
-                    None => IpcResponse::err("Container not found"),
-                }
-            }
-            OrchestratorRequest::CreateContainer { request } => {
-                let req: CreateContainerRequest = match serde_json::from_value(request) {
-                    Ok(r) => r,
-                    Err(e) => return IpcResponse::err(format!("Invalid create request: {e}")),
-                };
-                match self.container_manager.create_container(req).await {
-                    Ok((record, token)) => IpcResponse::ok_data(serde_json::json!({
-                        "id": record.id,
-                        "name": record.name,
-                        "slug": record.slug,
-                        "container_name": record.container_name,
-                        "host_id": record.host_id,
-                        "status": record.status,
-                        "token": token,
-                    })),
-                    Err(e) => IpcResponse::err(format!("Failed to create container: {e}")),
-                }
-            }
-            OrchestratorRequest::StartContainer { id } => {
-                match self.container_manager.start_container(&id).await {
-                    Ok(true) => IpcResponse::ok_empty(),
-                    Ok(false) => IpcResponse::err("Container not found"),
-                    Err(e) => IpcResponse::err(e),
-                }
-            }
-            OrchestratorRequest::StopContainer { id } => {
-                match self.container_manager.stop_container(&id).await {
-                    Ok(true) => IpcResponse::ok_empty(),
-                    Ok(false) => IpcResponse::err("Container not found"),
-                    Err(e) => IpcResponse::err(e),
-                }
-            }
-            OrchestratorRequest::DeleteContainer { id } => {
-                match self.container_manager.remove_container(&id).await {
-                    Ok(true) => IpcResponse::ok_empty(),
-                    Ok(false) => IpcResponse::err("Container not found"),
-                    Err(e) => IpcResponse::err(e),
-                }
-            }
-            OrchestratorRequest::UpdateContainer { id, request } => {
-                let req: UpdateContainerRequest = match serde_json::from_value(request) {
-                    Ok(r) => r,
-                    Err(e) => return IpcResponse::err(format!("Invalid update request: {e}")),
-                };
-                match self.container_manager.update_container(&id, req).await {
-                    Ok(true) => IpcResponse::ok_empty(),
-                    Ok(false) => IpcResponse::err("Container not found"),
-                    Err(e) => IpcResponse::err(e),
-                }
-            }
-
-            // ── Container volumes ─────────────────────────────────
-            OrchestratorRequest::ListVolumes { container_id } => {
-                match self.container_manager.list_volumes(&container_id).await {
-                    Ok(volumes) => IpcResponse::ok_data(volumes),
-                    Err(e) => IpcResponse::err(e),
-                }
-            }
-            OrchestratorRequest::AttachVolume { container_id, volume } => {
-                let name = volume.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let source_path = match volume.get("source_path").and_then(|v| v.as_str()) {
-                    Some(s) => s.to_string(),
-                    None => return IpcResponse::err("source_path is required"),
-                };
-                let mount_point = match volume.get("mount_point").and_then(|v| v.as_str()) {
-                    Some(s) => s.to_string(),
-                    None => return IpcResponse::err("mount_point is required"),
-                };
-                let read_only = volume.get("read_only").and_then(|v| v.as_bool()).unwrap_or(false);
-                let zfs_dataset = volume.get("zfs_dataset").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let zfs_quota = volume.get("zfs_quota").and_then(|v| v.as_u64());
-
-                match self.container_manager.attach_volume(
-                    &container_id, name, source_path, mount_point, read_only, zfs_dataset, zfs_quota,
-                ).await {
-                    Ok(vol) => IpcResponse::ok_data(vol),
-                    Err(e) => IpcResponse::err(e),
-                }
-            }
-            OrchestratorRequest::UpdateVolume { container_id, volume_id, updates } => {
-                match self.container_manager.update_volume(&container_id, &volume_id, updates).await {
-                    Ok(vol) => IpcResponse::ok_data(vol),
-                    Err(e) => IpcResponse::err(e),
-                }
-            }
-            OrchestratorRequest::DetachVolume { container_id, volume_id } => {
-                match self.container_manager.detach_volume(&container_id, &volume_id).await {
-                    Ok(()) => IpcResponse::ok_empty(),
-                    Err(e) => IpcResponse::err(e),
-                }
-            }
-
-            // ── Container extended ───────────────────────────────
-            OrchestratorRequest::MigrateContainer { id, target_host_id } => {
-                match self.container_manager.migrate_container(
-                    &id,
-                    &target_host_id,
-                    &self.migrations,
-                ).await {
-                    Ok(transfer_id) => IpcResponse::ok_data(serde_json::json!({
-                        "transfer_id": transfer_id,
-                    })),
-                    Err(e) => IpcResponse::err(e),
-                }
-            }
-            OrchestratorRequest::GetMigrationStatus { app_id } => {
-                let migrations = self.migrations.read().await;
-                // Find migration by app_id (migrations are keyed by transfer_id)
-                let migration = migrations.values().find(|m| m.app_id == app_id);
-                match migration {
-                    Some(state) => IpcResponse::ok_data(state),
-                    None => IpcResponse::err("No active migration for this application"),
-                }
-            }
-            OrchestratorRequest::CancelMigration { app_id } => {
-                let migrations = self.migrations.read().await;
-                let migration = migrations.values().find(|m| m.app_id == app_id);
-                match migration {
-                    Some(state) => {
-                        state.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
-                        info!(app_id = app_id, "Migration cancellation requested");
-                        IpcResponse::ok_empty()
-                    }
-                    None => IpcResponse::err("No active migration for this application"),
-                }
-            }
-            OrchestratorRequest::RenameContainer { id, request } => {
-                let req: RenameContainerRequest = match serde_json::from_value(request) {
-                    Ok(r) => r,
-                    Err(e) => return IpcResponse::err(format!("Invalid rename request: {e}")),
-                };
-                match self.container_manager.rename_container(
-                    &id,
-                    req,
-                    &self.renames,
-                ).await {
-                    Ok(rename_id) => IpcResponse::ok_data(serde_json::json!({
-                        "rename_id": rename_id,
-                    })),
-                    Err(e) => IpcResponse::err(e),
-                }
-            }
-            OrchestratorRequest::GetRenameStatus { app_id } => {
-                let renames = self.renames.read().await;
-                // Find rename by app_id (renames track app_ids in a Vec)
-                let rename = renames.values().find(|r| r.app_ids.contains(&app_id));
-                match rename {
-                    Some(state) => IpcResponse::ok_data(state),
-                    None => IpcResponse::err("No active rename for this application"),
-                }
-            }
-            OrchestratorRequest::GetContainerConfig => {
-                let config = self.container_manager.get_config().await;
-                IpcResponse::ok_data(config)
-            }
-            OrchestratorRequest::UpdateContainerConfig { config } => {
-                let cfg = match serde_json::from_value(config) {
-                    Ok(c) => c,
-                    Err(e) => return IpcResponse::err(format!("Invalid container config: {e}")),
-                };
-                match self.container_manager.update_config(cfg).await {
-                    Ok(()) => IpcResponse::ok_empty(),
-                    Err(e) => IpcResponse::err(e),
-                }
-            }
-
             // ── Git ──────────────────────────────────────────────
             OrchestratorRequest::ListRepos => {
                 match self.git.list_repos().await {
@@ -516,30 +328,6 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                         IpcResponse::ok_empty()
                     }
                     Err(e) => IpcResponse::err(format!("Failed to save git config: {e}")),
-                }
-            }
-
-            // ── Database (centralized) ─────────────────────────────
-            OrchestratorRequest::DataverseQuery { app_id, query } => {
-                let dv_query = match serde_json::from_value(query) {
-                    Ok(q) => q,
-                    Err(e) => return IpcResponse::err(format!("Invalid query: {e}")),
-                };
-                match self.db.execute_query(&app_id, dv_query).await {
-                    Ok(result) => IpcResponse::ok_data(result),
-                    Err(e) => IpcResponse::err(format!("Query failed: {e}")),
-                }
-            }
-            OrchestratorRequest::DataverseGetSchema { app_id } => {
-                match self.db.get_schema(&app_id).await {
-                    Ok(schema) => IpcResponse::ok_data(schema),
-                    Err(e) => IpcResponse::err(e),
-                }
-            }
-            OrchestratorRequest::DataverseOverview => {
-                match self.db.overview().await {
-                    Ok(data) => IpcResponse::ok_data(data),
-                    Err(e) => IpcResponse::err(e),
                 }
             }
 

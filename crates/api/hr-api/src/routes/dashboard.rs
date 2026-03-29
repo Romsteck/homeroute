@@ -121,34 +121,9 @@ async fn fetch_cpu_ram() -> Option<(f64, f64)> {
     result.ok().flatten()
 }
 
-/// Count running/total containers via IPC orchestrator.
-async fn fetch_containers(state: &ApiState) -> Option<(usize, usize)> {
-    let timeout = Duration::from_secs(2);
-    let resp = tokio::time::timeout(
-        timeout,
-        state.orchestrator.request(&OrchestratorRequest::ListContainers),
-    )
-    .await
-    .ok()?
-    .ok()?;
-
-    if !resp.ok {
-        return None;
-    }
-
-    let data = resp.data?;
-    let containers = data.as_array()?;
-    let total = containers.len();
-    let running = containers
-        .iter()
-        .filter(|c| {
-            c.get("state")
-                .and_then(|s| s.as_str())
-                .map(|s| s == "running")
-                .unwrap_or(false)
-        })
-        .count();
-    Some((running, total))
+/// Legacy containers have been removed. Return None for backward compat.
+async fn fetch_containers(_state: &ApiState) -> Option<(usize, usize)> {
+    None
 }
 
 /// Count running/total applications via IPC orchestrator.

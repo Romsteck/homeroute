@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import Section from '../components/Section';
-import { getHosts, getContainers, getEdgeStats } from '../api/client';
+import { getHosts, getEdgeStats } from '../api/client';
 import useWebSocket from '../hooks/useWebSocket';
 
 const formatBytes = (bytes) => {
@@ -32,7 +32,6 @@ const getDaysUntilExpiry = (expiresAt) => {
 
 export default function Monitoring() {
   const [hosts, setHosts] = useState([]);
-  const [containers, setContainers] = useState([]);
   const [certificates, setCertificates] = useState([]);
   const [edgeStats, setEdgeStats] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -58,29 +57,18 @@ export default function Monitoring() {
         )
       );
     },
-    'containers:metrics': (data) => {
-      setContainers(prev =>
-        prev.map(c =>
-          c.id === data.containerId
-            ? { ...c, metrics: data }
-            : c
-        )
-      );
-    },
   });
 
   const fetchAll = async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
     try {
-      const [hostsRes, containersRes, certsRes, edgeRes] = await Promise.allSettled([
+      const [hostsRes, certsRes, edgeRes] = await Promise.allSettled([
         getHosts(),
-        getContainers(),
         fetch('/api/acme/certificates').then(r => r.json()),
         getEdgeStats(),
       ]);
 
       if (hostsRes.status === 'fulfilled') setHosts(hostsRes.value.data.hosts || []);
-      if (containersRes.status === 'fulfilled') setContainers(containersRes.value.data.containers || []);
       if (certsRes.status === 'fulfilled' && certsRes.value.success) {
         // Filter out legacy_code certs (dev code-server, no longer in use)
         setCertificates((certsRes.value.certificates || []).filter(c => c.type !== 'legacy_code'));
@@ -152,13 +140,6 @@ export default function Monitoring() {
       }
     });
 
-    // Container down
-    containers.forEach(c => {
-      if (c.status !== 'running' && c.status !== 'stopped') {
-        result.push({ severity: 'critical', source: `container:${c.name}`, message: `Container '${c.name}' is ${c.status}` });
-      }
-    });
-
     // TLS certificates expiring < 30 days
     certificates.forEach(cert => {
       const days = getDaysUntilExpiry(cert.expires_at);
@@ -177,7 +158,7 @@ export default function Monitoring() {
     // Sort: critical first
     result.sort((a, b) => (a.severity === 'critical' ? 0 : 1) - (b.severity === 'critical' ? 0 : 1));
     return result;
-  }, [hosts, containers, certificates]);
+  }, [hosts, certificates]);
 
   if (loading) {
     return (
@@ -188,7 +169,6 @@ export default function Monitoring() {
   }
 
   const onlineHosts = hosts.filter(h => h.is_local || h.status === 'online');
-  const runningContainers = containers.filter(c => c.status === 'running');
   const backupHost = hosts.find(h => h.id === '877bcb76-4fb8-4164-940c-707201adf9bc');
 
   const handleWakeBackup = async () => {
@@ -437,60 +417,6 @@ export default function Monitoring() {
               </div>
             );
           })()
-        )}
-      </Section>
-
-      {/* Containers */}
-      <Section title={`Containers (${runningContainers.length}/${containers.length})`}>
-        {containers.length === 0 ? (
-          <div className="text-center py-4 text-gray-400 text-sm">Aucun container.</div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-            {containers.map((c) => {
-              const isRunning = c.status === 'running';
-              const m = c.metrics;
-              return (
-                <div key={c.id} className={`bg-gray-800 border border-gray-700 p-3 ${!isRunning ? 'opacity-50' : ''}`}>
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm font-medium text-white truncate">{c.name}</span>
-                    <span className={`px-1.5 py-0.5 text-[10px] font-medium ${
-                      isRunning ? 'bg-green-500/20 text-green-400 border border-green-500/30' : 'bg-gray-500/20 text-gray-400 border border-gray-500/30'
-                    }`}>
-                      {(c.status || 'stopped').toUpperCase()}
-                    </span>
-                  </div>
-                  {m ? (
-                    <div className="space-y-1.5">
-                      {m.cpuPercent != null && (
-                        <div className="flex items-center gap-2">
-                          <Cpu className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-                          <div className="flex-1">
-                            <div className="w-full bg-gray-700 h-2">
-                              <div className="h-2 bg-blue-500 transition-all" style={{ width: `${Math.min(m.cpuPercent, 100)}%` }} />
-                            </div>
-                          </div>
-                          <span className="text-xs text-gray-400 w-10 text-right">{m.cpuPercent.toFixed(0)}%</span>
-                        </div>
-                      )}
-                      {m.memoryUsedBytes != null && m.memoryTotalBytes != null && (
-                        <div className="flex items-center gap-2">
-                          <HardDrive className="w-3.5 h-3.5 text-green-400 shrink-0" />
-                          <div className="flex-1">
-                            <div className="w-full bg-gray-700 h-2">
-                              <div className="h-2 bg-green-500 transition-all" style={{ width: `${(m.memoryUsedBytes / m.memoryTotalBytes * 100).toFixed(0)}%` }} />
-                            </div>
-                          </div>
-                          <span className="text-xs text-gray-400 w-20 text-right">{formatBytes(m.memoryUsedBytes)}/{formatBytes(m.memoryTotalBytes)}</span>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="text-xs text-gray-500">{isRunning ? 'Metriques en attente...' : 'Arrete'}</div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
         )}
       </Section>
 

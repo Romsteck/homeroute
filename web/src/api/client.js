@@ -127,38 +127,6 @@ export const getLocalInterfaces = () => api.get('/hosts/local/interfaces');
 // Edge Stats
 export const getEdgeStats = () => api.get('/edge/stats');
 
-// Containers (nspawn)
-export const getContainers = () => api.get('/containers');
-export const createContainer = (data) => api.post('/containers', data);
-export const updateContainer = (id, data) => api.put(`/containers/${id}`, data);
-export const deleteContainer = (id) => api.delete(`/containers/${id}`);
-export const startContainer = (id) => api.post(`/containers/${id}/start`);
-export const stopContainer = (id) => api.post(`/containers/${id}/stop`);
-export const migrateContainer = (id, targetHostId) => api.post(`/containers/${id}/migrate`, { target_host_id: targetHostId });
-export const getMigrationStatus = (id) => api.get(`/containers/${id}/migrate/status`);
-export const cancelMigration = (id) => api.post(`/containers/${id}/migrate/cancel`);
-export const getContainersConfig = () => api.get('/containers/config');
-export const updateContainersConfig = (data) => api.put('/containers/config', data);
-export const renameContainer = (id, data) => api.post(`/containers/${id}/rename`, data);
-export const getRenameStatus = (id) => api.get(`/containers/${id}/rename/status`);
-export const getContainerVolumes = (id) => api.get(`/containers/${id}/volumes`);
-export const attachContainerVolume = (id, data) => api.post(`/containers/${id}/volumes`, data);
-export const updateContainerVolume = (id, volId, data) => api.put(`/containers/${id}/volumes/${volId}`, data);
-export const detachContainerVolume = (id, volId) => api.delete(`/containers/${id}/volumes/${volId}`);
-
-// Prod status/logs (queried via dev container's linked prod)
-export const getProdStatus = (devAppId) => api.get(`/applications/${devAppId}/prod/status`);
-export const getProdLogs = (devAppId, lines = 50) => api.get(`/applications/${devAppId}/prod/logs`, { params: { lines } });
-
-// Dataverse
-export const getDataverseOverview = () => api.get('/dataverse/overview');
-export const getDataverseTable = (appId, tableName) => api.get(`/dataverse/apps/${appId}/tables/${tableName}`);
-export const getDataverseRelations = (appId) => api.get(`/dataverse/apps/${appId}/relations`);
-export const getDataverseRows = (appId, table, params) => api.get(`/dataverse/apps/${appId}/tables/${table}/rows`, { params });
-export const insertDataverseRows = (appId, table, rows) => api.post(`/dataverse/apps/${appId}/tables/${table}/rows`, { rows });
-export const updateDataverseRows = (appId, table, data) => api.put(`/dataverse/apps/${appId}/tables/${table}/rows`, data);
-export const deleteDataverseRows = (appId, table, filters) => api.delete(`/dataverse/apps/${appId}/tables/${table}/rows`, { data: { filters } });
-
 // Store
 export const getStoreApps = () => api.get('/store/apps');
 

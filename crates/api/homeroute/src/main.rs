@@ -105,10 +105,7 @@ async fn main() -> anyhow::Result<()> {
 
         // These fields are managed by hr-orchestrator; homeroute passes None/empty.
         registry: None,
-        container_manager: None,
         git: Some(Arc::new(GitService::new())),
-        migrations: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        renames: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         update_log,
         task_store: task_store.clone(),
     };

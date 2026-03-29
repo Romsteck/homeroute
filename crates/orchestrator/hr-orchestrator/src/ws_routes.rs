@@ -1,12 +1,12 @@
 //! WebSocket endpoints for hr-orchestrator (port 4001).
 //!
-//! These handlers manage agent, host-agent, and terminal WebSocket connections
+//! These handlers manage agent, host-agent, and env-agent WebSocket connections
 //! directly against the local AgentRegistry, without going through hr-api.
 
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::response::IntoResponse;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -21,7 +21,6 @@ use hr_environment::{EnvAgentMessage, EnvOrchestratorMessage};
 use hr_registry::protocol::{AgentMessage, HostAgentMessage, HostRegistryMessage, RegistryMessage};
 use hr_registry::AgentRegistry;
 
-use crate::container_manager::ContainerManager;
 use crate::env_manager::EnvironmentManager;
 
 // ── Transfer types for host-agent migration relay ────────────────────
@@ -53,7 +52,6 @@ struct ActiveTransfer {
 #[derive(Clone)]
 pub struct WsState {
     pub registry: Arc<AgentRegistry>,
-    pub container_manager: Arc<ContainerManager>,
     pub env_manager: Arc<EnvironmentManager>,
     pub env: Arc<EnvConfig>,
     pub events: Arc<EventBus>,
@@ -529,12 +527,6 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: WsState) {
     // Mark host online
     update_host_status(&host_id, "online", &state.events.host_status).await;
 
-    // Restore containers that should be running on this host
-    state
-        .container_manager
-        .restore_host_containers(&host_id)
-        .await;
-
     // Track which transfer_ids are being relayed (remote->remote)
     let mut relay_transfers: std::collections::HashSet<String> =
         std::collections::HashSet::new();
@@ -780,15 +772,8 @@ async fn handle_host_agent_message(
                 match tokio::fs::File::create(&file_path).await {
                     Ok(file) => {
                         // Resolve storage path and network mode for local
-                        let sp = state
-                            .container_manager
-                            .resolve_storage_path("local")
-                            .await;
-                        let nm = state
-                            .container_manager
-                            .resolve_network_mode("local")
-                            .await
-                            .unwrap_or_else(|_| "bridge:br-lan".to_string());
+                        let sp = "/var/lib/machines".to_string();
+                        let nm = "bridge:br-lan".to_string();
 
                         // app_id is used for progress tracking; in hr-orchestrator
                         // the migration state is not replicated, so we use empty.
@@ -1420,314 +1405,7 @@ async fn handle_local_nspawn_import(
     let _ = tokio::fs::remove_file(&ws_import_path).await;
 }
 
-// ══════════════════════════════════════════════════════════════════════
-// Terminal WebSocket (/containers/{id}/terminal)
-// ══════════════════════════════════════════════════════════════════════
-
-pub async fn terminal_ws(
-    State(state): State<WsState>,
-    Path(id): Path<String>,
-    ws: WebSocketUpgrade,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_terminal_ws(state, id, socket))
-}
-
-async fn handle_terminal_ws(state: WsState, container_id: String, mut socket: WebSocket) {
-    let mgr = &state.container_manager;
-
-    // Look up the container record to get the container name and host_id
-    let containers = mgr.list_containers().await;
-    let container_record = containers
-        .iter()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(&container_id));
-
-    let Some(record) = container_record else {
-        let _ = socket
-            .send(Message::Text(
-                json!({"error": "Container not found"}).to_string().into(),
-            ))
-            .await;
-        let _ = socket.send(Message::Close(None)).await;
-        return;
-    };
-
-    let container = record
-        .get("container_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let host_id = record
-        .get("host_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("local")
-        .to_string();
-
-    if container.is_empty() {
-        let _ = socket
-            .send(Message::Text(
-                json!({"error": "Container not found"}).to_string().into(),
-            ))
-            .await;
-        let _ = socket.send(Message::Close(None)).await;
-        return;
-    }
-
-    info!(container, host_id, "Container V2 terminal WebSocket opened");
-
-    if host_id == "local" {
-        handle_terminal_local(&container, &mut socket).await;
-    } else {
-        handle_terminal_remote(&state.registry, &host_id, &container, &mut socket).await;
-    }
-
-    let _ = socket.send(Message::Close(None)).await;
-    info!(container, "Container V2 terminal WebSocket closed");
-}
-
-/// Handle terminal for a local container (machinectl + nsenter).
-async fn handle_terminal_local(container: &str, socket: &mut WebSocket) {
-    // Get the container's leader PID via machinectl show
-    let leader_pid = match Command::new("machinectl")
-        .args(["show", container, "--property=Leader", "--value"])
-        .output()
-        .await
-    {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            error!(container, "Failed to get leader PID: {stderr}");
-            let _ = socket
-                .send(Message::Text(
-                    json!({"error": format!("Failed to get container PID: {stderr}")})
-                        .to_string()
-                        .into(),
-                ))
-                .await;
-            return;
-        }
-        Err(e) => {
-            error!(container, "Failed to run machinectl show: {e}");
-            let _ = socket
-                .send(Message::Text(
-                    json!({"error": format!("Failed to get container PID: {e}")})
-                        .to_string()
-                        .into(),
-                ))
-                .await;
-            return;
-        }
-    };
-
-    // Use script to allocate a PTY for nsenter+bash (interactive shell with echo/prompts)
-    let nsenter_cmd = format!(
-        "nsenter -t {} -m -u -i -n -p -- /bin/bash -l",
-        leader_pid
-    );
-    let mut child = match Command::new("script")
-        .args(["-qfec", &nsenter_cmd, "/dev/null"])
-        .env("TERM", "xterm-256color")
-        .env("HOME", "/root")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            error!(container, "Failed to spawn nsenter shell: {e}");
-            let _ = socket
-                .send(Message::Text(
-                    json!({"error": format!("Failed to start shell: {e}")})
-                        .to_string()
-                        .into(),
-                ))
-                .await;
-            return;
-        }
-    };
-
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
-
-    let mut stdout_buf = vec![0u8; 4096];
-    let mut stderr_buf = vec![0u8; 4096];
-
-    loop {
-        tokio::select! {
-            n = stdout.read(&mut stdout_buf) => {
-                match n {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if socket.send(Message::Binary(stdout_buf[..n].to_vec().into())).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-            n = stderr.read(&mut stderr_buf) => {
-                match n {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if socket.send(Message::Binary(stderr_buf[..n].to_vec().into())).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-            ws_msg = socket.recv() => {
-                match ws_msg {
-                    Some(Ok(Message::Text(text))) => {
-                        if stdin.write_all(text.as_bytes()).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(Message::Binary(data))) => {
-                        if stdin.write_all(&data).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    _ => {}
-                }
-            }
-            status = child.wait() => {
-                match status {
-                    Ok(s) => info!(container, status = ?s, "Shell process exited"),
-                    Err(e) => error!(container, "Shell process error: {e}"),
-                }
-                break;
-            }
-        }
-    }
-
-    let _ = child.kill().await;
-}
-
-/// Handle terminal for a remote container (proxied through host-agent WebSocket).
-async fn handle_terminal_remote(
-    registry: &Arc<AgentRegistry>,
-    host_id: &str,
-    container: &str,
-    socket: &mut WebSocket,
-) {
-    if !registry.is_host_connected(host_id).await {
-        let _ = socket
-            .send(Message::Text(
-                json!({"error": "Host is not connected"}).to_string().into(),
-            ))
-            .await;
-        return;
-    }
-
-    let session_id = uuid::Uuid::new_v4().to_string();
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
-
-    // Register session so data from host-agent is routed to us
-    registry
-        .register_terminal_session(&session_id, tx)
-        .await;
-
-    // Send TerminalOpen to host-agent
-    if let Err(e) = registry
-        .send_host_command(
-            host_id,
-            HostRegistryMessage::TerminalOpen {
-                session_id: session_id.clone(),
-                container_name: container.to_string(),
-            },
-        )
-        .await
-    {
-        error!(container, host_id, "Failed to send TerminalOpen: {e}");
-        let _ = socket
-            .send(Message::Text(
-                json!({"error": format!("Failed to open remote terminal: {e}")})
-                    .to_string()
-                    .into(),
-            ))
-            .await;
-        registry
-            .unregister_terminal_session(&session_id)
-            .await;
-        return;
-    }
-
-    info!(
-        container,
-        host_id,
-        session_id,
-        "Remote terminal session started"
-    );
-
-    // Bidirectional relay loop
-    loop {
-        tokio::select! {
-            // Data from host-agent (terminal output) -> WebSocket client
-            data = rx.recv() => {
-                match data {
-                    Some(d) if d.is_empty() => {
-                        // Empty data signals session closed by host-agent
-                        break;
-                    }
-                    Some(d) => {
-                        if socket.send(Message::Binary(d.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    None => break, // Channel closed
-                }
-            }
-            // Data from WebSocket client (user input) -> host-agent
-            ws_msg = socket.recv() => {
-                match ws_msg {
-                    Some(Ok(Message::Text(text))) => {
-                        let _ = registry.send_host_command(
-                            host_id,
-                            HostRegistryMessage::TerminalData {
-                                session_id: session_id.clone(),
-                                data: text.as_bytes().to_vec(),
-                            },
-                        ).await;
-                    }
-                    Some(Ok(Message::Binary(data))) => {
-                        let _ = registry.send_host_command(
-                            host_id,
-                            HostRegistryMessage::TerminalData {
-                                session_id: session_id.clone(),
-                                data: data.to_vec(),
-                            },
-                        ).await;
-                    }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    // Cleanup: send TerminalClose and unregister
-    let _ = registry
-        .send_host_command(
-            host_id,
-            HostRegistryMessage::TerminalClose {
-                session_id: session_id.clone(),
-            },
-        )
-        .await;
-    registry
-        .unregister_terminal_session(&session_id)
-        .await;
-
-    info!(
-        container,
-        host_id,
-        session_id,
-        "Remote terminal session ended"
-    );
-}
+// (Legacy terminal WebSocket for containers removed)
 
 // ══════════════════════════════════════════════════════════════════════
 // DNS record helpers for agent lifecycle

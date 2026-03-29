@@ -1,10 +1,4 @@
 #![recursion_limit = "512"]
-// Container manager has the full canonical implementation. Some methods are
-// not yet wired to IPC (create, migrate, rename) -- they will be activated
-// as the deploy pipeline migrates from hr-api.
-#[allow(dead_code)]
-mod container_manager;
-mod db_manager;
 mod env_manager;
 mod ipc_handler;
 mod mcp;
@@ -17,14 +11,11 @@ use hr_common::config::EnvConfig;
 use hr_common::events::EventBus;
 use hr_ipc::{EdgeClient, NetcoreClient};
 use hr_registry::AgentRegistry;
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use container_manager::ContainerManager;
 use ipc_handler::OrchestratorHandler;
 
 const ORCHESTRATOR_SOCKET: &str = "/run/hr-orchestrator.sock";
@@ -153,45 +144,6 @@ async fn main() -> anyhow::Result<()> {
     }
     info!("Git service initialized");
 
-    // ── Container V2 Manager (nspawn) ────────────────────────────────
-
-    let container_v2_state_path = PathBuf::from("/var/lib/server-dashboard/containers-v2.json");
-    let container_manager = Arc::new(ContainerManager::new(
-        container_v2_state_path,
-        Arc::new(env.clone()),
-        events.clone(),
-        registry.clone(),
-        Some(git_service.clone()),
-    ));
-
-    // Recover registry state from container configs if state file was lost/corrupted
-    {
-        let records = container_manager.list_container_records().await;
-        let tuples: Vec<_> = records
-            .iter()
-            .map(|c| {
-                (
-                    c.id.clone(),
-                    c.name.clone(),
-                    c.slug.clone(),
-                    c.container_name.clone(),
-                    c.host_id.clone(),
-                    c.environment,
-                    c.stack,
-                    c.created_at,
-                )
-            })
-            .collect();
-        match registry.recover_from_containers(&tuples).await {
-            Ok(0) => {} // nothing to recover
-            Ok(n) => warn!(count = n, "Recovered applications from container configs"),
-            Err(e) => warn!(error = %e, "Failed to recover registry from containers"),
-        }
-    }
-
-    // Restore local containers that were running before reboot
-    container_manager.restore_local_containers().await;
-
     // ── CertReady listener — notify agents of certificate renewals ───
 
     {
@@ -282,9 +234,6 @@ async fn main() -> anyhow::Result<()> {
 
     // ── IPC server (Unix socket) ─────────────────────────────────────
 
-    let migrations = Arc::new(RwLock::new(HashMap::new()));
-    let renames = Arc::new(RwLock::new(HashMap::new()));
-
     // ── Backup pipeline ──────────────────────────────────────────────────
     let backup_pipeline = Arc::new(backup_pipeline::BackupPipeline::new(events.clone()));
     backup_pipeline::spawn_daily_scheduler(backup_pipeline.clone());
@@ -293,11 +242,6 @@ async fn main() -> anyhow::Result<()> {
     // ── Container health watcher ──────────────────────────────────────────
     container_watcher::ContainerWatcher::spawn(registry.clone(), events.clone());
     info!("Container health watcher spawned (60s interval, auto-recovery)");
-
-    // ── Database Manager (centralized per-app SQLite) ───────────────
-    let db_dir = PathBuf::from("/opt/homeroute/data/db");
-    let db_manager = Arc::new(db_manager::DbManager::new(db_dir));
-    info!("Database manager initialized");
 
     // ── Environment Manager ───────────────────────────────────────
     let env_state_path = PathBuf::from("/var/lib/server-dashboard/environments.json");
@@ -321,12 +265,8 @@ async fn main() -> anyhow::Result<()> {
 
     let handler = Arc::new(OrchestratorHandler {
         registry: registry.clone(),
-        container_manager: container_manager.clone(),
         git: git_service.clone(),
-        migrations,
-        renames,
         backup: backup_pipeline.clone(),
-        db: db_manager.clone(),
         env_manager: env_manager.clone(),
     });
 
@@ -351,7 +291,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── MCP endpoint (optional, requires MCP_TOKEN env var) ─────────
 
-    let mcp_state = mcp::McpState::from_env(registry.clone(), container_manager.clone(), git_service.clone(), edge.clone(), backup_pipeline.clone(), db_manager.clone(), env_manager.clone(), pipeline_engine.clone());
+    let mcp_state = mcp::McpState::from_env(registry.clone(), git_service.clone(), edge.clone(), backup_pipeline.clone(), env_manager.clone(), pipeline_engine.clone());
     if mcp_state.is_some() {
         info!("MCP endpoint enabled (POST /mcp)");
     }
@@ -360,7 +300,6 @@ async fn main() -> anyhow::Result<()> {
 
     let ws_state = ws_routes::WsState {
         registry: registry.clone(),
-        container_manager: container_manager.clone(),
         env_manager: env_manager.clone(),
         env: Arc::new(env.clone()),
         events: events.clone(),
@@ -381,10 +320,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/host-agents/ws", axum::routing::get(ws_routes::host_agent_ws))
         // Alias: host agents connect via legacy path /api/hosts/agent/ws
         .route("/api/hosts/agent/ws", axum::routing::get(ws_routes::host_agent_ws))
-        .route(
-            "/containers/{id}/terminal",
-            axum::routing::get(ws_routes::terminal_ws),
-        )
         .with_state(ws_state);
 
     // Merge MCP route (has its own state, only if MCP_TOKEN is set)
