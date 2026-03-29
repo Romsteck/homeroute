@@ -155,7 +155,6 @@ async fn main() -> Result<()> {
     // Routes *.{env}.{domain} traffic to the correct app based on Host header.
     {
         let proxy_state = app_proxy::AppProxyState {
-            supervisor: Arc::clone(&supervisor),
             config: Arc::new(cfg.clone()),
             http_client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
                 .build_http(),

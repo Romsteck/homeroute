@@ -569,6 +569,15 @@ impl ContextGenerator {
              - Build: `{build_cmd}`\n\
              {env_section}\n\
              \n\
+             ## Variables d'environnement\n\
+             Le service systemd definit ces variables automatiquement :\n\
+             - `PORT` — port d'ecoute de l'app (TOUJOURS utiliser cette variable, jamais de port en dur)\n\
+             - `DATABASE_URL` / `DATABASE_PATH` / `DB_PATH` — chemin vers la base de donnees SQLite\n\
+             - `NODE_ENV` — `production` (toujours builde, meme en dev)\n\
+             \n\
+             **IMPORTANT** : toute app DOIT lire `PORT` pour son port d'ecoute.\n\
+             Ne JAMAIS hardcoder un port (3000, 8080, etc.) dans le code.\n\
+             \n\
              ## Base de donnees\n\
              - Utiliser `db.*` pour toutes les operations\n\
              - Ne JAMAIS acceder aux fichiers .db directement\n\

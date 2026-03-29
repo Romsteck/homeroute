@@ -5,26 +5,37 @@
 //!   {app_slug}.{env_slug}.{base_domain} → localhost:{app_port}
 //!   studio.{env_slug}.{base_domain}     → localhost:8443 (code-server)
 //!   code.{env_slug}.{base_domain}       → localhost:8443 (code-server)
+//!
+//! Supports both HTTP and WebSocket (Upgrade) requests.
 
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::State;
-use axum::http::{Request, Response, StatusCode, Uri};
+use axum::extract::{ConnectInfo, State};
+use axum::http::{Request, StatusCode, Uri};
 use axum::response::IntoResponse;
 use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
 use tracing::{debug, warn};
 
-use crate::supervisor::AppSupervisor;
 use hr_environment::config::EnvAgentConfig;
 
 /// State shared by the app proxy handler.
 #[derive(Clone)]
 pub struct AppProxyState {
-    pub supervisor: Arc<AppSupervisor>,
     pub config: Arc<EnvAgentConfig>,
     pub http_client: Client<hyper_util::client::legacy::connect::HttpConnector, Body>,
+}
+
+/// Resolve target port from host header.
+fn resolve_port(config: &EnvAgentConfig, host: &str) -> Option<u16> {
+    let domain = host.split(':').next().unwrap_or(host);
+    let app_slug = domain.split('.').next().unwrap_or("");
+
+    if app_slug == "studio" || app_slug == "code" {
+        return Some(config.code_server_port);
+    }
+
+    config.apps.iter().find(|a| a.slug == app_slug).map(|a| a.port)
 }
 
 /// Axum handler: proxy all requests to the correct app based on Host header.
@@ -39,26 +50,16 @@ pub async fn proxy_handler(
         .unwrap_or("")
         .to_string();
 
-    // Extract app slug from host: {app_slug}.{env_slug}.{domain}
-    let domain = host.split(':').next().unwrap_or(&host);
-    let app_slug = domain.split('.').next().unwrap_or("").to_string();
-
-    // Resolve target port
-    let target_port = if app_slug == "studio" || app_slug == "code" {
-        state.config.code_server_port
-    } else {
-        // Find app port from config
-        match state.config.apps.iter().find(|a| a.slug == app_slug.as_str()) {
-            Some(app) => app.port,
-            None => {
-                warn!(host, app_slug, "app not found for proxy");
-                return (StatusCode::NOT_FOUND, format!("App '{}' not found", app_slug))
-                    .into_response();
-            }
+    let target_port = match resolve_port(&state.config, &host) {
+        Some(port) => port,
+        None => {
+            let app_slug = host.split('.').next().unwrap_or("?");
+            warn!(host, app_slug, "app not found for proxy");
+            return (StatusCode::NOT_FOUND, format!("App '{}' not found", app_slug))
+                .into_response();
         }
     };
 
-    // Build target URI
     let path_and_query = req
         .uri()
         .path_and_query()
@@ -74,12 +75,11 @@ pub async fn proxy_handler(
         }
     };
 
-    debug!(app_slug, target_port, path = path_and_query, "proxying request");
+    let app_slug = host.split('.').next().unwrap_or("?");
+    debug!(app_slug, target_port, path = path_and_query, "proxying");
 
-    // Forward the request
     let (mut parts, body) = req.into_parts();
     parts.uri = uri;
-
     let forwarded_req = Request::from_parts(parts, body);
 
     match state.http_client.request(forwarded_req).await {

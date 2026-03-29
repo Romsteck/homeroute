@@ -614,12 +614,13 @@ async fn proxy_handler_inner(
                     // e.g. "trader.dev" → env_slug = "dev"
                     // e.g. "studio.dev" → env_slug = "dev"
                     let dot_pos = prefix.find('.')?;
+                    let sub = &prefix[..dot_pos];
                     let env_slug = &prefix[dot_pos + 1..];
                     // Reject if env_slug contains dots (too many segments)
                     if env_slug.contains('.') {
                         return None;
                     }
-                    let (ip, port) = cache.resolve_env(env_slug)?;
+                    let (ip, port) = cache.resolve_env(sub, env_slug)?;
                     debug!(
                         domain = domain_only, env = env_slug, ip = %ip, port = port,
                         "Resolved wildcard env route"

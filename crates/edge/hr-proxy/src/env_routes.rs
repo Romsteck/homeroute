@@ -16,6 +16,7 @@ pub struct EnvRouteCache {
 /// One entry per connected environment.
 struct EnvEntry {
     container_ip: IpAddr,
+    code_server_port: u16,
 }
 
 /// Data used to update the cache (from IPC ListEnvironments response).
@@ -53,12 +54,18 @@ impl EnvRouteCache {
         }
     }
 
-    /// Resolve a wildcard env route: any `*.{env_slug}.{base_domain}` → container_ip:80.
-    /// Returns (container_ip, proxy_port) if the env exists and is connected.
-    pub fn resolve_env(&self, env_slug: &str) -> Option<(IpAddr, u16)> {
+    /// Resolve a wildcard env route: `{sub}.{env_slug}.{base_domain}`.
+    /// - studio/code subdomains → container_ip:8443 (direct to code-server, supports WS)
+    /// - all other subdomains → container_ip:80 (env-agent internal proxy)
+    pub fn resolve_env(&self, sub: &str, env_slug: &str) -> Option<(IpAddr, u16)> {
         let routes = self.routes.read().ok()?;
         let entry = routes.get(env_slug)?;
-        Some((entry.container_ip, ENV_PROXY_PORT))
+        let port = if sub == "studio" || sub == "code" {
+            entry.code_server_port
+        } else {
+            ENV_PROXY_PORT
+        };
+        Some((entry.container_ip, port))
     }
 
     /// Update the cache from environment data.
@@ -74,7 +81,7 @@ impl EnvRouteCache {
                 None => continue,
             };
 
-            new_routes.insert(env.slug.clone(), EnvEntry { container_ip: ip });
+            new_routes.insert(env.slug.clone(), EnvEntry { container_ip: ip, code_server_port: 8443 });
         }
 
         debug!(envs = new_routes.len(), "env route cache updated");

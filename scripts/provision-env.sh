@@ -297,6 +297,14 @@ install_dev_tools() {
 
         # --- code-server ---
         echo '>>> Installing code-server...'
+        # --- Create developer user with sudo NOPASSWD ---
+        echo ">>> Creating developer user..."
+        useradd -m -d /home/developer -s /bin/bash developer 2>/dev/null || true
+        apt-get install -y sudo > /dev/null 2>&1
+        echo "developer ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/developer
+        chmod 440 /etc/sudoers.d/developer
+        chown -R developer:developer /apps/ 2>/dev/null || true
+
         curl -fsSL https://code-server.dev/install.sh | sh 2>/dev/null
 
         # Configure code-server to listen on all interfaces
@@ -316,10 +324,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/code-server --config /root/.config/code-server/config.yaml /apps
+ExecStart=/usr/bin/code-server --bind-addr 0.0.0.0:8443 --auth none /apps
 Restart=always
 RestartSec=5
-Environment=HOME=/root
+User=developer
+Environment=HOME=/home/developer
 
 [Install]
 WantedBy=multi-user.target

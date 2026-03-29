@@ -131,6 +131,7 @@ impl AppSupervisor {
                  Environment=DATABASE_URL={db_path}/{slug}.db\n\
                  Environment=DATABASE_PATH={db_path}/{slug}.db\n\
                  Environment=DB_PATH={db_path}/{slug}.db\n\
+                 Environment=STATIC_DIR=client/dist\n\
                  \n\
                  [Install]\n\
                  WantedBy=multi-user.target\n",
