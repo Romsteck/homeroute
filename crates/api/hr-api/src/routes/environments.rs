@@ -439,15 +439,15 @@ struct DbTablesParams {
 }
 
 /// GET /api/environments/:slug/db/tables
-async fn get_db_tables(
+async fn get_db_tables(State(state): State<ApiState>,
     Path(slug): Path<String>,
     Query(params): Query<DbTablesParams>,
 ) -> impl IntoResponse {
-    let mut args = serde_json::json!({"env_slug": slug});
+    let mut args = serde_json::json!({});
     if let Some(app) = &params.app_slug {
-        args["app_slug"] = serde_json::json!(app);
+        args["app_id"] = serde_json::json!(app);
     }
-    match mcp_call("db.list_tables", args).await {
+    match env_mcp_call(&state, &slug, "db.list_tables", args).await {
         Ok(result) => Json(serde_json::json!({"success": true, "data": result})).into_response(),
         Err(e) => {
             error!("DB list tables failed: {e}");
@@ -467,18 +467,17 @@ struct DbSchemaParams {
 }
 
 /// GET /api/environments/:slug/db/schema?table=...
-async fn get_db_schema(
+async fn get_db_schema(State(state): State<ApiState>,
     Path(slug): Path<String>,
     Query(params): Query<DbSchemaParams>,
 ) -> impl IntoResponse {
     let mut args = serde_json::json!({
-        "env_slug": slug,
-        "table": params.table,
+        "table_name": params.table,
     });
     if let Some(app) = &params.app_slug {
-        args["app_slug"] = serde_json::json!(app);
+        args["app_id"] = serde_json::json!(app);
     }
-    match mcp_call("db.get_schema", args).await {
+    match env_mcp_call(&state, &slug, "db.get_schema", args).await {
         Ok(result) => Json(serde_json::json!({"success": true, "data": result})).into_response(),
         Err(e) => {
             error!("DB schema failed: {e}");
@@ -504,18 +503,17 @@ struct DbQueryParams {
 }
 
 /// GET /api/environments/:slug/db/query
-async fn query_db_data(
+async fn query_db_data(State(state): State<ApiState>,
     Path(slug): Path<String>,
     Query(params): Query<DbQueryParams>,
 ) -> impl IntoResponse {
     let mut args = serde_json::json!({
-        "env_slug": slug,
-        "table": params.table,
+        "table_name": params.table,
         "limit": params.limit.unwrap_or(50),
         "offset": params.offset.unwrap_or(0),
     });
     if let Some(app) = &params.app_slug {
-        args["app_slug"] = serde_json::json!(app);
+        args["app_id"] = serde_json::json!(app);
     }
     if let Some(order) = &params.order_by {
         args["order_by"] = serde_json::json!(order);
@@ -528,7 +526,7 @@ async fn query_db_data(
             args["filters"] = filters;
         }
     }
-    match mcp_call("db.query_data", args).await {
+    match env_mcp_call(&state, &slug, "db.query_data", args).await {
         Ok(result) => Json(serde_json::json!({"success": true, "data": result})).into_response(),
         Err(e) => {
             error!("DB query failed: {e}");
@@ -551,23 +549,22 @@ struct CountParams {
 }
 
 /// GET /api/environments/:slug/db/count
-async fn count_db_rows(
+async fn count_db_rows(State(state): State<ApiState>,
     Path(slug): Path<String>,
     Query(params): Query<CountParams>,
 ) -> impl IntoResponse {
     let mut args = serde_json::json!({
-        "env_slug": slug,
         "table_name": params.table,
     });
     if let Some(app) = &params.app_slug {
-        args["app_slug"] = serde_json::json!(app);
+        args["app_id"] = serde_json::json!(app);
     }
     if let Some(filters_str) = &params.filters {
         if let Ok(filters) = serde_json::from_str::<serde_json::Value>(filters_str) {
             args["filters"] = filters;
         }
     }
-    match mcp_call("db.count_rows", args).await {
+    match env_mcp_call(&state, &slug, "db.count_rows", args).await {
         Ok(result) => Json(serde_json::json!({"success": true, "data": result})).into_response(),
         Err(e) => {
             error!("DB count rows failed: {e}");
@@ -588,15 +585,13 @@ struct InsertRowsRequest {
 }
 
 /// POST /api/environments/:slug/db/rows
-async fn insert_db_rows(
+async fn insert_db_rows(State(state): State<ApiState>,
     Path(slug): Path<String>,
     Json(req): Json<InsertRowsRequest>,
 ) -> impl IntoResponse {
-    match mcp_call(
-        "db.insert_data",
+    match env_mcp_call(&state, &slug, "db.insert_data",
         serde_json::json!({
-            "env_slug": slug,
-            "app_slug": req.app_slug,
+            "app_id": req.app_slug,
             "table_name": req.table,
             "rows": req.rows,
         }),
@@ -624,15 +619,13 @@ struct UpdateRowsRequest {
 }
 
 /// PUT /api/environments/:slug/db/rows
-async fn update_db_rows(
+async fn update_db_rows(State(state): State<ApiState>,
     Path(slug): Path<String>,
     Json(req): Json<UpdateRowsRequest>,
 ) -> impl IntoResponse {
-    match mcp_call(
-        "db.update_data",
+    match env_mcp_call(&state, &slug, "db.update_data",
         serde_json::json!({
-            "env_slug": slug,
-            "app_slug": req.app_slug,
+            "app_id": req.app_slug,
             "table_name": req.table,
             "updates": req.updates,
             "filters": req.filters,
@@ -660,15 +653,13 @@ struct DeleteRowsRequest {
 }
 
 /// DELETE /api/environments/:slug/db/rows
-async fn delete_db_rows(
+async fn delete_db_rows(State(state): State<ApiState>,
     Path(slug): Path<String>,
     Json(req): Json<DeleteRowsRequest>,
 ) -> impl IntoResponse {
-    match mcp_call(
-        "db.delete_data",
+    match env_mcp_call(&state, &slug, "db.delete_data",
         serde_json::json!({
-            "env_slug": slug,
-            "app_slug": req.app_slug,
+            "app_id": req.app_slug,
             "table_name": req.table,
             "filters": req.filters,
         }),

@@ -607,6 +607,7 @@ async fn proxy_handler_inner(
                 // Try wildcard environment route: *.{env}.{base_domain}
                 // All traffic for an env goes to the env-agent internal proxy (port 80)
                 // which dispatches to the correct app based on the Host header.
+                debug!(domain = domain_only, "No static route found, trying env wildcard");
                 let env_route = state.env_route_cache.as_ref().and_then(|cache| {
                     let suffix = format!(".{}", base_domain);
                     let prefix = domain_only.strip_suffix(&suffix)?;
