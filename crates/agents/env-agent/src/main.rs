@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
     info!(apps = cfg.apps.len(), "Port registry initialized");
 
     // ── 3. Initialize AppSupervisor ──────────────────────────────────
-    let supervisor = Arc::new(AppSupervisor::new(cfg.apps.clone(), cfg.env_type(), cfg.apps_path.clone()));
+    let supervisor = Arc::new(AppSupervisor::new(cfg.apps.clone(), cfg.env_type(), cfg.apps_path.clone(), cfg.db_path.clone()));
     info!(apps = cfg.apps.len(), "AppSupervisor initialized");
 
     // ── 3b. Generate systemd service units ─────────────────────────────

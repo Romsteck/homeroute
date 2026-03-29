@@ -56,14 +56,16 @@ pub struct AppSupervisor {
     apps: Vec<EnvAgentAppConfig>,
     env_type: EnvType,
     apps_path: String,
+    db_path: String,
 }
 
 impl AppSupervisor {
     /// Create a new supervisor from the list of configured apps.
-    pub fn new(apps: Vec<EnvAgentAppConfig>, env_type: EnvType, apps_path: String) -> Self {
+    pub fn new(apps: Vec<EnvAgentAppConfig>, env_type: EnvType, apps_path: String, db_path: String) -> Self {
         Self {
             apps,
             env_type,
+            db_path,
             apps_path,
         }
     }
@@ -99,6 +101,19 @@ impl AppSupervisor {
         for app in &self.apps {
             let working_dir = format!("{}/{}", self.apps_path, app.slug);
 
+            // Create .dataverse/app.db symlink → env-agent DB for legacy app compatibility
+            if app.has_db {
+                let dataverse_dir = format!("{}/.dataverse", working_dir);
+                let db_file = format!("{}/{}.db", self.db_path, app.slug);
+                let _ = std::fs::create_dir_all(&dataverse_dir);
+                let link_path = format!("{}/app.db", dataverse_dir);
+                // Remove existing file/link and create fresh symlink
+                let _ = std::fs::remove_file(&link_path);
+                if let Err(e) = std::os::unix::fs::symlink(&db_file, &link_path) {
+                    warn!(slug = %app.slug, error = %e, "failed to create .dataverse symlink");
+                }
+            }
+
             // --- Main service: {slug}.service ---
             let run_unit = format!(
                 "[Unit]\n\
@@ -113,13 +128,18 @@ impl AppSupervisor {
                  RestartSec=3\n\
                  Environment=NODE_ENV=production\n\
                  Environment=PORT={port}\n\
+                 Environment=DATABASE_URL={db_path}/{slug}.db\n\
+                 Environment=DATABASE_PATH={db_path}/{slug}.db\n\
+                 Environment=DB_PATH={db_path}/{slug}.db\n\
                  \n\
                  [Install]\n\
                  WantedBy=multi-user.target\n",
                 name = app.name,
+                slug = app.slug,
                 working_dir = working_dir,
                 run_command = app.run_command,
                 port = app.port,
+                db_path = self.db_path,
             );
 
             let svc_path = unit_dir.join(Self::service_name(&app.slug));
@@ -446,7 +466,7 @@ mod tests {
             test_command: None,
             description: None,
         }];
-        let supervisor = AppSupervisor::new(apps, EnvType::Development, "/apps".to_string());
+        let supervisor = AppSupervisor::new(apps, EnvType::Development, "/apps".to_string(), "/opt/env-agent/data/db".to_string());
         assert!(supervisor.find_app("trader").is_ok());
         assert!(supervisor.find_app("nonexistent").is_err());
     }
