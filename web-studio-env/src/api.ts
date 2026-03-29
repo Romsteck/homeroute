@@ -130,11 +130,32 @@ export async function getAppLogs(
   appSlug: string,
   lines = 100,
 ): Promise<LogEntry[]> {
-  return fetchJson<LogEntry[]>(
+  const raw = await fetchJson<any>(
     `${API_BASE}/environments/${envSlug}/apps/${appSlug}/logs?lines=${lines}`,
     undefined,
-    [],
+    null,
   );
+  // API returns { logs: "raw journalctl text", slug: "..." }
+  // Parse the raw text into LogEntry[]
+  const text = typeof raw === "string" ? raw : raw?.logs || "";
+  if (!text) return [];
+  return text
+    .split("\n")
+    .filter(Boolean)
+    .map((line: string) => {
+      // journalctl format: "Mar 29 19:48:42 hostname unit[pid]: message"
+      const match = line.match(/^(\w+ \d+ [\d:]+) \S+ \S+: (.*)$/);
+      if (match) {
+        const message = match[2];
+        const level =
+          /error|panic|fatal/i.test(message) ? "ERROR"
+          : /warn/i.test(message) ? "WARN"
+          : /debug/i.test(message) ? "DEBUG"
+          : "INFO";
+        return { timestamp: match[1], level, message };
+      }
+      return { timestamp: "", level: "INFO", message: line };
+    });
 }
 
 // --- Database ---

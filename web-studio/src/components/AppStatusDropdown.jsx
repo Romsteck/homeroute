@@ -1,8 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 
-export default function AppStatusDropdown({ apps, onStart, onStop, onRestart, onStartAll, onStopAll }) {
+export default function AppStatusDropdown({ apps, onStart, onStop, onRestart, onStartAll, onStopAll, onFetchLogs }) {
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState({});
+  const [logsApp, setLogsApp] = useState(null);  // slug of app showing logs
+  const [logs, setLogs] = useState('');
+  const [logsLoading, setLogsLoading] = useState(false);
+  const logsEndRef = useRef(null);
+  const logsIntervalRef = useRef(null);
   const ref = useRef(null);
 
   const runningCount = apps.filter(a => a.status === 'running').length;
@@ -13,11 +18,36 @@ export default function AppStatusDropdown({ apps, onStart, onStop, onRestart, on
   useEffect(() => {
     if (!open) return;
     function handleClick(e) {
-      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+      if (ref.current && !ref.current.contains(e.target)) {
+        setOpen(false);
+        setLogsApp(null);
+      }
     }
     document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, [open]);
+
+  // Fetch logs when logsApp changes + poll every 3s
+  useEffect(() => {
+    if (!logsApp || !onFetchLogs) return;
+    let cancelled = false;
+    const load = async () => {
+      setLogsLoading(true);
+      const text = await onFetchLogs(logsApp, 80);
+      if (!cancelled) {
+        setLogs(text);
+        setLogsLoading(false);
+        // Auto-scroll to bottom
+        setTimeout(() => logsEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
+      }
+    };
+    load();
+    logsIntervalRef.current = setInterval(load, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(logsIntervalRef.current);
+    };
+  }, [logsApp, onFetchLogs]);
 
   const withPending = useCallback((slug, action, fn) => {
     setPending(p => ({ ...p, [slug]: action }));
@@ -63,7 +93,13 @@ export default function AppStatusDropdown({ apps, onStart, onStop, onRestart, on
                 <div key={app.slug} className="flex items-center justify-between px-3 py-1.5 hover:bg-gray-800/50">
                   <div className="flex items-center gap-2 min-w-0">
                     <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${dotColor}`} />
-                    <span className="text-sm text-gray-300 truncate">{app.name || app.slug}</span>
+                    <button
+                      onClick={() => setLogsApp(logsApp === app.slug ? null : app.slug)}
+                      className={`text-sm truncate transition-colors ${logsApp === app.slug ? 'text-indigo-400' : 'text-gray-300 hover:text-indigo-300'}`}
+                      title="View logs"
+                    >
+                      {app.name || app.slug}
+                    </button>
                     {app.port && (
                       <span className="text-[10px] text-gray-600">:{app.port}</span>
                     )}
@@ -102,6 +138,37 @@ export default function AppStatusDropdown({ apps, onStart, onStop, onRestart, on
               );
             })}
           </div>
+
+          {/* Logs panel */}
+          {logsApp && (
+            <div className="border-t border-gray-800">
+              <div className="flex items-center justify-between px-3 py-1.5 bg-gray-800/50">
+                <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">
+                  Logs — {logsApp}
+                </span>
+                <button
+                  onClick={() => setLogsApp(null)}
+                  className="text-gray-500 hover:text-gray-300 transition-colors"
+                >
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              <div className="h-48 overflow-y-auto bg-black/30 px-2 py-1 font-mono text-[10px] leading-relaxed text-gray-400 whitespace-pre-wrap">
+                {logsLoading && !logs ? (
+                  <span className="text-gray-600">Loading logs...</span>
+                ) : logs ? (
+                  <>
+                    {logs}
+                    <div ref={logsEndRef} />
+                  </>
+                ) : (
+                  <span className="text-gray-600">No logs available</span>
+                )}
+              </div>
+            </div>
+          )}
 
           <div className="flex items-center gap-2 px-3 py-2 border-t border-gray-800">
             <button

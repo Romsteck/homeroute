@@ -13,6 +13,7 @@ export default function Header({
   onRestartApp,
   onStartAll,
   onStopAll,
+  onFetchLogs,
 }) {
   const tabs = [
     { id: 'studio', label: 'Studio', icon: StudioIcon },
@@ -63,6 +64,7 @@ export default function Header({
             onRestart={onRestartApp}
             onStartAll={onStartAll}
             onStopAll={onStopAll}
+            onFetchLogs={onFetchLogs}
           />
         )}
         <div className="h-4 w-px bg-gray-800" />

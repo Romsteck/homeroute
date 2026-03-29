@@ -100,6 +100,77 @@ async fn mcp_call(tool: &str, arguments: serde_json::Value) -> Result<serde_json
     Ok(json.get("result").cloned().unwrap_or(serde_json::Value::Null))
 }
 
+/// POST to an env-agent MCP endpoint (resolves env IP first).
+/// Used for tools that live on the env-agent, not the orchestrator (app.logs, app.control, etc.)
+async fn env_mcp_call(
+    state: &ApiState,
+    env_slug: &str,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    // Resolve env IP via IPC
+    let resp = state
+        .orchestrator
+        .request(&OrchestratorRequest::GetEnvironment { id: env_slug.to_string() })
+        .await
+        .map_err(|e| format!("IPC error: {e}"))?;
+
+    if !resp.ok {
+        return Err(format!("Environment '{}' not found", env_slug));
+    }
+
+    let env_ip = resp.data
+        .as_ref()
+        .and_then(|d| d.get("ipv4_address"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("No IP for environment '{}'", env_slug))?;
+
+    let url = format!("http://{}:4010/mcp", env_ip);
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": tool,
+            "arguments": arguments,
+        }
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Env-agent request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Env-agent returned status {}", resp.status()));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse env-agent response: {e}"))?;
+
+    if let Some(err) = json.get("error") {
+        return Err(format!("Env-agent error: {}", err));
+    }
+
+    // Extract text content from JSON-RPC result
+    let result = json.get("result").cloned().unwrap_or(serde_json::Value::Null);
+    if let Some(text) = result.pointer("/content/0/text").and_then(|t| t.as_str()) {
+        // Try to parse text as JSON
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) {
+            return Ok(parsed);
+        }
+        return Ok(serde_json::Value::String(text.to_string()));
+    }
+    Ok(result)
+}
+
 // ── Environment handlers ────────────────────────────────────────
 
 /// GET /api/environments
@@ -282,16 +353,18 @@ struct ControlAppRequest {
 
 /// POST /api/environments/:slug/apps/:app_slug/control
 async fn control_app(
+    State(state): State<ApiState>,
     Path((slug, app_slug)): Path<(String, String)>,
     Json(req): Json<ControlAppRequest>,
 ) -> impl IntoResponse {
     info!(env = slug, app = app_slug, action = req.action, "Controlling app in environment");
-    match mcp_call(
-        "app.control",
+    let tool = format!("app.{}", req.action);
+    match env_mcp_call(
+        &state,
+        &slug,
+        &tool,
         serde_json::json!({
-            "env_slug": slug,
-            "app_slug": app_slug,
-            "action": req.action,
+            "slug": app_slug,
         }),
     )
     .await
@@ -315,15 +388,17 @@ struct AppLogsQuery {
 
 /// GET /api/environments/:slug/apps/:app_slug/logs
 async fn get_app_logs(
+    State(state): State<ApiState>,
     Path((slug, app_slug)): Path<(String, String)>,
     Query(query): Query<AppLogsQuery>,
 ) -> impl IntoResponse {
     let lines = query.lines.unwrap_or(100);
-    match mcp_call(
+    match env_mcp_call(
+        &state,
+        &slug,
         "app.logs",
         serde_json::json!({
-            "env_slug": slug,
-            "app_slug": app_slug,
+            "slug": app_slug,
             "lines": lines,
         }),
     )

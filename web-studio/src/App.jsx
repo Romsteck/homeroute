@@ -63,6 +63,7 @@ export default function App() {
         onRestartApp={appStatus.restartApp}
         onStartAll={appStatus.startAll}
         onStopAll={appStatus.stopAll}
+        onFetchLogs={appStatus.fetchLogs}
       />
 
       {/* Session tabs - only visible in studio mode */}

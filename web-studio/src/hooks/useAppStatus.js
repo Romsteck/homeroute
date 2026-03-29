@@ -61,5 +61,15 @@ export default function useAppStatus(pollInterval = 10000) {
     setTimeout(refresh, 2000);
   }, [apps, refresh]);
 
-  return { apps, loading, refresh, startApp, stopApp, restartApp, startAll, stopAll };
+  const fetchLogs = useCallback(async (slug, lines = 100) => {
+    try {
+      const data = await mcpCall('app.logs', { slug, lines });
+      return data?.logs || data || '';
+    } catch (e) {
+      console.warn(`Failed to fetch logs for ${slug}:`, e);
+      return 'Failed to fetch logs';
+    }
+  }, []);
+
+  return { apps, loading, refresh, startApp, stopApp, restartApp, startAll, stopAll, fetchLogs };
 }
