@@ -1,3 +1,5 @@
+import AppStatusDropdown from './AppStatusDropdown';
+
 export default function Header({
   appName,
   activeTab,
@@ -5,6 +7,12 @@ export default function Header({
   connected,
   authStatus,
   onOpenAuthDialog,
+  apps,
+  onStartApp,
+  onStopApp,
+  onRestartApp,
+  onStartAll,
+  onStopAll,
 }) {
   const tabs = [
     { id: 'studio', label: 'Studio', icon: StudioIcon },
@@ -45,8 +53,19 @@ export default function Header({
         })}
       </div>
 
-      {/* Right: auth + connection status */}
+      {/* Right: apps + auth + connection status */}
       <div className="flex items-center gap-3">
+        {apps && apps.length > 0 && (
+          <AppStatusDropdown
+            apps={apps}
+            onStart={onStartApp}
+            onStop={onStopApp}
+            onRestart={onRestartApp}
+            onStartAll={onStartAll}
+            onStopAll={onStopAll}
+          />
+        )}
+        <div className="h-4 w-px bg-gray-800" />
         {authStatus?.authenticated ? (
           <button
             onClick={onOpenAuthDialog}

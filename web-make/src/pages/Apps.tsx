@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { AppTable } from '../components/AppRow'
-import { fetchApps } from '../api'
+import { fetchApps, controlApp } from '../api'
 import type { EnvApp } from '../types'
 
 interface AppsProps {
@@ -11,6 +11,7 @@ export function Apps({ currentEnv }: AppsProps) {
   const [apps, setApps] = useState<EnvApp[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [controlling, setControlling] = useState<string | null>(null)
 
   useEffect(() => {
     setLoading(true)
@@ -32,6 +33,20 @@ export function Apps({ currentEnv }: AppsProps) {
     )
   }
 
+  const handleControl = async (slug: string, action: string) => {
+    setControlling(slug)
+    try {
+      await controlApp(currentEnv, slug, action)
+      await new Promise((r) => setTimeout(r, 1500))
+      const refreshed = await fetchApps(currentEnv)
+      setApps(refreshed)
+    } catch (e) {
+      console.warn('Control failed:', e)
+    } finally {
+      setControlling(null)
+    }
+  }
+
   const runningCount = apps.filter((a) => a.running || a.status === 'running').length
 
   return (
@@ -50,7 +65,7 @@ export function Apps({ currentEnv }: AppsProps) {
         </div>
       )}
 
-      <AppTable apps={apps} envSlug={currentEnv} />
+      <AppTable apps={apps} envSlug={currentEnv} onControl={handleControl} controlling={controlling} />
     </div>
   )
 }

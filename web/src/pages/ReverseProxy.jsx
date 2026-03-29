@@ -38,6 +38,7 @@ import {
   reloadProxy,
   getCertificatesStatus,
   getRustProxyStatus,
+  getSystemRoutes,
 } from '../api/client';
 
 function ReverseProxy() {
@@ -47,6 +48,9 @@ function ReverseProxy() {
   const [rustProxy, setRustProxy] = useState(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState(null);
+
+  // System routes
+  const [systemRoutes, setSystemRoutes] = useState([]);
 
   // Tab state
   const [activeTab, setActiveTab] = useState('standalone');
@@ -136,12 +140,13 @@ Verification rapide (sans les details utilisateur).
 
   async function fetchData() {
     try {
-      const [configRes, statusRes, hostsRes, certsRes, rustRes] = await Promise.all([
+      const [configRes, statusRes, hostsRes, certsRes, rustRes, sysRoutesRes] = await Promise.all([
         getReverseProxyConfig(),
         getReverseProxyStatus(),
         getReverseProxyHosts(),
         getCertificatesStatus(),
         getRustProxyStatus().catch(() => ({ data: { success: false } })),
+        getSystemRoutes().catch(() => ({ data: { success: false } })),
       ]);
 
       if (configRes.data.success) {
@@ -157,6 +162,7 @@ Verification rapide (sans les details utilisateur).
       }
       if (certsRes.data.success) setCertStatuses(certsRes.data.certificates || {});
       if (rustRes.data.success) setRustProxy(rustRes.data);
+      if (sysRoutesRes.data.success) setSystemRoutes(sysRoutesRes.data.routes || []);
     } catch (error) {
       console.error('Error:', error);
       setMessage({ type: 'error', text: 'Erreur de chargement' });
@@ -337,6 +343,7 @@ Verification rapide (sans les details utilisateur).
 
   const tabs = [
     { id: 'standalone', label: 'Standalone', icon: Globe, count: hosts.length },
+    { id: 'system', label: 'System Routes', icon: Server, count: systemRoutes.length },
     { id: 'config', label: 'Configuration', icon: Settings }
   ];
 
@@ -552,6 +559,70 @@ Verification rapide (sans les details utilisateur).
             </Card>
           </div>
         </div>
+      )}
+
+      {activeTab === 'system' && (
+        <Card title="System Routes" icon={Server}>
+          {systemRoutes.length === 0 ? (
+            <div className="text-center py-8 text-gray-500">
+              <Server className="w-12 h-12 mx-auto mb-2 opacity-50" />
+              <p>Aucune route systeme</p>
+              <p className="text-xs mt-2">Les routes apparaissent automatiquement pour les environnements actifs</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-gray-400 border-b border-gray-700">
+                    <th className="pb-2">Domaine</th>
+                    <th className="pb-2">Cible</th>
+                    <th className="pb-2">Environnement</th>
+                    <th className="pb-2">App</th>
+                    <th className="pb-2">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {systemRoutes.map((route, i) => (
+                    <tr key={i} className="border-b border-gray-700/50">
+                      <td className="py-3">
+                        <div className="flex items-center gap-2">
+                          <ExternalLink className="w-4 h-4 text-gray-500" />
+                          <a
+                            href={`https://${route.domain}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="font-mono text-blue-400 hover:underline"
+                          >
+                            {route.domain}
+                          </a>
+                        </div>
+                      </td>
+                      <td className="py-3 font-mono text-sm text-gray-300">
+                        {route.target}
+                      </td>
+                      <td className="py-3">
+                        <span className="text-xs bg-gray-700 px-2 py-0.5">{route.environment}</span>
+                      </td>
+                      <td className="py-3">
+                        <span className={`text-xs px-2 py-0.5 ${route.type === 'studio' ? 'bg-purple-900/30 text-purple-400' : 'bg-blue-900/30 text-blue-400'}`}>
+                          {route.app}
+                        </span>
+                      </td>
+                      <td className="py-3">
+                        <div className="flex items-center gap-2">
+                          <div className={`w-2.5 h-2.5 rounded-full ${route.status === 'running' ? 'bg-green-400' : 'bg-gray-500'}`} />
+                          <span className={route.status === 'running' ? 'text-green-400' : 'text-gray-500'}>
+                            {route.status === 'running' ? 'Running' : 'Stopped'}
+                          </span>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
       )}
 
       {activeTab === 'config' && (

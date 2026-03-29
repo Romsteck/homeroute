@@ -1,3 +1,4 @@
+mod app_proxy;
 mod config;
 mod connection;
 mod context;
@@ -149,6 +150,35 @@ async fn main() -> Result<()> {
             error!("HTTP server error: {e}");
         }
     });
+
+    // ── 6b. Start internal app proxy (port 80) ────────────────────────
+    // Routes *.{env}.{domain} traffic to the correct app based on Host header.
+    {
+        let proxy_state = app_proxy::AppProxyState {
+            supervisor: Arc::clone(&supervisor),
+            config: Arc::new(cfg.clone()),
+            http_client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                .build_http(),
+        };
+
+        let proxy_router = axum::Router::new()
+            .fallback(app_proxy::proxy_handler)
+            .with_state(proxy_state);
+
+        tokio::spawn(async move {
+            let listener = match tokio::net::TcpListener::bind("0.0.0.0:80").await {
+                Ok(l) => l,
+                Err(e) => {
+                    error!("Failed to bind app proxy on port 80: {e}");
+                    return;
+                }
+            };
+            info!("App proxy started on port 80");
+            if let Err(e) = axum::serve(listener, proxy_router).await {
+                error!("App proxy error: {e}");
+            }
+        });
+    }
 
     // ── 7. WebSocket reconnection loop to orchestrator ───────────────
     let mut backoff = INITIAL_BACKOFF_SECS;

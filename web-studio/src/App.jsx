@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import useStudioWebSocket from './hooks/useStudioWebSocket';
 import useSessionTabs from './hooks/useSessionTabs';
 import useClaudeAuth from './hooks/useClaudeAuth';
+import useAppStatus from './hooks/useAppStatus';
 import Header from './components/Header';
 import SessionTabs from './components/SessionTabs';
 import ChatPanel from './components/ChatPanel';
@@ -34,6 +35,7 @@ export default function App() {
   const ws = useStudioWebSocket();
   const sessionManager = useSessionTabs(ws);
   const auth = useClaudeAuth(ws.subscribe, ws.sendRaw, ws.connected);
+  const appStatus = useAppStatus();
   const appInfo = useMemo(() => getAppInfo(), []);
   const activeState = sessionManager.getActiveState();
 
@@ -55,6 +57,12 @@ export default function App() {
         connected={ws.connected}
         authStatus={auth.authStatus}
         onOpenAuthDialog={auth.openAuthDialog}
+        apps={appStatus.apps}
+        onStartApp={appStatus.startApp}
+        onStopApp={appStatus.stopApp}
+        onRestartApp={appStatus.restartApp}
+        onStartAll={appStatus.startAll}
+        onStopAll={appStatus.stopAll}
       />
 
       {/* Session tabs - only visible in studio mode */}

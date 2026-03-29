@@ -1,11 +1,13 @@
 use axum::{
     extract::{Path, State},
+    response::IntoResponse,
     routing::{get, post, put},
     Json, Router,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 use hr_ipc::edge::EdgeRequest;
+use hr_ipc::orchestrator::OrchestratorRequest;
 
 use crate::state::ApiState;
 
@@ -20,6 +22,7 @@ pub fn router() -> Router<ApiState> {
         .route("/reload", post(reload_proxy))
         .route("/certificates/status", get(certificates_status))
         .route("/certificates/renew", post(renew_certificates))
+        .route("/system-routes", get(system_routes))
 }
 
 /// Load the reverseproxy-config.json
@@ -353,4 +356,57 @@ async fn renew_certificates(State(state): State<ApiState>) -> Json<Value> {
         "renewed": renewed,
         "errors": errors
     }))
+}
+
+/// GET /api/reverseproxy/system-routes
+/// Returns auto-managed routes derived from running environments and their apps.
+async fn system_routes(State(state): State<ApiState>) -> impl IntoResponse {
+    let base_domain = &state.env.base_domain;
+
+    let resp = match state.orchestrator.request(&OrchestratorRequest::ListEnvironments).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Json(json!({"success": false, "error": format!("Orchestrator unavailable: {e}")}));
+        }
+    };
+
+    if !resp.ok {
+        return Json(json!({"success": false, "error": resp.error.unwrap_or_default()}));
+    }
+
+    let envs: Vec<Value> = resp
+        .data
+        .and_then(|d| serde_json::from_value(d).ok())
+        .unwrap_or_default();
+
+    let mut routes = Vec::new();
+
+    for env in &envs {
+        let slug = env.get("slug").and_then(|s| s.as_str()).unwrap_or_default();
+        let status = env.get("status").and_then(|s| s.as_str()).unwrap_or("stopped");
+        let connected = env.get("agent_connected").and_then(|a| a.as_bool()).unwrap_or(false);
+        let ip = match env.get("ipv4_address").and_then(|a| a.as_str()) {
+            Some(ip) => ip,
+            None => continue,
+        };
+
+        let apps_count = env.get("apps").and_then(|a| a.as_array()).map(|a| a.len()).unwrap_or(0);
+        let apps_running = env.get("apps").and_then(|a| a.as_array())
+            .map(|apps| apps.iter().filter(|a| a.get("running").and_then(|r| r.as_bool()).unwrap_or(false)).count())
+            .unwrap_or(0);
+        let env_status = if connected && status == "running" { "running" } else { "stopped" };
+
+        // One wildcard route per environment
+        routes.push(json!({
+            "domain": format!("*.{slug}.{base_domain}"),
+            "target": format!("{ip}:80"),
+            "environment": slug,
+            "status": env_status,
+            "type": "wildcard",
+            "apps_count": apps_count,
+            "apps_running": apps_running,
+        }));
+    }
+
+    Json(json!({"success": true, "routes": routes}))
 }

@@ -86,7 +86,7 @@ impl IpcHandler<EdgeRequest, IpcResponse> for EdgeHandler {
                 IpcResponse::ok_empty()
             }
             EdgeRequest::ListAppRoutes => {
-                IpcResponse::ok_data(self.proxy.config().routes)
+                IpcResponse::ok_data(self.proxy.list_app_routes())
             }
 
             // ── Proxy config ──────────────────────────────────────

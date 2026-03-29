@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { AppTable } from '../components/AppRow'
 import { PipelineRow } from '../components/PipelineRow'
 import { EnvTypeBadge } from '../components/StatusBadge'
-import { fetchPipelines, fetchEnvironments } from '../api'
+import { fetchPipelines, fetchEnvironments, controlApp } from '../api'
 import type { EnvApp, PipelineRun, Environment } from '../types'
 
 interface DashboardProps {
@@ -16,6 +16,7 @@ export function Dashboard({ currentEnv }: DashboardProps) {
   const [environments, setEnvironments] = useState<Environment[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [controlling, setControlling] = useState<string | null>(null)
 
   useEffect(() => {
     setLoading(true)
@@ -39,6 +40,28 @@ export function Dashboard({ currentEnv }: DashboardProps) {
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
   }, [currentEnv])
+
+  const handleControl = async (slug: string, action: string) => {
+    setControlling(slug)
+    try {
+      await controlApp(currentEnv, slug, action)
+      await new Promise((r) => setTimeout(r, 1500))
+      const envs = await fetchEnvironments()
+      const env = envs.find((e) => e.slug === currentEnv)
+      if (env?.apps) {
+        setApps(env.apps.map((a) => ({
+          ...a,
+          status: a.running ? 'running' as const : 'stopped' as const,
+          url: `https://${a.slug}.${currentEnv}.mynetwk.biz`,
+          studio_url: `https://studio.${currentEnv}.mynetwk.biz/?folder=/apps/${a.slug}`,
+        })))
+      }
+    } catch (e) {
+      console.warn('Control failed:', e)
+    } finally {
+      setControlling(null)
+    }
+  }
 
   const runningCount = apps.filter((a) => a.running || a.status === 'running').length
 
@@ -95,7 +118,7 @@ export function Dashboard({ currentEnv }: DashboardProps) {
             View all
           </Link>
         </div>
-        <AppTable apps={apps} envSlug={currentEnv} />
+        <AppTable apps={apps} envSlug={currentEnv} onControl={handleControl} controlling={controlling} />
       </section>
 
       {/* Recent Pipelines */}

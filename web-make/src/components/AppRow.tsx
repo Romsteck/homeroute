@@ -2,12 +2,49 @@ import { StatusBadge, StackBadge } from './StatusBadge'
 import type { EnvApp } from '../types'
 import { Link } from 'react-router-dom'
 
+// ── Inline icons (14x14) ───────────────────────────────────────
+
+function PlayIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+      <path d="M3.5 2.5v9l8-4.5z" />
+    </svg>
+  )
+}
+
+function StopIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+      <rect x="3" y="3" width="8" height="8" rx="1" />
+    </svg>
+  )
+}
+
+function RestartIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M1.5 7a5.5 5.5 0 0 1 9.37-3.9M12.5 7a5.5 5.5 0 0 1-9.37 3.9" />
+      <path d="M10.87 1v2.1h-2.1M3.13 13v-2.1h2.1" />
+    </svg>
+  )
+}
+
+function Spinner() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" className="animate-spin">
+      <path d="M7 1.5a5.5 5.5 0 1 1-5.5 5.5" strokeLinecap="round" />
+    </svg>
+  )
+}
+
 interface AppRowProps {
   app: EnvApp
   envSlug?: string
+  onControl?: (slug: string, action: string) => void
+  controlling?: string | null
 }
 
-export function AppRow({ app, envSlug }: AppRowProps) {
+export function AppRow({ app, envSlug, onControl, controlling }: AppRowProps) {
   const displayStatus = app.status || (app.running ? 'running' : 'stopped')
   const displayVersion = app.version || '-'
 
@@ -71,6 +108,39 @@ export function AppRow({ app, envSlug }: AppRowProps) {
       {/* Actions */}
       <td className="px-4 py-3">
         <div className="flex items-center gap-2 justify-end">
+          {onControl && (
+            <div className="flex items-center gap-1 mr-2">
+              {app.running ? (
+                <>
+                  <button
+                    onClick={() => onControl(app.slug, 'restart')}
+                    disabled={controlling === app.slug}
+                    className="p-1 rounded hover:bg-white/10 text-blue-400 hover:text-blue-300 transition-colors disabled:opacity-50"
+                    title="Restart"
+                  >
+                    {controlling === app.slug ? <Spinner /> : <RestartIcon />}
+                  </button>
+                  <button
+                    onClick={() => onControl(app.slug, 'stop')}
+                    disabled={controlling === app.slug}
+                    className="p-1 rounded hover:bg-white/10 text-red-400 hover:text-red-300 transition-colors disabled:opacity-50"
+                    title="Stop"
+                  >
+                    <StopIcon />
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => onControl(app.slug, 'start')}
+                  disabled={controlling === app.slug}
+                  className="p-1 rounded hover:bg-white/10 text-emerald-400 hover:text-emerald-300 transition-colors disabled:opacity-50"
+                  title="Start"
+                >
+                  {controlling === app.slug ? <Spinner /> : <PlayIcon />}
+                </button>
+              )}
+            </div>
+          )}
           {app.url && (
             <a
               href={app.url}
@@ -104,7 +174,12 @@ export function AppRow({ app, envSlug }: AppRowProps) {
 }
 
 /** Reusable table wrapper for app lists */
-export function AppTable({ apps, envSlug }: { apps: EnvApp[]; envSlug?: string }) {
+export function AppTable({ apps, envSlug, onControl, controlling }: {
+  apps: EnvApp[]
+  envSlug?: string
+  onControl?: (slug: string, action: string) => void
+  controlling?: string | null
+}) {
   if (apps.length === 0) {
     return (
       <div className="rounded-xl border border-white/5 p-8 text-center" style={{ background: '#1e1e3a' }}>
@@ -129,7 +204,7 @@ export function AppTable({ apps, envSlug }: { apps: EnvApp[]; envSlug?: string }
         </thead>
         <tbody>
           {apps.map((app) => (
-            <AppRow key={app.slug} app={app} envSlug={envSlug} />
+            <AppRow key={app.slug} app={app} envSlug={envSlug} onControl={onControl} controlling={controlling} />
           ))}
         </tbody>
       </table>

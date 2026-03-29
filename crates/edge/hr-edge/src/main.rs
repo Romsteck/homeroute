@@ -137,8 +137,12 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let orchestrator_port = env.orchestrator_port;
+    let env_route_cache = Arc::new(hr_proxy::EnvRouteCache::new());
     let proxy_state = Arc::new(
-        ProxyState::new(proxy_config.clone(), env.api_port, orchestrator_port).with_auth(auth.clone()).with_app_routes_path(env.data_dir.join("app-routes.json")),
+        ProxyState::new(proxy_config.clone(), env.api_port, orchestrator_port)
+            .with_auth(auth.clone())
+            .with_app_routes_path(env.data_dir.join("app-routes.json"))
+            .with_env_route_cache(env_route_cache.clone()),
     );
 
     let https_port = proxy_config.https_port;
@@ -149,6 +153,86 @@ async fn main() -> anyhow::Result<()> {
         tls_manager.loaded_domains().len(),
         proxy_config.active_routes().len()
     );
+
+    // ── Env route cache refresh + app route sync (every 30s from orchestrator) ─
+    {
+        let cache = env_route_cache.clone();
+        let proxy_state_sync = proxy_state.clone();
+        let base_domain = env.base_domain.clone();
+        tokio::spawn(async move {
+            let client = hr_ipc::orchestrator::OrchestratorClient::new("/run/hr-orchestrator.sock");
+            // Wait 10s for orchestrator to start
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            loop {
+                match client.request(&hr_ipc::orchestrator::OrchestratorRequest::ListEnvironments).await {
+                    Ok(resp) if resp.ok => {
+                        if let Some(data) = resp.data {
+                            // Update the EnvRouteCache
+                            if let Ok(envs) = serde_json::from_value::<Vec<hr_proxy::env_routes::EnvRouteSummary>>(data.clone()) {
+                                cache.update(envs);
+                            }
+
+                            // Sync app routes from env data
+                            if let Ok(envs) = serde_json::from_value::<Vec<serde_json::Value>>(data) {
+                                let mut expected = std::collections::HashMap::new();
+                                for env_val in &envs {
+                                    let slug = env_val.get("slug").and_then(|s| s.as_str()).unwrap_or_default();
+                                    let ip_str = match env_val.get("ipv4_address").and_then(|a| a.as_str()) {
+                                        Some(ip) => ip,
+                                        None => continue,
+                                    };
+                                    let ip: std::net::Ipv4Addr = match ip_str.parse() {
+                                        Ok(ip) => ip,
+                                        Err(_) => continue,
+                                    };
+                                    let agent_connected = env_val.get("agent_connected").and_then(|a| a.as_bool()).unwrap_or(false);
+                                    if !agent_connected { continue; }
+
+                                    // Studio route
+                                    let studio_domain = format!("studio.{}.{}", slug, base_domain);
+                                    expected.insert(studio_domain, hr_proxy::AppRoute {
+                                        app_id: format!("env-{}-studio", slug),
+                                        host_id: format!("env-{}", slug),
+                                        target_ip: ip,
+                                        target_port: 8443,
+                                        auth_required: false,
+                                        allowed_groups: vec![],
+                                        local_only: false,
+                                    });
+
+                                    // App routes
+                                    if let Some(apps) = env_val.get("apps").and_then(|a| a.as_array()) {
+                                        for app in apps {
+                                            let app_slug = app.get("slug").and_then(|s| s.as_str()).unwrap_or_default();
+                                            let port = app.get("port").and_then(|p| p.as_u64()).unwrap_or(3000) as u16;
+                                            let running = app.get("running").and_then(|r| r.as_bool()).unwrap_or(false);
+                                            if !running { continue; }
+                                            let domain = format!("{}.{}.{}", app_slug, slug, base_domain);
+                                            expected.insert(domain, hr_proxy::AppRoute {
+                                                app_id: format!("env-{}-{}", slug, app_slug),
+                                                host_id: format!("env-{}", slug),
+                                                target_ip: ip,
+                                                target_port: port,
+                                                auth_required: false,
+                                                allowed_groups: vec![],
+                                                local_only: false,
+                                            });
+                                        }
+                                    }
+                                }
+                                proxy_state_sync.sync_env_routes(&expected);
+                            }
+                        }
+                    }
+                    Ok(_) => {} // orchestrator returned error, skip
+                    Err(e) => {
+                        debug!("Env route cache refresh failed: {}", e);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        });
+    }
 
     // ── Store shared refs for SIGHUP reload ──────────────────────────
     let proxy_state_reload = proxy_state.clone();
@@ -269,6 +353,75 @@ async fn main() -> anyhow::Result<()> {
                     handler,
                 )
                 .await
+            }
+        });
+    }
+
+    // ── Background env route refresh (every 30s) ────────────────────
+    {
+        let proxy_state_sync = proxy_state.clone();
+        let base_domain_sync = env.base_domain.clone();
+        tokio::spawn(async move {
+            let orch = hr_ipc::orchestrator::OrchestratorClient::new("/run/hr-orchestrator.sock");
+            // Wait for orchestrator to start
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            loop {
+                if let Ok(resp) = orch.request(&hr_ipc::orchestrator::OrchestratorRequest::ListEnvironments).await {
+                    if resp.ok {
+                        if let Some(data) = resp.data {
+                            if let Ok(envs) = serde_json::from_value::<Vec<serde_json::Value>>(data) {
+                                let mut expected = std::collections::HashMap::new();
+                                for env_val in &envs {
+                                    let slug = env_val.get("slug").and_then(|s| s.as_str()).unwrap_or_default();
+                                    let ip_str = match env_val.get("ipv4_address").and_then(|a| a.as_str()) {
+                                        Some(ip) => ip,
+                                        None => continue,
+                                    };
+                                    let ip: std::net::Ipv4Addr = match ip_str.parse() {
+                                        Ok(ip) => ip,
+                                        Err(_) => continue,
+                                    };
+                                    let agent_connected = env_val.get("agent_connected").and_then(|a| a.as_bool()).unwrap_or(false);
+                                    if !agent_connected { continue; }
+
+                                    // Studio route
+                                    let studio_domain = format!("studio.{}.{}", slug, base_domain_sync);
+                                    expected.insert(studio_domain, hr_proxy::AppRoute {
+                                        app_id: format!("env-{}-studio", slug),
+                                        host_id: format!("env-{}", slug),
+                                        target_ip: ip,
+                                        target_port: 8443,
+                                        auth_required: false,
+                                        allowed_groups: vec![],
+                                        local_only: false,
+                                    });
+
+                                    // App routes
+                                    if let Some(apps) = env_val.get("apps").and_then(|a| a.as_array()) {
+                                        for app in apps {
+                                            let app_slug = app.get("slug").and_then(|s| s.as_str()).unwrap_or_default();
+                                            let port = app.get("port").and_then(|p| p.as_u64()).unwrap_or(3000) as u16;
+                                            let running = app.get("running").and_then(|r| r.as_bool()).unwrap_or(false);
+                                            if !running { continue; }
+                                            let domain = format!("{}.{}.{}", app_slug, slug, base_domain_sync);
+                                            expected.insert(domain, hr_proxy::AppRoute {
+                                                app_id: format!("env-{}-{}", slug, app_slug),
+                                                host_id: format!("env-{}", slug),
+                                                target_ip: ip,
+                                                target_port: port,
+                                                auth_required: false,
+                                                allowed_groups: vec![],
+                                                local_only: false,
+                                            });
+                                        }
+                                    }
+                                }
+                                proxy_state_sync.sync_env_routes(&expected);
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             }
         });
     }

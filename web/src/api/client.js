@@ -64,6 +64,7 @@ export const updateBaseDomain = (baseDomain) => api.put('/reverseproxy/config/do
 export const renewCertificates = () => api.post('/reverseproxy/certificates/renew');
 export const reloadProxy = () => api.post('/reverseproxy/reload');
 export const getCertificatesStatus = () => api.get('/reverseproxy/certificates/status');
+export const getSystemRoutes = () => api.get('/reverseproxy/system-routes');
 
 // Rust Proxy
 export const getRustProxyStatus = () => api.get('/rust-proxy/status');

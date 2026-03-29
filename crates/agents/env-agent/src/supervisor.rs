@@ -108,7 +108,7 @@ impl AppSupervisor {
                  [Service]\n\
                  Type=simple\n\
                  WorkingDirectory={working_dir}\n\
-                 ExecStart=/bin/bash -c '{run_command}'\n\
+                 ExecStart=/bin/bash -c \"{run_command}\"\n\
                  Restart=on-failure\n\
                  RestartSec=3\n\
                  Environment=NODE_ENV=production\n\
@@ -141,7 +141,7 @@ impl AppSupervisor {
                      [Service]\n\
                      Type=simple\n\
                      WorkingDirectory={working_dir}\n\
-                     ExecStart=/bin/bash -c '{watch_cmd}'\n\
+                     ExecStart=/bin/bash -c \"{watch_cmd}\"\n\
                      Restart=on-failure\n\
                      RestartSec=5\n\
                      Environment=NODE_ENV=development\n\

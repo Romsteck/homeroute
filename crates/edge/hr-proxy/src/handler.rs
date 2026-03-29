@@ -16,6 +16,7 @@ use tokio::net::TcpStream;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{ProxyConfig, RouteConfig};
+use crate::env_routes::EnvRouteCache;
 use crate::logging::{self, AccessLogEntry, OptionalAccessLogger};
 use crate::metrics::ProxyMetrics;
 
@@ -58,6 +59,8 @@ pub struct ProxyState {
     app_routes_path: Option<std::path::PathBuf>,
     /// Per-domain request/error counters.
     pub metrics: ProxyMetrics,
+    /// Dynamic environment route cache ({app}.{env}.{base_domain} routing).
+    pub env_route_cache: Option<Arc<EnvRouteCache>>,
 }
 
 impl ProxyState {
@@ -86,12 +89,19 @@ impl ProxyState {
             app_routes: RwLock::new(std::collections::HashMap::new()),
             app_routes_path: None,
             metrics: ProxyMetrics::new(),
+            env_route_cache: None,
         }
     }
 
     /// Set the auth service for forward-auth
     pub fn with_auth(mut self, auth: Arc<AuthService>) -> Self {
         self.auth = Some(auth);
+        self
+    }
+
+    /// Set the environment route cache for dynamic {app}.{env}.{domain} routing.
+    pub fn with_env_route_cache(mut self, cache: Arc<EnvRouteCache>) -> Self {
+        self.env_route_cache = Some(cache);
         self
     }
 
@@ -174,6 +184,39 @@ impl ProxyState {
         let mut map = self.app_routes.write().unwrap();
         info!(domain = domain, target = %route.target_ip, port = route.target_port, "Added app route");
         map.insert(domain, route);
+        drop(map);
+        self.persist_app_routes();
+    }
+
+    /// Return a snapshot of all current app routes.
+    pub fn list_app_routes(&self) -> std::collections::HashMap<String, AppRoute> {
+        self.app_routes.read().unwrap().clone()
+    }
+
+    /// Reconcile app routes with the authoritative env route data.
+    /// - Removes stale env routes (app_id starting with "env-") not in `expected`
+    /// - Adds missing routes from `expected`
+    /// - Leaves non-env routes (legacy agents) untouched
+    pub fn sync_env_routes(&self, expected: &std::collections::HashMap<String, AppRoute>) {
+        let mut map = self.app_routes.write().unwrap();
+
+        // Remove stale env routes
+        map.retain(|domain, route| {
+            if route.app_id.starts_with("env-") {
+                expected.contains_key(domain)
+            } else {
+                true // keep non-env routes
+            }
+        });
+
+        // Add missing routes
+        for (domain, route) in expected {
+            if !map.contains_key(domain) {
+                info!(domain = domain.as_str(), "Adding missing env route");
+                map.insert(domain.clone(), route.clone());
+            }
+        }
+
         drop(map);
         self.persist_app_routes();
     }
@@ -557,10 +600,45 @@ async fn proxy_handler_inner(
             cert_id: None,
         }
     } else {
-        // Find matching route
-        state
-            .find_route(&host)
-            .ok_or(ProxyError::DomainNotFound(host.clone()))?
+        // Find matching static route first
+        match state.find_route(&host) {
+            Some(route) => route,
+            None => {
+                // Try wildcard environment route: *.{env}.{base_domain}
+                // All traffic for an env goes to the env-agent internal proxy (port 80)
+                // which dispatches to the correct app based on the Host header.
+                let env_route = state.env_route_cache.as_ref().and_then(|cache| {
+                    let suffix = format!(".{}", base_domain);
+                    let prefix = domain_only.strip_suffix(&suffix)?;
+                    // Extract env_slug: the part after the first dot
+                    // e.g. "trader.dev" → env_slug = "dev"
+                    // e.g. "studio.dev" → env_slug = "dev"
+                    let dot_pos = prefix.find('.')?;
+                    let env_slug = &prefix[dot_pos + 1..];
+                    // Reject if env_slug contains dots (too many segments)
+                    if env_slug.contains('.') {
+                        return None;
+                    }
+                    let (ip, port) = cache.resolve_env(env_slug)?;
+                    debug!(
+                        domain = domain_only, env = env_slug, ip = %ip, port = port,
+                        "Resolved wildcard env route"
+                    );
+                    Some(RouteConfig {
+                        id: format!("__env_{}", env_slug),
+                        domain: domain_only.to_string(),
+                        backend: "rust".to_string(),
+                        target_host: ip.to_string(),
+                        target_port: port,
+                        local_only: false,
+                        require_auth: false,
+                        enabled: true,
+                        cert_id: None,
+                    })
+                });
+                env_route.ok_or(ProxyError::DomainNotFound(host.clone()))?
+            }
+        }
     };
 
     // Block ALL traffic for local-only routes
