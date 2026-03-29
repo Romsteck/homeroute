@@ -1,15 +1,19 @@
 //! App supervisor — manages app processes via systemd services.
 //!
 //! Each app runs as a systemd service: {slug}.service
+//! In dev environments, an optional watch service ({slug}-watch.service)
+//! rebuilds the app on file changes.
 //! The supervisor can start, stop, restart, and check health.
 
 use anyhow::{anyhow, Result};
 use hr_environment::config::EnvAgentAppConfig;
+use hr_environment::types::EnvType;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::process::Command;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 /// Status of an app process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,20 +41,41 @@ impl std::fmt::Display for AppProcessStatus {
 pub struct AppProcessInfo {
     pub slug: String,
     pub name: String,
+    pub stack: hr_environment::types::AppStackType,
     pub port: u16,
     pub status: AppProcessStatus,
+    /// Status of the watch service (dev only, None in acc/prod).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watch_status: Option<AppProcessStatus>,
+    pub has_db: bool,
     pub version: Option<String>,
 }
 
 /// Manages app processes within the environment via systemd services.
 pub struct AppSupervisor {
     apps: Vec<EnvAgentAppConfig>,
+    env_type: EnvType,
+    apps_path: String,
 }
 
 impl AppSupervisor {
     /// Create a new supervisor from the list of configured apps.
-    pub fn new(apps: Vec<EnvAgentAppConfig>) -> Self {
-        Self { apps }
+    pub fn new(apps: Vec<EnvAgentAppConfig>, env_type: EnvType, apps_path: String) -> Self {
+        Self {
+            apps,
+            env_type,
+            apps_path,
+        }
+    }
+
+    /// Whether this is a development environment (watch services enabled).
+    fn is_dev(&self) -> bool {
+        self.env_type == EnvType::Development
+    }
+
+    /// Systemd watch service name for a given slug.
+    fn watch_service_name(slug: &str) -> String {
+        format!("{}-watch.service", slug)
     }
 
     /// Find an app config by slug, or return an error.
@@ -66,28 +91,128 @@ impl AppSupervisor {
         format!("{}.service", slug)
     }
 
-    /// Start an app's systemd service.
+    /// Generate systemd unit files for all apps.
+    /// Creates {slug}.service (run) and {slug}-watch.service (dev watch) for each app.
+    pub fn generate_service_units(&self) -> Result<()> {
+        let unit_dir = Path::new("/etc/systemd/system");
+
+        for app in &self.apps {
+            let working_dir = format!("{}/{}", self.apps_path, app.slug);
+
+            // --- Main service: {slug}.service ---
+            let run_unit = format!(
+                "[Unit]\n\
+                 Description={name} app service\n\
+                 After=network.target\n\
+                 \n\
+                 [Service]\n\
+                 Type=simple\n\
+                 WorkingDirectory={working_dir}\n\
+                 ExecStart=/bin/bash -c '{run_command}'\n\
+                 Restart=on-failure\n\
+                 RestartSec=3\n\
+                 Environment=NODE_ENV=production\n\
+                 Environment=PORT={port}\n\
+                 \n\
+                 [Install]\n\
+                 WantedBy=multi-user.target\n",
+                name = app.name,
+                working_dir = working_dir,
+                run_command = app.run_command,
+                port = app.port,
+            );
+
+            let svc_path = unit_dir.join(Self::service_name(&app.slug));
+            write_unit_if_changed(&svc_path, &run_unit)?;
+
+            // --- Watch service: {slug}-watch.service (dev only) ---
+            if self.is_dev() {
+                let watch_cmd = app
+                    .watch_command
+                    .as_deref()
+                    .unwrap_or_else(|| app.stack.default_watch_command());
+
+                let watch_unit = format!(
+                    "[Unit]\n\
+                     Description={name} watch (dev rebuild)\n\
+                     After={slug}.service\n\
+                     BindsTo={slug}.service\n\
+                     \n\
+                     [Service]\n\
+                     Type=simple\n\
+                     WorkingDirectory={working_dir}\n\
+                     ExecStart=/bin/bash -c '{watch_cmd}'\n\
+                     Restart=on-failure\n\
+                     RestartSec=5\n\
+                     Environment=NODE_ENV=development\n\
+                     \n\
+                     [Install]\n\
+                     WantedBy=multi-user.target\n",
+                    name = app.name,
+                    slug = app.slug,
+                    working_dir = working_dir,
+                    watch_cmd = watch_cmd,
+                );
+
+                let watch_path = unit_dir.join(Self::watch_service_name(&app.slug));
+                write_unit_if_changed(&watch_path, &watch_unit)?;
+            }
+
+            info!(slug = %app.slug, "service units generated");
+        }
+
+        Ok(())
+    }
+
+    /// Start an app's systemd service (+ watch service in dev).
     pub async fn start_app(&self, slug: &str) -> Result<()> {
         let _ = self.find_app(slug)?;
         let svc = Self::service_name(slug);
         debug!(slug, "starting app service");
-        run_systemctl(&["start", &svc]).await
+        run_systemctl(&["start", &svc]).await?;
+        if self.is_dev() {
+            let watch_svc = Self::watch_service_name(slug);
+            if service_exists(&watch_svc).await {
+                debug!(slug, "starting watch service");
+                if let Err(e) = run_systemctl(&["start", &watch_svc]).await {
+                    warn!(slug, error = %e, "failed to start watch service (non-fatal)");
+                }
+            }
+        }
+        Ok(())
     }
 
-    /// Stop an app's systemd service.
+    /// Stop an app's systemd service (+ watch service in dev).
     pub async fn stop_app(&self, slug: &str) -> Result<()> {
         let _ = self.find_app(slug)?;
+        if self.is_dev() {
+            let watch_svc = Self::watch_service_name(slug);
+            if service_exists(&watch_svc).await {
+                debug!(slug, "stopping watch service");
+                let _ = run_systemctl(&["stop", &watch_svc]).await;
+            }
+        }
         let svc = Self::service_name(slug);
         debug!(slug, "stopping app service");
         run_systemctl(&["stop", &svc]).await
     }
 
-    /// Restart an app's systemd service.
+    /// Restart an app's systemd service (+ watch service in dev).
     pub async fn restart_app(&self, slug: &str) -> Result<()> {
         let _ = self.find_app(slug)?;
         let svc = Self::service_name(slug);
         debug!(slug, "restarting app service");
-        run_systemctl(&["restart", &svc]).await
+        run_systemctl(&["restart", &svc]).await?;
+        if self.is_dev() {
+            let watch_svc = Self::watch_service_name(slug);
+            if service_exists(&watch_svc).await {
+                debug!(slug, "restarting watch service");
+                if let Err(e) = run_systemctl(&["restart", &watch_svc]).await {
+                    warn!(slug, error = %e, "failed to restart watch service (non-fatal)");
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Query the status of an app's systemd service.
@@ -102,6 +227,24 @@ impl AppSupervisor {
         Ok(parse_active_state(&stdout))
     }
 
+    /// Query the status of an app's watch service (dev only).
+    pub async fn watch_status(&self, slug: &str) -> Option<AppProcessStatus> {
+        if !self.is_dev() {
+            return None;
+        }
+        let watch_svc = Self::watch_service_name(slug);
+        if !service_exists(&watch_svc).await {
+            return None;
+        }
+        let output = Command::new("systemctl")
+            .args(["is-active", &watch_svc])
+            .output()
+            .await
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Some(parse_active_state(&stdout))
+    }
+
     /// Return status info for all configured apps.
     pub async fn list_apps(&self) -> Vec<AppProcessInfo> {
         let mut result = Vec::with_capacity(self.apps.len());
@@ -113,11 +256,15 @@ impl AppSupervisor {
                     AppProcessStatus::Unknown
                 }
             };
+            let watch_status = self.watch_status(&app.slug).await;
             result.push(AppProcessInfo {
                 slug: app.slug.clone(),
                 name: app.name.clone(),
+                stack: app.stack,
                 port: app.port,
                 status,
+                watch_status,
+                has_db: app.has_db,
                 version: None,
             });
         }
@@ -222,6 +369,25 @@ impl AppSupervisor {
     }
 }
 
+/// Write a unit file only if the content has changed.
+fn write_unit_if_changed(path: &Path, content: &str) -> Result<()> {
+    if path.exists() {
+        if let Ok(existing) = std::fs::read_to_string(path) {
+            if existing == content {
+                return Ok(());
+            }
+        }
+    }
+    std::fs::write(path, content)?;
+    Ok(())
+}
+
+/// Check if a systemd service unit file exists.
+async fn service_exists(service_name: &str) -> bool {
+    let path = format!("/etc/systemd/system/{}", service_name);
+    Path::new(&path).exists()
+}
+
 /// Run a systemctl command and return Ok(()) on success.
 async fn run_systemctl(args: &[&str]) -> Result<()> {
     let output = Command::new("systemctl").args(args).output().await?;
@@ -276,8 +442,11 @@ mod tests {
             build_command: None,
             health_path: "/api/health".into(),
             has_db: false,
+            watch_command: None,
+            test_command: None,
+            description: None,
         }];
-        let supervisor = AppSupervisor::new(apps);
+        let supervisor = AppSupervisor::new(apps, EnvType::Development, "/apps".to_string());
         assert!(supervisor.find_app("trader").is_ok());
         assert!(supervisor.find_app("nonexistent").is_err());
     }

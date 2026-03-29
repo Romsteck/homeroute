@@ -111,10 +111,67 @@ pub struct EnvApp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppStackType {
+    /// Next.js with custom server + WebSocket support — public/SEO apps.
     #[default]
     NextJs,
+    /// Rust Axum backend + Vite/React frontend — authenticated/perf-sensitive apps.
     AxumVite,
-    AxumFlutter,
+    /// Pure Rust Axum backend — API-only services, no frontend.
+    Axum,
+}
+
+impl AppStackType {
+    /// Human-readable display name.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::NextJs => "Next.js",
+            Self::AxumVite => "Axum + Vite/React",
+            Self::Axum => "Axum",
+        }
+    }
+
+    /// Default build command for this stack.
+    pub fn default_build_command(&self) -> &'static str {
+        match self {
+            Self::NextJs => "pnpm build",
+            Self::AxumVite => "cd server && cargo build --release && cd ../client && pnpm build",
+            Self::Axum => "cargo build --release",
+        }
+    }
+
+    /// Default run command (serves the built app — same in all env types).
+    pub fn default_run_command(&self) -> &'static str {
+        match self {
+            Self::NextJs => "node server.js",
+            Self::AxumVite => "./server/target/release/{slug}",
+            Self::Axum => "./target/release/{slug}",
+        }
+    }
+
+    /// Default watch command for dev (rebuild on file changes).
+    pub fn default_watch_command(&self) -> &'static str {
+        match self {
+            Self::NextJs => "pnpm dev",
+            Self::AxumVite => "cd client && pnpm dev & cd server && cargo watch -x run",
+            Self::Axum => "cargo watch -x run",
+        }
+    }
+
+    /// Default health check path.
+    pub fn default_health_path(&self) -> &'static str {
+        match self {
+            Self::NextJs | Self::AxumVite | Self::Axum => "/api/health",
+        }
+    }
+
+    /// Brief description of the project structure for this stack.
+    pub fn project_structure(&self) -> &'static str {
+        match self {
+            Self::NextJs => "app/ (pages+API), components/, lib/, server.ts",
+            Self::AxumVite => "server/ (Rust Axum) + client/ (Vite/React/TypeScript)",
+            Self::Axum => "src/ (Rust Axum), Cargo.toml",
+        }
+    }
 }
 
 /// Permissions derived from the environment type.

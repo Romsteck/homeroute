@@ -4,6 +4,7 @@ mod context;
 mod db_manager;
 mod discovery;
 mod mcp;
+mod port_registry;
 mod secrets;
 mod supervisor;
 
@@ -67,9 +68,32 @@ async fn main() -> Result<()> {
     let secrets = Arc::new(SecretsManager::new(&data_path.join("secrets")));
     info!("SecretsManager initialized");
 
+    // ── 2c. Port Registry ────────────────────────────────────────────
+    let registry_path = data_path.join("port-registry.json");
+    let mut port_reg = port_registry::PortRegistry::new(3001, registry_path);
+    let _ = port_reg.load();
+    let app_ports: Vec<(String, u16)> = cfg.apps.iter().map(|a| (a.slug.clone(), a.port)).collect();
+    port_reg.assign_all(&app_ports)?;
+    port_reg.save()?;
+    // Apply assigned ports back to config
+    let mut cfg = cfg;
+    for app in &mut cfg.apps {
+        if let Some(port) = port_reg.port_for(&app.slug) {
+            app.port = port;
+        }
+    }
+    info!(apps = cfg.apps.len(), "Port registry initialized");
+
     // ── 3. Initialize AppSupervisor ──────────────────────────────────
-    let supervisor = Arc::new(AppSupervisor::new(cfg.apps.clone()));
+    let supervisor = Arc::new(AppSupervisor::new(cfg.apps.clone(), cfg.env_type(), cfg.apps_path.clone()));
     info!(apps = cfg.apps.len(), "AppSupervisor initialized");
+
+    // ── 3b. Generate systemd service units ─────────────────────────────
+    if let Err(e) = supervisor.generate_service_units() {
+        warn!("Failed to generate service units: {e}");
+    } else {
+        info!("Systemd service units generated");
+    }
 
     // ── 4. Start all configured apps ─────────────────────────────────
     supervisor.start_all().await;
@@ -458,8 +482,6 @@ async fn handle_orchestrator_message(
 
 /// Build the app discovery payload from supervisor state.
 async fn build_app_discovery(supervisor: &AppSupervisor) -> Vec<EnvApp> {
-    use hr_environment::types::AppStackType;
-
     supervisor
         .list_apps()
         .await
@@ -467,11 +489,11 @@ async fn build_app_discovery(supervisor: &AppSupervisor) -> Vec<EnvApp> {
         .map(|app| EnvApp {
             slug: app.slug,
             name: app.name,
-            stack: AppStackType::default(),
+            stack: app.stack,
             port: app.port,
             version: app.version,
             running: app.status == supervisor::AppProcessStatus::Running,
-            has_db: false, // TODO: check DbManager
+            has_db: app.has_db,
         })
         .collect()
 }

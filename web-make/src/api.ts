@@ -7,6 +7,7 @@ import type {
   DbTable,
   DbSchema,
   DbQueryResult,
+  DbFilter,
 } from './types'
 
 // API is served on the same origin (homeroute Rust serves both SPA + API)
@@ -311,20 +312,95 @@ export async function fetchDbSchema(envSlug: string, table: string, appSlug?: st
 export async function queryDbData(
   envSlug: string,
   table: string,
-  limit = 50,
-  offset = 0,
-  appSlug?: string,
+  options: {
+    limit?: number
+    offset?: number
+    order_by?: string
+    order_desc?: boolean
+    filters?: DbFilter[]
+    app_slug?: string
+  } = {},
 ): Promise<DbQueryResult> {
-  const params = new URLSearchParams({
-    table,
-    limit: String(limit),
-    offset: String(offset),
-  })
-  if (appSlug) params.set('app_slug', appSlug)
+  const params = new URLSearchParams({ table })
+  if (options.limit != null) params.set('limit', String(options.limit))
+  if (options.offset != null) params.set('offset', String(options.offset))
+  if (options.order_by) params.set('order_by', options.order_by)
+  if (options.order_desc != null) params.set('order_desc', String(options.order_desc))
+  if (options.app_slug) params.set('app_slug', options.app_slug)
+  if (options.filters && options.filters.length > 0) {
+    params.set('filters', JSON.stringify(options.filters))
+  }
   const res = await fetch(`${API_BASE}/environments/${envSlug}/db/query?${params}`)
   if (!res.ok) throw new Error('Failed to query data')
   const json = await res.json()
   return json.data || json
+}
+
+export async function countDbRows(
+  envSlug: string,
+  table: string,
+  appSlug?: string,
+  filters?: DbFilter[],
+): Promise<number> {
+  const params = new URLSearchParams({ table })
+  if (appSlug) params.set('app_slug', appSlug)
+  if (filters && filters.length > 0) params.set('filters', JSON.stringify(filters))
+  const res = await fetch(`${API_BASE}/environments/${envSlug}/db/count?${params}`)
+  if (!res.ok) throw new Error('Failed to count rows')
+  const json = await res.json()
+  return json.data?.count ?? json.count ?? 0
+}
+
+export async function insertDbRows(
+  envSlug: string,
+  appSlug: string,
+  table: string,
+  rows: Record<string, any>[],
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/environments/${envSlug}/db/rows`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ app_slug: appSlug, table, rows }),
+  })
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({}))
+    throw new Error(json.error || 'Failed to insert rows')
+  }
+}
+
+export async function updateDbRows(
+  envSlug: string,
+  appSlug: string,
+  table: string,
+  updates: Record<string, any>,
+  filters: DbFilter[],
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/environments/${envSlug}/db/rows`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ app_slug: appSlug, table, updates, filters }),
+  })
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({}))
+    throw new Error(json.error || 'Failed to update rows')
+  }
+}
+
+export async function deleteDbRows(
+  envSlug: string,
+  appSlug: string,
+  table: string,
+  filters: DbFilter[],
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/environments/${envSlug}/db/rows`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ app_slug: appSlug, table, filters }),
+  })
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({}))
+    throw new Error(json.error || 'Failed to delete rows')
+  }
 }
 
 // ── Cross-env monitoring ────────────────────────────────────────

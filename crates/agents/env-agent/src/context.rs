@@ -4,13 +4,17 @@
 //! has full project awareness:
 //!   - {apps_path}/{slug}/CLAUDE.md           — project identity, DB schema, commands
 //!   - {apps_path}/{slug}/.claude/settings.json — MCP servers (env-agent, homeroute, hub)
-//!   - {apps_path}/{slug}/.claude/rules/env-context.md  — permissions for this env type
+//!
+//! Also generates global context at the apps root:
+//!   - {apps_path}/CLAUDE.md                      — environment overview, all apps
+//!   - {apps_path}/.claude/settings.json          — MCP servers
+//!   - {apps_path}/.claude/rules/env-rules.md     — permissions for this env type
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use hr_environment::config::EnvAgentAppConfig;
-use hr_environment::types::{AppStackType, EnvPermissions, EnvType};
+use hr_environment::types::{EnvPermissions, EnvType};
 use tracing::{info, warn};
 
 use crate::db_manager::DbManager;
@@ -31,26 +35,22 @@ impl ContextGenerator {
     pub fn generate_for_app(
         &self,
         app: &EnvAgentAppConfig,
+        all_apps: &[EnvAgentAppConfig],
         db_tables: Option<Vec<String>>,
     ) -> anyhow::Result<()> {
         let app_dir = PathBuf::from(&self.apps_path).join(&app.slug);
 
         // Ensure directories exist
         let claude_dir = app_dir.join(".claude");
-        let rules_dir = claude_dir.join("rules");
-        fs::create_dir_all(&rules_dir)?;
+        fs::create_dir_all(&claude_dir)?;
 
         // 1. CLAUDE.md
-        let claude_md = self.render_claude_md(app, &db_tables);
+        let claude_md = self.render_claude_md(app, all_apps, &db_tables);
         write_if_changed(&app_dir.join("CLAUDE.md"), &claude_md)?;
 
         // 2. .claude/settings.json
         let settings = self.render_settings_json();
         write_if_changed(&claude_dir.join("settings.json"), &settings)?;
-
-        // 3. .claude/rules/env-context.md
-        let env_context = self.render_env_context_md();
-        write_if_changed(&rules_dir.join("env-context.md"), &env_context)?;
 
         info!(
             app = %app.slug,
@@ -61,12 +61,15 @@ impl ContextGenerator {
         Ok(())
     }
 
-    /// Refresh context files for all apps.
+    /// Refresh context files for all apps + global context.
     pub fn refresh_all(&self, apps: &[EnvAgentAppConfig]) -> anyhow::Result<()> {
         for app in apps {
-            if let Err(e) = self.generate_for_app(app, None) {
+            if let Err(e) = self.generate_for_app(app, apps, None) {
                 warn!(app = %app.slug, error = %e, "failed to generate context");
             }
+        }
+        if let Err(e) = self.generate_global_context(apps) {
+            warn!(error = %e, "failed to generate global context");
         }
         Ok(())
     }
@@ -99,7 +102,7 @@ impl ContextGenerator {
             None
         };
 
-        self.generate_for_app(app, db_tables)
+        self.generate_for_app(app, apps, db_tables)
     }
 
     /// Refresh context for all apps, fetching DB info.
@@ -116,7 +119,33 @@ impl ContextGenerator {
                 Err(e) => warn!(app = %app.slug, error = %e, "failed to generate context"),
             }
         }
+        if let Err(e) = self.generate_global_context(apps) {
+            warn!(error = %e, "failed to generate global context");
+        }
         Ok(count)
+    }
+
+    /// Generate global context files at the apps root.
+    pub fn generate_global_context(&self, apps: &[EnvAgentAppConfig]) -> anyhow::Result<()> {
+        let root = PathBuf::from(&self.apps_path);
+        let claude_dir = root.join(".claude");
+        let rules_dir = claude_dir.join("rules");
+        fs::create_dir_all(&rules_dir)?;
+
+        // 1. /apps/CLAUDE.md
+        let claude_md = self.render_global_claude_md(apps);
+        write_if_changed(&root.join("CLAUDE.md"), &claude_md)?;
+
+        // 2. /apps/.claude/settings.json
+        let settings = self.render_settings_json();
+        write_if_changed(&claude_dir.join("settings.json"), &settings)?;
+
+        // 3. /apps/.claude/rules/env-rules.md
+        let rules = self.render_global_rules_md();
+        write_if_changed(&rules_dir.join("env-rules.md"), &rules)?;
+
+        info!(env = %self.env_slug, "global context files generated");
+        Ok(())
     }
 
     // ── Renderers ──────────────────────────────────────────────────────
@@ -124,9 +153,9 @@ impl ContextGenerator {
     fn render_claude_md(
         &self,
         app: &EnvAgentAppConfig,
+        all_apps: &[EnvAgentAppConfig],
         db_tables: &Option<Vec<String>>,
     ) -> String {
-        let stack_label = stack_display(app.stack);
         let env_label = env_type_label(self.env_type);
         let url = format!("{}.{}.{}", app.slug, self.env_slug, self.base_domain);
 
@@ -149,10 +178,48 @@ impl ContextGenerator {
             (false, _) => "Pas de base de donnees configuree.".to_string(),
         };
 
+        let structure_section = match &app.description {
+            Some(desc) => desc.clone(),
+            None => app.stack.project_structure().to_string(),
+        };
+
         let build_cmd = app
             .build_command
             .as_deref()
-            .unwrap_or("N/A");
+            .unwrap_or_else(|| app.stack.default_build_command());
+
+        let service_section = if self.env_type == EnvType::Development {
+            format!(
+                "- Watch: `{slug}-watch.service` — rebuild continu\n  \
+                 Chaque modification de code declenche un rebuild + restart automatique.\n  \
+                 Pour rebuilder manuellement: `{build}` puis `systemctl restart {slug}`",
+                slug = app.slug,
+                build = build_cmd,
+            )
+        } else {
+            "- Deploye via pipeline. Ne pas modifier le code directement.".to_string()
+        };
+
+        // Other apps section
+        let other_apps: Vec<String> = all_apps
+            .iter()
+            .filter(|a| a.slug != app.slug)
+            .map(|a| {
+                format!(
+                    "- {name} ({slug}) — port {port}, stack {stack}",
+                    name = a.name,
+                    slug = a.slug,
+                    port = a.port,
+                    stack = a.stack.display_name(),
+                )
+            })
+            .collect();
+
+        let other_apps_section = if other_apps.is_empty() {
+            "Aucune autre app dans cet environnement.".to_string()
+        } else {
+            other_apps.join("\n")
+        };
 
         format!(
             "# {name} — Environnement {env_label}\n\
@@ -162,28 +229,95 @@ impl ContextGenerator {
              - Env: {env_slug} (studio.{env_slug}.mynetwk.biz)\n\
              - Stack: {stack}\n\
              - URL: {url}\n\
+             - Port: {port}\n\
+             \n\
+             ## Structure du projet\n\
+             {structure}\n\
              \n\
              ## Base de donnees\n\
              {db_section}\n\
              \n\
-             ## Commandes\n\
-             - Build: {build_cmd}\n\
-             - Run: {run_command}\n\
-             - Health: curl http://localhost:{port}{health_path}\n\
+             ## Service systemd\n\
+             - Service principal: `{slug}.service`\n\
+             - Build: `{build_cmd}`\n\
+             - Run: `{run_command}`\n\
+             {service_section}\n\
              \n\
-             ## Regles\n\
-             Voir `.claude/rules/env-context.md` pour les permissions de cet environnement.\n",
+             ## Commandes MCP\n\
+             - `app.restart {slug}` — restart le service\n\
+             - `app.logs {slug}` — voir les logs\n\
+             - `app.health {slug}` — health check\n\
+             - Health direct: `curl http://localhost:{port}{health_path}`\n\
+             \n\
+             ## Autres apps dans l'environnement\n\
+             {other_apps}\n",
             name = app.name,
             env_label = env_label,
             slug = app.slug,
             env_slug = self.env_slug,
-            stack = stack_label,
+            stack = app.stack.display_name(),
             url = url,
+            port = app.port,
+            structure = structure_section,
             db_section = db_section,
             build_cmd = build_cmd,
             run_command = app.run_command,
-            port = app.port,
+            service_section = service_section,
             health_path = app.health_path,
+            other_apps = other_apps_section,
+        )
+    }
+
+    fn render_global_claude_md(&self, apps: &[EnvAgentAppConfig]) -> String {
+        let env_label = env_type_label(self.env_type);
+
+        let mut table_rows = String::new();
+        for app in apps {
+            table_rows.push_str(&format!(
+                "| {name} | {slug} | {port} | {stack} | {db} |\n",
+                name = app.name,
+                slug = app.slug,
+                port = app.port,
+                stack = app.stack.display_name(),
+                db = if app.has_db { "oui" } else { "-" },
+            ));
+        }
+
+        let env_behavior = if self.env_type == EnvType::Development {
+            "- Service watch: `{slug}-watch.service` — rebuild continu en arriere-plan\n  \
+             Les modifications de code declenchent un rebuild + restart automatique"
+                .to_string()
+        } else {
+            "- Deploye via pipeline. Ne pas modifier le code directement.".to_string()
+        };
+
+        format!(
+            "# Environnement {env_slug} — {env_label}\n\
+             \n\
+             ## Apps dans cet environnement\n\
+             | App | Slug | Port | Stack | DB |\n\
+             | --- | --- | --- | --- | --- |\n\
+             {table_rows}\
+             \n\
+             ## Fonctionnement\n\
+             - Chaque app est TOUJOURS buildee puis servie, meme en dev\n\
+             - Service principal: `{{slug}}.service` — sert l'app buildee sur son port\n\
+             {env_behavior}\n\
+             \n\
+             ## Stacks supportees\n\
+             - **Next.js** : `pnpm build` puis `node server.js` (custom server + WS)\n\
+             - **Axum+Vite** : `cargo build --release` + `vite build` puis binaire Axum sert API + dist/\n\
+             - **Axum** : `cargo build --release` puis binaire Axum (API-only, pas de frontend)\n\
+             \n\
+             ## Regles\n\
+             - Utiliser les outils MCP (app.*, db.*, studio.*) — JAMAIS ssh/scp/machinectl\n\
+             - Ports 3001+ pour les apps, 4010 pour MCP, 8443 pour code-server\n\
+             - Ne pas acceder aux fichiers .db directement — utiliser MCP db.*\n\
+             - Voir .claude/rules/env-rules.md pour les permissions detaillees\n",
+            env_slug = self.env_slug,
+            env_label = env_label,
+            table_rows = table_rows,
+            env_behavior = env_behavior,
         )
     }
 
@@ -204,55 +338,59 @@ impl ContextGenerator {
         serde_json::to_string_pretty(&settings).expect("JSON serialization cannot fail")
     }
 
-    fn render_env_context_md(&self) -> String {
+    fn render_global_rules_md(&self) -> String {
         let perms = EnvPermissions::for_type(self.env_type);
         let env_label = env_type_label(self.env_type);
 
         let mut lines = Vec::new();
         lines.push(format!(
-            "# Permissions — Environnement {}\n",
+            "# Regles globales — Environnement {}\n",
             env_label
         ));
+        lines.push(
+            "Cet environnement est un conteneur nspawn gere par HomeRoute.".to_string(),
+        );
+        lines.push(
+            "Toutes les apps tournent comme services systemd geres par env-agent.\n".to_string(),
+        );
 
-        lines.push(format!(
-            "| Permission | Autorise |"
-        ));
+        lines.push("| Permission | Autorise |".to_string());
         lines.push("| --- | --- |".to_string());
         lines.push(format!(
             "| Modifier le code source | {} |",
-            yes_no(perms.code_edit)
+            if perms.code_edit { "Oui" } else { "Non" }
         ));
         lines.push(format!(
             "| Build et run | {} |",
-            yes_no(perms.build_run)
+            if perms.build_run { "Oui" } else { "Non" }
         ));
         lines.push(format!(
             "| Modifier le schema DB | {} |",
-            yes_no(perms.db_schema_write)
+            if perms.db_schema_write { "Oui" } else { "Non" }
         ));
         lines.push(format!(
             "| Ecrire des donnees DB | {} |",
-            yes_no(perms.db_data_write)
+            if perms.db_data_write { "Oui" } else { "Non" }
         ));
         lines.push(format!(
             "| Lire des donnees DB | {} |",
-            yes_no(perms.db_data_read)
+            if perms.db_data_read { "Oui" } else { "Non" }
         ));
         lines.push(format!(
             "| Lire les logs | {} |",
-            yes_no(perms.logs_read)
+            if perms.logs_read { "Oui" } else { "Non" }
         ));
         lines.push(format!(
             "| Promouvoir via pipeline | {} |",
-            yes_no(perms.pipeline_promote)
+            if perms.pipeline_promote { "Oui" } else { "Non" }
         ));
         lines.push(format!(
             "| Rollback | {} |",
-            yes_no(perms.pipeline_rollback)
+            if perms.pipeline_rollback { "Oui" } else { "Non" }
         ));
         lines.push(format!(
             "| Modifier les variables d'env | {} |",
-            yes_no(perms.env_vars_write)
+            if perms.env_vars_write { "Oui" } else { "Non" }
         ));
 
         // Add explicit warnings for restricted envs
@@ -277,19 +415,29 @@ impl ContextGenerator {
         }
 
         lines.push(String::new());
+        lines.push("## Conventions".to_string());
+        lines.push(
+            "- Ne pas acceder aux fichiers .db directement — utiliser les outils MCP `db.*`"
+                .to_string(),
+        );
+        lines.push(
+            "- Pour deployer vers production, utiliser les pipelines".to_string(),
+        );
+        lines.push(
+            "- Utiliser les outils MCP `app.*` pour gerer les services (pas systemctl directement)"
+                .to_string(),
+        );
+        lines.push(
+            "- Les modifications de code en dev sont automatiquement rebuilees par le service watch"
+                .to_string(),
+        );
+
+        lines.push(String::new());
         lines.join("\n")
     }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
-
-fn stack_display(stack: AppStackType) -> &'static str {
-    match stack {
-        AppStackType::NextJs => "Next.js",
-        AppStackType::AxumVite => "Axum + Vite/React",
-        AppStackType::AxumFlutter => "Axum + Flutter",
-    }
-}
 
 fn env_type_label(env_type: EnvType) -> &'static str {
     match env_type {
@@ -297,10 +445,6 @@ fn env_type_label(env_type: EnvType) -> &'static str {
         EnvType::Acceptance => "Acceptance",
         EnvType::Production => "Production",
     }
-}
-
-fn yes_no(v: bool) -> &'static str {
-    if v { "Oui" } else { "Non" }
 }
 
 /// Write a file only if the content has changed, to avoid unnecessary FS churn.
@@ -319,6 +463,7 @@ fn write_if_changed(path: &Path, content: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hr_environment::types::AppStackType;
 
     fn test_generator() -> ContextGenerator {
         ContextGenerator {
@@ -342,6 +487,25 @@ mod tests {
             build_command: Some("cargo build --release".to_string()),
             health_path: "/api/health".to_string(),
             has_db: true,
+            watch_command: None,
+            test_command: None,
+            description: None,
+        }
+    }
+
+    fn test_app_wallet() -> EnvAgentAppConfig {
+        EnvAgentAppConfig {
+            slug: "wallet".to_string(),
+            name: "Wallet".to_string(),
+            stack: AppStackType::AxumVite,
+            port: 3002,
+            run_command: "./bin/wallet".to_string(),
+            build_command: None,
+            health_path: "/api/health".to_string(),
+            has_db: false,
+            watch_command: None,
+            test_command: None,
+            description: None,
         }
     }
 
@@ -349,13 +513,14 @@ mod tests {
     fn test_generate_creates_files() {
         let ctx = test_generator();
         let app = test_app();
+        let all_apps = vec![app.clone()];
         let base = PathBuf::from(&ctx.apps_path);
 
         // Clean up from previous runs
         let _ = fs::remove_dir_all(&base);
 
         let tables = vec!["users".to_string(), "trades".to_string()];
-        ctx.generate_for_app(&app, Some(tables)).unwrap();
+        ctx.generate_for_app(&app, &all_apps, Some(tables)).unwrap();
 
         let claude_md = fs::read_to_string(base.join("trader/CLAUDE.md")).unwrap();
         assert!(claude_md.contains("# Trader"));
@@ -364,6 +529,8 @@ mod tests {
         assert!(claude_md.contains("`users`"));
         assert!(claude_md.contains("`trades`"));
         assert!(claude_md.contains("cargo build --release"));
+        assert!(claude_md.contains("Service principal:"));
+        assert!(claude_md.contains("app.restart trader"));
 
         let settings =
             fs::read_to_string(base.join("trader/.claude/settings.json")).unwrap();
@@ -377,10 +544,8 @@ mod tests {
             .unwrap()
             .contains("10.0.0.254"));
 
-        let env_ctx =
-            fs::read_to_string(base.join("trader/.claude/rules/env-context.md")).unwrap();
-        assert!(env_ctx.contains("Development"));
-        assert!(env_ctx.contains("Oui"));
+        // Per-app env-context.md should NOT exist anymore
+        assert!(!base.join("trader/.claude/rules/env-context.md").exists());
 
         // Clean up
         let _ = fs::remove_dir_all(&base);
@@ -392,7 +557,7 @@ mod tests {
         let mut app = test_app();
         app.has_db = false;
 
-        let md = ctx.render_claude_md(&app, &None);
+        let md = ctx.render_claude_md(&app, &[app.clone()], &None);
         assert!(md.contains("Pas de base de donnees configuree"));
     }
 
@@ -403,10 +568,11 @@ mod tests {
             ..test_generator()
         };
 
-        let ctx_md = ctx.render_env_context_md();
-        assert!(ctx_md.contains("PRODUCTION"));
-        assert!(ctx_md.contains("| Modifier le code source | Non |"));
-        assert!(ctx_md.contains("| Rollback | Oui |"));
+        let rules_md = ctx.render_global_rules_md();
+        assert!(rules_md.contains("PRODUCTION"));
+        assert!(rules_md.contains("| Modifier le code source | Non |"));
+        assert!(rules_md.contains("| Rollback | Oui |"));
+        assert!(rules_md.contains("## Conventions"));
     }
 
     #[test]
@@ -415,8 +581,60 @@ mod tests {
         let mut app = test_app();
         app.build_command = None;
 
-        let md = ctx.render_claude_md(&app, &None);
-        assert!(md.contains("Build: N/A"));
+        let md = ctx.render_claude_md(&app, &[app.clone()], &None);
+        // Should fall back to stack default build command
+        assert!(md.contains(app.stack.default_build_command()));
+    }
+
+    #[test]
+    fn test_other_apps_listed() {
+        let ctx = test_generator();
+        let trader = test_app();
+        let wallet = test_app_wallet();
+        let all_apps = vec![trader.clone(), wallet.clone()];
+
+        let md = ctx.render_claude_md(&trader, &all_apps, &None);
+        assert!(md.contains("Autres apps dans l'environnement"));
+        assert!(md.contains("Wallet (wallet)"));
+        assert!(md.contains("port 3002"));
+
+        // Wallet's CLAUDE.md should list Trader
+        let md2 = ctx.render_claude_md(&wallet, &all_apps, &None);
+        assert!(md2.contains("Trader (trader)"));
+    }
+
+    #[test]
+    fn test_description_overrides_structure() {
+        let ctx = test_generator();
+        let mut app = test_app();
+        app.description = Some("Custom app description here".to_string());
+
+        let md = ctx.render_claude_md(&app, &[app.clone()], &None);
+        assert!(md.contains("Custom app description here"));
+        assert!(!md.contains(app.stack.project_structure()));
+    }
+
+    #[test]
+    fn test_dev_watch_section() {
+        let ctx = test_generator();
+        let app = test_app();
+
+        let md = ctx.render_claude_md(&app, &[app.clone()], &None);
+        assert!(md.contains("watch.service"));
+        assert!(md.contains("rebuild continu"));
+    }
+
+    #[test]
+    fn test_prod_no_watch() {
+        let ctx = ContextGenerator {
+            env_type: EnvType::Production,
+            ..test_generator()
+        };
+        let app = test_app();
+
+        let md = ctx.render_claude_md(&app, &[app.clone()], &None);
+        assert!(!md.contains("watch.service"));
+        assert!(md.contains("Deploye via pipeline"));
     }
 
     #[test]
@@ -428,24 +646,52 @@ mod tests {
 
         let _ = fs::remove_dir_all(&ctx.apps_path);
 
-        let apps = vec![
-            test_app(),
-            EnvAgentAppConfig {
-                slug: "wallet".to_string(),
-                name: "Wallet".to_string(),
-                stack: AppStackType::AxumVite,
-                port: 3002,
-                run_command: "./bin/wallet".to_string(),
-                build_command: None,
-                health_path: "/api/health".to_string(),
-                has_db: false,
-            },
-        ];
+        let apps = vec![test_app(), test_app_wallet()];
 
         ctx.refresh_all(&apps).unwrap();
 
         assert!(PathBuf::from("/tmp/ctx-test-refresh/trader/CLAUDE.md").exists());
         assert!(PathBuf::from("/tmp/ctx-test-refresh/wallet/CLAUDE.md").exists());
+
+        let _ = fs::remove_dir_all(&ctx.apps_path);
+    }
+
+    #[test]
+    fn test_generate_global_context() {
+        let ctx = ContextGenerator {
+            apps_path: "/tmp/ctx-test-global".to_string(),
+            ..test_generator()
+        };
+
+        let _ = fs::remove_dir_all(&ctx.apps_path);
+
+        let apps = vec![test_app(), test_app_wallet()];
+        ctx.generate_global_context(&apps).unwrap();
+
+        let root = PathBuf::from(&ctx.apps_path);
+
+        // Check CLAUDE.md
+        let claude_md = fs::read_to_string(root.join("CLAUDE.md")).unwrap();
+        assert!(claude_md.contains("Environnement dev"));
+        assert!(claude_md.contains("| Trader |"));
+        assert!(claude_md.contains("| Wallet |"));
+        assert!(claude_md.contains("oui")); // trader has_db
+        assert!(claude_md.contains("Stacks supportees"));
+
+        // Check settings.json
+        let settings = fs::read_to_string(root.join(".claude/settings.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        assert!(parsed["mcpServers"]["env"]["url"]
+            .as_str()
+            .unwrap()
+            .contains("4010"));
+
+        // Check env-rules.md
+        let rules = fs::read_to_string(root.join(".claude/rules/env-rules.md")).unwrap();
+        assert!(rules.contains("Regles globales"));
+        assert!(rules.contains("conteneur nspawn"));
+        assert!(rules.contains("Conventions"));
+        assert!(rules.contains("| Modifier le code source | Oui |"));
 
         let _ = fs::remove_dir_all(&ctx.apps_path);
     }

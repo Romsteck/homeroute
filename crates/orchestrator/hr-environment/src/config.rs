@@ -58,6 +58,16 @@ pub struct EnvAgentAppConfig {
     /// Whether this app has a Dataverse database.
     #[serde(default)]
     pub has_db: bool,
+    /// Watch command for dev environments (rebuild on file changes).
+    /// Falls back to `stack.default_watch_command()` if absent.
+    #[serde(default)]
+    pub watch_command: Option<String>,
+    /// Test command.
+    #[serde(default)]
+    pub test_command: Option<String>,
+    /// Brief description of the app (overrides stack-derived structure hint).
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 impl EnvAgentConfig {

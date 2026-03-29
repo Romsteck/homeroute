@@ -45,6 +45,7 @@ export default function App() {
           <Route path="/pipelines" element={<Pipelines />} />
           <Route path="/environments" element={<Environments />} />
           <Route path="/environments/:slug" element={<EnvironmentDetail />} />
+          <Route path="/tables" element={<DbExplorer currentEnv={currentEnv} />} />
           <Route path="/environments/:slug/db" element={<DbExplorer />} />
           <Route path="/environments/:slug/db/:appSlug" element={<DbExplorer />} />
           <Route path="/environments/:slug/forms/:appSlug" element={<FormBuilder />} />

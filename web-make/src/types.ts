@@ -87,14 +87,17 @@ export interface DbTable {
   name: string
   row_count: number
   column_count: number
+  app_slug?: string
 }
 
 export interface DbColumn {
   name: string
   data_type: string
+  field_type?: string
   nullable: boolean
   primary_key: boolean
   default_value?: string
+  choices?: string[]
 }
 
 export interface DbSchema {
@@ -115,4 +118,10 @@ export interface DbQueryResult {
   columns: string[]
   rows: Record<string, string | number | boolean | null>[]
   total_count: number
+}
+
+export interface DbFilter {
+  column: string
+  op: 'eq' | 'ne' | 'gt' | 'lt' | 'gte' | 'lte' | 'like' | 'in' | 'is_null' | 'is_not_null'
+  value: any
 }

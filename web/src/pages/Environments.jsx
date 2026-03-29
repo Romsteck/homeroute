@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Layers,
   Plus,
@@ -15,6 +15,11 @@ import {
   RefreshCw,
   Check,
   Pencil,
+  ChevronDown,
+  ChevronRight,
+  Eye,
+  EyeOff,
+  Database,
 } from 'lucide-react';
 import Button from '../components/Button';
 import PageHeader from '../components/PageHeader';
@@ -41,6 +46,7 @@ function Environments() {
   const [editData, setEditData] = useState({ name: '', slug: '' });
   const [editError, setEditError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [expandedEnvs, setExpandedEnvs] = useState(new Set());
 
   const fetchData = useCallback(async () => {
     try {
@@ -261,6 +267,42 @@ function Environments() {
     return <WifiOff className="w-3.5 h-3.5 text-gray-600" title="Agent deconnecte" />;
   }
 
+  function toggleExpand(slug) {
+    setExpandedEnvs(prev => {
+      const next = new Set(prev);
+      if (next.has(slug)) next.delete(slug);
+      else next.add(slug);
+      return next;
+    });
+  }
+
+  function getStackBadgeClass(stack) {
+    switch (stack) {
+      case 'next-js':
+        return 'bg-purple-500/20 text-purple-400 border-purple-500/30';
+      case 'axum-vite':
+        return 'bg-amber-500/20 text-amber-400 border-amber-500/30';
+      case 'axum':
+        return 'bg-blue-500/20 text-blue-400 border-blue-500/30';
+      default:
+        return 'bg-gray-500/20 text-gray-400 border-gray-500/30';
+    }
+  }
+
+  function getStackDisplayName(stack) {
+    switch (stack) {
+      case 'next-js': return 'Next.js';
+      case 'axum-vite': return 'Axum+Vite';
+      case 'axum': return 'Axum';
+      default: return stack || 'Unknown';
+    }
+  }
+
+  function isDevEnv(env) {
+    const t = env.env_type || env.type;
+    return t === 'dev' || t === 'development';
+  }
+
   // ── Render ──────────────────────────────────
 
   if (loading) {
@@ -323,8 +365,13 @@ function Environments() {
                   </tr>
                 </thead>
                 <tbody>
-                  {environments.map(env => (
-                    <tr key={env.slug || env.id} className="border-b border-gray-700/50 hover:bg-gray-800/50">
+                  {environments.map(env => {
+                    const envApps = env.apps || [];
+                    const appCount = env.app_count ?? envApps.length;
+                    const isExpanded = expandedEnvs.has(env.slug);
+                    return (
+                    <React.Fragment key={env.slug || env.id}>
+                    <tr className="border-b border-gray-700/50 hover:bg-gray-800/50">
                       {/* Name */}
                       <td className="px-3 py-2.5 text-sm font-medium text-white">
                         <div className="flex items-center gap-2">
@@ -372,11 +419,22 @@ function Environments() {
                           <span className="text-sm font-mono text-gray-500">--</span>
                         )}
                       </td>
-                      {/* App count */}
+                      {/* App count - clickable to expand */}
                       <td className="px-3 py-2.5 hidden lg:table-cell">
-                        <span className="text-sm text-gray-400">
-                          {env.app_count ?? (env.apps ? env.apps.length : 0)}
-                        </span>
+                        {appCount > 0 ? (
+                          <button
+                            onClick={() => toggleExpand(env.slug)}
+                            className="flex items-center gap-1 text-sm text-blue-400 hover:text-blue-300 transition-colors"
+                            title={isExpanded ? 'Masquer les apps' : 'Voir les apps'}
+                          >
+                            {isExpanded
+                              ? <ChevronDown className="w-3.5 h-3.5" />
+                              : <ChevronRight className="w-3.5 h-3.5" />}
+                            {appCount}
+                          </button>
+                        ) : (
+                          <span className="text-sm text-gray-500">0</span>
+                        )}
                       </td>
                       {/* Host */}
                       <td className="px-3 py-2.5 hidden xl:table-cell">
@@ -443,14 +501,86 @@ function Environments() {
                         </div>
                       </td>
                     </tr>
-                  ))}
+                    {/* Expanded apps sub-table */}
+                    {isExpanded && envApps.length > 0 && (
+                      <tr className="bg-gray-800/30">
+                        <td colSpan="10" className="px-6 py-3">
+                          <table className="w-full text-left">
+                            <thead>
+                              <tr className="text-[10px] text-gray-500 uppercase tracking-wider">
+                                <th className="px-2 py-1 font-medium">Nom</th>
+                                <th className="px-2 py-1 font-medium">Stack</th>
+                                <th className="px-2 py-1 font-medium">Port</th>
+                                <th className="px-2 py-1 font-medium">Version</th>
+                                <th className="px-2 py-1 font-medium">Statut</th>
+                                <th className="px-2 py-1 font-medium">DB</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {envApps.map(app => (
+                                <tr key={app.slug} className="border-t border-gray-700/30">
+                                  <td className="px-2 py-1.5 text-sm text-white">{app.name || app.slug}</td>
+                                  <td className="px-2 py-1.5">
+                                    <span className={`px-1.5 py-0.5 text-[10px] font-medium border ${getStackBadgeClass(app.stack)}`}>
+                                      {getStackDisplayName(app.stack)}
+                                    </span>
+                                  </td>
+                                  <td className="px-2 py-1.5 text-sm font-mono text-gray-400">{app.port || '--'}</td>
+                                  <td className="px-2 py-1.5 text-sm font-mono text-gray-400">{app.version || '--'}</td>
+                                  <td className="px-2 py-1.5">
+                                    <div className="flex items-center gap-1.5">
+                                      {app.running ? (
+                                        <span className="flex items-center gap-1 text-xs text-green-400">
+                                          <span className="w-1.5 h-1.5 rounded-full bg-green-400"></span>
+                                          Running
+                                        </span>
+                                      ) : (
+                                        <span className="flex items-center gap-1 text-xs text-gray-500">
+                                          <span className="w-1.5 h-1.5 rounded-full bg-gray-500"></span>
+                                          Stopped
+                                        </span>
+                                      )}
+                                      {isDevEnv(env) && app.watch_status && (
+                                        app.watch_status === 'running' ? (
+                                          <span className="flex items-center gap-0.5 text-[10px] text-blue-400" title="Watch actif">
+                                            <Eye className="w-3 h-3" />
+                                          </span>
+                                        ) : (
+                                          <span className="flex items-center gap-0.5 text-[10px] text-gray-600" title="Watch arrete">
+                                            <EyeOff className="w-3 h-3" />
+                                          </span>
+                                        )
+                                      )}
+                                    </div>
+                                  </td>
+                                  <td className="px-2 py-1.5">
+                                    {app.has_db ? (
+                                      <Database className="w-3.5 h-3.5 text-amber-400" title="Base de donnees" />
+                                    ) : (
+                                      <span className="text-gray-600 text-xs">--</span>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </td>
+                      </tr>
+                    )}
+                    </React.Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
 
             {/* Mobile: Card view */}
             <div className="md:hidden grid grid-cols-1 gap-3">
-              {environments.map(env => (
+              {environments.map(env => {
+                const envApps = env.apps || [];
+                const appCount = env.app_count ?? envApps.length;
+                const isExpanded = expandedEnvs.has(env.slug);
+                return (
                 <div key={env.slug || env.id} className="bg-gray-800 border border-gray-700 rounded-lg p-4">
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2">
@@ -496,8 +626,20 @@ function Environments() {
                     </div>
                     <div>
                       <span className="text-gray-500 text-xs">Apps</span>
-                      <div className="mt-0.5 text-gray-300">
-                        {env.app_count ?? (env.apps ? env.apps.length : 0)}
+                      <div className="mt-0.5">
+                        {appCount > 0 ? (
+                          <button
+                            onClick={() => toggleExpand(env.slug)}
+                            className="flex items-center gap-1 text-blue-400 hover:text-blue-300"
+                          >
+                            {isExpanded
+                              ? <ChevronDown className="w-3.5 h-3.5" />
+                              : <ChevronRight className="w-3.5 h-3.5" />}
+                            {appCount}
+                          </button>
+                        ) : (
+                          <span className="text-gray-500">0</span>
+                        )}
                       </div>
                     </div>
                     <div>
@@ -507,6 +649,49 @@ function Environments() {
                       </div>
                     </div>
                   </div>
+
+                  {/* Expanded apps list (mobile) */}
+                  {isExpanded && envApps.length > 0 && (
+                    <div className="border-t border-gray-700 pt-2 mb-3 space-y-2">
+                      {envApps.map(app => (
+                        <div key={app.slug} className="bg-gray-900/50 rounded p-2 text-sm">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-white font-medium">{app.name || app.slug}</span>
+                            <span className={`px-1.5 py-0.5 text-[10px] font-medium border ${getStackBadgeClass(app.stack)}`}>
+                              {getStackDisplayName(app.stack)}
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-1 text-xs">
+                            <div className="text-gray-500">Port: <span className="text-gray-300 font-mono">{app.port || '--'}</span></div>
+                            <div className="text-gray-500">Version: <span className="text-gray-300 font-mono">{app.version || '--'}</span></div>
+                            <div className="flex items-center gap-1">
+                              {app.running ? (
+                                <span className="flex items-center gap-1 text-green-400">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-green-400"></span>
+                                  Running
+                                </span>
+                              ) : (
+                                <span className="flex items-center gap-1 text-gray-500">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-gray-500"></span>
+                                  Stopped
+                                </span>
+                              )}
+                              {isDevEnv(env) && app.watch_status && (
+                                app.watch_status === 'running' ? (
+                                  <Eye className="w-3 h-3 text-blue-400" title="Watch actif" />
+                                ) : (
+                                  <EyeOff className="w-3 h-3 text-gray-600" title="Watch arrete" />
+                                )
+                              )}
+                            </div>
+                            <div>
+                              {app.has_db && <Database className="w-3.5 h-3.5 text-amber-400" title="Base de donnees" />}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
                   <div className="flex items-center gap-1 border-t border-gray-700 pt-3">
                     {env.status === 'running' ? (
@@ -558,7 +743,8 @@ function Environments() {
                     </button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </>
         )}

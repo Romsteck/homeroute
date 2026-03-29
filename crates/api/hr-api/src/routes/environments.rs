@@ -27,6 +27,8 @@ pub fn router() -> Router<ApiState> {
         .route("/environments/{slug}/db/tables", get(get_db_tables))
         .route("/environments/{slug}/db/schema", get(get_db_schema))
         .route("/environments/{slug}/db/query", get(query_db_data))
+        .route("/environments/{slug}/db/count", get(count_db_rows))
+        .route("/environments/{slug}/db/rows", post(insert_db_rows).put(update_db_rows).delete(delete_db_rows))
         .route("/monitoring/envs", get(monitoring_envs_summary))
         .route("/pipelines/promote", post(promote_pipeline))
         .route("/pipelines/definitions", get(list_pipeline_definitions))
@@ -356,9 +358,21 @@ async fn monitoring_envs_summary(State(state): State<ApiState>) -> impl IntoResp
     }
 }
 
+#[derive(Deserialize)]
+struct DbTablesParams {
+    app_slug: Option<String>,
+}
+
 /// GET /api/environments/:slug/db/tables
-async fn get_db_tables(Path(slug): Path<String>) -> impl IntoResponse {
-    match mcp_call("db.list_tables", serde_json::json!({"env_slug": slug})).await {
+async fn get_db_tables(
+    Path(slug): Path<String>,
+    Query(params): Query<DbTablesParams>,
+) -> impl IntoResponse {
+    let mut args = serde_json::json!({"env_slug": slug});
+    if let Some(app) = &params.app_slug {
+        args["app_slug"] = serde_json::json!(app);
+    }
+    match mcp_call("db.list_tables", args).await {
         Ok(result) => Json(serde_json::json!({"success": true, "data": result})).into_response(),
         Err(e) => {
             error!("DB list tables failed: {e}");
@@ -374,6 +388,7 @@ async fn get_db_tables(Path(slug): Path<String>) -> impl IntoResponse {
 #[derive(Deserialize)]
 struct DbSchemaParams {
     table: String,
+    app_slug: Option<String>,
 }
 
 /// GET /api/environments/:slug/db/schema?table=...
@@ -381,15 +396,14 @@ async fn get_db_schema(
     Path(slug): Path<String>,
     Query(params): Query<DbSchemaParams>,
 ) -> impl IntoResponse {
-    match mcp_call(
-        "db.get_schema",
-        serde_json::json!({
-            "env_slug": slug,
-            "table": params.table,
-        }),
-    )
-    .await
-    {
+    let mut args = serde_json::json!({
+        "env_slug": slug,
+        "table": params.table,
+    });
+    if let Some(app) = &params.app_slug {
+        args["app_slug"] = serde_json::json!(app);
+    }
+    match mcp_call("db.get_schema", args).await {
         Ok(result) => Json(serde_json::json!({"success": true, "data": result})).into_response(),
         Err(e) => {
             error!("DB schema failed: {e}");
@@ -405,8 +419,13 @@ async fn get_db_schema(
 #[derive(Deserialize)]
 struct DbQueryParams {
     table: String,
+    app_slug: Option<String>,
     limit: Option<u32>,
     offset: Option<u32>,
+    order_by: Option<String>,
+    order_desc: Option<bool>,
+    /// Filters as JSON string: [{"column":"name","op":"like","value":"%test%"}]
+    filters: Option<String>,
 }
 
 /// GET /api/environments/:slug/db/query
@@ -414,20 +433,176 @@ async fn query_db_data(
     Path(slug): Path<String>,
     Query(params): Query<DbQueryParams>,
 ) -> impl IntoResponse {
+    let mut args = serde_json::json!({
+        "env_slug": slug,
+        "table": params.table,
+        "limit": params.limit.unwrap_or(50),
+        "offset": params.offset.unwrap_or(0),
+    });
+    if let Some(app) = &params.app_slug {
+        args["app_slug"] = serde_json::json!(app);
+    }
+    if let Some(order) = &params.order_by {
+        args["order_by"] = serde_json::json!(order);
+    }
+    if let Some(desc) = params.order_desc {
+        args["order_desc"] = serde_json::json!(desc);
+    }
+    if let Some(filters_str) = &params.filters {
+        if let Ok(filters) = serde_json::from_str::<serde_json::Value>(filters_str) {
+            args["filters"] = filters;
+        }
+    }
+    match mcp_call("db.query_data", args).await {
+        Ok(result) => Json(serde_json::json!({"success": true, "data": result})).into_response(),
+        Err(e) => {
+            error!("DB query failed: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"success": false, "error": e})),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ── DB write handlers ──────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CountParams {
+    table: String,
+    app_slug: Option<String>,
+    filters: Option<String>,
+}
+
+/// GET /api/environments/:slug/db/count
+async fn count_db_rows(
+    Path(slug): Path<String>,
+    Query(params): Query<CountParams>,
+) -> impl IntoResponse {
+    let mut args = serde_json::json!({
+        "env_slug": slug,
+        "table_name": params.table,
+    });
+    if let Some(app) = &params.app_slug {
+        args["app_slug"] = serde_json::json!(app);
+    }
+    if let Some(filters_str) = &params.filters {
+        if let Ok(filters) = serde_json::from_str::<serde_json::Value>(filters_str) {
+            args["filters"] = filters;
+        }
+    }
+    match mcp_call("db.count_rows", args).await {
+        Ok(result) => Json(serde_json::json!({"success": true, "data": result})).into_response(),
+        Err(e) => {
+            error!("DB count rows failed: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"success": false, "error": e})),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct InsertRowsRequest {
+    app_slug: String,
+    table: String,
+    rows: Vec<serde_json::Value>,
+}
+
+/// POST /api/environments/:slug/db/rows
+async fn insert_db_rows(
+    Path(slug): Path<String>,
+    Json(req): Json<InsertRowsRequest>,
+) -> impl IntoResponse {
     match mcp_call(
-        "db.query_data",
+        "db.insert_data",
         serde_json::json!({
             "env_slug": slug,
-            "table": params.table,
-            "limit": params.limit.unwrap_or(50),
-            "offset": params.offset.unwrap_or(0),
+            "app_slug": req.app_slug,
+            "table_name": req.table,
+            "rows": req.rows,
         }),
     )
     .await
     {
         Ok(result) => Json(serde_json::json!({"success": true, "data": result})).into_response(),
         Err(e) => {
-            error!("DB query failed: {e}");
+            error!("DB insert failed: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"success": false, "error": e})),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateRowsRequest {
+    app_slug: String,
+    table: String,
+    updates: serde_json::Value,
+    filters: Vec<serde_json::Value>,
+}
+
+/// PUT /api/environments/:slug/db/rows
+async fn update_db_rows(
+    Path(slug): Path<String>,
+    Json(req): Json<UpdateRowsRequest>,
+) -> impl IntoResponse {
+    match mcp_call(
+        "db.update_data",
+        serde_json::json!({
+            "env_slug": slug,
+            "app_slug": req.app_slug,
+            "table_name": req.table,
+            "updates": req.updates,
+            "filters": req.filters,
+        }),
+    )
+    .await
+    {
+        Ok(result) => Json(serde_json::json!({"success": true, "data": result})).into_response(),
+        Err(e) => {
+            error!("DB update failed: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"success": false, "error": e})),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct DeleteRowsRequest {
+    app_slug: String,
+    table: String,
+    filters: Vec<serde_json::Value>,
+}
+
+/// DELETE /api/environments/:slug/db/rows
+async fn delete_db_rows(
+    Path(slug): Path<String>,
+    Json(req): Json<DeleteRowsRequest>,
+) -> impl IntoResponse {
+    match mcp_call(
+        "db.delete_data",
+        serde_json::json!({
+            "env_slug": slug,
+            "app_slug": req.app_slug,
+            "table_name": req.table,
+            "filters": req.filters,
+        }),
+    )
+    .await
+    {
+        Ok(result) => Json(serde_json::json!({"success": true, "data": result})).into_response(),
+        Err(e) => {
+            error!("DB delete failed: {e}");
             (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({"success": false, "error": e})),

@@ -51,10 +51,22 @@ export function EnvTypeBadge({ envType }: { envType: EnvType }) {
   )
 }
 
+const stackColors: Record<string, string> = {
+  'next-js': 'bg-white/10 text-white/70',
+  'axum-vite': 'bg-orange-500/15 text-orange-400',
+  'axum': 'bg-amber-500/15 text-amber-400',
+}
+
+const stackLabels: Record<string, string> = {
+  'next-js': 'Next.js',
+  'axum-vite': 'Axum + Vite',
+  'axum': 'Axum',
+}
+
 export function StackBadge({ stack }: { stack: string }) {
   return (
-    <span className="inline-flex items-center px-2 py-0.5 rounded bg-[#7c3aed]/15 text-[#a78bfa] text-xs font-medium">
-      {stack}
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${stackColors[stack] ?? 'bg-[#7c3aed]/15 text-[#a78bfa]'}`}>
+      {stackLabels[stack] ?? stack}
     </span>
   )
 }

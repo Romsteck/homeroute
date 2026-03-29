@@ -33,6 +33,11 @@ export function AppRow({ app, envSlug }: AppRowProps) {
         <StackBadge stack={app.stack} />
       </td>
 
+      {/* Port */}
+      <td className="px-4 py-3">
+        <span className="text-sm font-mono text-white/40">{app.port || '-'}</span>
+      </td>
+
       {/* Version */}
       <td className="px-4 py-3">
         <span className="text-sm font-mono text-white/50">{displayVersion}</span>
@@ -115,6 +120,7 @@ export function AppTable({ apps, envSlug }: { apps: EnvApp[]; envSlug?: string }
           <tr className="border-b border-white/10">
             <th className="text-left px-4 py-2.5 text-[11px] font-medium text-white/30 uppercase tracking-wider">Name</th>
             <th className="text-left px-4 py-2.5 text-[11px] font-medium text-white/30 uppercase tracking-wider">Stack</th>
+            <th className="text-left px-4 py-2.5 text-[11px] font-medium text-white/30 uppercase tracking-wider">Port</th>
             <th className="text-left px-4 py-2.5 text-[11px] font-medium text-white/30 uppercase tracking-wider">Version</th>
             <th className="text-left px-4 py-2.5 text-[11px] font-medium text-white/30 uppercase tracking-wider">Status</th>
             <th className="text-left px-4 py-2.5 text-[11px] font-medium text-white/30 uppercase tracking-wider">DB</th>
