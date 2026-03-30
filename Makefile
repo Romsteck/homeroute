@@ -7,7 +7,7 @@ PROD_HOST := romain@10.0.0.20
 PROD_DIR  := /opt/homeroute
 PROD_API  := http://10.0.0.20:4000
 
-.PHONY: server netcore edge orchestrator web web-make studio all deploy deploy-prod deploy-netcore deploy-edge deploy-orchestrator test clean store agent agent-prod host-agent host-agent-prod check-prod check-not-prod env-agent provision-env-dev provision-env-prod deploy-web-make
+.PHONY: server netcore edge orchestrator web web-make studio studio-env all deploy deploy-prod deploy-netcore deploy-edge deploy-orchestrator deploy-studio-env test clean store agent agent-prod host-agent host-agent-prod check-prod check-not-prod env-agent provision-env-dev provision-env-prod deploy-web-make
 
 SHELL := /bin/bash
 
@@ -56,12 +56,22 @@ deploy-web-make: check-prod web-make
 	rsync -az --delete web-make/dist/ $(PROD_HOST):$(PROD_DIR)/web-make/dist/
 	@echo "✓ Maker Portal deployed"
 
-# Build Studio frontend (Claude Code headless UI)
+# Deploy Studio Env to production (static files served by homeroute on port 4003)
+deploy-studio-env: check-prod studio-env
+	@echo "Deploying Studio Env to production..."
+	rsync -az --delete web-studio-env/dist/ $(PROD_HOST):$(PROD_DIR)/web-studio-env/dist/
+	@echo "✓ Studio Env deployed"
+
+# Build Studio frontend (Claude Code headless UI — legacy per-app)
 studio:
 	cd web-studio && npm install --silent && npm run build
 
-# Full build (studio + netcore + edge + orchestrator + server + frontend)
-all: studio netcore edge orchestrator server web
+# Build Studio Env frontend (environment studio — studio.{env}.mynetwk.biz)
+studio-env:
+	cd web-studio-env && pnpm install --frozen-lockfile && pnpm build
+
+# Full build (studio + studio-env + netcore + edge + orchestrator + server + frontend)
+all: studio studio-env netcore edge orchestrator server web
 
 # Deploy locally (only works on prod server itself)
 deploy: check-not-prod all
@@ -79,6 +89,7 @@ deploy-prod: check-prod all
 	rsync -az --info=progress2 crates/target/release/hr-netcore $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-netcore
 	rsync -az --delete web/dist/ $(PROD_HOST):$(PROD_DIR)/web/dist/
 	rsync -az --delete web-studio/dist/ $(PROD_HOST):$(PROD_DIR)/web-studio/dist/
+	rsync -az --delete web-studio-env/dist/ $(PROD_HOST):$(PROD_DIR)/web-studio-env/dist/
 	rsync -az systemd/ $(PROD_HOST):$(PROD_DIR)/systemd/
 	ssh $(PROD_HOST) 'sudo cp $(PROD_DIR)/systemd/*.service /etc/systemd/system/ && sudo systemctl daemon-reload'
 	ssh $(PROD_HOST) 'sudo systemctl restart hr-edge && sudo systemctl restart hr-orchestrator && sudo systemctl restart homeroute'
@@ -188,10 +199,13 @@ env-agent:
 	@cp crates/target/release/env-agent data/agent-binaries/env-agent 2>/dev/null || true
 	@echo "env-agent built → crates/target/release/env-agent"
 
-# Deploy env-agent to ALL environment containers on Medion
+# Deploy env-agent to ALL environment containers + update studio-env frontend
 # Binary path: /usr/bin/env-agent (standardized across all envs)
 ENV_CONTAINERS := env-dev env-prod
-deploy-env-agent: env-agent
+deploy-env-agent: env-agent studio-env
+	@echo "Deploying Studio Env frontend..."
+	@rsync -az --delete web-studio-env/dist/ $(PROD_HOST):$(PROD_DIR)/web-studio-env/dist/
+	@echo "✓ Studio Env frontend deployed"
 	@for ENV in $(ENV_CONTAINERS); do \
 		echo "Deploying env-agent to $$ENV..."; \
 		LEADER=$$(ssh $(PROD_HOST) "sudo machinectl show $$ENV -p Leader --value 2>/dev/null"); \

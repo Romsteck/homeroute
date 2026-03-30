@@ -1,3 +1,4 @@
+import { useState, useCallback } from "react";
 import type { Environment, EnvApp, TabId } from "../types";
 import { ProjectSidebar } from "./ProjectSidebar";
 import { TabBar } from "./TabBar";
@@ -19,7 +20,7 @@ interface Props {
   error: string | null;
 }
 
-function renderTab(tab: TabId, env: Environment, app: EnvApp | null, appSlug: string | null) {
+function renderTab(tab: TabId, env: Environment, _app: EnvApp | null, appSlug: string | null) {
   if (!appSlug) {
     return (
       <div className="flex items-center justify-center h-full text-muted text-sm">
@@ -28,22 +29,53 @@ function renderTab(tab: TabId, env: Environment, app: EnvApp | null, appSlug: st
     );
   }
   switch (tab) {
-    case "code": return <CodeTab env={env} app={app} appSlug={appSlug} />;
     case "board": return <BoardTab appSlug={appSlug} />;
     case "docs": return <DocsTab env={env} appSlug={appSlug} />;
     case "pipes": return <PipesTab env={env} appSlug={appSlug} />;
     case "db": return <DbTab env={env} appSlug={appSlug} />;
     case "logs": return <LogsTab env={env} appSlug={appSlug} />;
+    default: return null;
   }
 }
 
 export function StudioLayout({ env, currentApp, apps, selectedApp, activeTab, onSelectApp, onSelectTab, error }: Props) {
   const isProd = env.type === "prod";
+  // Track which app slugs have had their code-server opened (lazy-load)
+  const [openedCodeServers, setOpenedCodeServers] = useState<Set<string>>(() => {
+    // If we restore on "code" tab with a selected app, open it immediately
+    const initial = new Set<string>();
+    if (activeTab === "code" && selectedApp) initial.add(selectedApp);
+    return initial;
+  });
+
+  const handleSelectTab = useCallback((tab: TabId) => {
+    onSelectTab(tab);
+    if (tab === "code" && selectedApp) {
+      setOpenedCodeServers(prev => {
+        if (prev.has(selectedApp)) return prev;
+        const next = new Set(prev);
+        next.add(selectedApp);
+        return next;
+      });
+    }
+  }, [onSelectTab, selectedApp]);
+
+  const handleSelectApp = useCallback((slug: string) => {
+    onSelectApp(slug);
+    if (activeTab === "code") {
+      setOpenedCodeServers(prev => {
+        if (prev.has(slug)) return prev;
+        const next = new Set(prev);
+        next.add(slug);
+        return next;
+      });
+    }
+  }, [onSelectApp, activeTab]);
 
   return (
     <div className="flex w-screen h-screen overflow-hidden bg-bg">
       {/* Sidebar */}
-      <ProjectSidebar apps={apps} selectedApp={selectedApp} onSelectApp={onSelectApp} />
+      <ProjectSidebar apps={apps} selectedApp={selectedApp} onSelectApp={handleSelectApp} />
 
       {/* Main */}
       <div className="flex flex-col flex-1 min-w-0 h-full">
@@ -76,11 +108,33 @@ export function StudioLayout({ env, currentApp, apps, selectedApp, activeTab, on
         )}
 
         {/* Tabs */}
-        <TabBar activeTab={activeTab} onSelectTab={onSelectTab} isProd={isProd} />
+        <TabBar activeTab={activeTab} onSelectTab={handleSelectTab} isProd={isProd} />
 
         {/* Content */}
-        <div className="flex-1 overflow-hidden">
-          {renderTab(activeTab, env, currentApp, selectedApp)}
+        <div className="flex-1 overflow-hidden relative">
+          {/* Code-server iframes: lazy-loaded on first click, then kept alive invisible */}
+          {[...openedCodeServers].map(slug => {
+            const isVisible = activeTab === "code" && selectedApp === slug;
+            const app = apps.find(a => a.slug === slug) || null;
+            return (
+              <div
+                key={slug}
+                className="absolute inset-0"
+                style={isVisible
+                  ? { visibility: "visible", zIndex: 1 }
+                  : { visibility: "hidden", zIndex: 0, pointerEvents: "none" }
+                }
+              >
+                <CodeTab env={env} app={app} appSlug={slug} />
+              </div>
+            );
+          })}
+          {/* Other tabs: mounted/unmounted normally */}
+          {activeTab !== "code" && (
+            <div className="h-full">
+              {renderTab(activeTab, env, currentApp, selectedApp)}
+            </div>
+          )}
         </div>
       </div>
     </div>

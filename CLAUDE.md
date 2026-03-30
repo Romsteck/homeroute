@@ -136,6 +136,7 @@ make edge            # cargo build --release -p hr-edge
 make orchestrator    # cargo build --release -p hr-orchestrator
 make netcore         # cargo build --release -p hr-netcore
 make web             # npm run build (web/) seulement
+make studio-env      # build web-studio-env (studio environnements)
 make agent           # build hr-agent (auto-incrémente version)
 make env-agent       # build env-agent
 make test            # cargo test
@@ -145,7 +146,8 @@ make deploy-prod         # build all + rsync + restart homeroute + health check
 make deploy-edge         # build + rsync + restart hr-edge seul
 make deploy-orchestrator # build + rsync + restart hr-orchestrator seul
 make deploy-netcore      # build + rsync + restart hr-netcore (rare)
-make deploy-env-agent    # build + deploy env-agent vers TOUS les containers d'env
+make deploy-env-agent    # build + deploy env-agent vers TOUS les containers d'env + studio-env frontend
+make deploy-studio-env   # build + deploy studio-env frontend seul
 
 # Déploiement local (UNIQUEMENT sur le serveur de prod lui-même)
 make deploy          # build all + systemctl restart (bloqué sur dev)

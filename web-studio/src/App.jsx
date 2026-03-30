@@ -32,6 +32,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState(() => {
     return localStorage.getItem('studio-active-tab') || 'studio';
   });
+  const [codeServerOpened, setCodeServerOpened] = useState(() => activeTab === 'code');
   const ws = useStudioWebSocket();
   const sessionManager = useSessionTabs(ws);
   const auth = useClaudeAuth(ws.subscribe, ws.sendRaw, ws.connected);
@@ -46,6 +47,7 @@ export default function App() {
   const handleTabChange = useCallback((tab) => {
     setActiveTab(tab);
     localStorage.setItem('studio-active-tab', tab);
+    if (tab === 'code') setCodeServerOpened(true);
   }, []);
 
   return (
@@ -81,7 +83,7 @@ export default function App() {
         />
       )}
 
-      <div className="flex flex-1 min-h-0">
+      <div className="flex flex-1 min-h-0 relative">
         {/* Studio tab - always mounted, hidden when inactive */}
         <div className="flex flex-1 min-h-0" style={{display: activeTab === 'studio' ? 'flex' : 'none'}}>
           <div className="w-[30%] min-w-[300px] flex flex-col border-r border-gray-800 min-h-0">
@@ -109,10 +111,15 @@ export default function App() {
         <div className="flex-1" style={{display: activeTab === 'preview' ? 'flex' : 'none'}}>
           <PreviewPanel slug={appInfo.slug} domain={appInfo.domain} mode="full" sendRaw={ws.sendRaw} />
         </div>
-        {/* Code Server tab - always mounted, hidden when inactive (preserve IDE state) */}
-        <div className="flex-1" style={{display: activeTab === 'code' ? 'flex' : 'none'}}>
-          <CodeServerPanel slug={appInfo.slug} domain={appInfo.domain} />
-        </div>
+        {/* Code Server tab - lazy-loaded on first click, then kept alive invisible */}
+        {codeServerOpened && (
+          <div className="flex-1" style={activeTab === 'code'
+            ? { display: 'flex' }
+            : { position: 'absolute', inset: 0, visibility: 'hidden', pointerEvents: 'none' }
+          }>
+            <CodeServerPanel slug={appInfo.slug} domain={appInfo.domain} />
+          </div>
+        )}
         {/* Files tab - only mounted when active */}
         {activeTab === 'files' && <FilesPanel sendRaw={ws.sendRaw} subscribe={ws.subscribe} connected={ws.connected} />}
         {activeTab === 'docs' && <DocsPanel sendRaw={ws.sendRaw} subscribe={ws.subscribe} connected={ws.connected} />}
