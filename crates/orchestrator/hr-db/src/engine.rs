@@ -557,7 +557,8 @@ impl DataverseEngine {
     pub fn count_rows(&self, table_name: &str) -> Result<u64, EngineError> {
         validate_identifier(table_name)?;
         let sql = format!("SELECT COUNT(*) FROM \"{}\"", table_name);
-        let count: u64 = self.conn.query_row(&sql, [], |r| r.get(0))?;
+        let count: i64 = self.conn.query_row(&sql, [], |r| r.get(0))?;
+        let count = count as u64;
         Ok(count)
     }
 

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use rcgen::{
-    CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+    CertificateParams, DnType, ExtendedKeyUsagePurpose, Issuer, IsCa, KeyPair, KeyUsagePurpose,
     SanType, PKCS_ECDSA_P256_SHA256,
 };
 use std::net::IpAddr;
@@ -27,6 +27,7 @@ pub fn generate_tunnel_certs(vps_host: &str) -> Result<TunnelCerts> {
     // ── CA ────────────────────────────────────────────────────────────
     let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
         .context("Failed to generate CA key pair")?;
+    let ca_key_pem = ca_key.serialize_pem();
 
     let mut ca_params = CertificateParams::new(Vec::<String>::new())
         .context("Failed to create CA params")?;
@@ -41,6 +42,9 @@ pub fn generate_tunnel_certs(vps_host: &str) -> Result<TunnelCerts> {
     let ca_cert = ca_params
         .self_signed(&ca_key)
         .context("Failed to self-sign CA cert")?;
+
+    let ca_issuer = Issuer::from_ca_cert_der(ca_cert.der(), ca_key)
+        .context("Failed to create CA issuer")?;
 
     // ── Server cert ──────────────────────────────────────────────────
     let server_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
@@ -58,7 +62,7 @@ pub fn generate_tunnel_certs(vps_host: &str) -> Result<TunnelCerts> {
     server_params.not_after = time::OffsetDateTime::now_utc() + validity;
 
     let server_cert = server_params
-        .signed_by(&server_key, &ca_cert, &ca_key)
+        .signed_by(&server_key, &ca_issuer)
         .context("Failed to sign server cert")?;
 
     // ── Client cert ──────────────────────────────────────────────────
@@ -75,12 +79,12 @@ pub fn generate_tunnel_certs(vps_host: &str) -> Result<TunnelCerts> {
     client_params.not_after = time::OffsetDateTime::now_utc() + validity;
 
     let client_cert = client_params
-        .signed_by(&client_key, &ca_cert, &ca_key)
+        .signed_by(&client_key, &ca_issuer)
         .context("Failed to sign client cert")?;
 
     Ok(TunnelCerts {
         ca_cert_pem: ca_cert.pem(),
-        ca_key_pem: ca_key.serialize_pem(),
+        ca_key_pem,
         server_cert_pem: server_cert.pem(),
         server_key_pem: server_key.serialize_pem(),
         client_cert_pem: client_cert.pem(),

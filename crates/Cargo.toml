@@ -68,7 +68,7 @@ anyhow = "1.0"
 thiserror = "2.0"
 
 # Database
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 
 # Auth
 argon2 = "0.5"
@@ -81,7 +81,7 @@ rand = "0.9"
 hex = "0.4"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "multipart", "stream"] }
 
 # Signal handling
 signal-hook = "0.3"
@@ -98,10 +98,10 @@ http-body-util = "0.1"
 socket2 = { version = "0.5", features = ["all"] }
 
 # Certificate generation
-rcgen = "0.13"
+rcgen = { version = "0.14", features = ["x509-parser"] }
 
 # WebSocket client (for hr-agent)
-tokio-tungstenite = "0.26"
+tokio-tungstenite = "0.29"
 futures-util = "0.3"
 
 # TOML config
@@ -114,7 +114,7 @@ ring = "0.17"
 rand_core = { version = "0.6", features = ["getrandom"] }
 
 # ACME (Let's Encrypt)
-instant-acme = "0.7"
+instant-acme = "0.8"
 base64 = "0.22"
 
 # Dataverse / Environments
@@ -135,7 +135,7 @@ xxhash-rust = { version = "0.8", features = ["xxh32"] }
 rust-embed = { version = "8", features = ["compression"] }
 
 # File system watcher
-notify = "7"
+notify = "8"
 
 # PTY (pseudo-terminal)
 pty-process = { version = "0.4", features = ["async"] }
