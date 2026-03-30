@@ -2,9 +2,8 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { AppTable } from '../components/AppRow'
 import { PipelineRow } from '../components/PipelineRow'
-import { EnvTypeBadge } from '../components/StatusBadge'
 import { fetchPipelines, fetchEnvironments, controlApp } from '../api'
-import type { EnvApp, PipelineRun, Environment } from '../types'
+import type { EnvApp, PipelineRun } from '../types'
 
 interface DashboardProps {
   currentEnv: string
@@ -13,7 +12,6 @@ interface DashboardProps {
 export function Dashboard({ currentEnv }: DashboardProps) {
   const [apps, setApps] = useState<EnvApp[]>([])
   const [pipelines, setPipelines] = useState<PipelineRun[]>([])
-  const [environments, setEnvironments] = useState<Environment[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [controlling, setControlling] = useState<string | null>(null)
@@ -26,7 +24,6 @@ export function Dashboard({ currentEnv }: DashboardProps) {
       fetchPipelines(5),
     ])
       .then(([envs, p]) => {
-        setEnvironments(envs)
         setPipelines(p)
         const env = envs.find((e) => e.slug === currentEnv)
         const enrichedApps = (env?.apps || []).map((a) => ({
@@ -95,14 +92,8 @@ export function Dashboard({ currentEnv }: DashboardProps) {
       {/* Quick Actions */}
       <div className="flex items-center gap-3">
         <Link
-          to="/environments"
-          className="px-4 py-2 rounded-lg text-sm font-medium bg-[#7c3aed] text-white hover:bg-[#6d28d9] transition-colors"
-        >
-          View Environments
-        </Link>
-        <Link
           to="/pipelines"
-          className="px-4 py-2 rounded-lg text-sm font-medium bg-white/5 text-white/60 hover:bg-white/10 border border-white/10 transition-colors"
+          className="px-4 py-2 rounded-lg text-sm font-medium bg-[#7c3aed] text-white hover:bg-[#6d28d9] transition-colors"
         >
           View Pipelines
         </Link>
@@ -144,42 +135,6 @@ export function Dashboard({ currentEnv }: DashboardProps) {
         )}
       </section>
 
-      {/* Environments Overview */}
-      <section>
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-xs font-medium text-white/30 uppercase tracking-wider">
-            Your Environments
-          </h2>
-          <Link to="/environments" className="text-xs text-[#a78bfa] hover:text-[#c4b5fd]">
-            Manage
-          </Link>
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {environments.map((env) => (
-            <Link
-              key={env.slug}
-              to={`/environments/${env.slug}`}
-              className={`p-4 rounded-xl border transition-colors ${
-                env.slug === currentEnv
-                  ? 'border-[#7c3aed]/40 bg-[#7c3aed]/10'
-                  : 'border-white/5 bg-[#1e1e3a] hover:border-white/10'
-              }`}
-            >
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-2">
-                  <span className={`w-2 h-2 rounded-full ${env.agent_connected ? 'bg-emerald-400' : 'bg-white/20'}`} />
-                  <h3 className="text-sm font-semibold text-[#e2e8f0]">{env.name}</h3>
-                </div>
-                <EnvTypeBadge envType={env.env_type} />
-              </div>
-              <p className="text-xs text-white/30">
-                {env.apps?.length ?? 0} apps
-                {env.agent_version ? ` \u00b7 v${env.agent_version}` : ''}
-              </p>
-            </Link>
-          ))}
-        </div>
-      </section>
     </div>
   )
 }

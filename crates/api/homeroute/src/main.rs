@@ -339,6 +339,75 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Environment status poller → websocket (every 3s, only emits on change)
+    {
+        let events = events.clone();
+        let orchestrator = orchestrator.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+            let mut last_snapshot: Option<String> = None;
+            loop {
+                interval.tick().await;
+
+                let resp = orchestrator
+                    .request(&hr_ipc::orchestrator::OrchestratorRequest::ListEnvironments)
+                    .await;
+
+                let envs: Vec<serde_json::Value> = match resp {
+                    Ok(r) if r.ok => {
+                        r.data
+                            .and_then(|d| d.get("environments").cloned())
+                            .and_then(|v| serde_json::from_value(v).ok())
+                            .unwrap_or_default()
+                    }
+                    _ => continue,
+                };
+
+                let snapshots: Vec<hr_common::events::EnvStatusSnapshot> = envs
+                    .iter()
+                    .filter_map(|env| {
+                        let slug = env.get("slug")?.as_str()?.to_string();
+                        let status = env.get("status")?.as_str()?.to_string();
+                        let agent_connected = env.get("agent_connected")?.as_bool()?;
+                        let agent_version = env.get("agent_version").and_then(|v| v.as_str()).map(|s| s.to_string());
+                        let apps: Vec<hr_common::events::EnvAppSnapshot> = env
+                            .get("apps")
+                            .and_then(|a| a.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|a| {
+                                        Some(hr_common::events::EnvAppSnapshot {
+                                            slug: a.get("slug")?.as_str()?.to_string(),
+                                            running: a.get("running").and_then(|v| v.as_bool()).unwrap_or(false),
+                                        })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        Some(hr_common::events::EnvStatusSnapshot {
+                            slug,
+                            status,
+                            agent_connected,
+                            agent_version,
+                            apps,
+                        })
+                    })
+                    .collect();
+
+                // Only emit if something changed
+                let serialized = serde_json::to_string(&snapshots).unwrap_or_default();
+                if last_snapshot.as_deref() == Some(&serialized) {
+                    continue;
+                }
+                last_snapshot = Some(serialized);
+
+                let _ = events.env_status.send(hr_common::events::EnvStatusEvent {
+                    environments: snapshots,
+                });
+            }
+        });
+    }
+
     // Energy metrics poller (every 3s — local + remote hosts)
     {
         let events = events.clone();

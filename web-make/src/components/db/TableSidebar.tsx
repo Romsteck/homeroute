@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import type { DbTable, EnvApp } from '../../types'
 
 interface AppWithTables {
@@ -28,6 +28,16 @@ export function TableSidebar({
     if (appsWithTables.length <= 3) return new Set(appsWithTables.map((a) => a.app.slug))
     return new Set()
   })
+
+  useEffect(() => {
+    if (appsWithTables.length === 0) return
+    setExpandedApps((prev) => {
+      if (prev.size > 0) return prev
+      if (selectedAppSlug) return new Set([selectedAppSlug])
+      if (appsWithTables.length <= 3) return new Set(appsWithTables.map((a) => a.app.slug))
+      return prev
+    })
+  }, [appsWithTables, selectedAppSlug])
 
   function toggleApp(slug: string) {
     setExpandedApps((prev) => {

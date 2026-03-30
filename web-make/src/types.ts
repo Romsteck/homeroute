@@ -1,6 +1,6 @@
 // --- Environments ---
 
-export type EnvType = 'dev' | 'acc' | 'prod'
+export type EnvType = 'dev' | 'development' | 'acc' | 'acceptance' | 'prod' | 'production'
 
 export type EnvStatus = 'running' | 'stopped' | 'pending' | 'provisioning' | 'disconnected' | 'error'
 
@@ -56,7 +56,7 @@ export interface AppEnvEntry {
 
 // --- Pipelines ---
 
-export type PipelineStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled'
+export type PipelineStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled' | 'waiting_gate'
 
 export type StepStatus = 'pending' | 'running' | 'success' | 'failed' | 'skipped'
 

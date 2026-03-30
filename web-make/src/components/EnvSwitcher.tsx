@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import type { Environment, EnvType } from '../types'
+import type { Environment } from '../types'
 
 interface EnvSwitcherProps {
   environments: Environment[]
@@ -7,11 +7,15 @@ interface EnvSwitcherProps {
   onChange: (slug: string) => void
 }
 
-const envTypeStyles: Record<EnvType, { bg: string; text: string; label: string }> = {
+const envTypeStyles: Record<string, { bg: string; text: string; label: string }> = {
   dev: { bg: 'bg-blue-500/20', text: 'text-blue-400', label: 'DEV' },
+  development: { bg: 'bg-blue-500/20', text: 'text-blue-400', label: 'DEV' },
   acc: { bg: 'bg-amber-500/20', text: 'text-amber-400', label: 'ACC' },
+  acceptance: { bg: 'bg-amber-500/20', text: 'text-amber-400', label: 'ACC' },
   prod: { bg: 'bg-emerald-500/20', text: 'text-emerald-400', label: 'PROD' },
+  production: { bg: 'bg-emerald-500/20', text: 'text-emerald-400', label: 'PROD' },
 }
+const fallbackStyle = { bg: 'bg-white/10', text: 'text-white/50', label: '???' }
 
 export function EnvSwitcher({ environments, current, onChange }: EnvSwitcherProps) {
   const [open, setOpen] = useState(false)
@@ -26,7 +30,7 @@ export function EnvSwitcher({ environments, current, onChange }: EnvSwitcherProp
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
-  const style = currentEnv ? envTypeStyles[currentEnv.env_type] : null
+  const style = currentEnv ? (envTypeStyles[currentEnv.env_type] ?? fallbackStyle) : null
 
   return (
     <div ref={ref} className="relative">
@@ -67,7 +71,7 @@ export function EnvSwitcher({ environments, current, onChange }: EnvSwitcherProp
           </div>
           <div className="p-1.5 max-h-64 overflow-auto">
             {environments.map((env) => {
-              const s = envTypeStyles[env.env_type]
+              const s = envTypeStyles[env.env_type] ?? fallbackStyle
               const isActive = env.slug === current
               return (
                 <button

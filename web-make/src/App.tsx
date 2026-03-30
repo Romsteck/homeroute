@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { Layout } from './components/Layout'
 import { Dashboard } from './pages/Dashboard'
@@ -10,6 +10,7 @@ import { EnvironmentDetail } from './pages/EnvironmentDetail'
 import { DbExplorer } from './pages/DbExplorer'
 import { FormBuilder } from './pages/FormBuilder'
 import { fetchEnvironments } from './api'
+import { useWebSocket } from './hooks/useWebSocket'
 import type { Environment } from './types'
 
 export default function App() {
@@ -22,6 +23,30 @@ export default function App() {
     setCurrentEnv(slug)
     localStorage.setItem('maker-current-env', slug)
   }
+
+  // Apply real-time env status updates from WebSocket
+  const handleEnvStatus = useCallback((data: any) => {
+    if (!data?.environments) return
+    setEnvironments((prev) => {
+      return prev.map((env) => {
+        const update = data.environments.find((u: any) => u.slug === env.slug)
+        if (!update) return env
+        return {
+          ...env,
+          status: update.status,
+          agent_connected: update.agent_connected,
+          agent_version: update.agent_version ?? env.agent_version,
+          apps: (env.apps || []).map((app) => {
+            const appUpdate = update.apps?.find((a: any) => a.slug === app.slug)
+            if (!appUpdate) return app
+            return { ...app, running: appUpdate.running }
+          }),
+        }
+      })
+    })
+  }, [])
+
+  useWebSocket({ 'env:status': handleEnvStatus })
 
   useEffect(() => {
     fetchEnvironments().then(setEnvironments)

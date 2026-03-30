@@ -28,10 +28,13 @@ const statusDots: Record<string, string> = {
   disconnected: 'bg-orange-400',
 }
 
-const envTypeColors: Record<EnvType, string> = {
+const envTypeColors: Record<string, string> = {
   dev: 'bg-blue-500/20 text-blue-400',
+  development: 'bg-blue-500/20 text-blue-400',
   acc: 'bg-amber-500/20 text-amber-400',
+  acceptance: 'bg-amber-500/20 text-amber-400',
   prod: 'bg-emerald-500/20 text-emerald-400',
+  production: 'bg-emerald-500/20 text-emerald-400',
 }
 
 export function StatusBadge({ status }: { status: AppStatus | PipelineStatus | string }) {
@@ -43,10 +46,16 @@ export function StatusBadge({ status }: { status: AppStatus | PipelineStatus | s
   )
 }
 
+const envTypeLabels: Record<string, string> = {
+  dev: 'DEV', development: 'DEV',
+  acc: 'ACC', acceptance: 'ACC',
+  prod: 'PROD', production: 'PROD',
+}
+
 export function EnvTypeBadge({ envType }: { envType: EnvType }) {
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${envTypeColors[envType] ?? 'bg-white/5 text-white/40'}`}>
-      {envType}
+      {envTypeLabels[envType] ?? envType}
     </span>
   )
 }

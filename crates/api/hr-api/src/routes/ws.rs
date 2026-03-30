@@ -35,6 +35,7 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut backup_live_rx = state.events.backup_live.subscribe();
     let mut task_update_rx = state.events.task_update.subscribe();
     let mut energy_metrics_rx = state.events.energy_metrics.subscribe();
+    let mut env_status_rx = state.events.env_status.subscribe();
 
     loop {
         tokio::select! {
@@ -344,6 +345,25 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("WebSocket energy_metrics lagged by {}", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // Environment status events (for maker portal)
+            result = env_status_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({
+                            "type": "env:status",
+                            "data": event
+                        });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("WebSocket env_status lagged by {}", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
