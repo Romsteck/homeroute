@@ -512,7 +512,7 @@ async fn run_pipeline(
     let mut all_success = true;
     let mut repo_messages = Vec::new();
 
-    for (i, repo) in repos.iter().enumerate() {
+    for repo in repos.iter() {
         if cancelled.load(Ordering::SeqCst) {
             ssh.close().await;
             return Err("Annulé par l'utilisateur".to_string());
@@ -643,7 +643,6 @@ struct RsyncStats {
 struct RsyncProgressUpdate {
     bytes_transferred: u64,
     percentage: f64,
-    speed: String,
     remaining_secs: Option<u64>,
     files_transferred: Option<u64>,
     files_total: Option<u64>,
@@ -714,10 +713,12 @@ fn parse_progress2_line(line: &str) -> Option<RsyncProgressUpdate> {
         }
     }
 
+    // speed is parsed but not used (we compute our own EMA-smoothed speed)
+    let _ = speed;
+
     Some(RsyncProgressUpdate {
         bytes_transferred: bytes,
         percentage: pct,
-        speed,
         remaining_secs,
         files_transferred,
         files_total,

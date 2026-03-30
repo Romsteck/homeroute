@@ -157,8 +157,6 @@ async fn main() -> anyhow::Result<()> {
     // ── Env route cache refresh + app route sync (every 30s from orchestrator) ─
     {
         let cache = env_route_cache.clone();
-        let proxy_state_sync = proxy_state.clone();
-        let base_domain = env.base_domain.clone();
         tokio::spawn(async move {
             let client = hr_ipc::orchestrator::OrchestratorClient::new("/run/hr-orchestrator.sock");
             // Wait 10s for orchestrator to start

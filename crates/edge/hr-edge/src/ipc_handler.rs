@@ -144,11 +144,8 @@ impl IpcHandler<EdgeRequest, IpcResponse> for EdgeHandler {
                 Ok(certs) => IpcResponse::ok_data(certs),
                 Err(e) => IpcResponse::err(format!("{}", e)),
             },
-            EdgeRequest::AcmeRequestAppWildcard { slug } => {
-                match self.acme.request_app_wildcard(&slug).await {
-                    Ok(cert) => IpcResponse::ok_data(cert),
-                    Err(e) => IpcResponse::err(format!("{}", e)),
-                }
+            EdgeRequest::AcmeRequestAppWildcard { slug: _ } => {
+                IpcResponse::err("Per-app wildcard certs have been removed. Use env wildcards.")
             }
             EdgeRequest::AcmeRequestEnvWildcard { env_slug } => {
                 match self.acme.request_env_wildcard(&env_slug).await {

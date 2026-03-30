@@ -15,8 +15,6 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use crate::backup_pipeline::BackupPipeline;
-
 // ── JSON-RPC types ──────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -42,7 +40,6 @@ pub struct McpState {
     pub registry: Arc<AgentRegistry>,
     pub git: Arc<hr_git::GitService>,
     pub edge: Arc<hr_ipc::EdgeClient>,
-    pub backup: Arc<BackupPipeline>,
     pub env_manager: Arc<crate::env_manager::EnvironmentManager>,
     pub pipeline_engine: Arc<hr_pipeline::PipelineEngine>,
 }
@@ -52,7 +49,6 @@ impl McpState {
         registry: Arc<AgentRegistry>,
         git: Arc<hr_git::GitService>,
         edge: Arc<hr_ipc::EdgeClient>,
-        backup: Arc<BackupPipeline>,
         env_manager: Arc<crate::env_manager::EnvironmentManager>,
         pipeline_engine: Arc<hr_pipeline::PipelineEngine>,
     ) -> Option<Self> {
@@ -65,7 +61,6 @@ impl McpState {
             registry,
             git,
             edge,
-            backup,
             env_manager,
             pipeline_engine,
         })
@@ -1333,24 +1328,6 @@ async fn internal_api_post(path: &str, body: Value) -> Result<Value, String> {
     }
 }
 
-async fn internal_api_put(path: &str, body: Value) -> Result<Value, String> {
-    let client = internal_client();
-    let resp = client
-        .put(format!("{INTERNAL_API_BASE}{path}"))
-        .header(INTERNAL_TOKEN_HEADER, INTERNAL_TOKEN)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
-    let status = resp.status();
-    if status.is_success() {
-        resp.json::<Value>().await.or_else(|_| Ok(json!({"status": "ok"})))
-    } else {
-        let body = resp.text().await.unwrap_or_default();
-        Err(format!("API returned {status}: {body}"))
-    }
-}
-
 async fn internal_api_delete(path: &str) -> Result<Value, String> {
     let client = internal_client();
     let resp = client
@@ -1467,7 +1444,7 @@ async fn tool_docs_list(id: Value) -> Value {
 
         // Count filled sections
         let mut filled = 0u32;
-        let mut total = 5u32;
+        let total = 5u32;
         if app_dir.join("meta.json").exists() {
             let content = std::fs::read_to_string(app_dir.join("meta.json")).unwrap_or_default();
             if content.trim().len() > 2 { filled += 1; }

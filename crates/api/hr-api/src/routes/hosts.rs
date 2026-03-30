@@ -236,6 +236,7 @@ async fn get_local_interfaces_handler() -> Json<Value> {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct UpdateLocalConfigRequest {
     #[serde(default)]
     lan_interface: Option<String>,
@@ -896,6 +897,7 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
     // Track local nspawn imports (remote→local)
     #[derive(Debug, Clone, Copy, PartialEq)]
     enum TransferPhase { ReceivingContainer, ReceivingWorkspace }
+    #[allow(dead_code)]
     struct ActiveTransfer {
         container_name: String,
         storage_path: String,

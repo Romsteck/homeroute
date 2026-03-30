@@ -401,16 +401,6 @@ impl EnvironmentManager {
         })
     }
 
-    /// Select the best host for a new environment (multi-host ready).
-    /// Currently always returns "medion". Will be expanded for load balancing
-    /// across multiple hosts once host-agents report capacity metrics.
-    pub async fn select_host(&self, _env_type: EnvType) -> String {
-        // TODO: When multi-host is enabled, query host-agents for capacity
-        // and select the best host based on available resources.
-        // For now, all environments run on the single production host.
-        "medion".to_string()
-    }
-
     /// Monitor env-agent heartbeats and mark stale connections as disconnected.
     pub async fn run_heartbeat_monitor(&self) {
         let stale_threshold = std::time::Duration::from_secs(120);

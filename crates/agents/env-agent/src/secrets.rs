@@ -79,9 +79,4 @@ impl SecretsManager {
         Ok(removed)
     }
 
-    /// Export all secrets for an app as env vars (for process startup).
-    pub fn export_env_vars(&self, app_slug: &str) -> Result<HashMap<String, String>> {
-        let store = self.load_store(app_slug)?;
-        Ok(store.secrets)
-    }
 }

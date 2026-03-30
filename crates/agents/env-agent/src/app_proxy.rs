@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::State;
 use axum::http::{Request, StatusCode, Uri};
 use axum::response::IntoResponse;
 use hyper_util::client::legacy::Client;

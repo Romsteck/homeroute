@@ -246,24 +246,6 @@ impl AgentRegistry {
         info!("ACME manager registered with agent registry");
     }
 
-    /// Request a per-app wildcard certificate (*.{slug}.{base_domain}).
-    /// Spawns a background task; non-blocking.
-    pub async fn request_app_cert(&self, slug: &str) {
-        let acme_guard = self.acme.read().await;
-        if let Some(acme) = acme_guard.clone() {
-            let slug_owned = slug.to_string();
-            tokio::spawn(async move {
-                match acme.request_app_wildcard(&slug_owned).await {
-                    Ok(_cert) => {
-                        info!(slug = %slug_owned, "Per-app wildcard certificate issued");
-                    }
-                    Err(e) => {
-                        warn!(slug = %slug_owned, error = %e, "Failed to issue per-app wildcard certificate");
-                    }
-                }
-            });
-        }
-    }
 
     // ── Application CRUD ────────────────────────────────────────
 
@@ -346,6 +328,7 @@ impl AgentRegistry {
     }
 
     /// Remove an application: disconnect agent and remove.
+    #[allow(deprecated)]
     pub async fn remove_application(&self, id: &str) -> Result<bool> {
         let app = {
             let mut state = self.state.write().await;
@@ -365,15 +348,6 @@ impl AgentRegistry {
             }
         }
 
-        // Delete per-app wildcard certificate
-        {
-            let acme_guard = self.acme.read().await;
-            if let Some(ref acme) = *acme_guard {
-                if let Err(e) = acme.delete_app_certificate(&app.slug) {
-                    warn!(slug = app.slug, error = %e, "Failed to delete app certificate");
-                }
-            }
-        }
 
         // Delete per-app wildcard DNS record if Cloudflare credentials available
         if let (Some(token), Some(zone_id)) = (&self.env.cf_api_token, &self.env.cf_zone_id) {

@@ -9,7 +9,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
 use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -1473,12 +1473,7 @@ async fn save_hosts(data: &serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
-fn find_host<'a>(data: &'a serde_json::Value, id: &str) -> Option<&'a serde_json::Value> {
-    data.get("hosts")?
-        .as_array()?
-        .iter()
-        .find(|h| h.get("id").and_then(|i| i.as_str()) == Some(id))
-}
+
 
 fn find_host_mut<'a>(
     data: &'a mut serde_json::Value,

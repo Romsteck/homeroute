@@ -184,7 +184,6 @@ async fn run_connection(config: &Config) -> Result<(), String> {
 
     // Track manifest receiving state (after data transfer, before finalize)
     struct ManifestReceive {
-        repo_name: String,
         data: Vec<u8>,
     }
     let mut active_manifest_receives: HashMap<String, ManifestReceive> = HashMap::new();
@@ -1106,7 +1105,6 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                             Ok(HostRegistryMessage::BackupManifestStart { repo_name, transfer_id, manifest_size }) => {
                                 info!(repo = %repo_name, transfer_id = %transfer_id, size = manifest_size, "Starting manifest receive");
                                 active_manifest_receives.insert(transfer_id, ManifestReceive {
-                                    repo_name,
                                     data: Vec::with_capacity(manifest_size as usize),
                                 });
                             }
