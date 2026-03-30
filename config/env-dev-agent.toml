@@ -1,0 +1,140 @@
+# env-agent.toml for env-dev (Development environment)
+# Deployed to /etc/env-agent.toml inside the env-dev container
+# Ports are auto-assigned by port-registry (base 3001) if set to 3000
+
+homeroute_address = "10.0.0.254"
+homeroute_port = 4001
+token = "REPLACE_WITH_64_CHAR_HEX_TOKEN"
+env_slug = "dev"
+
+# ── Next.js apps ──────────────────────────────────────────────────────
+
+[[apps]]
+slug = "aptymus"
+name = "Aptymus"
+stack = "next-js"
+port = 3000
+run_command = "node --import tsx server.ts"
+build_command = "pnpm build"
+health_path = "/api/health"
+has_db = false
+watch_command = "pnpm dev"
+description = "Marketplace / annonces"
+
+[[apps]]
+slug = "calendar"
+name = "Calendar"
+stack = "next-js"
+port = 3000
+run_command = "node custom-server.js"
+build_command = "pnpm build"
+health_path = "/api/health"
+has_db = false
+watch_command = "pnpm dev"
+description = "Calendrier partage et evenements"
+
+[[apps]]
+slug = "forge"
+name = "Forge"
+stack = "next-js"
+port = 3000
+run_command = "pnpm start"
+build_command = "pnpm build"
+health_path = "/api/health"
+has_db = false
+watch_command = "pnpm dev"
+description = "Portail de creation et gestion de projets"
+
+[[apps]]
+slug = "padel"
+name = "Padel"
+stack = "next-js"
+port = 3000
+run_command = "NODE_ENV=production node --import tsx server.ts"
+build_command = "pnpm build"
+health_path = "/api/health"
+has_db = true
+watch_command = "pnpm dev"
+description = "Gestion de matchs et reservations de padel"
+
+[[apps]]
+slug = "www"
+name = "WWW"
+stack = "next-js"
+port = 3000
+run_command = "node server.js"
+build_command = "pnpm build"
+health_path = "/api/health"
+has_db = true
+watch_command = "pnpm dev"
+description = "Site principal et portail d'accueil"
+
+# ── Axum + Vite apps ─────────────────────────────────────────────────
+
+[[apps]]
+slug = "files"
+name = "Files"
+stack = "axum-vite"
+port = 3000
+run_command = "./bin/files"
+build_command = "cd server && cargo build --release && cd ../client && pnpm build"
+health_path = "/api/health"
+has_db = true
+description = "Gestionnaire de fichiers avec upload et partage"
+
+[[apps]]
+slug = "home"
+name = "Home"
+stack = "axum-vite"
+port = 3000
+run_command = "./bin/smart-home"
+build_command = "cd server && cargo build --release && cd ../client && pnpm build"
+health_path = "/api/health"
+has_db = true
+description = "Domotique et controle de la maison connectee"
+
+[[apps]]
+slug = "trader"
+name = "Trader"
+stack = "axum-vite"
+port = 3000
+run_command = "./bin/trader"
+build_command = "cd server && cargo build --release && cd ../client && pnpm build"
+health_path = "/api/health"
+has_db = true
+description = "Trading et suivi de portefeuille"
+
+[[apps]]
+slug = "wallet"
+name = "Wallet"
+stack = "axum-vite"
+port = 3000
+run_command = "./bin/wallet"
+build_command = "cd server && cargo build --release && cd ../client && pnpm build"
+health_path = "/api/health"
+has_db = true
+description = "Gestion de budget et depenses"
+
+# ── Pure Axum apps ────────────────────────────────────────────────────
+
+[[apps]]
+slug = "hub"
+name = "Hub"
+stack = "axum"
+port = 3500
+run_command = "./bin/hub"
+build_command = "cargo build --release"
+health_path = "/api/health"
+has_db = false
+description = "Hub central: todos, jobs, monitoring agents"
+
+[[apps]]
+slug = "myfrigo"
+name = "MyFrigo"
+stack = "axum"
+port = 3000
+run_command = "./bin/myfrigo"
+build_command = "cd api && cargo build --release"
+health_path = "/api/health"
+has_db = false
+description = "Gestion du frigo et des courses"
