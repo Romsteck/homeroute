@@ -18,6 +18,7 @@ use hyper_util::client::legacy::Client;
 use tracing::{debug, warn};
 
 use hr_environment::config::EnvAgentConfig;
+use hr_environment::types::EnvType;
 
 /// State shared by the app proxy handler.
 #[derive(Clone)]
@@ -32,7 +33,11 @@ fn resolve_port(config: &EnvAgentConfig, host: &str) -> Option<u16> {
     let app_slug = domain.split('.').next().unwrap_or("");
 
     if app_slug == "studio" || app_slug == "code" {
-        return Some(config.code_server_port);
+        // Studio/code-server only available in development environments
+        if config.env_type() == EnvType::Development {
+            return Some(config.code_server_port);
+        }
+        return None;
     }
 
     config.apps.iter().find(|a| a.slug == app_slug).map(|a| a.port)

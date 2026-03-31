@@ -42,6 +42,7 @@ pub struct McpState {
     pub edge: Arc<hr_ipc::EdgeClient>,
     pub env_manager: Arc<crate::env_manager::EnvironmentManager>,
     pub pipeline_engine: Arc<hr_pipeline::PipelineEngine>,
+    pub pipeline_store: Arc<hr_pipeline::PipelineStore>,
 }
 
 impl McpState {
@@ -51,6 +52,7 @@ impl McpState {
         edge: Arc<hr_ipc::EdgeClient>,
         env_manager: Arc<crate::env_manager::EnvironmentManager>,
         pipeline_engine: Arc<hr_pipeline::PipelineEngine>,
+        pipeline_store: Arc<hr_pipeline::PipelineStore>,
     ) -> Option<Self> {
         let token = std::env::var("MCP_TOKEN").ok()?;
         if token.is_empty() {
@@ -63,6 +65,7 @@ impl McpState {
             edge,
             env_manager,
             pipeline_engine,
+            pipeline_store,
         })
     }
 }
@@ -569,8 +572,15 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState) -> Value 
         // ── Pipelines ──
         "pipeline.promote" => tool_pipeline_promote(id, &arguments, state).await,
         "pipeline.status" => tool_pipeline_status(id, &arguments, state).await,
-        "pipeline.history" => tool_pipeline_history(id, state).await,
+        "pipeline.history" => tool_pipeline_history(id, &arguments, state).await,
         "pipeline.cancel" => tool_pipeline_cancel(id, &arguments, state).await,
+        "pipeline.definitions" => tool_pipeline_definitions(id, &arguments, state).await,
+        "pipeline.get_config" => tool_pipeline_get_config(id, &arguments, state).await,
+        "pipeline.save_config" => tool_pipeline_save_config(id, &arguments, state).await,
+        "pipeline.logs" => tool_pipeline_logs(id, &arguments, state).await,
+        "pipeline.approve_gate" => tool_pipeline_approve_gate(id, &arguments, state).await,
+        "pipeline.reject_gate" => tool_pipeline_reject_gate(id, &arguments, state).await,
+        "pipeline.pending_gates" => tool_pipeline_pending_gates(id, &arguments, state).await,
         _ => {
             warn!(tool = tool_name, "Unknown tool");
             error_response(id, METHOD_NOT_FOUND, format!("Tool not found: {tool_name}"))
@@ -1761,8 +1771,14 @@ fn tool_definitions_env() -> Value {
         },
         {
             "name": "pipeline.history",
-            "description": "List recent pipeline runs.",
-            "inputSchema": { "type": "object", "properties": {} }
+            "description": "List recent pipeline runs, optionally filtered by app.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "app_slug": { "type": "string", "description": "Filter by app slug (optional)" },
+                    "limit": { "type": "integer", "description": "Max results (default 20)", "default": 20 }
+                }
+            }
         },
         {
             "name": "pipeline.cancel",
@@ -1771,6 +1787,78 @@ fn tool_definitions_env() -> Value {
                 "type": "object",
                 "properties": { "id": { "type": "string", "description": "Pipeline run ID" } },
                 "required": ["id"]
+            }
+        },
+        {
+            "name": "pipeline.definitions",
+            "description": "List all pipeline definitions (templates with steps per app).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "pipeline.get_config",
+            "description": "Get the pipeline configuration for an app (env chain, skip steps, auto-promote, gates).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "app_slug": { "type": "string", "description": "App slug" } },
+                "required": ["app_slug"]
+            }
+        },
+        {
+            "name": "pipeline.save_config",
+            "description": "Save pipeline configuration for an app.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "app_slug": { "type": "string", "description": "App slug" },
+                    "env_chain": { "type": "array", "items": { "type": "string" }, "description": "Ordered env chain (e.g. ['dev', 'acc', 'prod'])" },
+                    "skip_steps": { "type": "array", "items": { "type": "string" }, "description": "Step names to skip (e.g. ['test'])" },
+                    "auto_promote": { "type": "array", "items": { "type": "string" }, "description": "Envs where auto-promote is enabled after deploy" },
+                    "gates": { "type": "array", "items": { "type": "object", "properties": { "from_env": { "type": "string" }, "to_env": { "type": "string" } } }, "description": "Gate definitions requiring approval" }
+                },
+                "required": ["app_slug"]
+            }
+        },
+        {
+            "name": "pipeline.logs",
+            "description": "Get the logs/output for a specific step in a pipeline run.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "run_id": { "type": "string", "description": "Pipeline run ID" },
+                    "step_name": { "type": "string", "description": "Step name (e.g. 'build', 'deploy', 'health-check')" }
+                },
+                "required": ["run_id", "step_name"]
+            }
+        },
+        {
+            "name": "pipeline.approve_gate",
+            "description": "Approve a pending gate to continue chain promotion.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "gate_id": { "type": "string", "description": "Gate approval ID" } },
+                "required": ["gate_id"]
+            }
+        },
+        {
+            "name": "pipeline.reject_gate",
+            "description": "Reject a pending gate to stop chain promotion.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "gate_id": { "type": "string", "description": "Gate approval ID" } },
+                "required": ["gate_id"]
+            }
+        },
+        {
+            "name": "pipeline.pending_gates",
+            "description": "List all pending gate approvals, optionally filtered by app.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "app_slug": { "type": "string", "description": "Filter by app slug (optional)" }
+                }
             }
         }
     ])
@@ -1899,6 +1987,41 @@ async fn tool_pipeline_promote(id: Value, args: &Value, state: &McpState) -> Val
         return error_response(id, INVALID_PARAMS, "Missing target_env".into());
     };
 
+    // Get pipeline config (or default)
+    let config = state.pipeline_store.get_config(app_slug).await
+        .unwrap_or_else(|| hr_pipeline::default_config(app_slug));
+
+    // Validate the transition against the env chain
+    if let Err(e) = hr_pipeline::validate_transition(&config, source_env, target_env) {
+        return tool_error(id, &format!("Invalid transition: {e}"));
+    }
+
+    // Get app info from the source environment to determine stack and has_db
+    let (stack, has_db) = match get_app_info(state, source_env, app_slug).await {
+        Some(info) => info,
+        None => {
+            return tool_error(id, &format!(
+                "App '{}' not found in environment '{}'", app_slug, source_env
+            ));
+        }
+    };
+
+    // Resolve steps from template based on stack + config
+    let mut steps = hr_pipeline::steps_for_stack(stack, &config, has_db);
+
+    // Inject build context into the Build step
+    let repo_path = state.git.repo_path(app_slug);
+    let build_command = stack.default_build_command().to_string();
+    for step in &mut steps {
+        if step.step_type == hr_pipeline::PipelineStepType::Build {
+            step.config = serde_json::json!({
+                "stack": stack,
+                "build_command": build_command,
+                "repo_path": repo_path.to_string_lossy(),
+            });
+        }
+    }
+
     // Create a transport adapter that delegates to the env_manager
     let transport = Arc::new(EnvManagerTransport { env_manager: state.env_manager.clone() });
 
@@ -1909,7 +2032,7 @@ async fn tool_pipeline_promote(id: Value, args: &Value, state: &McpState) -> Val
         source_env.into(),
         target_env.into(),
         "mcp".into(),
-        None,
+        Some(steps),
     ).await {
         Ok(run) => tool_success(id, serde_json::to_value(&run).unwrap_or(json!(null))),
         Err(e) => tool_error(id, &format!("Failed to start pipeline: {e}")),
@@ -1926,9 +2049,24 @@ async fn tool_pipeline_status(id: Value, args: &Value, state: &McpState) -> Valu
     }
 }
 
-async fn tool_pipeline_history(id: Value, state: &McpState) -> Value {
-    let runs = state.pipeline_engine.get_runs().await;
-    tool_success(id, serde_json::to_value(&runs).unwrap_or(json!([])))
+async fn tool_pipeline_history(id: Value, args: &Value, state: &McpState) -> Value {
+    let app_slug = args.get("app_slug").and_then(|v| v.as_str());
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+
+    // Use the store for persistent history, falling back to engine's in-memory runs
+    let runs = state.pipeline_store.list_runs(app_slug, limit).await;
+    if !runs.is_empty() {
+        return tool_success(id, serde_json::to_value(&runs).unwrap_or(json!([])));
+    }
+
+    // Fallback: engine in-memory runs (filtered manually)
+    let mut engine_runs = state.pipeline_engine.get_runs().await;
+    if let Some(slug) = app_slug {
+        engine_runs.retain(|r| r.app_slug == slug);
+    }
+    engine_runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    engine_runs.truncate(limit);
+    tool_success(id, serde_json::to_value(&engine_runs).unwrap_or(json!([])))
 }
 
 async fn tool_pipeline_cancel(id: Value, args: &Value, state: &McpState) -> Value {
@@ -1939,6 +2077,129 @@ async fn tool_pipeline_cancel(id: Value, args: &Value, state: &McpState) -> Valu
         Ok(()) => tool_success(id, json!({"cancelled": run_id})),
         Err(e) => tool_error(id, &format!("Failed to cancel pipeline: {e}")),
     }
+}
+
+async fn tool_pipeline_definitions(id: Value, _args: &Value, state: &McpState) -> Value {
+    let defs = state.pipeline_store.list_definitions().await;
+    tool_success(id, serde_json::to_value(&defs).unwrap_or(json!([])))
+}
+
+async fn tool_pipeline_get_config(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(app_slug) = args.get("app_slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing app_slug".into());
+    };
+    match state.pipeline_store.get_config(app_slug).await {
+        Some(config) => tool_success(id, serde_json::to_value(&config).unwrap_or(json!(null))),
+        None => tool_error(id, &format!("No pipeline config for app '{}'", app_slug)),
+    }
+}
+
+async fn tool_pipeline_save_config(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(app_slug) = args.get("app_slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing app_slug".into());
+    };
+
+    let env_chain: Vec<String> = args.get("env_chain")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let skip_steps: std::collections::HashSet<String> = args.get("skip_steps")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let auto_promote: std::collections::HashSet<String> = args.get("auto_promote")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let gates: Vec<hr_pipeline::GateDef> = args.get("gates")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let config = hr_pipeline::PipelineConfig {
+        app_slug: app_slug.to_string(),
+        env_chain,
+        skip_steps,
+        auto_promote,
+        gates,
+    };
+
+    state.pipeline_store.save_config(config).await;
+    tool_success(id, json!({"saved": app_slug}))
+}
+
+async fn tool_pipeline_logs(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(run_id) = args.get("run_id").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing run_id".into());
+    };
+    let Some(step_name) = args.get("step_name").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing step_name".into());
+    };
+
+    // Try engine first (in-memory active runs), then store (persisted)
+    let run = state.pipeline_engine.get_run(run_id).await
+        .or_else(|| {
+            // Synchronous fallback not possible here; we'll try store below
+            None
+        });
+
+    // If not found in engine, try the store asynchronously
+    let run = match run {
+        Some(r) => r,
+        None => match state.pipeline_store.get_run(run_id).await {
+            Some(r) => r,
+            None => return tool_error(id, &format!("Pipeline run '{}' not found", run_id)),
+        },
+    };
+
+    match run.steps.iter().find(|s| s.name == step_name) {
+        Some(step) => tool_success(id, json!({
+            "step": step_name,
+            "status": step.status,
+            "output": step.output,
+            "started_at": step.started_at,
+            "finished_at": step.finished_at,
+        })),
+        None => tool_error(id, &format!("Step '{}' not found in run '{}'", step_name, run_id)),
+    }
+}
+
+async fn tool_pipeline_approve_gate(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(gate_id) = args.get("gate_id").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing gate_id".into());
+    };
+
+    match state.pipeline_store.approve_gate(gate_id, "mcp").await {
+        Some(gate) => tool_success(id, serde_json::to_value(&gate).unwrap_or(json!(null))),
+        None => tool_error(id, &format!("Gate '{}' not found or already resolved", gate_id)),
+    }
+}
+
+async fn tool_pipeline_reject_gate(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(gate_id) = args.get("gate_id").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing gate_id".into());
+    };
+
+    match state.pipeline_store.reject_gate(gate_id, "mcp").await {
+        Some(gate) => tool_success(id, serde_json::to_value(&gate).unwrap_or(json!(null))),
+        None => tool_error(id, &format!("Gate '{}' not found or already resolved", gate_id)),
+    }
+}
+
+async fn tool_pipeline_pending_gates(id: Value, args: &Value, state: &McpState) -> Value {
+    let app_slug = args.get("app_slug").and_then(|v| v.as_str());
+    let gates = state.pipeline_store.list_pending_gates(app_slug).await;
+    tool_success(id, serde_json::to_value(&gates).unwrap_or(json!([])))
+}
+
+/// Helper: get app info (stack, has_db) from an environment.
+async fn get_app_info(
+    state: &McpState,
+    env_slug: &str,
+    app_slug: &str,
+) -> Option<(hr_environment::AppStackType, bool)> {
+    let env = state.env_manager.get_by_slug(env_slug).await?;
+    let app = env.apps.iter().find(|a| a.slug == app_slug)?;
+    Some((app.stack, app.has_db))
 }
 
 // ── PipelineTransport adapter ────────────────────────────────────────

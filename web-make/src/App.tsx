@@ -5,6 +5,8 @@ import { Dashboard } from './pages/Dashboard'
 import { Apps } from './pages/Apps'
 import { AppDetail } from './pages/AppDetail'
 import { Pipelines } from './pages/Pipelines'
+import { PipelineDetail } from './pages/PipelineDetail'
+import { PipelineConfigPage } from './pages/PipelineConfig'
 import { Environments } from './pages/Environments'
 import { EnvironmentDetail } from './pages/EnvironmentDetail'
 import { DbExplorer } from './pages/DbExplorer'
@@ -67,7 +69,9 @@ export default function App() {
           <Route index element={<Dashboard currentEnv={currentEnv} />} />
           <Route path="/apps" element={<Apps currentEnv={currentEnv} />} />
           <Route path="/apps/:slug" element={<AppDetail />} />
+          <Route path="/apps/:slug/pipeline" element={<PipelineConfigPage />} />
           <Route path="/pipelines" element={<Pipelines />} />
+          <Route path="/pipelines/:id" element={<PipelineDetail />} />
           <Route path="/environments" element={<Environments />} />
           <Route path="/environments/:slug" element={<EnvironmentDetail />} />
           <Route path="/tables" element={<DbExplorer currentEnv={currentEnv} />} />

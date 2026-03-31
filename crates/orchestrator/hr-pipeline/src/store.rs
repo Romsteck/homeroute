@@ -12,6 +12,10 @@ use crate::types::*;
 struct PipelineState {
     definitions: Vec<PipelineDefinition>,
     runs: Vec<PipelineRun>,
+    #[serde(default)]
+    configs: Vec<PipelineConfig>,
+    #[serde(default)]
+    gates: Vec<GateApproval>,
 }
 
 /// Manages pipeline definitions and run history with JSON persistence.
@@ -38,9 +42,11 @@ impl PipelineStore {
             PipelineState::default()
         };
         info!(
-            "Pipeline store loaded: {} definitions, {} runs",
+            "Pipeline store loaded: {} definitions, {} runs, {} configs, {} gates",
             state.definitions.len(),
-            state.runs.len()
+            state.runs.len(),
+            state.configs.len(),
+            state.gates.len(),
         );
         Self {
             state: RwLock::new(state),
@@ -81,6 +87,9 @@ impl PipelineStore {
             triggered_by: triggered_by.to_string(),
             started_at: Utc::now(),
             finished_at: None,
+            chain_id: None,
+            artifact_url: None,
+            artifact_sha256: None,
         };
         let mut state = self.state.write().await;
         state.runs.push(run.clone());
@@ -192,6 +201,94 @@ impl PipelineStore {
     pub async fn list_definitions(&self) -> Vec<PipelineDefinition> {
         let state = self.state.read().await;
         state.definitions.clone()
+    }
+
+    // ── Pipeline Config CRUD ──
+
+    /// Get a pipeline config by app slug.
+    pub async fn get_config(&self, app_slug: &str) -> Option<PipelineConfig> {
+        let state = self.state.read().await;
+        state
+            .configs
+            .iter()
+            .find(|c| c.app_slug == app_slug)
+            .cloned()
+    }
+
+    /// Save (upsert) a pipeline config by app slug.
+    pub async fn save_config(&self, config: PipelineConfig) {
+        let mut state = self.state.write().await;
+        if let Some(existing) = state
+            .configs
+            .iter_mut()
+            .find(|c| c.app_slug == config.app_slug)
+        {
+            *existing = config;
+        } else {
+            state.configs.push(config);
+        }
+        drop(state);
+        self.persist().await;
+    }
+
+    /// List all pipeline configs.
+    pub async fn list_configs(&self) -> Vec<PipelineConfig> {
+        let state = self.state.read().await;
+        state.configs.clone()
+    }
+
+    // ── Gate lifecycle ──
+
+    /// Create a new pending gate approval.
+    pub async fn create_gate(&self, gate: GateApproval) {
+        let mut state = self.state.write().await;
+        state.gates.push(gate);
+        drop(state);
+        self.persist().await;
+    }
+
+    /// Get a gate by ID.
+    pub async fn get_gate(&self, gate_id: &str) -> Option<GateApproval> {
+        let state = self.state.read().await;
+        state.gates.iter().find(|g| g.id == gate_id).cloned()
+    }
+
+    /// Approve a gate, recording who approved and when.
+    pub async fn approve_gate(&self, gate_id: &str, approved_by: &str) -> Option<GateApproval> {
+        let mut state = self.state.write().await;
+        let gate = state.gates.iter_mut().find(|g| g.id == gate_id)?;
+        gate.status = GateStatus::Approved;
+        gate.resolved_at = Some(Utc::now());
+        gate.resolved_by = Some(approved_by.to_string());
+        let result = gate.clone();
+        drop(state);
+        self.persist().await;
+        Some(result)
+    }
+
+    /// Reject a gate, recording who rejected and when.
+    pub async fn reject_gate(&self, gate_id: &str, rejected_by: &str) -> Option<GateApproval> {
+        let mut state = self.state.write().await;
+        let gate = state.gates.iter_mut().find(|g| g.id == gate_id)?;
+        gate.status = GateStatus::Rejected;
+        gate.resolved_at = Some(Utc::now());
+        gate.resolved_by = Some(rejected_by.to_string());
+        let result = gate.clone();
+        drop(state);
+        self.persist().await;
+        Some(result)
+    }
+
+    /// List all pending gate approvals, optionally filtered by app slug.
+    pub async fn list_pending_gates(&self, app_slug: Option<&str>) -> Vec<GateApproval> {
+        let state = self.state.read().await;
+        state
+            .gates
+            .iter()
+            .filter(|g| g.status == GateStatus::Pending)
+            .filter(|g| app_slug.map_or(true, |a| g.app_slug == a))
+            .cloned()
+            .collect()
     }
 
     /// Write state to disk.
@@ -345,6 +442,151 @@ mod tests {
 
         let defs = store.list_definitions().await;
         assert_eq!(defs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_config_crud() {
+        let tmp = NamedTempFile::new().unwrap();
+        let store = PipelineStore::new(tmp.path().to_path_buf());
+
+        // No config initially
+        assert!(store.get_config("trader").await.is_none());
+        assert!(store.list_configs().await.is_empty());
+
+        // Save a config
+        let config = PipelineConfig {
+            app_slug: "trader".into(),
+            env_chain: vec!["dev".into(), "acc".into(), "prod".into()],
+            skip_steps: std::collections::HashSet::from(["test".into()]),
+            auto_promote: std::collections::HashSet::from(["dev".into()]),
+            gates: vec![GateDef {
+                from_env: "acc".into(),
+                to_env: "prod".into(),
+            }],
+        };
+        store.save_config(config).await;
+
+        let fetched = store.get_config("trader").await.unwrap();
+        assert_eq!(fetched.env_chain.len(), 3);
+        assert!(fetched.skip_steps.contains("test"));
+
+        // Upsert: change the chain
+        let config2 = PipelineConfig {
+            app_slug: "trader".into(),
+            env_chain: vec!["dev".into(), "prod".into()],
+            skip_steps: std::collections::HashSet::new(),
+            auto_promote: std::collections::HashSet::new(),
+            gates: vec![],
+        };
+        store.save_config(config2).await;
+
+        let fetched2 = store.get_config("trader").await.unwrap();
+        assert_eq!(fetched2.env_chain.len(), 2);
+        assert!(fetched2.skip_steps.is_empty());
+
+        // Still only 1 config
+        assert_eq!(store.list_configs().await.len(), 1);
+
+        // Add another app config
+        let config3 = PipelineConfig {
+            app_slug: "wallet".into(),
+            env_chain: vec!["dev".into()],
+            skip_steps: std::collections::HashSet::new(),
+            auto_promote: std::collections::HashSet::new(),
+            gates: vec![],
+        };
+        store.save_config(config3).await;
+        assert_eq!(store.list_configs().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_gate_lifecycle() {
+        let tmp = NamedTempFile::new().unwrap();
+        let store = PipelineStore::new(tmp.path().to_path_buf());
+
+        // Create a pending gate
+        let gate = GateApproval {
+            id: "gate-001".into(),
+            chain_id: "chain-001".into(),
+            app_slug: "trader".into(),
+            from_env: "acc".into(),
+            to_env: "prod".into(),
+            version: "1.2.3".into(),
+            status: GateStatus::Pending,
+            created_at: Utc::now(),
+            resolved_at: None,
+            resolved_by: None,
+        };
+        store.create_gate(gate).await;
+
+        // List pending
+        let pending = store.list_pending_gates(None).await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "gate-001");
+
+        // Get by ID
+        let fetched = store.get_gate("gate-001").await.unwrap();
+        assert_eq!(fetched.status, GateStatus::Pending);
+
+        // Approve
+        let approved = store.approve_gate("gate-001", "romain").await.unwrap();
+        assert_eq!(approved.status, GateStatus::Approved);
+        assert!(approved.resolved_at.is_some());
+        assert_eq!(approved.resolved_by.as_deref(), Some("romain"));
+
+        // No longer pending
+        assert!(store.list_pending_gates(None).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_gate_reject() {
+        let tmp = NamedTempFile::new().unwrap();
+        let store = PipelineStore::new(tmp.path().to_path_buf());
+
+        let gate = GateApproval {
+            id: "gate-002".into(),
+            chain_id: "chain-002".into(),
+            app_slug: "wallet".into(),
+            from_env: "dev".into(),
+            to_env: "prod".into(),
+            version: "2.0".into(),
+            status: GateStatus::Pending,
+            created_at: Utc::now(),
+            resolved_at: None,
+            resolved_by: None,
+        };
+        store.create_gate(gate).await;
+
+        let rejected = store.reject_gate("gate-002", "admin").await.unwrap();
+        assert_eq!(rejected.status, GateStatus::Rejected);
+        assert_eq!(rejected.resolved_by.as_deref(), Some("admin"));
+    }
+
+    #[tokio::test]
+    async fn test_pending_gates_filtered() {
+        let tmp = NamedTempFile::new().unwrap();
+        let store = PipelineStore::new(tmp.path().to_path_buf());
+
+        for (id, app) in [("g1", "trader"), ("g2", "wallet"), ("g3", "trader")] {
+            store
+                .create_gate(GateApproval {
+                    id: id.into(),
+                    chain_id: "c1".into(),
+                    app_slug: app.into(),
+                    from_env: "dev".into(),
+                    to_env: "prod".into(),
+                    version: "1.0".into(),
+                    status: GateStatus::Pending,
+                    created_at: Utc::now(),
+                    resolved_at: None,
+                    resolved_by: None,
+                })
+                .await;
+        }
+
+        assert_eq!(store.list_pending_gates(None).await.len(), 3);
+        assert_eq!(store.list_pending_gates(Some("trader")).await.len(), 2);
+        assert_eq!(store.list_pending_gates(Some("wallet")).await.len(), 1);
     }
 
     #[tokio::test]

@@ -3,7 +3,8 @@ import { Link } from 'react-router-dom'
 import { AppTable } from '../components/AppRow'
 import { PipelineRow } from '../components/PipelineRow'
 import { fetchPipelines, fetchEnvironments, controlApp } from '../api'
-import type { EnvApp, PipelineRun } from '../types'
+import type { EnvApp, Environment, PipelineRun } from '../types'
+import { isDevEnv } from '../types'
 
 interface DashboardProps {
   currentEnv: string
@@ -15,6 +16,7 @@ export function Dashboard({ currentEnv }: DashboardProps) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [controlling, setControlling] = useState<string | null>(null)
+  const [currentEnvData, setCurrentEnvData] = useState<Environment | null>(null)
 
   useEffect(() => {
     setLoading(true)
@@ -26,11 +28,13 @@ export function Dashboard({ currentEnv }: DashboardProps) {
       .then(([envs, p]) => {
         setPipelines(p)
         const env = envs.find((e) => e.slug === currentEnv)
+        setCurrentEnvData(env ?? null)
+        const isDev = env ? isDevEnv(env.env_type) : false
         const enrichedApps = (env?.apps || []).map((a) => ({
           ...a,
           status: a.running ? 'running' as const : 'stopped' as const,
           url: env?.slug ? `https://${a.slug}.${env.slug}.mynetwk.biz` : undefined,
-          studio_url: env?.slug ? `https://studio.${env.slug}.mynetwk.biz/?folder=/apps/${a.slug}` : undefined,
+          studio_url: isDev && env?.slug ? `https://studio.${env.slug}.mynetwk.biz/?folder=/apps/${a.slug}` : undefined,
         }))
         setApps(enrichedApps)
       })
@@ -46,11 +50,12 @@ export function Dashboard({ currentEnv }: DashboardProps) {
       const envs = await fetchEnvironments()
       const env = envs.find((e) => e.slug === currentEnv)
       if (env?.apps) {
+        const isDev = isDevEnv(env.env_type)
         setApps(env.apps.map((a) => ({
           ...a,
           status: a.running ? 'running' as const : 'stopped' as const,
           url: `https://${a.slug}.${currentEnv}.mynetwk.biz`,
-          studio_url: `https://studio.${currentEnv}.mynetwk.biz/?folder=/apps/${a.slug}`,
+          studio_url: isDev ? `https://studio.${currentEnv}.mynetwk.biz/?folder=/apps/${a.slug}` : undefined,
         })))
       }
     } catch (e) {
@@ -109,7 +114,12 @@ export function Dashboard({ currentEnv }: DashboardProps) {
             View all
           </Link>
         </div>
-        <AppTable apps={apps} envSlug={currentEnv} onControl={handleControl} controlling={controlling} />
+        <AppTable
+          apps={apps}
+          envSlug={currentEnv}
+          onControl={currentEnvData && isDevEnv(currentEnvData.env_type) ? handleControl : undefined}
+          controlling={controlling}
+        />
       </section>
 
       {/* Recent Pipelines */}

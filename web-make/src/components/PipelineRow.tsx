@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { StatusBadge } from './StatusBadge'
 import type { PipelineRun } from '../types'
 
@@ -24,8 +25,9 @@ function formatDuration(startIso: string, endIso?: string): string {
 
 export function PipelineRow({ pipeline }: PipelineRowProps) {
   return (
-    <div
-      className="flex items-center gap-4 px-4 py-3 rounded-lg border border-white/5 hover:border-white/10 transition-colors"
+    <Link
+      to={`/pipelines/${pipeline.id}`}
+      className="flex items-center gap-4 px-4 py-3 rounded-lg border border-white/5 hover:border-white/10 transition-colors cursor-pointer"
       style={{ background: '#1e1e3a' }}
     >
       <div className="flex-1 min-w-0">
@@ -62,6 +64,6 @@ export function PipelineRow({ pipeline }: PipelineRowProps) {
         <p className="text-xs text-white/40">{formatTime(pipeline.started_at)}</p>
         <p className="text-xs text-white/20">{formatDuration(pipeline.started_at, pipeline.finished_at)}</p>
       </div>
-    </div>
+    </Link>
   )
 }

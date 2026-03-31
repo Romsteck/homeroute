@@ -291,14 +291,18 @@ impl EnvironmentManager {
     }
 
     /// Update the app list for an environment (from env-agent AppDiscovery).
+    /// Only persists to disk if the app list actually changed.
     pub async fn update_apps(&self, env_slug: &str, apps: Vec<EnvApp>) {
         let mut envs = self.environments.write().await;
         if let Some(env) = envs.iter_mut().find(|e| e.record.slug == env_slug) {
-            env.record.apps = apps;
+            let changed = env.record.apps != apps;
             env.record.last_heartbeat = Some(Utc::now());
+            if changed {
+                env.record.apps = apps;
+                drop(envs);
+                self.persist().await;
+            }
         }
-        drop(envs);
-        self.persist().await;
     }
 
     /// Register a WebSocket connection for an env-agent.

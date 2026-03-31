@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +43,8 @@ pub enum PipelineStepType {
     Deploy,
     /// HTTP health check after deploy.
     HealthCheck,
+    /// Build the application from source.
+    Build,
     /// Custom shell command.
     Custom,
 }
@@ -70,6 +74,15 @@ pub struct PipelineRun {
     pub started_at: DateTime<Utc>,
     /// When the pipeline finished (if done).
     pub finished_at: Option<DateTime<Utc>>,
+    /// Chain ID linking multiple runs in an env chain promotion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
+    /// Artifact URL produced by the build step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_url: Option<String>,
+    /// SHA256 hash of the artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_sha256: Option<String>,
 }
 
 /// Status of a pipeline run.
@@ -88,6 +101,9 @@ pub enum PipelineStatus {
     RolledBack,
     /// Cancelled by user.
     Cancelled,
+    /// Waiting for a gate approval before continuing the chain.
+    #[serde(rename = "waiting_gate")]
+    WaitingGate,
 }
 
 /// Execution state of a single pipeline step.
@@ -121,6 +137,70 @@ pub enum StepStatus {
 
 fn default_timeout() -> u64 {
     120
+}
+
+/// Per-app pipeline configuration: env chain, skip steps, auto-promote, gates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineConfig {
+    /// App slug this config belongs to.
+    pub app_slug: String,
+    /// Ordered list of environments for promotion (e.g. ["dev", "acc", "prod"]).
+    pub env_chain: Vec<String>,
+    /// Step names to skip (e.g. {"test"}).
+    #[serde(default)]
+    pub skip_steps: HashSet<String>,
+    /// Envs where auto-promote is enabled after successful deploy
+    /// (e.g. {"dev"} = auto promote after deploy in dev).
+    #[serde(default)]
+    pub auto_promote: HashSet<String>,
+    /// Gate definitions requiring manual approval between envs.
+    #[serde(default)]
+    pub gates: Vec<GateDef>,
+}
+
+/// A gate definition between two environments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateDef {
+    /// Source environment.
+    pub from_env: String,
+    /// Target environment.
+    pub to_env: String,
+}
+
+/// Status of a gate approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GateStatus {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+/// A gate approval record for a chain promotion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateApproval {
+    /// Unique gate approval ID.
+    pub id: String,
+    /// Chain ID this gate belongs to.
+    pub chain_id: String,
+    /// App slug.
+    pub app_slug: String,
+    /// Source environment.
+    pub from_env: String,
+    /// Target environment.
+    pub to_env: String,
+    /// Version being promoted.
+    pub version: String,
+    /// Current gate status.
+    pub status: GateStatus,
+    /// When the gate was created.
+    pub created_at: DateTime<Utc>,
+    /// When the gate was resolved (approved or rejected).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<DateTime<Utc>>,
+    /// Who resolved the gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<String>,
 }
 
 #[cfg(test)]
@@ -158,11 +238,107 @@ mod tests {
             triggered_by: "claude".into(),
             started_at: Utc::now(),
             finished_at: None,
+            chain_id: None,
+            artifact_url: None,
+            artifact_sha256: None,
         };
         let json = serde_json::to_string_pretty(&run).unwrap();
         let parsed: PipelineRun = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.status, PipelineStatus::Running);
         assert_eq!(parsed.steps.len(), 2);
         assert_eq!(parsed.steps[0].status, StepStatus::Success);
+        // New optional fields should be None
+        assert!(parsed.chain_id.is_none());
+        assert!(parsed.artifact_url.is_none());
+        assert!(parsed.artifact_sha256.is_none());
+    }
+
+    #[test]
+    fn test_pipeline_run_serde_with_chain() {
+        let run = PipelineRun {
+            id: "run-002".into(),
+            pipeline_id: "pipe-trader".into(),
+            app_slug: "trader".into(),
+            version: "abc1234".into(),
+            source_env: "dev".into(),
+            target_env: "acc".into(),
+            status: PipelineStatus::WaitingGate,
+            steps: vec![],
+            triggered_by: "ci".into(),
+            started_at: Utc::now(),
+            finished_at: None,
+            chain_id: Some("chain-001".into()),
+            artifact_url: Some("http://10.0.0.254:4001/artifacts/trader/abc1234.tar.gz".into()),
+            artifact_sha256: Some("abcdef1234567890".into()),
+        };
+        let json = serde_json::to_string_pretty(&run).unwrap();
+        let parsed: PipelineRun = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.status, PipelineStatus::WaitingGate);
+        assert_eq!(parsed.chain_id.as_deref(), Some("chain-001"));
+        assert!(parsed.artifact_url.is_some());
+        assert!(parsed.artifact_sha256.is_some());
+    }
+
+    #[test]
+    fn test_pipeline_run_backward_compat() {
+        // Simulate a JSON from before the new fields were added
+        let old_json = r#"{
+            "id": "run-old",
+            "pipeline_id": "pipe-1",
+            "app_slug": "wallet",
+            "version": "1.0",
+            "source_env": "dev",
+            "target_env": "prod",
+            "status": "running",
+            "steps": [],
+            "triggered_by": "user",
+            "started_at": "2025-01-01T00:00:00Z",
+            "finished_at": null
+        }"#;
+        let parsed: PipelineRun = serde_json::from_str(old_json).unwrap();
+        assert_eq!(parsed.app_slug, "wallet");
+        assert!(parsed.chain_id.is_none());
+        assert!(parsed.artifact_url.is_none());
+        assert!(parsed.artifact_sha256.is_none());
+    }
+
+    #[test]
+    fn test_pipeline_config_serde() {
+        let config = PipelineConfig {
+            app_slug: "trader".into(),
+            env_chain: vec!["dev".into(), "acc".into(), "prod".into()],
+            skip_steps: HashSet::from(["test".into()]),
+            auto_promote: HashSet::from(["dev".into()]),
+            gates: vec![GateDef {
+                from_env: "acc".into(),
+                to_env: "prod".into(),
+            }],
+        };
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let parsed: PipelineConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.env_chain.len(), 3);
+        assert!(parsed.skip_steps.contains("test"));
+        assert!(parsed.auto_promote.contains("dev"));
+        assert_eq!(parsed.gates.len(), 1);
+    }
+
+    #[test]
+    fn test_gate_approval_serde() {
+        let gate = GateApproval {
+            id: "gate-001".into(),
+            chain_id: "chain-001".into(),
+            app_slug: "trader".into(),
+            from_env: "acc".into(),
+            to_env: "prod".into(),
+            version: "1.2.3".into(),
+            status: GateStatus::Pending,
+            created_at: Utc::now(),
+            resolved_at: None,
+            resolved_by: None,
+        };
+        let json = serde_json::to_string_pretty(&gate).unwrap();
+        let parsed: GateApproval = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.status, GateStatus::Pending);
+        assert!(parsed.resolved_at.is_none());
     }
 }

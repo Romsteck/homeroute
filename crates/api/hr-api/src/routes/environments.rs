@@ -5,7 +5,7 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use tracing::{error, info};
@@ -32,12 +32,53 @@ pub fn router() -> Router<ApiState> {
         .route("/monitoring/envs", get(monitoring_envs_summary))
         .route("/pipelines/promote", post(promote_pipeline))
         .route("/pipelines/definitions", get(list_pipeline_definitions))
+        .route("/pipelines/config/{app_slug}", get(get_pipeline_config))
+        .route("/pipelines/config", put(save_pipeline_config))
+        .route("/pipelines/gates/pending", get(list_pending_gates))
+        .route("/pipelines/gates/{gate_id}/approve", post(approve_pipeline_gate))
+        .route("/pipelines/gates/{gate_id}/reject", post(reject_pipeline_gate))
         .route("/pipelines", get(list_pipelines))
         .route("/pipelines/{id}", get(get_pipeline))
         .route("/pipelines/{id}/cancel", post(cancel_pipeline))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
+
+/// Returns true if the environment type is read-only (acceptance or production).
+fn is_readonly_env(env_type: &str) -> bool {
+    matches!(env_type, "acc" | "acceptance" | "prod" | "production")
+}
+
+/// Resolve the env_type for a given environment slug via IPC.
+async fn resolve_env_type(state: &ApiState, env_slug: &str) -> Result<String, String> {
+    let resp = state
+        .orchestrator
+        .request(&OrchestratorRequest::GetEnvironment { id: env_slug.to_string() })
+        .await
+        .map_err(|e| format!("IPC error: {e}"))?;
+
+    if !resp.ok {
+        return Err(format!("Environment '{}' not found", env_slug));
+    }
+
+    Ok(resp.data
+        .as_ref()
+        .and_then(|d| d.get("env_type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("dev")
+        .to_string())
+}
+
+fn readonly_forbidden(action: &str) -> axum::response::Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "success": false,
+            "error": format!("{} is disabled in non-development environments", action)
+        })),
+    )
+        .into_response()
+}
 
 fn ipc_ok_response(resp: hr_ipc::types::IpcResponse) -> axum::response::Response {
     if resp.ok {
@@ -357,6 +398,13 @@ async fn control_app(
     Path((slug, app_slug)): Path<(String, String)>,
     Json(req): Json<ControlAppRequest>,
 ) -> impl IntoResponse {
+    // Block app control in read-only environments
+    if let Ok(env_type) = resolve_env_type(&state, &slug).await {
+        if is_readonly_env(&env_type) {
+            return readonly_forbidden("App control");
+        }
+    }
+
     info!(env = slug, app = app_slug, action = req.action, "Controlling app in environment");
     let tool = format!("app.{}", req.action);
     match env_mcp_call(
@@ -589,6 +637,12 @@ async fn insert_db_rows(State(state): State<ApiState>,
     Path(slug): Path<String>,
     Json(req): Json<InsertRowsRequest>,
 ) -> impl IntoResponse {
+    if let Ok(env_type) = resolve_env_type(&state, &slug).await {
+        if is_readonly_env(&env_type) {
+            return readonly_forbidden("Database writes");
+        }
+    }
+
     match env_mcp_call(&state, &slug, "db.insert_data",
         serde_json::json!({
             "app_id": req.app_slug,
@@ -623,6 +677,12 @@ async fn update_db_rows(State(state): State<ApiState>,
     Path(slug): Path<String>,
     Json(req): Json<UpdateRowsRequest>,
 ) -> impl IntoResponse {
+    if let Ok(env_type) = resolve_env_type(&state, &slug).await {
+        if is_readonly_env(&env_type) {
+            return readonly_forbidden("Database writes");
+        }
+    }
+
     match env_mcp_call(&state, &slug, "db.update_data",
         serde_json::json!({
             "app_id": req.app_slug,
@@ -657,6 +717,12 @@ async fn delete_db_rows(State(state): State<ApiState>,
     Path(slug): Path<String>,
     Json(req): Json<DeleteRowsRequest>,
 ) -> impl IntoResponse {
+    if let Ok(env_type) = resolve_env_type(&state, &slug).await {
+        if is_readonly_env(&env_type) {
+            return readonly_forbidden("Database writes");
+        }
+    }
+
     match env_mcp_call(&state, &slug, "db.delete_data",
         serde_json::json!({
             "app_id": req.app_slug,
@@ -764,6 +830,102 @@ async fn list_pipeline_definitions() -> impl IntoResponse {
         Ok(result) => Json(serde_json::json!({"success": true, "data": result})).into_response(),
         Err(e) => {
             error!("Pipeline definitions list failed: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"success": false, "error": e})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// GET /api/pipelines/config/:app_slug
+async fn get_pipeline_config(Path(app_slug): Path<String>) -> impl IntoResponse {
+    match mcp_call("pipeline.get_config", serde_json::json!({"app_slug": app_slug})).await {
+        Ok(result) => Json(serde_json::json!({"success": true, "data": result})).into_response(),
+        Err(e) => {
+            error!("Pipeline config fetch failed: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"success": false, "error": e})),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SavePipelineConfigRequest {
+    app_slug: String,
+    env_chain: Vec<String>,
+    skip_steps: Vec<String>,
+    auto_promote: Vec<String>,
+    #[serde(default)]
+    gates: Vec<serde_json::Value>,
+}
+
+/// PUT /api/pipelines/config
+async fn save_pipeline_config(Json(req): Json<SavePipelineConfigRequest>) -> impl IntoResponse {
+    match mcp_call(
+        "pipeline.save_config",
+        serde_json::json!({
+            "app_slug": req.app_slug,
+            "env_chain": req.env_chain,
+            "skip_steps": req.skip_steps,
+            "auto_promote": req.auto_promote,
+            "gates": req.gates,
+        }),
+    )
+    .await
+    {
+        Ok(result) => Json(serde_json::json!({"success": true, "data": result})).into_response(),
+        Err(e) => {
+            error!("Pipeline config save failed: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"success": false, "error": e})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// GET /api/pipelines/gates/pending
+async fn list_pending_gates() -> impl IntoResponse {
+    match mcp_call("pipeline.pending_gates", serde_json::json!({})).await {
+        Ok(result) => Json(serde_json::json!({"success": true, "data": result})).into_response(),
+        Err(e) => {
+            error!("Pending gates list failed: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"success": false, "error": e})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// POST /api/pipelines/gates/:gate_id/approve
+async fn approve_pipeline_gate(Path(gate_id): Path<String>) -> impl IntoResponse {
+    match mcp_call("pipeline.approve_gate", serde_json::json!({"gate_id": gate_id})).await {
+        Ok(result) => Json(serde_json::json!({"success": true, "data": result})).into_response(),
+        Err(e) => {
+            error!("Gate approval failed: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"success": false, "error": e})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// POST /api/pipelines/gates/:gate_id/reject
+async fn reject_pipeline_gate(Path(gate_id): Path<String>) -> impl IntoResponse {
+    match mcp_call("pipeline.reject_gate", serde_json::json!({"gate_id": gate_id})).await {
+        Ok(result) => Json(serde_json::json!({"success": true, "data": result})).into_response(),
+        Err(e) => {
+            error!("Gate rejection failed: {e}");
             (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({"success": false, "error": e})),

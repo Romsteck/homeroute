@@ -89,7 +89,7 @@ pub enum EnvStatus {
 }
 
 /// An application within an environment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnvApp {
     /// Application slug (e.g., "trader", "wallet").
     pub slug: String,
@@ -215,12 +215,12 @@ impl EnvPermissions {
                 code_edit: false,
                 build_run: false,
                 db_schema_write: false,
-                db_data_write: true, // via tests
+                db_data_write: false,
                 db_data_read: true,
                 logs_read: true,
-                pipeline_promote: true,
+                pipeline_promote: false,
                 pipeline_rollback: true,
-                env_vars_write: true,
+                env_vars_write: false,
             },
             EnvType::Production => Self {
                 code_edit: false,
@@ -276,6 +276,20 @@ mod tests {
     }
 
     #[test]
+    fn test_permissions_acc_readonly() {
+        let perms = EnvPermissions::for_type(EnvType::Acceptance);
+        assert!(!perms.code_edit);
+        assert!(!perms.build_run);
+        assert!(!perms.db_schema_write);
+        assert!(!perms.db_data_write);
+        assert!(perms.db_data_read);
+        assert!(perms.logs_read);
+        assert!(!perms.pipeline_promote);
+        assert!(perms.pipeline_rollback);
+        assert!(!perms.env_vars_write);
+    }
+
+    #[test]
     fn test_permissions_prod_locked() {
         let perms = EnvPermissions::for_type(EnvType::Production);
         assert!(!perms.code_edit);
@@ -284,7 +298,9 @@ mod tests {
         assert!(!perms.db_data_write);
         assert!(perms.db_data_read);
         assert!(perms.logs_read);
+        assert!(!perms.pipeline_promote);
         assert!(perms.pipeline_rollback);
+        assert!(!perms.env_vars_write);
     }
 
     #[test]

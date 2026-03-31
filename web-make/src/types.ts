@@ -2,6 +2,10 @@
 
 export type EnvType = 'dev' | 'development' | 'acc' | 'acceptance' | 'prod' | 'production'
 
+export function isDevEnv(envType: EnvType): boolean {
+  return envType === 'dev' || envType === 'development'
+}
+
 export type EnvStatus = 'running' | 'stopped' | 'pending' | 'provisioning' | 'disconnected' | 'error'
 
 export interface Environment {
@@ -62,7 +66,11 @@ export type StepStatus = 'pending' | 'running' | 'success' | 'failed' | 'skipped
 
 export interface PipelineStep {
   name: string
+  step_type?: string
   status: StepStatus
+  output?: string
+  started_at?: string
+  finished_at?: string
   duration_ms?: number
   log?: string
 }
@@ -79,6 +87,34 @@ export interface PipelineRun {
   started_at: string
   finished_at?: string
   triggered_by: string
+}
+
+// --- Pipeline Config ---
+
+export interface PipelineConfig {
+  app_slug: string
+  env_chain: string[]
+  skip_steps: string[]
+  auto_promote: string[]
+  gates: GateDef[]
+}
+
+export interface GateDef {
+  from_env: string
+  to_env: string
+}
+
+export interface GateApproval {
+  id: string
+  chain_id: string
+  app_slug: string
+  from_env: string
+  to_env: string
+  version: string
+  status: 'pending' | 'approved' | 'rejected'
+  created_at: string
+  resolved_at?: string
+  resolved_by?: string
 }
 
 // --- DB Explorer ---

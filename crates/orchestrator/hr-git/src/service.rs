@@ -494,6 +494,65 @@ nohup bash -c 'GIT_SSH_COMMAND="ssh -i {SSH_KEY_PATH} -o StrictHostKeyChecking=n
         Ok(())
     }
 
+    // --- Pipeline hook ---
+
+    /// Set up a post-receive hook that triggers pipeline on push to main/master.
+    pub async fn setup_pipeline_hook(&self, slug: &str) -> anyhow::Result<()> {
+        let repo_path = self.repo_path(slug);
+        if !repo_path.exists() {
+            bail!("Repository '{slug}' not found");
+        }
+
+        let hooks_dir = repo_path.join("hooks");
+        tokio::fs::create_dir_all(&hooks_dir).await?;
+        let hook_path = hooks_dir.join("post-receive");
+
+        // Pipeline trigger snippet
+        let pipeline_snippet = format!(
+            r#"
+# Pipeline trigger — notify orchestrator on push to main/master
+while read oldrev newrev refname; do
+  if [ "$refname" = "refs/heads/main" ] || [ "$refname" = "refs/heads/master" ]; then
+    curl -s -X POST http://10.0.0.254:4001/hooks/git-push \
+      -H "Content-Type: application/json" \
+      -d "{{\\"slug\\":\\"{slug}\\",\\"ref\\":\\"$refname\\",\\"commit\\":\\"$newrev\\"}}" &>/dev/null &
+  fi
+done
+"#
+        );
+
+        if hook_path.exists() {
+            // Append to existing hook (don't overwrite mirror hook)
+            let existing = tokio::fs::read_to_string(&hook_path).await?;
+            if existing.contains("hooks/git-push") {
+                info!(slug, "Pipeline hook already present");
+                return Ok(());
+            }
+            let updated = format!("{}\n{}", existing.trim(), pipeline_snippet);
+            tokio::fs::write(&hook_path, updated.as_bytes()).await?;
+        } else {
+            // Create new hook
+            let script = format!("#!/bin/bash\n{}", pipeline_snippet);
+            tokio::fs::write(&hook_path, script.as_bytes()).await?;
+        }
+
+        // chmod +x
+        let output = Command::new("chmod")
+            .args(["+x"])
+            .arg(&hook_path)
+            .output()
+            .await
+            .context("Failed to chmod pipeline hook")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("chmod +x failed: {stderr}");
+        }
+
+        info!(slug, "Pipeline hook configured");
+        Ok(())
+    }
+
     // --- Private helpers ---
 
     async fn has_commits(&self, repo_path: &Path) -> bool {

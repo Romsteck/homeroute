@@ -144,7 +144,7 @@ fn build_tool_definitions(perms: &EnvPermissions, include_studio: bool) -> Value
             "description": "Get the permission matrix for this environment type.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
-        // ── app.* ──
+        // ── app.* (read-only always available) ──
         json!({
             "name": "app.list",
             "description": "List all configured apps with status (running/stopped/failed).",
@@ -153,33 +153,6 @@ fn build_tool_definitions(perms: &EnvPermissions, include_studio: bool) -> Value
         json!({
             "name": "app.status",
             "description": "Get the status of a specific app.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "slug": { "type": "string", "description": "App slug" } },
-                "required": ["slug"]
-            }
-        }),
-        json!({
-            "name": "app.start",
-            "description": "Start an app's systemd service.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "slug": { "type": "string", "description": "App slug" } },
-                "required": ["slug"]
-            }
-        }),
-        json!({
-            "name": "app.stop",
-            "description": "Stop an app's systemd service.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "slug": { "type": "string", "description": "App slug" } },
-                "required": ["slug"]
-            }
-        }),
-        json!({
-            "name": "app.restart",
-            "description": "Restart an app's systemd service.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "slug": { "type": "string", "description": "App slug" } },
@@ -200,12 +173,12 @@ fn build_tool_definitions(perms: &EnvPermissions, include_studio: bool) -> Value
         }),
     ];
 
-    // Only the HTTP handler has ContextGenerator access
-    if include_studio {
+    // app.start/stop/restart only in dev (build_run permission)
+    if perms.build_run {
         tools.extend([
             json!({
-                "name": "app.health",
-                "description": "Perform an HTTP health check on an app.",
+                "name": "app.start",
+                "description": "Start an app's systemd service.",
                 "inputSchema": {
                     "type": "object",
                     "properties": { "slug": { "type": "string", "description": "App slug" } },
@@ -213,8 +186,8 @@ fn build_tool_definitions(perms: &EnvPermissions, include_studio: bool) -> Value
                 }
             }),
             json!({
-                "name": "studio.refresh_context",
-                "description": "Regenerate CLAUDE.md and .claude/ files for an app.",
+                "name": "app.stop",
+                "description": "Stop an app's systemd service.",
                 "inputSchema": {
                     "type": "object",
                     "properties": { "slug": { "type": "string", "description": "App slug" } },
@@ -222,11 +195,48 @@ fn build_tool_definitions(perms: &EnvPermissions, include_studio: bool) -> Value
                 }
             }),
             json!({
-                "name": "studio.refresh_all",
-                "description": "Regenerate context files for all apps in the environment.",
-                "inputSchema": { "type": "object", "properties": {} }
+                "name": "app.restart",
+                "description": "Restart an app's systemd service.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "slug": { "type": "string", "description": "App slug" } },
+                    "required": ["slug"]
+                }
             }),
         ]);
+    }
+
+    // Only the HTTP handler has ContextGenerator access
+    if include_studio {
+        tools.push(json!({
+            "name": "app.health",
+            "description": "Perform an HTTP health check on an app.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "slug": { "type": "string", "description": "App slug" } },
+                "required": ["slug"]
+            }
+        }));
+
+        // studio.* tools only in dev (code_edit permission)
+        if perms.code_edit {
+            tools.extend([
+                json!({
+                    "name": "studio.refresh_context",
+                    "description": "Regenerate CLAUDE.md and .claude/ files for an app.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "slug": { "type": "string", "description": "App slug" } },
+                        "required": ["slug"]
+                    }
+                }),
+                json!({
+                    "name": "studio.refresh_all",
+                    "description": "Regenerate context files for all apps in the environment.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                }),
+            ]);
+        }
     }
 
     // ── secrets.* ──
@@ -552,9 +562,9 @@ fn build_tool_definitions(perms: &EnvPermissions, include_studio: bool) -> Value
 
     // ── Proxied tools (available via HTTP handler, auto-scoped by ?project=) ──
     if include_studio {
-        tools.extend([
-            // ── pipeline.* ──
-            json!({
+        // pipeline.promote only in environments with promote permission (dev)
+        if perms.pipeline_promote {
+            tools.push(json!({
                 "name": "pipeline.promote",
                 "description": "Promote the current app to a target environment via deployment pipeline.",
                 "inputSchema": {
@@ -565,7 +575,10 @@ fn build_tool_definitions(perms: &EnvPermissions, include_studio: bool) -> Value
                     },
                     "required": ["target_env"]
                 }
-            }),
+            }));
+        }
+
+        tools.extend([
             json!({
                 "name": "pipeline.status",
                 "description": "Get the status of a pipeline run.",
@@ -781,20 +794,48 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "app.status" => tool_app_status(id, &arguments, state).await,
         "app.health" => tool_app_health(id, &arguments, state).await,
         "app.logs" => tool_app_logs(id, &arguments, state).await,
-        "app.start" => tool_app_start(id, &arguments, state).await,
-        "app.stop" => tool_app_stop(id, &arguments, state).await,
-        "app.restart" => tool_app_restart(id, &arguments, state).await,
+        "app.start" | "app.stop" | "app.restart" => {
+            let perms = EnvPermissions::for_type(state.config.env_type());
+            if !perms.build_run {
+                return tool_error(id, "App control is not allowed in this environment type");
+            }
+            match tool_name {
+                "app.start" => tool_app_start(id, &arguments, state).await,
+                "app.stop" => tool_app_stop(id, &arguments, state).await,
+                _ => tool_app_restart(id, &arguments, state).await,
+            }
+        }
         // ── secrets.* ──
         "secrets.list" => tool_secrets_list(id, &arguments, state),
         "secrets.get" => tool_secrets_get(id, &arguments, state),
-        "secrets.set" => tool_secrets_set(id, &arguments, state),
-        "secrets.delete" => tool_secrets_delete(id, &arguments, state),
+        "secrets.set" => {
+            let perms = EnvPermissions::for_type(state.config.env_type());
+            if !perms.env_vars_write {
+                return tool_error(id, "Setting secrets is not allowed in this environment type");
+            }
+            tool_secrets_set(id, &arguments, state)
+        }
+        "secrets.delete" => {
+            let perms = EnvPermissions::for_type(state.config.env_type());
+            if !perms.env_vars_write {
+                return tool_error(id, "Deleting secrets is not allowed in this environment type");
+            }
+            tool_secrets_delete(id, &arguments, state)
+        }
         t if t.starts_with("db.") => {
             let perms = EnvPermissions::for_type(state.config.env_type());
             handle_db_tool_inner(id, t, &arguments, &state.db, &perms).await
         }
-        "studio.refresh_context" => tool_studio_refresh(id, &arguments, state).await,
-        "studio.refresh_all" => tool_studio_refresh_all(id, state).await,
+        "studio.refresh_context" | "studio.refresh_all" => {
+            let perms = EnvPermissions::for_type(state.config.env_type());
+            if !perms.code_edit {
+                return tool_error(id, "Studio tools are not available in this environment type");
+            }
+            match tool_name {
+                "studio.refresh_context" => tool_studio_refresh(id, &arguments, state).await,
+                _ => tool_studio_refresh_all(id, state).await,
+            }
+        }
 
         // ── Proxied tools: pipeline.* → orchestrator ──
         "pipeline.promote" => {

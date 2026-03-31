@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { PipelineRow } from '../components/PipelineRow'
-import { fetchPipelines, fetchEnvironments } from '../api'
-import type { PipelineRun } from '../types'
+import { fetchPipelines, fetchEnvironments, fetchPendingGates } from '../api'
+import type { PipelineRun, GateApproval } from '../types'
 
 export function Pipelines() {
   const [pipelines, setPipelines] = useState<PipelineRun[]>([])
@@ -9,14 +9,16 @@ export function Pipelines() {
   const [filterEnv, setFilterEnv] = useState<string>('')
   const [appSlugs, setAppSlugs] = useState<string[]>([])
   const [envSlugs, setEnvSlugs] = useState<string[]>([])
+  const [pendingGates, setPendingGates] = useState<GateApproval[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     setLoading(true)
     setError(null)
-    Promise.all([fetchPipelines(), fetchEnvironments()])
-      .then(([pipes, envs]) => {
+    Promise.all([fetchPipelines(), fetchEnvironments(), fetchPendingGates()])
+      .then(([pipes, envs, gates]) => {
+        setPendingGates(gates)
         setPipelines(pipes)
         setEnvSlugs(envs.map((e) => e.slug))
         const allAppSlugs = new Set<string>()
@@ -57,11 +59,16 @@ export function Pipelines() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-[#e2e8f0]">Pipelines</h1>
-          <p className="text-sm text-white/40 mt-1">{pipelines.length} pipeline runs</p>
+          <div className="flex items-center gap-3 mt-1">
+            <p className="text-sm text-white/40">{pipelines.length} pipeline runs</p>
+            {pendingGates.length > 0 && (
+              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-500/20 text-amber-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                {pendingGates.length} pending gate{pendingGates.length > 1 ? 's' : ''}
+              </span>
+            )}
+          </div>
         </div>
-        <button className="px-4 py-2 bg-[#7c3aed] hover:bg-[#6d28d9] text-white text-sm font-medium rounded-lg transition-colors">
-          New Pipeline
-        </button>
       </div>
 
       {error && (

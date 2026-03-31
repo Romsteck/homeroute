@@ -4,6 +4,7 @@ import { AppTable } from '../components/AppRow'
 import { StatusBadge, EnvTypeBadge } from '../components/StatusBadge'
 import { fetchEnvironment, fetchEnvironments, fetchApps, fetchDbTables, fetchPipelines } from '../api'
 import type { Environment, EnvApp, DbTable, PipelineRun } from '../types'
+import { isDevEnv } from '../types'
 import { PipelineRow } from '../components/PipelineRow'
 
 const BASE_DOMAIN = 'mynetwk.biz'
@@ -49,11 +50,13 @@ export function EnvironmentDetail() {
     }).catch(() => setPipelines([]))
   }, [slug])
 
+  const isDev = env ? isDevEnv(env.env_type) : false
+
   const displayApps = apps.length > 0 ? apps : (env?.apps || []).map((a) => ({
     ...a,
     status: (a.running ? 'running' : 'stopped') as EnvApp['status'],
     url: `https://${a.slug}.${slug}.${BASE_DOMAIN}`,
-    studio_url: `https://studio.${slug}.${BASE_DOMAIN}/?folder=/apps/${a.slug}`,
+    studio_url: isDev ? `https://studio.${slug}.${BASE_DOMAIN}/?folder=/apps/${a.slug}` : undefined,
   }))
 
   if (loading) {
@@ -119,17 +122,19 @@ export function EnvironmentDetail() {
 
       {/* Quick Actions */}
       <div className="flex items-center gap-3">
-        <a
-          href={`https://studio.${slug}.${BASE_DOMAIN}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-[#7c3aed]/15 text-[#a78bfa] hover:bg-[#7c3aed]/25 border border-[#7c3aed]/20 transition-colors"
-        >
-          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" />
-          </svg>
-          Open Studio
-        </a>
+        {isDev && (
+          <a
+            href={`https://studio.${slug}.${BASE_DOMAIN}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-[#7c3aed]/15 text-[#a78bfa] hover:bg-[#7c3aed]/25 border border-[#7c3aed]/20 transition-colors"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" />
+            </svg>
+            Open Studio
+          </a>
+        )}
         <Link
           to={`/environments/${slug}/db`}
           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-white/5 text-white/60 hover:bg-white/10 border border-white/10 transition-colors"

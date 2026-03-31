@@ -12,6 +12,7 @@ const statusColors: Record<string, string> = {
   degraded: 'bg-amber-500/20 text-amber-400',
   provisioning: 'bg-blue-500/20 text-blue-400',
   disconnected: 'bg-orange-500/20 text-orange-400',
+  waiting_gate: 'bg-amber-500/20 text-amber-400',
 }
 
 const statusDots: Record<string, string> = {
@@ -26,6 +27,7 @@ const statusDots: Record<string, string> = {
   degraded: 'bg-amber-400',
   provisioning: 'bg-blue-400 animate-pulse',
   disconnected: 'bg-orange-400',
+  waiting_gate: 'bg-amber-400 animate-pulse',
 }
 
 const envTypeColors: Record<string, string> = {

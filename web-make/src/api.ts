@@ -4,11 +4,14 @@ import type {
   AppInfo,
   AppEnvEntry,
   PipelineRun,
+  PipelineConfig,
+  GateApproval,
   DbTable,
   DbSchema,
   DbQueryResult,
   DbFilter,
 } from './types'
+import { isDevEnv } from './types'
 
 // API is served on the same origin (homeroute Rust serves both SPA + API)
 const API_BASE = '/api'
@@ -23,11 +26,12 @@ const BASE_DOMAIN = 'mynetwk.biz'
 
 /** Enrich an EnvApp from backend with computed frontend fields. */
 function enrichApp(app: EnvApp, env?: Environment): EnvApp {
+  const isDev = env ? isDevEnv(env.env_type) : false
   return {
     ...app,
     status: app.running ? 'running' : 'stopped',
     url: env?.slug ? `https://${app.slug}.${env.slug}.${BASE_DOMAIN}` : undefined,
-    studio_url: env?.slug ? `https://studio.${env.slug}.${BASE_DOMAIN}/?folder=/apps/${app.slug}` : undefined,
+    studio_url: isDev && env?.slug ? `https://studio.${env.slug}.${BASE_DOMAIN}/?folder=/apps/${app.slug}` : undefined,
   }
 }
 
@@ -244,6 +248,54 @@ export async function triggerPipeline(
   if (!res.ok) throw new Error('Failed to trigger pipeline')
   const json = await res.json()
   return json.data || { id: 'unknown' }
+}
+
+export async function fetchPipeline(id: string): Promise<PipelineRun> {
+  const res = await fetch(`${API_BASE}/pipelines/${id}`)
+  if (!res.ok) throw new Error(`Failed to fetch pipeline: ${res.status}`)
+  const data = await res.json()
+  return data.data || data
+}
+
+export async function fetchPipelineConfig(appSlug: string): Promise<PipelineConfig | null> {
+  try {
+    const res = await fetch(`${API_BASE}/pipelines/config/${appSlug}`)
+    if (!res.ok) return null
+    const data = await res.json()
+    return data.data || data
+  } catch {
+    return null
+  }
+}
+
+export async function savePipelineConfig(config: PipelineConfig): Promise<void> {
+  const res = await fetch(`${API_BASE}/pipelines/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  })
+  if (!res.ok) throw new Error(`Failed to save config: ${res.status}`)
+}
+
+export async function approveGate(gateId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/pipelines/gates/${gateId}/approve`, { method: 'POST' })
+  if (!res.ok) throw new Error(`Failed to approve gate: ${res.status}`)
+}
+
+export async function rejectGate(gateId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/pipelines/gates/${gateId}/reject`, { method: 'POST' })
+  if (!res.ok) throw new Error(`Failed to reject gate: ${res.status}`)
+}
+
+export async function fetchPendingGates(): Promise<GateApproval[]> {
+  try {
+    const res = await fetch(`${API_BASE}/pipelines/gates/pending`)
+    if (!res.ok) return []
+    const data = await res.json()
+    return data.data || data || []
+  } catch {
+    return []
+  }
 }
 
 // ── Environment monitoring & control ────────────────────────────

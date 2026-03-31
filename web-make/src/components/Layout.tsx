@@ -2,12 +2,13 @@ import { useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { EnvSwitcher } from './EnvSwitcher'
 import type { Environment } from '../types'
+import { isDevEnv } from '../types'
 
-const staticNavItems = [
-  { to: '/', label: 'Home', icon: 'home' },
-  { to: '/apps', label: 'Apps', icon: 'apps' },
-  { to: '/tables', label: 'Tables', icon: 'table' },
-  { to: '/pipelines', label: 'Pipelines', icon: 'play' },
+const allNavItems = [
+  { to: '/', label: 'Home', icon: 'home', devOnly: false },
+  { to: '/apps', label: 'Apps', icon: 'apps', devOnly: false },
+  { to: '/tables', label: 'Tables', icon: 'table', devOnly: false },
+  { to: '/pipelines', label: 'Pipelines', icon: 'play', devOnly: true },
 ]
 
 const iconMap: Record<string, React.ReactNode> = {
@@ -42,6 +43,9 @@ interface LayoutProps {
 export function Layout({ environments, currentEnv, onEnvChange }: LayoutProps) {
   const [sidebarExpanded, setSidebarExpanded] = useState(false)
   const location = useLocation()
+  const currentEnvData = environments.find((e) => e.slug === currentEnv)
+  const isDev = currentEnvData ? isDevEnv(currentEnvData.env_type) : true
+  const navItems = allNavItems.filter((item) => !item.devOnly || isDev)
 
   return (
     <div className="flex flex-col h-screen" style={{ background: '#0f0f23' }}>
@@ -93,7 +97,7 @@ export function Layout({ environments, currentEnv, onEnvChange }: LayoutProps) {
           onMouseLeave={() => setSidebarExpanded(false)}
         >
           <nav className="flex-1 py-3 space-y-1 px-2">
-            {staticNavItems.map((item) => {
+            {navItems.map((item) => {
               const isTableNav = item.to === '/tables'
               const isTableActive = isTableNav && (location.pathname === '/tables' || location.pathname.includes('/db'))
               return (

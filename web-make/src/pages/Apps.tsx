@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { AppTable } from '../components/AppRow'
-import { fetchApps, controlApp } from '../api'
+import { fetchApps, fetchEnvironments, controlApp } from '../api'
 import type { EnvApp } from '../types'
+import { isDevEnv } from '../types'
 
 interface AppsProps {
   currentEnv: string
@@ -12,12 +13,17 @@ export function Apps({ currentEnv }: AppsProps) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [controlling, setControlling] = useState<string | null>(null)
+  const [isDev, setIsDev] = useState(true)
 
   useEffect(() => {
     setLoading(true)
     setError(null)
-    fetchApps(currentEnv)
-      .then(setApps)
+    Promise.all([fetchApps(currentEnv), fetchEnvironments()])
+      .then(([a, envs]) => {
+        setApps(a)
+        const env = envs.find((e) => e.slug === currentEnv)
+        setIsDev(env ? isDevEnv(env.env_type) : false)
+      })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
   }, [currentEnv])
@@ -65,7 +71,7 @@ export function Apps({ currentEnv }: AppsProps) {
         </div>
       )}
 
-      <AppTable apps={apps} envSlug={currentEnv} onControl={handleControl} controlling={controlling} />
+      <AppTable apps={apps} envSlug={currentEnv} onControl={isDev ? handleControl : undefined} controlling={controlling} />
     </div>
   )
 }

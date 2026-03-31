@@ -160,6 +160,58 @@ ssh root@10.0.0.254 'systemctl reload hr-edge'      # hot-reload proxy config (S
 ssh root@10.0.0.254 'systemctl reload hr-netcore'    # hot-reload DNS/DHCP/Adblock (SIGHUP)
 ```
 
+## Pipelines standardisés
+
+Les apps dans les environnements sont déployées via des **pipelines standardisés** par stack. Le build se fait automatiquement sur Medion (l'orchestrator), pas besoin de builder manuellement.
+
+### Stacks supportés
+
+| Stack | Template steps |
+|-------|---------------|
+| `AxumVite` | Build → Test → BackupDb → MigrateDb → Deploy → HealthCheck |
+| `NextJs` | Build → Test → BackupDb → MigrateDb → Deploy → HealthCheck |
+| `Axum` | Build → Test → Deploy → HealthCheck |
+
+Les steps Test, BackupDb, MigrateDb sont optionnels (configurables via `PipelineConfig.skip_steps`).
+
+### MCP Pipeline tools
+
+| Tool | Usage |
+|------|-------|
+| `pipeline.promote` | Déclencher une promotion (utilise les templates + config) |
+| `pipeline.status` | Voir l'état d'un run (steps, logs, durée) |
+| `pipeline.history` | Historique des runs (filtrable par app_slug) |
+| `pipeline.logs` | Logs détaillés d'un step spécifique (pour diagnostic) |
+| `pipeline.get_config` | Lire la config pipeline d'une app |
+| `pipeline.save_config` | Sauvegarder la config (chaîne d'envs, gates, etc.) |
+| `pipeline.approve_gate` | Approuver une gate manuelle |
+| `pipeline.reject_gate` | Rejeter une gate |
+| `pipeline.pending_gates` | Lister les gates en attente |
+| `pipeline.cancel` | Annuler un pipeline en cours |
+
+### Workflow de promotion
+
+1. `pipeline.promote(app_slug, version, source_env, target_env)` → déclenche build + deploy
+2. Le build produit un artifact dans `/opt/homeroute/data/artifacts/{slug}/`
+3. L'artifact est servi en HTTP sur `http://10.0.0.254:4001/artifacts/`
+4. L'env-agent cible télécharge, vérifie le SHA256, extrait et redémarre l'app
+5. Si échec → rollback automatique vers la version précédente
+
+### Confiance et sécurité
+
+- Chaque transition doit suivre la **chaîne d'envs** définie (pas de saut dev→prod si acc est dans la chaîne)
+- **Un seul pipeline** peut tourner par app à la fois (verrou de concurrence)
+- L'env-agent **rejette** les déploiements pour des apps non déclarées dans sa config
+- L'artifact est identifié par `{app_slug}-{commit_sha}` — immuable, réutilisé dans la chaîne
+
+### hr-git auto-trigger
+
+Un `git push` vers un repo hr-git peut déclencher automatiquement un pipeline si `auto_promote` est configuré. Le hook post-receive envoie un HTTP POST à l'orchestrator.
+
+### Note importante
+
+Les pipelines gèrent le déploiement des **apps dans les envs** (trader, wallet, etc.). Les binaires HomeRoute eux-mêmes (hr-edge, hr-orchestrator, etc.) sont toujours déployés via `make deploy-*`.
+
 ## Règles obligatoires
 
 - **JAMAIS** `cargo run` directement — utiliser `make deploy-prod` depuis dev

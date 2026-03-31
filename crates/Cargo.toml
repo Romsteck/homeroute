@@ -131,6 +131,9 @@ bytes = "1"
 # Checksums (for binary transfer protocol)
 xxhash-rust = { version = "0.8", features = ["xxh32"] }
 
+# SHA-256 (for artifact verification)
+sha2 = "0.10"
+
 # Embedded static files
 rust-embed = { version = "8", features = ["compression"] }
 
