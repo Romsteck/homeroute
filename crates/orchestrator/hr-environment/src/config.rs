@@ -75,6 +75,9 @@ pub struct EnvAgentAppConfig {
     /// Brief description of the app (overrides stack-derived structure hint).
     #[serde(default)]
     pub description: Option<String>,
+    /// Git remote URL (hr-git Smart HTTP).
+    #[serde(default)]
+    pub git_repo: Option<String>,
 }
 
 impl EnvAgentConfig {
@@ -167,6 +170,7 @@ mod tests {
             run_command = "./bin/wallet"
             build_command = "cargo build --release"
             has_db = true
+            git_repo = "http://10.0.0.254:4000/api/git/repos/wallet.git/"
         "#;
 
         let config: EnvAgentConfig = toml::from_str(toml_str).unwrap();
@@ -177,6 +181,8 @@ mod tests {
         assert_eq!(config.apps[1].build_command, Some("cargo build --release".into()));
         assert_eq!(config.mcp_port, 4010); // default
         assert_eq!(config.db_path, "/opt/env-agent/data/db"); // default
+        assert!(config.apps[0].git_repo.is_none());
+        assert_eq!(config.apps[1].git_repo.as_deref(), Some("http://10.0.0.254:4000/api/git/repos/wallet.git/"));
     }
 
     #[test]
@@ -192,6 +198,7 @@ mod tests {
             apps_path: "/apps".into(),
             db_path: "/opt/env-agent/data/db".into(),
             hub_url: "http://10.0.0.20:3500".into(),
+            mcp_token: None,
             apps: vec![],
         };
         assert_eq!(config.orchestrator_ws_url(), "ws://10.0.0.254:4001/envs/ws");

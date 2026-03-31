@@ -3,6 +3,7 @@ mod config;
 mod connection;
 mod context;
 mod db_manager;
+mod deploy;
 mod discovery;
 mod mcp;
 mod port_registry;
@@ -85,6 +86,19 @@ async fn main() -> Result<()> {
         }
     }
     info!(apps = cfg.apps.len(), "Port registry initialized");
+
+    // ── 2d. Auto-derive git_repo for dev envs ───────────────────────
+    if cfg.env_type() == hr_environment::types::EnvType::Development {
+        for app in &mut cfg.apps {
+            if app.git_repo.is_none() {
+                app.git_repo = Some(format!(
+                    "http://{}:4000/api/git/repos/{}.git/",
+                    cfg.homeroute_address, app.slug
+                ));
+                info!(slug = app.slug, "Auto-derived git_repo URL");
+            }
+        }
+    }
 
     // ── 3. Initialize AppSupervisor ──────────────────────────────────
     let supervisor = Arc::new(AppSupervisor::new(cfg.apps.clone(), cfg.env_type(), cfg.apps_path.clone(), cfg.db_path.clone()));
@@ -202,6 +216,26 @@ async fn main() -> Result<()> {
         let _ = outbound_tx
             .send(EnvAgentMessage::AppDiscovery { apps: apps_info })
             .await;
+
+        // Spawn periodic app status re-scan (every 10s) so the orchestrator
+        // always has up-to-date running/stopped state for each app.
+        let status_tx = outbound_tx.clone();
+        let status_supervisor = Arc::clone(&supervisor);
+        let status_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            interval.tick().await; // skip immediate first tick (initial discovery already sent)
+            loop {
+                interval.tick().await;
+                let apps = build_app_discovery(&status_supervisor).await;
+                if status_tx
+                    .send(EnvAgentMessage::AppDiscovery { apps })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
 
         // Spawn metrics sender (every 5 seconds) — uses cgroups for container-accurate metrics
         let metrics_tx = outbound_tx.clone();
@@ -323,7 +357,8 @@ async fn main() -> Result<()> {
             }
         }
 
-        // Cancel metrics sender
+        // Cancel periodic tasks
+        status_handle.abort();
         metrics_handle.abort();
 
         // Wait before reconnecting
@@ -391,18 +426,63 @@ async fn handle_orchestrator_message(
         EnvOrchestratorMessage::DeployApp {
             pipeline_id,
             app_slug,
-            ..
+            version,
+            artifact_url,
+            sha256,
         } => {
-            info!(app = %app_slug, pipeline = %pipeline_id, "Deploy requested");
-            // TODO Phase 5: download artifact, extract, restart app
-            let _ = outbound_tx
-                .send(EnvAgentMessage::PipelineProgress {
-                    pipeline_id,
-                    step: "deploy".into(),
-                    success: false,
-                    message: Some("Not yet implemented".into()),
-                })
-                .await;
+            info!(app = %app_slug, version = %version, pipeline = %pipeline_id, "Deploy requested");
+
+            if !supervisor.has_app(&app_slug) {
+                let _ = outbound_tx
+                    .send(EnvAgentMessage::PipelineProgress {
+                        pipeline_id,
+                        step: "deploy".into(),
+                        success: false,
+                        message: Some(format!("App '{}' not found in supervisor config", app_slug)),
+                    })
+                    .await;
+                return;
+            }
+
+            let app_path = PathBuf::from(format!("/apps/{}", app_slug));
+
+            match deploy::deploy_artifact(&artifact_url, &sha256, &app_path).await {
+                Ok(msg) => {
+                    // Restart the app after successful deploy
+                    if let Err(e) = supervisor.restart_app(&app_slug).await {
+                        warn!(app = %app_slug, error = %e, "Restart after deploy failed");
+                        let _ = outbound_tx
+                            .send(EnvAgentMessage::PipelineProgress {
+                                pipeline_id,
+                                step: "deploy".into(),
+                                success: false,
+                                message: Some(format!("Deployed but restart failed: {e}")),
+                            })
+                            .await;
+                    } else {
+                        info!(app = %app_slug, version = %version, "Deploy + restart successful");
+                        let _ = outbound_tx
+                            .send(EnvAgentMessage::PipelineProgress {
+                                pipeline_id,
+                                step: "deploy".into(),
+                                success: true,
+                                message: Some(msg),
+                            })
+                            .await;
+                    }
+                }
+                Err(e) => {
+                    error!(app = %app_slug, error = %e, "Deploy failed");
+                    let _ = outbound_tx
+                        .send(EnvAgentMessage::PipelineProgress {
+                            pipeline_id,
+                            step: "deploy".into(),
+                            success: false,
+                            message: Some(format!("Deploy failed: {e}")),
+                        })
+                        .await;
+                }
+            }
         }
 
         EnvOrchestratorMessage::MigrateDb {
@@ -468,7 +548,46 @@ async fn handle_orchestrator_message(
             app_slug,
         } => {
             info!(app = %app_slug, pipeline = %pipeline_id, "Rollback requested");
-            // TODO Phase 5: restore previous binary + DB snapshot
+
+            let app_path = PathBuf::from(format!("/apps/{}", app_slug));
+
+            match deploy::rollback_app(&app_path).await {
+                Ok(msg) => {
+                    // Restart the app after rollback
+                    if let Err(e) = supervisor.restart_app(&app_slug).await {
+                        warn!(app = %app_slug, error = %e, "Restart after rollback failed");
+                        let _ = outbound_tx
+                            .send(EnvAgentMessage::PipelineProgress {
+                                pipeline_id,
+                                step: "rollback".into(),
+                                success: false,
+                                message: Some(format!("Rolled back but restart failed: {e}")),
+                            })
+                            .await;
+                    } else {
+                        info!(app = %app_slug, "Rollback + restart successful");
+                        let _ = outbound_tx
+                            .send(EnvAgentMessage::PipelineProgress {
+                                pipeline_id,
+                                step: "rollback".into(),
+                                success: true,
+                                message: Some(msg),
+                            })
+                            .await;
+                    }
+                }
+                Err(e) => {
+                    error!(app = %app_slug, error = %e, "Rollback failed");
+                    let _ = outbound_tx
+                        .send(EnvAgentMessage::PipelineProgress {
+                            pipeline_id,
+                            step: "rollback".into(),
+                            success: false,
+                            message: Some(format!("Rollback failed: {e}")),
+                        })
+                        .await;
+                }
+            }
         }
 
         EnvOrchestratorMessage::SnapshotDb {
@@ -477,8 +596,30 @@ async fn handle_orchestrator_message(
         } => {
             info!(app = %app_slug, pipeline = %pipeline_id, "DB snapshot requested");
             match db_manager.snapshot_db(&app_slug).await {
-                Ok(path) => info!(path = %path.display(), "Snapshot created"),
-                Err(e) => error!(app = %app_slug, "Snapshot failed: {e}"),
+                Ok(path) => {
+                    let msg = format!("Snapshot created at {}", path.display());
+                    info!("{msg}");
+                    let _ = outbound_tx
+                        .send(EnvAgentMessage::PipelineProgress {
+                            pipeline_id,
+                            step: "backup-db".into(),
+                            success: true,
+                            message: Some(msg),
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    let msg = format!("Snapshot failed: {e}");
+                    error!(app = %app_slug, "{msg}");
+                    let _ = outbound_tx
+                        .send(EnvAgentMessage::PipelineProgress {
+                            pipeline_id,
+                            step: "backup-db".into(),
+                            success: false,
+                            message: Some(msg),
+                        })
+                        .await;
+                }
             }
         }
 

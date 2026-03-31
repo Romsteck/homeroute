@@ -64,9 +64,32 @@ impl ContextGenerator {
         let workflow = self.render_workflow_md(app);
         write_if_changed(&rules_dir.join("workflow.md"), &workflow)?;
 
-        // 6. .mcp.json (Claude Code VS Code extension reads this for MCP servers)
+        // 6. .claude/rules/git.md (git workflow rules)
+        if app.git_repo.is_some() {
+            let git_rules = render_git_rules_md(app, &self.env_slug, self.env_type);
+            write_if_changed(&rules_dir.join("git.md"), &git_rules)?;
+        }
+
+        // 7. .mcp.json (Claude Code VS Code extension reads this for MCP servers)
         let mcp_json = self.render_mcp_json_for_app(&app.slug);
         write_if_changed(&app_dir.join(".mcp.json"), &mcp_json)?;
+
+        // Clean up legacy rule files from pre-environment migration
+        for legacy in &[
+            "deploy.md",
+            "env-context.md",
+            "homeroute-deploy.md",
+            "homeroute-dev.md",
+            "homeroute-docs.md",
+            "homeroute-dataverse.md",
+            "homeroute-store.md",
+            "project.md",
+        ] {
+            let p = rules_dir.join(legacy);
+            if p.exists() {
+                let _ = fs::remove_file(&p);
+            }
+        }
 
         info!(app = %app.slug, env = %self.env_slug, "context files generated");
         Ok(())
@@ -254,6 +277,7 @@ impl ContextGenerator {
              - Run: `{run_command}`\n\
              {service_section}\n\
              \n\
+             {git_section}\
              ## MCP\n\
              Voir `.claude/rules/mcp-tools.md` pour la liste complete des outils disponibles.\n\
              Tous les outils sont scopes automatiquement a ce projet.\n\
@@ -272,6 +296,7 @@ impl ContextGenerator {
             build_cmd = build_cmd,
             run_command = app.run_command,
             service_section = service_section,
+            git_section = render_git_section_claude_md(&app.git_repo),
             other_apps = other_apps_section,
         )
     }
@@ -590,13 +615,16 @@ impl ContextGenerator {
              \n\
              ## Documentation\n\
              - Lire la doc avant de modifier l'app: `docs.get`\n\
-             - Mettre a jour apres modification: `docs.update`\n",
+             - Mettre a jour apres modification: `docs.update`\n\
+             \n\
+             {git_workflow}",
             name = app.name,
             stack = app.stack.display_name(),
             slug = app.slug,
             run_command = app.run_command,
             build_cmd = build_cmd,
             env_section = env_section,
+            git_workflow = render_git_section_workflow(&app.git_repo, self.env_type),
         )
     }
 }
@@ -608,6 +636,104 @@ fn env_type_label(env_type: EnvType) -> &'static str {
         EnvType::Development => "Development",
         EnvType::Acceptance => "Acceptance",
         EnvType::Production => "Production",
+    }
+}
+
+fn render_git_rules_md(
+    app: &EnvAgentAppConfig,
+    _env_slug: &str,
+    env_type: EnvType,
+) -> String {
+    let git_url = match &app.git_repo {
+        Some(url) => url.as_str(),
+        None => return String::new(),
+    };
+
+    if env_type != EnvType::Development {
+        return format!(
+            "# Git — {name}\n\
+             \n\
+             Le code est en lecture seule dans cet environnement.\n\
+             Git est disponible pour consultation uniquement (`git log`, `git diff`, `git blame`).\n",
+            name = app.name,
+        );
+    }
+
+    format!(
+        "# Git — {name}\n\
+         \n\
+         ## Repository HomeRoute\n\
+         - Remote origin: `{git_url}`\n\
+         - Repo gere par hr-git (bare repo sur l'orchestrator)\n\
+         - Protocole: Smart HTTP (pas de SSH, pas de token)\n\
+         \n\
+         ## Regles obligatoires\n\
+         \n\
+         ### Debut de session\n\
+         - `git status` pour verifier l'etat du working directory\n\
+         - `git pull` si des changements ont ete faits depuis une autre session\n\
+         \n\
+         ### Pendant le travail\n\
+         - Committer apres chaque modification significative (feature, bugfix, refactor)\n\
+         - Messages de commit courts et descriptifs en anglais\n\
+         - Ne jamais mentionner Claude ou l'IA dans les messages de commit\n\
+         - `git add -A && git commit -m \"description\"` — ne pas oublier le push\n\
+         \n\
+         ### Fin de session\n\
+         - `git push` pour envoyer les commits vers le repo HomeRoute\n\
+         - Verifier que le push a reussi\n\
+         \n\
+         ## Fichiers exclus (.gitignore)\n\
+         Les fichiers suivants sont generes automatiquement et ne doivent JAMAIS etre commites :\n\
+         - `CLAUDE.md`, `.claude/`, `.mcp.json` — contexte Claude Code (regenere par env-agent)\n\
+         - `node_modules/`, `target/`, `.next/`, `dist/`, `bin/` — artefacts de build\n\
+         - `*.db`, `.dataverse/` — bases de donnees\n\
+         \n\
+         ## Commandes utiles\n\
+         ```bash\n\
+         git status              # etat du working directory\n\
+         git log --oneline -10   # historique recent\n\
+         git diff                # changements non stages\n\
+         git add -A && git commit -m \"msg\" && git push\n\
+         ```\n\
+         \n\
+         ## Outils MCP git\n\
+         - `git.log` — consulter l'historique des commits\n\
+         - `git.branches` — lister les branches\n",
+        name = app.name,
+        git_url = git_url,
+    )
+}
+
+fn render_git_section_claude_md(git_repo: &Option<String>) -> String {
+    match git_repo {
+        Some(url) => format!(
+            "## Git\n\
+             - Remote: `{url}`\n\
+             - Committer et push les modifications apres chaque changement significatif\n\
+             \n\
+             "
+        ),
+        None => String::new(),
+    }
+}
+
+fn render_git_section_workflow(git_repo: &Option<String>, env_type: EnvType) -> String {
+    match (git_repo, env_type) {
+        (Some(_url), EnvType::Development) => {
+            "## Git\n\
+             - `git status` avant de commencer le travail\n\
+             - Committer avec un message descriptif apres chaque modification significative\n\
+             - `git push` en fin de session de travail\n\
+             - Ne pas committer les fichiers generes (CLAUDE.md, .claude/, .mcp.json, bin/)\n"
+                .to_string()
+        }
+        (Some(_url), _) => {
+            "## Git\n\
+             - Code en lecture seule. Git est disponible pour consultation (`git log`, `git diff`).\n"
+                .to_string()
+        }
+        (None, _) => String::new(),
     }
 }
 
@@ -652,6 +778,7 @@ mod tests {
             watch_command: None,
             test_command: None,
             description: None,
+            git_repo: None,
         }
     }
 
@@ -668,6 +795,7 @@ mod tests {
             watch_command: None,
             test_command: None,
             description: None,
+            git_repo: Some("http://10.0.0.254:4000/api/git/repos/wallet.git/".to_string()),
         }
     }
 
@@ -932,6 +1060,61 @@ mod tests {
         assert!(md.contains("## Base de donnees"));
         assert!(md.contains("## Todos"));
         assert!(md.contains("## Documentation"));
+    }
+
+    #[test]
+    fn test_git_section_in_claude_md() {
+        let ctx = test_generator();
+        let app = test_app_wallet(); // has git_repo
+        let md = ctx.render_claude_md(&app, &[app.clone()], &None);
+        assert!(md.contains("## Git"));
+        assert!(md.contains("wallet.git"));
+    }
+
+    #[test]
+    fn test_no_git_section_without_repo() {
+        let ctx = test_generator();
+        let app = test_app(); // no git_repo
+        let md = ctx.render_claude_md(&app, &[app.clone()], &None);
+        assert!(!md.contains("## Git"));
+    }
+
+    #[test]
+    fn test_git_workflow_dev() {
+        let ctx = test_generator();
+        let app = test_app_wallet();
+        let md = ctx.render_workflow_md(&app);
+        assert!(md.contains("## Git"));
+        assert!(md.contains("git push"));
+        assert!(md.contains("git status"));
+    }
+
+    #[test]
+    fn test_git_rules_md_dev() {
+        let app = test_app_wallet();
+        let md = render_git_rules_md(&app, "dev", EnvType::Development);
+        assert!(md.contains("# Git — Wallet"));
+        assert!(md.contains("wallet.git"));
+        assert!(md.contains("Regles obligatoires"));
+        assert!(md.contains("git push"));
+        assert!(md.contains(".gitignore"));
+        assert!(md.contains("git.log"));
+    }
+
+    #[test]
+    fn test_git_rules_md_prod() {
+        let mut app = test_app_wallet();
+        app.git_repo = Some("http://10.0.0.254:4000/api/git/repos/wallet.git/".into());
+        let md = render_git_rules_md(&app, "prod", EnvType::Production);
+        assert!(md.contains("lecture seule"));
+        assert!(!md.contains("git push"));
+    }
+
+    #[test]
+    fn test_git_rules_md_none() {
+        let app = test_app(); // no git_repo
+        let md = render_git_rules_md(&app, "dev", EnvType::Development);
+        assert!(md.is_empty());
     }
 
     #[test]

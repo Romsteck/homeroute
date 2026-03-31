@@ -58,6 +58,7 @@ pub struct WsState {
     pub edge: Arc<EdgeClient>,
     pub netcore: Arc<NetcoreClient>,
     pub pipeline_engine: Arc<hr_pipeline::PipelineEngine>,
+    pub git: Arc<hr_git::GitService>,
 }
 
 // ── Constants ────────────────────────────────────────────────────────
@@ -1795,6 +1796,21 @@ async fn handle_env_agent_message(
                         warn!(domain = code_domain, error = %e, "Failed to set code-server route");
                     } else {
                         info!(domain = code_domain, env_slug, "Set code-server route");
+                    }
+                }
+            }
+
+            // Auto-create git bare repos for dev environment apps
+            if let Some(env_record) = env_manager.get_by_slug(env_slug).await {
+                if env_record.env_type == hr_environment::types::EnvType::Development {
+                    let git = state.git.clone();
+                    for app in &apps {
+                        if !git.repo_exists(&app.slug) {
+                            match git.create_repo(&app.slug).await {
+                                Ok(_) => info!(env_slug, app_slug = app.slug, "Auto-created git repo for dev app"),
+                                Err(e) => warn!(env_slug, app_slug = app.slug, error = %e, "Failed to auto-create git repo"),
+                            }
+                        }
                     }
                 }
             }

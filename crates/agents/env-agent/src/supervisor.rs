@@ -80,6 +80,11 @@ impl AppSupervisor {
         format!("{}-watch.service", slug)
     }
 
+    /// Check if an app exists in the supervisor config.
+    pub fn has_app(&self, slug: &str) -> bool {
+        self.apps.iter().any(|a| a.slug == slug)
+    }
+
     /// Find an app config by slug, or return an error.
     fn find_app(&self, slug: &str) -> Result<&EnvAgentAppConfig> {
         self.apps
@@ -111,6 +116,59 @@ impl AppSupervisor {
                 let _ = std::fs::remove_file(&link_path);
                 if let Err(e) = std::os::unix::fs::symlink(&db_file, &link_path) {
                     warn!(slug = %app.slug, error = %e, "failed to create .dataverse symlink");
+                }
+            }
+
+            // --- Git init (if git_repo is configured and .git doesn't exist) ---
+            if let Some(ref git_url) = app.git_repo {
+                let git_dir = format!("{}/.git", working_dir);
+                if !Path::new(&git_dir).exists() {
+                    info!(slug = %app.slug, "initializing git repository");
+                    let git = |args: &[&str]| {
+                        std::process::Command::new("git")
+                            .args(args)
+                            .current_dir(&working_dir)
+                            .output()
+                    };
+                    // Ensure safe.directory is set to avoid ownership issues
+                    let _ = std::process::Command::new("git")
+                        .args(["config", "--global", "--add", "safe.directory", &working_dir])
+                        .output();
+                    let _ = git(&["init"]);
+                    let _ = git(&["remote", "add", "origin", git_url]);
+                    let _ = git(&["config", "user.name", "env-agent"]);
+                    let _ = git(&["config", "user.email", "env-agent@homeroute.local"]);
+
+                    // Write .gitignore if not present
+                    let gitignore_path = format!("{}/.gitignore", working_dir);
+                    if !Path::new(&gitignore_path).exists() {
+                        let _ = std::fs::write(&gitignore_path, GITIGNORE_CONTENT);
+                    }
+
+                    // Determine branch from remote, default to main
+                    let branch = std::process::Command::new("git")
+                        .args(["ls-remote", "--symref", "origin", "HEAD"])
+                        .current_dir(&working_dir)
+                        .output()
+                        .ok()
+                        .and_then(|o| String::from_utf8(o.stdout).ok())
+                        .and_then(|s| {
+                            s.lines()
+                                .find(|l| l.contains("ref:"))
+                                .and_then(|l| l.split_whitespace().nth(1))
+                                .map(|r| r.trim_start_matches("refs/heads/").to_string())
+                        })
+                        .unwrap_or_else(|| "main".to_string());
+                    let _ = git(&["branch", "-m", &branch]);
+
+                    // Initial commit + push
+                    let _ = git(&["add", "-A"]);
+                    if let Ok(output) = git(&["commit", "-m", &format!("initial commit: {}", app.slug)]) {
+                        if output.status.success() {
+                            let _ = git(&["push", "--force", "-u", "origin", &branch]);
+                            info!(slug = %app.slug, branch = %branch, "Git initialized with initial commit");
+                        }
+                    }
                 }
             }
 
@@ -391,6 +449,21 @@ impl AppSupervisor {
 }
 
 /// Write a unit file only if the content has changed.
+/// Default .gitignore for app repositories.
+const GITIGNORE_CONTENT: &str = "\
+node_modules/
+target/
+.next/
+dist/
+*.db
+.dataverse/
+CLAUDE.md
+.claude/
+.mcp.json
+bin/
+.pnpm-store/
+";
+
 fn write_unit_if_changed(path: &Path, content: &str) -> Result<()> {
     if path.exists() {
         if let Ok(existing) = std::fs::read_to_string(path) {
@@ -466,6 +539,7 @@ mod tests {
             watch_command: None,
             test_command: None,
             description: None,
+            git_repo: None,
         }];
         let supervisor = AppSupervisor::new(apps, EnvType::Development, "/apps".to_string(), "/opt/env-agent/data/db".to_string());
         assert!(supervisor.find_app("trader").is_ok());

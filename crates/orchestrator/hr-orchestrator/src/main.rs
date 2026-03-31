@@ -1,5 +1,6 @@
 #![recursion_limit = "512"]
 mod env_manager;
+mod hooks;
 mod ipc_handler;
 mod mcp;
 mod backup_pipeline;
@@ -14,6 +15,7 @@ use hr_registry::AgentRegistry;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tower_http::services::ServeDir;
 use tracing::{info, warn};
 
 use ipc_handler::OrchestratorHandler;
@@ -259,8 +261,11 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // ── Pipeline Engine ───────────────────────────────────────────
+    // ── Pipeline Engine + Store ────────────────────────────────────
     let pipeline_engine = Arc::new(hr_pipeline::PipelineEngine::new());
+    let pipeline_store = Arc::new(hr_pipeline::PipelineStore::new(
+        PathBuf::from("/var/lib/server-dashboard/pipelines.json"),
+    ));
     info!("Pipeline engine initialized");
 
     let handler = Arc::new(OrchestratorHandler {
@@ -291,7 +296,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── MCP endpoint (optional, requires MCP_TOKEN env var) ─────────
 
-    let mcp_state = mcp::McpState::from_env(registry.clone(), git_service.clone(), edge.clone(), env_manager.clone(), pipeline_engine.clone());
+    let mcp_state = mcp::McpState::from_env(registry.clone(), git_service.clone(), edge.clone(), env_manager.clone(), pipeline_engine.clone(), pipeline_store.clone());
     if mcp_state.is_some() {
         info!("MCP endpoint enabled (POST /mcp)");
     }
@@ -306,6 +311,7 @@ async fn main() -> anyhow::Result<()> {
         edge: edge.clone(),
         netcore,
         pipeline_engine: pipeline_engine.clone(),
+        git: git_service.clone(),
     };
 
     let ws_router = axum::Router::new()
@@ -320,6 +326,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/host-agents/ws", axum::routing::get(ws_routes::host_agent_ws))
         // Alias: host agents connect via legacy path /api/hosts/agent/ws
         .route("/api/hosts/agent/ws", axum::routing::get(ws_routes::host_agent_ws))
+        // Serve build artifacts for env-agents to download
+        .nest_service("/artifacts", ServeDir::new("/opt/homeroute/data/artifacts"))
         .with_state(ws_state);
 
     // Merge MCP route (has its own state, only if MCP_TOKEN is set)
@@ -331,6 +339,16 @@ async fn main() -> anyhow::Result<()> {
     } else {
         ws_router
     };
+
+    // Merge git push hook route
+    let hook_state = hooks::HookState {
+        pipeline_engine: pipeline_engine.clone(),
+        pipeline_store: pipeline_store.clone(),
+    };
+    let hook_router = axum::Router::new()
+        .route("/hooks/git-push", axum::routing::post(hooks::handle_git_push_hook))
+        .with_state(hook_state);
+    let ws_router = ws_router.merge(hook_router);
 
     let ws_handle = tokio::spawn(async move {
         let addr: SocketAddr = format!("[::]:{}", ORCHESTRATOR_WS_PORT)
