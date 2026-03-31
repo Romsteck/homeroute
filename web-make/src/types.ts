@@ -117,6 +117,15 @@ export interface GateApproval {
   resolved_by?: string
 }
 
+// --- App Stacks ---
+
+export type AppStackType = 'next-js' | 'axum-vite'
+
+export const APP_STACKS: { value: AppStackType; label: string }[] = [
+  { value: 'next-js', label: 'Next.js' },
+  { value: 'axum-vite', label: 'Axum + Vite/React' },
+]
+
 // --- DB Explorer ---
 
 export interface DbTable {

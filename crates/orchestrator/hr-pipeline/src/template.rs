@@ -178,7 +178,7 @@ mod tests {
     fn test_steps_skip_test() {
         let mut config = default_config("myapp");
         config.skip_steps.insert("test".into());
-        let steps = steps_for_stack(AppStackType::Axum, &config, false);
+        let steps = steps_for_stack(AppStackType::AxumVite, &config, false);
         let names: Vec<&str> = steps.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["build", "deploy", "health-check"]);
     }

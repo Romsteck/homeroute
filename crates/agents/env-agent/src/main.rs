@@ -8,6 +8,7 @@ mod discovery;
 mod mcp;
 mod port_registry;
 mod proxy;
+mod scaffold;
 mod secrets;
 mod supervisor;
 
@@ -132,13 +133,17 @@ async fn main() -> Result<()> {
         supervisor: Arc::clone(&supervisor),
     };
 
+    let shared_config = Arc::new(tokio::sync::RwLock::new(cfg.clone()));
+    let shared_port_registry = Arc::new(std::sync::Mutex::new(port_reg));
+
     let mcp_state = mcp::McpState {
         db: Arc::clone(&db_manager),
         supervisor: Arc::clone(&supervisor),
-        config: Arc::new(cfg.clone()),
+        config: Arc::clone(&shared_config),
         context: Arc::clone(&context_gen),
         secrets: Arc::clone(&secrets),
         http_client: reqwest::Client::new(),
+        port_registry: Arc::clone(&shared_port_registry),
     };
 
     let discovery_router = discovery::router(discovery_state);
@@ -169,7 +174,7 @@ async fn main() -> Result<()> {
     // Routes *.{env}.{domain} traffic to the correct app based on Host header.
     {
         let proxy_state = app_proxy::AppProxyState {
-            config: Arc::new(cfg.clone()),
+            config: Arc::clone(&shared_config),
             http_client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
                 .build_http(),
         };

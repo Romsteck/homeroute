@@ -8,7 +8,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use hr_ipc::orchestrator::OrchestratorRequest;
 
@@ -20,7 +20,7 @@ pub fn router() -> Router<ApiState> {
         .route("/environments/{slug}", get(get_environment).put(update_environment).delete(destroy_environment))
         .route("/environments/{slug}/start", post(start_environment))
         .route("/environments/{slug}/stop", post(stop_environment))
-        .route("/environments/{slug}/apps", get(get_environment_apps))
+        .route("/environments/{slug}/apps", get(get_environment_apps).post(create_app))
         .route("/environments/{slug}/monitoring", get(get_environment_monitoring))
         .route("/environments/{slug}/apps/{app_slug}/control", post(control_app))
         .route("/environments/{slug}/apps/{app_slug}/logs", get(get_app_logs))
@@ -369,6 +369,113 @@ async fn get_environment_apps(
         )
             .into_response(),
         Err(e) => ipc_err_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateAppRequest {
+    name: String,
+    slug: String,
+    stack: String,
+    #[serde(default)]
+    has_db: bool,
+}
+
+/// POST /api/environments/:slug/apps — Create a new app in the environment.
+async fn create_app(
+    State(state): State<ApiState>,
+    Path(env_slug): Path<String>,
+    Json(req): Json<CreateAppRequest>,
+) -> impl IntoResponse {
+    // 1. Verify env is dev (not read-only)
+    let env_type = match resolve_env_type(&state, &env_slug).await {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"success": false, "error": e})),
+            )
+                .into_response();
+        }
+    };
+    if is_readonly_env(&env_type) {
+        return readonly_forbidden("App creation");
+    }
+
+    // 2. Verify global uniqueness of the slug across all environments
+    match state.orchestrator.request(&OrchestratorRequest::ListEnvironments).await {
+        Ok(resp) if resp.ok => {
+            if let Some(envs) = resp.data.as_ref().and_then(|d| d.as_array()) {
+                for env in envs {
+                    let this_env_slug = env.get("slug").and_then(|s| s.as_str()).unwrap_or("");
+                    if let Some(apps) = env.get("apps").and_then(|a| a.as_array()) {
+                        for app in apps {
+                            if app.get("slug").and_then(|s| s.as_str()) == Some(&req.slug) {
+                                return (
+                                    StatusCode::CONFLICT,
+                                    Json(serde_json::json!({
+                                        "success": false,
+                                        "error": format!("App slug '{}' already exists in environment '{}'", req.slug, this_env_slug)
+                                    })),
+                                )
+                                    .into_response();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(resp) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"success": false, "error": resp.error})),
+            )
+                .into_response();
+        }
+        Err(e) => return ipc_err_response(e),
+    }
+
+    // 3. Create git repo (warn if fails, don't block)
+    match state.orchestrator.request(&OrchestratorRequest::CreateRepo { slug: req.slug.clone() }).await {
+        Ok(resp) if resp.ok => {
+            info!(slug = req.slug, "Git repo created");
+        }
+        Ok(resp) => {
+            warn!(slug = req.slug, error = ?resp.error, "Git repo creation failed (non-blocking)");
+        }
+        Err(e) => {
+            warn!(slug = req.slug, error = %e, "Git repo creation failed (non-blocking)");
+        }
+    }
+
+    // 4. Call env-agent MCP app.create
+    info!(env = env_slug, slug = req.slug, name = req.name, stack = req.stack, "Creating app in environment");
+    match env_mcp_call(
+        &state,
+        &env_slug,
+        "app.create",
+        serde_json::json!({
+            "name": req.name,
+            "slug": req.slug,
+            "stack": req.stack,
+            "has_db": req.has_db,
+        }),
+    )
+    .await
+    {
+        Ok(result) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"success": true, "data": result})),
+        )
+            .into_response(),
+        Err(e) => {
+            error!("App creation failed: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"success": false, "error": e})),
+            )
+                .into_response()
+        }
     }
 }
 

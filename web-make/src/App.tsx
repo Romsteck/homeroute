@@ -7,8 +7,6 @@ import { AppDetail } from './pages/AppDetail'
 import { Pipelines } from './pages/Pipelines'
 import { PipelineDetail } from './pages/PipelineDetail'
 import { PipelineConfigPage } from './pages/PipelineConfig'
-import { Environments } from './pages/Environments'
-import { EnvironmentDetail } from './pages/EnvironmentDetail'
 import { DbExplorer } from './pages/DbExplorer'
 import { FormBuilder } from './pages/FormBuilder'
 import { fetchEnvironments } from './api'
@@ -72,8 +70,6 @@ export default function App() {
           <Route path="/apps/:slug/pipeline" element={<PipelineConfigPage />} />
           <Route path="/pipelines" element={<Pipelines />} />
           <Route path="/pipelines/:id" element={<PipelineDetail />} />
-          <Route path="/environments" element={<Environments />} />
-          <Route path="/environments/:slug" element={<EnvironmentDetail />} />
           <Route path="/tables" element={<DbExplorer currentEnv={currentEnv} />} />
           <Route path="/environments/:slug/db" element={<DbExplorer />} />
           <Route path="/environments/:slug/db/:appSlug" element={<DbExplorer />} />

@@ -97,6 +97,15 @@ impl EnvAgentConfig {
         }
     }
 
+    /// Save configuration to a TOML file (atomic write: .tmp then rename).
+    pub fn save(&self, path: &str) -> anyhow::Result<()> {
+        let toml_str = toml::to_string_pretty(self)?;
+        let tmp_path = format!("{}.tmp", path);
+        std::fs::write(&tmp_path, &toml_str)?;
+        std::fs::rename(&tmp_path, path)?;
+        Ok(())
+    }
+
     /// WebSocket URL to connect to the orchestrator.
     pub fn orchestrator_ws_url(&self) -> String {
         format!(

@@ -148,9 +148,6 @@ async fn package_artifact(
                 "client/dist/".to_string(),
             ]
         }
-        AppStackType::Axum => {
-            vec!["target/release/".to_string()]
-        }
         AppStackType::NextJs => {
             vec![
                 ".next/".to_string(),

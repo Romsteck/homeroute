@@ -370,15 +370,8 @@ export function DbExplorer({ currentEnv }: DbExplorerProps) {
         <div className="flex items-center gap-2 mb-1">
           {!isStandaloneRoute && (
             <>
-              <Link to="/environments" className="text-xs text-white/25 hover:text-white/50 transition-colors">
-                Environments
-              </Link>
-              <span className="text-xs text-white/10">/</span>
-              <Link
-                to={`/environments/${envSlug}`}
-                className="text-xs text-white/25 hover:text-white/50 transition-colors"
-              >
-                {envSlug}
+              <Link to="/tables" className="text-xs text-white/25 hover:text-white/50 transition-colors">
+                Tables
               </Link>
               <span className="text-xs text-white/10">/</span>
             </>

@@ -46,10 +46,11 @@ const METHOD_NOT_FOUND: i32 = -32601;
 pub struct McpState {
     pub db: Arc<DbManager>,
     pub supervisor: Arc<AppSupervisor>,
-    pub config: Arc<hr_environment::config::EnvAgentConfig>,
+    pub config: Arc<tokio::sync::RwLock<hr_environment::config::EnvAgentConfig>>,
     pub context: Arc<ContextGenerator>,
     pub secrets: Arc<SecretsManager>,
     pub http_client: reqwest::Client,
+    pub port_registry: Arc<std::sync::Mutex<crate::port_registry::PortRegistry>>,
 }
 
 // ── HTTP Handler ────────────────────────────────────────────────────
@@ -80,9 +81,9 @@ pub async fn mcp_handler(
     debug!(method = %request.method, project = ?project_slug, "MCP request");
 
     let response = match request.method.as_str() {
-        "initialize" => handle_initialize(id, &state),
+        "initialize" => handle_initialize(id, &state).await,
         "notifications/initialized" => return (StatusCode::OK, Json(json!({}))),
-        "tools/list" => handle_tools_list(id, &state),
+        "tools/list" => handle_tools_list(id, &state).await,
         "tools/call" => handle_tools_call(id, request.params, &state, project_slug).await,
         _ => error_response(
             id,
@@ -96,8 +97,9 @@ pub async fn mcp_handler(
 
 // ── Initialize ──────────────────────────────────────────────────────
 
-fn handle_initialize(id: Value, state: &McpState) -> Value {
-    let env_type = state.config.env_type();
+async fn handle_initialize(id: Value, state: &McpState) -> Value {
+    let config = state.config.read().await;
+    let env_type = config.env_type();
     success_response(
         id,
         json!({
@@ -115,7 +117,7 @@ fn handle_initialize(id: Value, state: &McpState) -> Value {
                  git.* (repos), todos.* (task tracking), jobs.* (job reporting).\n\
                  Use ?project=<slug> query param to scope proxied tools to a specific app.\n\
                  Permissions are enforced based on the environment type.",
-                state.config.env_slug, env_type
+                config.env_slug, env_type
             )
         }),
     )
@@ -123,8 +125,9 @@ fn handle_initialize(id: Value, state: &McpState) -> Value {
 
 // ── Tools list ──────────────────────────────────────────────────────
 
-fn handle_tools_list(id: Value, state: &McpState) -> Value {
-    let perms = EnvPermissions::for_type(state.config.env_type());
+async fn handle_tools_list(id: Value, state: &McpState) -> Value {
+    let config = state.config.read().await;
+    let perms = EnvPermissions::for_type(config.env_type());
     let tools = build_tool_definitions(&perms, true);
     success_response(id, json!({ "tools": tools }))
 }
@@ -173,8 +176,22 @@ fn build_tool_definitions(perms: &EnvPermissions, include_studio: bool) -> Value
         }),
     ];
 
-    // app.start/stop/restart only in dev (build_run permission)
+    // app.create/start/stop/restart only in dev (build_run permission)
     if perms.build_run {
+        tools.push(json!({
+            "name": "app.create",
+            "description": "Create a new app in this environment. Scaffolds code, assigns port, generates systemd service, and starts the app.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Display name for the app" },
+                    "slug": { "type": "string", "description": "URL-safe slug (alphanumeric + hyphens)" },
+                    "stack": { "type": "string", "enum": ["next-js", "axum-vite"], "description": "Technology stack" },
+                    "has_db": { "type": "boolean", "description": "Whether the app needs a database (default false)" }
+                },
+                "required": ["name", "slug", "stack"]
+            }
+        }));
         tools.extend([
             json!({
                 "name": "app.start",
@@ -787,15 +804,27 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
 
     debug!(tool = tool_name, project = ?project_slug, "Tool call");
 
+    // Read config once, clone what we need, drop the lock before async work
+    let (env_type, env_slug) = {
+        let config = state.config.read().await;
+        (config.env_type(), config.env_slug.clone())
+    };
+    let perms = EnvPermissions::for_type(env_type);
+
     match tool_name {
-        "env.info" => tool_env_info(id, state),
-        "env.permissions" => tool_env_permissions(id, state),
+        "env.info" => tool_env_info(id, state).await,
+        "env.permissions" => tool_env_permissions(id, state).await,
         "app.list" => tool_app_list(id, state).await,
         "app.status" => tool_app_status(id, &arguments, state).await,
         "app.health" => tool_app_health(id, &arguments, state).await,
         "app.logs" => tool_app_logs(id, &arguments, state).await,
+        "app.create" => {
+            if !perms.build_run {
+                return tool_error(id, "App creation is not allowed in this environment type");
+            }
+            tool_app_create(id, &arguments, state).await
+        }
         "app.start" | "app.stop" | "app.restart" => {
-            let perms = EnvPermissions::for_type(state.config.env_type());
             if !perms.build_run {
                 return tool_error(id, "App control is not allowed in this environment type");
             }
@@ -809,25 +838,21 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "secrets.list" => tool_secrets_list(id, &arguments, state),
         "secrets.get" => tool_secrets_get(id, &arguments, state),
         "secrets.set" => {
-            let perms = EnvPermissions::for_type(state.config.env_type());
             if !perms.env_vars_write {
                 return tool_error(id, "Setting secrets is not allowed in this environment type");
             }
             tool_secrets_set(id, &arguments, state)
         }
         "secrets.delete" => {
-            let perms = EnvPermissions::for_type(state.config.env_type());
             if !perms.env_vars_write {
                 return tool_error(id, "Deleting secrets is not allowed in this environment type");
             }
             tool_secrets_delete(id, &arguments, state)
         }
         t if t.starts_with("db.") => {
-            let perms = EnvPermissions::for_type(state.config.env_type());
             handle_db_tool_inner(id, t, &arguments, &state.db, &perms).await
         }
         "studio.refresh_context" | "studio.refresh_all" => {
-            let perms = EnvPermissions::for_type(state.config.env_type());
             if !perms.code_edit {
                 return tool_error(id, "Studio tools are not available in this environment type");
             }
@@ -842,7 +867,7 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
             let slug = project_slug.clone().unwrap_or_default();
             let mut args = arguments.clone();
             args["app_slug"] = json!(slug);
-            args["source_env"] = json!(state.config.env_slug);
+            args["source_env"] = json!(env_slug);
             if args.get("version").and_then(|v| v.as_str()).is_none() {
                 args["version"] = json!("latest");
             }
@@ -856,7 +881,7 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "pipeline.history" => {
             let mut args = arguments.clone();
             args["app_slug"] = json!(project_slug.clone().unwrap_or_default());
-            args["source_env"] = json!(state.config.env_slug);
+            args["source_env"] = json!(env_slug);
             if args.get("limit").is_none() {
                 args["limit"] = json!(10);
             }
@@ -867,13 +892,13 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "deploy.status" => {
             let mut args = arguments.clone();
             args["app_id"] = json!(project_slug.clone().unwrap_or_default());
-            args["env_slug"] = json!(state.config.env_slug);
+            args["env_slug"] = json!(env_slug);
             proxy_orchestrator_tool(id, state, "deploy.status", args).await
         }
         "deploy.logs" => {
             let mut args = arguments.clone();
             args["app_id"] = json!(project_slug.clone().unwrap_or_default());
-            args["env_slug"] = json!(state.config.env_slug);
+            args["env_slug"] = json!(env_slug);
             if args.get("lines").is_none() {
                 args["lines"] = json!(50);
             }
@@ -973,12 +998,16 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
 // ── Proxy helpers ──────────────────────────────────────────────────
 
 async fn proxy_orchestrator_tool(id: Value, state: &McpState, tool_name: &str, args: Value) -> Value {
-    let token = state.config.mcp_token.as_deref().unwrap_or(&state.config.token);
+    let (address, port, mcp_token, token) = {
+        let config = state.config.read().await;
+        (config.homeroute_address.clone(), config.homeroute_port, config.mcp_token.clone(), config.token.clone())
+    };
+    let effective_token = mcp_token.as_deref().unwrap_or(&token);
     match crate::proxy::proxy_to_orchestrator(
         &state.http_client,
-        &state.config.homeroute_address,
-        state.config.homeroute_port,
-        token,
+        &address,
+        port,
+        effective_token,
         tool_name,
         args,
     ).await {
@@ -988,9 +1017,13 @@ async fn proxy_orchestrator_tool(id: Value, state: &McpState, tool_name: &str, a
 }
 
 async fn proxy_hub_tool(id: Value, state: &McpState, tool_name: &str, args: Value) -> Value {
+    let hub_url = {
+        let config = state.config.read().await;
+        config.hub_url.clone()
+    };
     match crate::proxy::proxy_to_hub(
         &state.http_client,
-        &state.config.hub_url,
+        &hub_url,
         tool_name,
         args,
     ).await {
@@ -1001,8 +1034,8 @@ async fn proxy_hub_tool(id: Value, state: &McpState, tool_name: &str, args: Valu
 
 // ── env tools (HTTP) ────────────────────────────────────────────────
 
-fn tool_env_info(id: Value, state: &McpState) -> Value {
-    let cfg = &state.config;
+async fn tool_env_info(id: Value, state: &McpState) -> Value {
+    let cfg = state.config.read().await;
     let perms = EnvPermissions::for_type(cfg.env_type());
     tool_success(
         id,
@@ -1024,8 +1057,9 @@ fn tool_env_info(id: Value, state: &McpState) -> Value {
     )
 }
 
-fn tool_env_permissions(id: Value, state: &McpState) -> Value {
-    let perms = EnvPermissions::for_type(state.config.env_type());
+async fn tool_env_permissions(id: Value, state: &McpState) -> Value {
+    let config = state.config.read().await;
+    let perms = EnvPermissions::for_type(config.env_type());
     tool_success(id, serde_json::to_value(&perms).unwrap_or(json!(null)))
 }
 
@@ -1097,6 +1131,143 @@ async fn tool_app_restart(id: Value, args: &Value, state: &McpState) -> Value {
     }
 }
 
+async fn tool_app_create(id: Value, args: &Value, state: &McpState) -> Value {
+    use hr_environment::config::EnvAgentAppConfig;
+    use hr_environment::types::AppStackType;
+
+    let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
+        return tool_error(id, "name required");
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return tool_error(id, "slug required");
+    };
+    let Some(stack_str) = args.get("stack").and_then(|v| v.as_str()) else {
+        return tool_error(id, "stack required");
+    };
+    let has_db = args.get("has_db").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // Validate slug: alphanumeric + hyphens, not empty
+    if slug.is_empty() || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return tool_error(id, "slug must be alphanumeric with hyphens only");
+    }
+    if slug.starts_with('-') || slug.ends_with('-') {
+        return tool_error(id, "slug must not start or end with a hyphen");
+    }
+
+    // Parse stack
+    let stack: AppStackType = match serde_json::from_str(&format!("\"{}\"", stack_str)) {
+        Ok(s) => s,
+        Err(_) => return tool_error(id, &format!("Invalid stack: {}. Use next-js, axum-vite, or axum", stack_str)),
+    };
+
+    // Check slug uniqueness in supervisor
+    if state.supervisor.has_app(slug) {
+        return tool_error(id, &format!("App '{}' already exists", slug));
+    }
+
+    // Assign port
+    let port = match state.port_registry.lock() {
+        Ok(mut reg) => match reg.assign_one(slug) {
+            Ok(p) => p,
+            Err(e) => return tool_error(id, &format!("Failed to assign port: {e}")),
+        },
+        Err(e) => return tool_error(id, &format!("Port registry lock error: {e}")),
+    };
+
+    // Read config values we need
+    let (apps_path, homeroute_address) = {
+        let config = state.config.read().await;
+        (config.apps_path.clone(), config.homeroute_address.clone())
+    };
+
+    // Build EnvAgentAppConfig with stack defaults (replace {slug} placeholder in run command)
+    let run_command = stack.default_run_command().replace("{slug}", slug);
+    let build_command = Some(stack.default_build_command().to_string());
+    let git_repo = Some(format!("http://{}:4000/api/git/repos/{}.git/", homeroute_address, slug));
+
+    let app_config = EnvAgentAppConfig {
+        slug: slug.to_string(),
+        name: name.to_string(),
+        stack,
+        port,
+        run_command,
+        build_command,
+        health_path: stack.default_health_path().to_string(),
+        has_db,
+        watch_command: None, // uses stack default
+        test_command: None,
+        description: None,
+        git_repo,
+    };
+
+    // Create app directory
+    let app_dir = std::path::PathBuf::from(&apps_path).join(slug);
+    if let Err(e) = std::fs::create_dir_all(&app_dir) {
+        return tool_error(id, &format!("Failed to create app directory: {e}"));
+    }
+
+    // Scaffold
+    if let Err(e) = crate::scaffold::scaffold_app(&app_dir, slug, stack, port) {
+        return tool_error(id, &format!("Failed to scaffold app: {e}"));
+    }
+
+    // Add to supervisor
+    if let Err(e) = state.supervisor.add_app(app_config.clone()) {
+        return tool_error(id, &format!("Failed to add app to supervisor: {e}"));
+    }
+
+    // Generate systemd unit
+    if let Err(e) = state.supervisor.generate_service_unit_for_app(&app_config) {
+        return tool_error(id, &format!("Failed to generate service unit: {e}"));
+    }
+
+    // systemctl daemon-reload
+    if let Err(e) = tokio::process::Command::new("systemctl")
+        .arg("daemon-reload")
+        .output()
+        .await
+    {
+        warn!(slug, error = %e, "daemon-reload failed");
+    }
+
+    // Start the app
+    if let Err(e) = state.supervisor.start_app(slug).await {
+        warn!(slug, error = %e, "failed to start new app (non-fatal)");
+    }
+
+    // Update and save config
+    {
+        let mut config = state.config.write().await;
+        config.apps.push(app_config.clone());
+        if let Err(e) = config.save(crate::CONFIG_PATH) {
+            warn!(slug, error = %e, "failed to save config");
+        }
+    }
+
+    // Save port registry
+    if let Ok(reg) = state.port_registry.lock() {
+        if let Err(e) = reg.save() {
+            warn!(slug, error = %e, "failed to save port registry");
+        }
+    }
+
+    // Refresh Claude Code context
+    let apps = { state.config.read().await.apps.clone() };
+    if let Err(e) = state.context.refresh_all(&apps) {
+        warn!(slug, error = %e, "failed to refresh context");
+    }
+
+    info!(slug, name, ?stack, port, has_db, "app created");
+    tool_success(id, json!({
+        "slug": slug,
+        "name": name,
+        "stack": stack_str,
+        "port": port,
+        "has_db": has_db,
+        "message": format!("App '{}' created and started on port {}", slug, port),
+    }))
+}
+
 // ── secrets tools (HTTP) ────────────────────────────────────────────
 
 fn tool_secrets_list(id: Value, args: &Value, state: &McpState) -> Value {
@@ -1124,10 +1295,7 @@ fn tool_secrets_get(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 fn tool_secrets_set(id: Value, args: &Value, state: &McpState) -> Value {
-    let perms = EnvPermissions::for_type(state.config.env_type());
-    if !perms.env_vars_write {
-        return tool_error(id, "Secrets writes not allowed in this environment type");
-    }
+    // Permission check is done in handle_tools_call before calling this function.
     let Some(app_slug) = args.get("app_slug").and_then(|v| v.as_str()) else {
         return tool_error(id, "app_slug required");
     };
@@ -1144,10 +1312,7 @@ fn tool_secrets_set(id: Value, args: &Value, state: &McpState) -> Value {
 }
 
 fn tool_secrets_delete(id: Value, args: &Value, state: &McpState) -> Value {
-    let perms = EnvPermissions::for_type(state.config.env_type());
-    if !perms.env_vars_write {
-        return tool_error(id, "Secrets writes not allowed in this environment type");
-    }
+    // Permission check is done in handle_tools_call before calling this function.
     let Some(app_slug) = args.get("app_slug").and_then(|v| v.as_str()) else {
         return tool_error(id, "app_slug required");
     };
@@ -1167,14 +1332,16 @@ async fn tool_studio_refresh(id: Value, args: &Value, state: &McpState) -> Value
     let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
         return tool_error(id, "slug required");
     };
-    match state.context.generate_for_app_by_slug(slug, &state.config.apps, &state.db).await {
+    let apps = { state.config.read().await.apps.clone() };
+    match state.context.generate_for_app_by_slug(slug, &apps, &state.db).await {
         Ok(()) => tool_success(id, json!({ "message": format!("Context refreshed for '{}'", slug) })),
         Err(e) => tool_error(id, &e.to_string()),
     }
 }
 
 async fn tool_studio_refresh_all(id: Value, state: &McpState) -> Value {
-    match state.context.generate_all_with_db(&state.config.apps, &state.db).await {
+    let apps = { state.config.read().await.apps.clone() };
+    match state.context.generate_all_with_db(&apps, &state.db).await {
         Ok(count) => tool_success(id, json!({ "message": format!("Context refreshed for {} apps", count) })),
         Err(e) => tool_error(id, &e.to_string()),
     }

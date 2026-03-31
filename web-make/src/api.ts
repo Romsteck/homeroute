@@ -455,6 +455,25 @@ export async function deleteDbRows(
   }
 }
 
+// ── Create app in environment ───────────────────────────────────
+
+export async function createApp(
+  envSlug: string,
+  data: { name: string; slug: string; stack: string; has_db?: boolean },
+): Promise<any> {
+  const res = await fetch(`${API_BASE}/environments/${envSlug}/apps`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({}))
+    throw new Error(json.error || 'Failed to create app')
+  }
+  const json = await res.json()
+  return json.data
+}
+
 // ── Cross-env monitoring ────────────────────────────────────────
 
 export async function fetchMonitoringSummary(): Promise<Environment[]> {

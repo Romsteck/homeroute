@@ -22,12 +22,8 @@ export function FormBuilder() {
       {/* Breadcrumb + Header */}
       <div>
         <div className="flex items-center gap-2 mb-2">
-          <Link to="/environments" className="text-xs text-white/30 hover:text-white/50">
-            Environments
-          </Link>
-          <span className="text-xs text-white/15">/</span>
-          <Link to={`/environments/${envSlug}`} className="text-xs text-white/30 hover:text-white/50">
-            {envSlug}
+          <Link to="/tables" className="text-xs text-white/30 hover:text-white/50">
+            Tables
           </Link>
           <span className="text-xs text-white/15">/</span>
           <span className="text-xs text-white/50">Form Builder</span>

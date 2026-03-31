@@ -340,7 +340,6 @@ impl ContextGenerator {
              ## Stacks supportees\n\
              - **Next.js** : `pnpm build` puis `node server.js` (custom server + WS)\n\
              - **Axum+Vite** : `cargo build --release` + `vite build` puis binaire Axum sert API + dist/\n\
-             - **Axum** : `cargo build --release` puis binaire Axum (API-only, pas de frontend)\n\
              \n\
              ## Regles\n\
              - Utiliser les outils MCP (app.*, db.*, studio.*) — JAMAIS ssh/scp/machinectl\n\

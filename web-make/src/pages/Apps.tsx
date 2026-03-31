@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { AppTable } from '../components/AppRow'
+import { CreateAppModal } from '../components/CreateAppModal'
 import { fetchApps, fetchEnvironments, controlApp } from '../api'
 import type { EnvApp } from '../types'
 import { isDevEnv } from '../types'
@@ -14,6 +15,7 @@ export function Apps({ currentEnv }: AppsProps) {
   const [error, setError] = useState<string | null>(null)
   const [controlling, setControlling] = useState<string | null>(null)
   const [isDev, setIsDev] = useState(true)
+  const [showCreateApp, setShowCreateApp] = useState(false)
 
   useEffect(() => {
     setLoading(true)
@@ -58,11 +60,24 @@ export function Apps({ currentEnv }: AppsProps) {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-[#e2e8f0]">Apps</h1>
-        <p className="text-sm text-white/40 mt-1">
-          {apps.length} apps in current environment, {runningCount} running
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-[#e2e8f0]">Apps</h1>
+          <p className="text-sm text-white/40 mt-1">
+            {apps.length} apps in current environment, {runningCount} running
+          </p>
+        </div>
+        {isDev && (
+          <button
+            onClick={() => setShowCreateApp(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-[#7c3aed]/15 text-[#a78bfa] hover:bg-[#7c3aed]/25 border border-[#7c3aed]/20 transition-colors"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+            </svg>
+            Create App
+          </button>
+        )}
       </div>
 
       {error && (
@@ -72,6 +87,17 @@ export function Apps({ currentEnv }: AppsProps) {
       )}
 
       <AppTable apps={apps} envSlug={currentEnv} onControl={isDev ? handleControl : undefined} controlling={controlling} />
+
+      {showCreateApp && (
+        <CreateAppModal
+          envSlug={currentEnv}
+          onCreated={() => {
+            setShowCreateApp(false)
+            fetchApps(currentEnv).then(setApps).catch(() => {})
+          }}
+          onClose={() => setShowCreateApp(false)}
+        />
+      )}
     </div>
   )
 }

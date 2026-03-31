@@ -102,6 +102,24 @@ impl PortRegistry {
         Ok(())
     }
 
+    /// Assign a single port to a new app slug.
+    /// Uses the same logic as assign_all phase 2: find the next available port from base_port.
+    pub fn assign_one(&mut self, slug: &str) -> Result<u16> {
+        if let Some(&existing) = self.assignments.get(slug) {
+            return Ok(existing);
+        }
+
+        let used_ports: std::collections::HashSet<u16> = self.assignments.values().copied().collect();
+        let mut next_port = self.base_port;
+        loop {
+            if !used_ports.contains(&next_port) {
+                self.assignments.insert(slug.to_string(), next_port);
+                return Ok(next_port);
+            }
+            next_port = next_port.checked_add(1).context("port overflow")?;
+        }
+    }
+
     /// Get the assigned port for a slug.
     pub fn port_for(&self, slug: &str) -> Option<u16> {
         self.assignments.get(slug).copied()

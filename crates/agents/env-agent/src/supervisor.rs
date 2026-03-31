@@ -53,7 +53,7 @@ pub struct AppProcessInfo {
 
 /// Manages app processes within the environment via systemd services.
 pub struct AppSupervisor {
-    apps: Vec<EnvAgentAppConfig>,
+    apps: std::sync::RwLock<Vec<EnvAgentAppConfig>>,
     env_type: EnvType,
     apps_path: String,
     db_path: String,
@@ -63,11 +63,26 @@ impl AppSupervisor {
     /// Create a new supervisor from the list of configured apps.
     pub fn new(apps: Vec<EnvAgentAppConfig>, env_type: EnvType, apps_path: String, db_path: String) -> Self {
         Self {
-            apps,
+            apps: std::sync::RwLock::new(apps),
             env_type,
             db_path,
             apps_path,
         }
+    }
+
+    /// Add a new app to the supervisor. Returns error if slug already exists.
+    pub fn add_app(&self, app: EnvAgentAppConfig) -> Result<()> {
+        let mut apps = self.apps.write().map_err(|e| anyhow!("RwLock poisoned: {e}"))?;
+        if apps.iter().any(|a| a.slug == app.slug) {
+            return Err(anyhow!("app '{}' already exists", app.slug));
+        }
+        apps.push(app);
+        Ok(())
+    }
+
+    /// Clone the current list of apps.
+    pub fn get_apps(&self) -> Vec<EnvAgentAppConfig> {
+        self.apps.read().map(|a| a.clone()).unwrap_or_default()
     }
 
     /// Whether this is a development environment (watch services enabled).
@@ -82,14 +97,15 @@ impl AppSupervisor {
 
     /// Check if an app exists in the supervisor config.
     pub fn has_app(&self, slug: &str) -> bool {
-        self.apps.iter().any(|a| a.slug == slug)
+        self.apps.read().map(|apps| apps.iter().any(|a| a.slug == slug)).unwrap_or(false)
     }
 
-    /// Find an app config by slug, or return an error.
-    fn find_app(&self, slug: &str) -> Result<&EnvAgentAppConfig> {
-        self.apps
-            .iter()
+    /// Find an app config by slug (cloned), or return an error.
+    fn find_app(&self, slug: &str) -> Result<EnvAgentAppConfig> {
+        let apps = self.apps.read().map_err(|e| anyhow!("RwLock poisoned: {e}"))?;
+        apps.iter()
             .find(|a| a.slug == slug)
+            .cloned()
             .ok_or_else(|| anyhow!("app not found: {}", slug))
     }
 
@@ -98,146 +114,148 @@ impl AppSupervisor {
         format!("{}.service", slug)
     }
 
-    /// Generate systemd unit files for all apps.
-    /// Creates {slug}.service (run) and {slug}-watch.service (dev watch) for each app.
-    pub fn generate_service_units(&self) -> Result<()> {
+    /// Generate the systemd unit file for a single app.
+    pub fn generate_service_unit_for_app(&self, app: &EnvAgentAppConfig) -> Result<()> {
         let unit_dir = Path::new("/etc/systemd/system");
+        let working_dir = format!("{}/{}", self.apps_path, app.slug);
 
-        for app in &self.apps {
-            let working_dir = format!("{}/{}", self.apps_path, app.slug);
-
-            // Create .dataverse/app.db symlink → env-agent DB for legacy app compatibility
-            if app.has_db {
-                let dataverse_dir = format!("{}/.dataverse", working_dir);
-                let db_file = format!("{}/{}.db", self.db_path, app.slug);
-                let _ = std::fs::create_dir_all(&dataverse_dir);
-                let link_path = format!("{}/app.db", dataverse_dir);
-                // Remove existing file/link and create fresh symlink
-                let _ = std::fs::remove_file(&link_path);
-                if let Err(e) = std::os::unix::fs::symlink(&db_file, &link_path) {
-                    warn!(slug = %app.slug, error = %e, "failed to create .dataverse symlink");
-                }
+        // Create .dataverse/app.db symlink → env-agent DB for legacy app compatibility
+        if app.has_db {
+            let dataverse_dir = format!("{}/.dataverse", working_dir);
+            let db_file = format!("{}/{}.db", self.db_path, app.slug);
+            let _ = std::fs::create_dir_all(&dataverse_dir);
+            let link_path = format!("{}/app.db", dataverse_dir);
+            let _ = std::fs::remove_file(&link_path);
+            if let Err(e) = std::os::unix::fs::symlink(&db_file, &link_path) {
+                warn!(slug = %app.slug, error = %e, "failed to create .dataverse symlink");
             }
+        }
 
-            // --- Git init (if git_repo is configured and .git doesn't exist) ---
-            if let Some(ref git_url) = app.git_repo {
-                let git_dir = format!("{}/.git", working_dir);
-                if !Path::new(&git_dir).exists() {
-                    info!(slug = %app.slug, "initializing git repository");
-                    let git = |args: &[&str]| {
-                        std::process::Command::new("git")
-                            .args(args)
-                            .current_dir(&working_dir)
-                            .output()
-                    };
-                    // Ensure safe.directory is set to avoid ownership issues
-                    let _ = std::process::Command::new("git")
-                        .args(["config", "--global", "--add", "safe.directory", &working_dir])
-                        .output();
-                    let _ = git(&["init"]);
-                    let _ = git(&["remote", "add", "origin", git_url]);
-                    let _ = git(&["config", "user.name", "env-agent"]);
-                    let _ = git(&["config", "user.email", "env-agent@homeroute.local"]);
-
-                    // Write .gitignore if not present
-                    let gitignore_path = format!("{}/.gitignore", working_dir);
-                    if !Path::new(&gitignore_path).exists() {
-                        let _ = std::fs::write(&gitignore_path, GITIGNORE_CONTENT);
-                    }
-
-                    // Determine branch from remote, default to main
-                    let branch = std::process::Command::new("git")
-                        .args(["ls-remote", "--symref", "origin", "HEAD"])
+        // --- Git init (if git_repo is configured and .git doesn't exist) ---
+        if let Some(ref git_url) = app.git_repo {
+            let git_dir = format!("{}/.git", working_dir);
+            if !Path::new(&git_dir).exists() {
+                info!(slug = %app.slug, "initializing git repository");
+                let git = |args: &[&str]| {
+                    std::process::Command::new("git")
+                        .args(args)
                         .current_dir(&working_dir)
                         .output()
-                        .ok()
-                        .and_then(|o| String::from_utf8(o.stdout).ok())
-                        .and_then(|s| {
-                            s.lines()
-                                .find(|l| l.contains("ref:"))
-                                .and_then(|l| l.split_whitespace().nth(1))
-                                .map(|r| r.trim_start_matches("refs/heads/").to_string())
-                        })
-                        .unwrap_or_else(|| "main".to_string());
-                    let _ = git(&["branch", "-m", &branch]);
+                };
+                let _ = std::process::Command::new("git")
+                    .args(["config", "--global", "--add", "safe.directory", &working_dir])
+                    .output();
+                let _ = git(&["init"]);
+                let _ = git(&["remote", "add", "origin", git_url]);
+                let _ = git(&["config", "user.name", "env-agent"]);
+                let _ = git(&["config", "user.email", "env-agent@homeroute.local"]);
 
-                    // Initial commit + push
-                    let _ = git(&["add", "-A"]);
-                    if let Ok(output) = git(&["commit", "-m", &format!("initial commit: {}", app.slug)]) {
-                        if output.status.success() {
-                            let _ = git(&["push", "--force", "-u", "origin", &branch]);
-                            info!(slug = %app.slug, branch = %branch, "Git initialized with initial commit");
-                        }
+                let gitignore_path = format!("{}/.gitignore", working_dir);
+                if !Path::new(&gitignore_path).exists() {
+                    let _ = std::fs::write(&gitignore_path, GITIGNORE_CONTENT);
+                }
+
+                let branch = std::process::Command::new("git")
+                    .args(["ls-remote", "--symref", "origin", "HEAD"])
+                    .current_dir(&working_dir)
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .and_then(|s| {
+                        s.lines()
+                            .find(|l| l.contains("ref:"))
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .map(|r| r.trim_start_matches("refs/heads/").to_string())
+                    })
+                    .unwrap_or_else(|| "main".to_string());
+                let _ = git(&["branch", "-m", &branch]);
+
+                let _ = git(&["add", "-A"]);
+                if let Ok(output) = git(&["commit", "-m", &format!("initial commit: {}", app.slug)]) {
+                    if output.status.success() {
+                        let _ = git(&["push", "--force", "-u", "origin", &branch]);
+                        info!(slug = %app.slug, branch = %branch, "Git initialized with initial commit");
                     }
                 }
             }
+        }
 
-            // --- Main service: {slug}.service ---
-            let run_unit = format!(
+        // --- Main service: {slug}.service ---
+        let run_unit = format!(
+            "[Unit]\n\
+             Description={name} app service\n\
+             After=network.target\n\
+             \n\
+             [Service]\n\
+             Type=simple\n\
+             WorkingDirectory={working_dir}\n\
+             ExecStart=/bin/bash -c \"{run_command}\"\n\
+             Restart=on-failure\n\
+             RestartSec=3\n\
+             Environment=NODE_ENV=production\n\
+             Environment=PORT={port}\n\
+             Environment=DATABASE_URL={db_path}/{slug}.db\n\
+             Environment=DATABASE_PATH={db_path}/{slug}.db\n\
+             Environment=DB_PATH={db_path}/{slug}.db\n\
+             Environment=STATIC_DIR=client/dist\n\
+             \n\
+             [Install]\n\
+             WantedBy=multi-user.target\n",
+            name = app.name,
+            slug = app.slug,
+            working_dir = working_dir,
+            run_command = app.run_command,
+            port = app.port,
+            db_path = self.db_path,
+        );
+
+        let svc_path = unit_dir.join(Self::service_name(&app.slug));
+        write_unit_if_changed(&svc_path, &run_unit)?;
+
+        // --- Watch service: {slug}-watch.service (dev only) ---
+        if self.is_dev() {
+            let watch_cmd = app
+                .watch_command
+                .as_deref()
+                .unwrap_or_else(|| app.stack.default_watch_command());
+
+            let watch_unit = format!(
                 "[Unit]\n\
-                 Description={name} app service\n\
-                 After=network.target\n\
+                 Description={name} watch (dev rebuild)\n\
+                 After={slug}.service\n\
+                 BindsTo={slug}.service\n\
                  \n\
                  [Service]\n\
                  Type=simple\n\
                  WorkingDirectory={working_dir}\n\
-                 ExecStart=/bin/bash -c \"{run_command}\"\n\
+                 ExecStart=/bin/bash -c \"{watch_cmd}\"\n\
                  Restart=on-failure\n\
-                 RestartSec=3\n\
-                 Environment=NODE_ENV=production\n\
-                 Environment=PORT={port}\n\
-                 Environment=DATABASE_URL={db_path}/{slug}.db\n\
-                 Environment=DATABASE_PATH={db_path}/{slug}.db\n\
-                 Environment=DB_PATH={db_path}/{slug}.db\n\
-                 Environment=STATIC_DIR=client/dist\n\
+                 RestartSec=5\n\
+                 Environment=NODE_ENV=development\n\
                  \n\
                  [Install]\n\
                  WantedBy=multi-user.target\n",
                 name = app.name,
                 slug = app.slug,
                 working_dir = working_dir,
-                run_command = app.run_command,
-                port = app.port,
-                db_path = self.db_path,
+                watch_cmd = watch_cmd,
             );
 
-            let svc_path = unit_dir.join(Self::service_name(&app.slug));
-            write_unit_if_changed(&svc_path, &run_unit)?;
+            let watch_path = unit_dir.join(Self::watch_service_name(&app.slug));
+            write_unit_if_changed(&watch_path, &watch_unit)?;
+        }
 
-            // --- Watch service: {slug}-watch.service (dev only) ---
-            if self.is_dev() {
-                let watch_cmd = app
-                    .watch_command
-                    .as_deref()
-                    .unwrap_or_else(|| app.stack.default_watch_command());
+        info!(slug = %app.slug, "service units generated");
+        Ok(())
+    }
 
-                let watch_unit = format!(
-                    "[Unit]\n\
-                     Description={name} watch (dev rebuild)\n\
-                     After={slug}.service\n\
-                     BindsTo={slug}.service\n\
-                     \n\
-                     [Service]\n\
-                     Type=simple\n\
-                     WorkingDirectory={working_dir}\n\
-                     ExecStart=/bin/bash -c \"{watch_cmd}\"\n\
-                     Restart=on-failure\n\
-                     RestartSec=5\n\
-                     Environment=NODE_ENV=development\n\
-                     \n\
-                     [Install]\n\
-                     WantedBy=multi-user.target\n",
-                    name = app.name,
-                    slug = app.slug,
-                    working_dir = working_dir,
-                    watch_cmd = watch_cmd,
-                );
+    /// Generate systemd unit files for all apps.
+    /// Creates {slug}.service (run) and {slug}-watch.service (dev watch) for each app.
+    pub fn generate_service_units(&self) -> Result<()> {
+        let apps = self.apps.read().map_err(|e| anyhow!("RwLock poisoned: {e}"))?;
 
-                let watch_path = unit_dir.join(Self::watch_service_name(&app.slug));
-                write_unit_if_changed(&watch_path, &watch_unit)?;
-            }
-
-            info!(slug = %app.slug, "service units generated");
+        for app in apps.iter() {
+            self.generate_service_unit_for_app(app)?;
         }
 
         Ok(())
@@ -326,8 +344,9 @@ impl AppSupervisor {
 
     /// Return status info for all configured apps.
     pub async fn list_apps(&self) -> Vec<AppProcessInfo> {
-        let mut result = Vec::with_capacity(self.apps.len());
-        for app in &self.apps {
+        let apps = self.get_apps();
+        let mut result = Vec::with_capacity(apps.len());
+        for app in &apps {
             let status = match self.app_status(&app.slug).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -358,7 +377,7 @@ impl AppSupervisor {
     pub async fn health_check(&self, slug: &str) -> Result<bool> {
         let app = self.find_app(slug)?;
         let addr = format!("127.0.0.1:{}", app.port);
-        let path = &app.health_path;
+        let path = app.health_path.clone();
 
         let connect = TcpStream::connect(&addr);
         let mut stream = match tokio::time::timeout(std::time::Duration::from_secs(3), connect).await {
@@ -375,7 +394,7 @@ impl AppSupervisor {
 
         let request = format!(
             "GET {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
-            path, app.port
+            &path, app.port
         );
         if let Err(e) = stream.write_all(request.as_bytes()).await {
             debug!(slug, error = %e, "health check: write failed");
@@ -431,7 +450,8 @@ impl AppSupervisor {
 
     /// Start all configured apps.
     pub async fn start_all(&self) {
-        for app in &self.apps {
+        let apps = self.get_apps();
+        for app in &apps {
             if let Err(e) = self.start_app(&app.slug).await {
                 error!(slug = %app.slug, error = %e, "failed to start app");
             }
@@ -440,7 +460,8 @@ impl AppSupervisor {
 
     /// Stop all configured apps.
     pub async fn stop_all(&self) {
-        for app in &self.apps {
+        let apps = self.get_apps();
+        for app in &apps {
             if let Err(e) = self.stop_app(&app.slug).await {
                 error!(slug = %app.slug, error = %e, "failed to stop app");
             }

@@ -120,12 +120,9 @@ export function AppDetail() {
               {app.environments.map((env) => (
                 <tr key={env.env_slug} className="border-b border-white/5 last:border-0 hover:bg-white/[0.02] transition-colors">
                   <td className="px-4 py-3">
-                    <Link
-                      to={`/environments/${env.env_slug}`}
-                      className="text-sm text-[#e2e8f0] hover:text-[#a78bfa] transition-colors"
-                    >
+                    <span className="text-sm text-[#e2e8f0]">
                       {env.env_name}
-                    </Link>
+                    </span>
                   </td>
                   <td className="px-4 py-3">
                     <EnvTypeBadge envType={env.env_type} />

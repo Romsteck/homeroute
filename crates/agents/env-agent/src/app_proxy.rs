@@ -23,7 +23,7 @@ use hr_environment::types::EnvType;
 /// State shared by the app proxy handler.
 #[derive(Clone)]
 pub struct AppProxyState {
-    pub config: Arc<EnvAgentConfig>,
+    pub config: Arc<tokio::sync::RwLock<EnvAgentConfig>>,
     pub http_client: Client<hyper_util::client::legacy::connect::HttpConnector, Body>,
 }
 
@@ -55,7 +55,12 @@ pub async fn proxy_handler(
         .unwrap_or("")
         .to_string();
 
-    let target_port = match resolve_port(&state.config, &host) {
+    let target_port = {
+        let config = state.config.read().await;
+        resolve_port(&config, &host)
+    };
+
+    let target_port = match target_port {
         Some(port) => port,
         None => {
             let app_slug = host.split('.').next().unwrap_or("?");

@@ -116,8 +116,6 @@ pub enum AppStackType {
     NextJs,
     /// Rust Axum backend + Vite/React frontend — authenticated/perf-sensitive apps.
     AxumVite,
-    /// Pure Rust Axum backend — API-only services, no frontend.
-    Axum,
 }
 
 impl AppStackType {
@@ -126,7 +124,6 @@ impl AppStackType {
         match self {
             Self::NextJs => "Next.js",
             Self::AxumVite => "Axum + Vite/React",
-            Self::Axum => "Axum",
         }
     }
 
@@ -135,7 +132,6 @@ impl AppStackType {
         match self {
             Self::NextJs => "pnpm build",
             Self::AxumVite => "cd server && cargo build --release && cd ../client && pnpm build",
-            Self::Axum => "cargo build --release",
         }
     }
 
@@ -144,7 +140,6 @@ impl AppStackType {
         match self {
             Self::NextJs => "node server.js",
             Self::AxumVite => "./server/target/release/{slug}",
-            Self::Axum => "./target/release/{slug}",
         }
     }
 
@@ -153,14 +148,13 @@ impl AppStackType {
         match self {
             Self::NextJs => "pnpm dev",
             Self::AxumVite => "cd client && pnpm dev & cd server && cargo watch -x run",
-            Self::Axum => "cargo watch -x run",
         }
     }
 
     /// Default health check path.
     pub fn default_health_path(&self) -> &'static str {
         match self {
-            Self::NextJs | Self::AxumVite | Self::Axum => "/api/health",
+            Self::NextJs | Self::AxumVite => "/api/health",
         }
     }
 
@@ -169,7 +163,6 @@ impl AppStackType {
         match self {
             Self::NextJs => "app/ (pages+API), components/, lib/, server.ts",
             Self::AxumVite => "server/ (Rust Axum) + client/ (Vite/React/TypeScript)",
-            Self::Axum => "src/ (Rust Axum), Cargo.toml",
         }
     }
 }
