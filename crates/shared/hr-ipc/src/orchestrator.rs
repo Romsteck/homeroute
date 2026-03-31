@@ -100,6 +100,8 @@ pub enum OrchestratorRequest {
     QueryEnvironmentDb { env_slug: String, query: serde_json::Value },
     /// Get a summary of all environments' monitoring data.
     GetEnvironmentsMonitoringSummary,
+    /// Toggle the public/auth flag for an app in a production environment.
+    SetAppPublic { env_slug: String, app_slug: String, public: bool },
 
     // ── Multi-host environments (7.6) ─────────────────────
     /// List environments running on a specific host.

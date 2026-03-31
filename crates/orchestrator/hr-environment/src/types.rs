@@ -105,6 +105,10 @@ pub struct EnvApp {
     pub running: bool,
     /// Whether this app has a Dataverse database.
     pub has_db: bool,
+    /// Whether this app is publicly accessible without auth (prod only).
+    /// In dev/acc environments this flag is ignored — auth is always required.
+    #[serde(default)]
+    pub public: bool,
 }
 
 /// Technology stack for an application.

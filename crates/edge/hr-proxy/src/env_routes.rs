@@ -17,6 +17,8 @@ pub struct EnvRouteCache {
 struct EnvEntry {
     container_ip: IpAddr,
     code_server_port: u16,
+    /// "dev", "acc", or "prod" — used for auth decisions.
+    env_type: String,
 }
 
 /// Data used to update the cache (from IPC ListEnvironments response).
@@ -25,6 +27,9 @@ pub struct EnvRouteSummary {
     pub slug: String,
     pub ipv4_address: Option<String>,
     pub agent_connected: bool,
+    /// Environment type as stored in EnvironmentRecord (e.g., "development", "production").
+    #[serde(default)]
+    pub env_type: Option<String>,
     #[serde(default)]
     pub apps: Vec<EnvAppSummary>,
 }
@@ -57,7 +62,8 @@ impl EnvRouteCache {
     /// Resolve a wildcard env route: `{sub}.{env_slug}.{base_domain}`.
     /// - studio/code subdomains → container_ip:8443 (direct to code-server, supports WS)
     /// - all other subdomains → container_ip:80 (env-agent internal proxy)
-    pub fn resolve_env(&self, sub: &str, env_slug: &str) -> Option<(IpAddr, u16)> {
+    /// Returns (ip, port, env_type) where env_type is "dev", "acc", or "prod".
+    pub fn resolve_env(&self, sub: &str, env_slug: &str) -> Option<(IpAddr, u16, String)> {
         let routes = self.routes.read().ok()?;
         let entry = routes.get(env_slug)?;
         let port = if sub == "studio" || sub == "code" {
@@ -65,7 +71,7 @@ impl EnvRouteCache {
         } else {
             ENV_PROXY_PORT
         };
-        Some((entry.container_ip, port))
+        Some((entry.container_ip, port, entry.env_type.clone()))
     }
 
     /// Update the cache from environment data.
@@ -81,7 +87,15 @@ impl EnvRouteCache {
                 None => continue,
             };
 
-            new_routes.insert(env.slug.clone(), EnvEntry { container_ip: ip, code_server_port: 8443 });
+            // Normalize env_type from serde format ("development"→"dev", etc.)
+            let env_type = match env.env_type.as_deref() {
+                Some("development") => "dev".to_string(),
+                Some("acceptance") => "acc".to_string(),
+                Some("production") => "prod".to_string(),
+                Some(other) => other.to_string(),
+                None => "dev".to_string(), // safe default: require auth
+            };
+            new_routes.insert(env.slug.clone(), EnvEntry { container_ip: ip, code_server_port: 8443, env_type });
         }
 
         debug!(envs = new_routes.len(), "env route cache updated");

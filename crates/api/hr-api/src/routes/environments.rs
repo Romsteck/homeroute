@@ -24,6 +24,7 @@ pub fn router() -> Router<ApiState> {
         .route("/environments/{slug}/monitoring", get(get_environment_monitoring))
         .route("/environments/{slug}/apps/{app_slug}/control", post(control_app))
         .route("/environments/{slug}/apps/{app_slug}/logs", get(get_app_logs))
+        .route("/environments/{slug}/apps/{app_slug}/auth", put(toggle_app_auth))
         .route("/environments/{slug}/db/tables", get(get_db_tables))
         .route("/environments/{slug}/db/schema", get(get_db_schema))
         .route("/environments/{slug}/db/query", get(query_db_data))
@@ -565,6 +566,51 @@ async fn get_app_logs(
             (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({"success": false, "error": e})),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ── App auth toggle (prod only) ──────────────────────────────
+
+#[derive(Deserialize)]
+struct ToggleAppAuthRequest {
+    public: bool,
+}
+
+/// PUT /api/environments/:slug/apps/:app_slug/auth
+async fn toggle_app_auth(
+    State(state): State<ApiState>,
+    Path((slug, app_slug)): Path<(String, String)>,
+    Json(req): Json<ToggleAppAuthRequest>,
+) -> impl IntoResponse {
+    info!(env = slug, app = app_slug, public = req.public, "Toggling app auth");
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::SetAppPublic {
+            env_slug: slug,
+            app_slug,
+            public: req.public,
+        })
+        .await
+    {
+        Ok(resp) if resp.ok => {
+            Json(serde_json::json!({"success": true, "data": resp.data})).into_response()
+        }
+        Ok(resp) => {
+            let msg = resp.error.unwrap_or_else(|| "Unknown error".into());
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"success": false, "error": msg})),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            error!("Toggle app auth IPC failed: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"success": false, "error": e.to_string()})),
             )
                 .into_response()
         }

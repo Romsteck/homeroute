@@ -669,6 +669,7 @@ async fn build_app_discovery(supervisor: &AppSupervisor) -> Vec<EnvApp> {
             version: app.version,
             running: app.status == supervisor::AppProcessStatus::Running,
             has_db: app.has_db,
+            public: false, // Set by orchestrator, not by env-agent
         })
         .collect()
 }

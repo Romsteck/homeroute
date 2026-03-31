@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { StatusBadge, EnvTypeBadge, StackBadge } from '../components/StatusBadge'
 import { PipelineRow } from '../components/PipelineRow'
-import { fetchAppDetail, triggerPipeline, fetchPipelines } from '../api'
+import { fetchAppDetail, triggerPipeline, fetchPipelines, toggleAppAuth } from '../api'
 import type { AppInfo, PipelineRun } from '../types'
 import { isDevEnv } from '../types'
 
@@ -16,6 +16,7 @@ export function AppDetail() {
   const [error, setError] = useState<string | null>(null)
   const [recentPipelines, setRecentPipelines] = useState<PipelineRun[]>([])
   const [promoting, setPromoting] = useState<string | null>(null)
+  const [togglingAuth, setTogglingAuth] = useState<string | null>(null)
 
   useEffect(() => {
     if (slug) {
@@ -31,6 +32,23 @@ export function AppDetail() {
         .catch(() => {})
     }
   }, [slug])
+
+  const isProdEnv = (envType: string) => envType === 'prod' || envType === 'production'
+
+  const handleToggleAuth = async (envSlug: string, currentPublic: boolean) => {
+    if (!slug) return
+    setTogglingAuth(envSlug)
+    try {
+      await toggleAppAuth(envSlug, slug, !currentPublic)
+      // Refresh app data
+      const refreshed = await fetchAppDetail(slug)
+      setApp(refreshed)
+    } catch (e) {
+      alert('Failed to toggle auth: ' + (e as Error).message)
+    } finally {
+      setTogglingAuth(null)
+    }
+  }
 
   const handlePromote = async (sourceEnv: string, targetEnv: string) => {
     if (!slug) return
@@ -113,6 +131,7 @@ export function AppDetail() {
                 <th className="text-left px-4 py-2.5 text-[11px] font-medium text-white/30 uppercase tracking-wider">Version</th>
                 <th className="text-left px-4 py-2.5 text-[11px] font-medium text-white/30 uppercase tracking-wider">Status</th>
                 <th className="text-left px-4 py-2.5 text-[11px] font-medium text-white/30 uppercase tracking-wider">Last Deploy</th>
+                <th className="text-left px-4 py-2.5 text-[11px] font-medium text-white/30 uppercase tracking-wider">Access</th>
                 <th className="text-right px-4 py-2.5 text-[11px] font-medium text-white/30 uppercase tracking-wider">Actions</th>
               </tr>
             </thead>
@@ -144,6 +163,34 @@ export function AppDetail() {
                           })
                         : '-'}
                     </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    {isProdEnv(env.env_type) ? (
+                      <button
+                        onClick={() => handleToggleAuth(env.env_slug, !!env.public)}
+                        disabled={togglingAuth === env.env_slug}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors ${
+                          env.public
+                            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20'
+                            : 'bg-amber-500/10 text-amber-400 border-amber-500/20 hover:bg-amber-500/20'
+                        } disabled:opacity-50`}
+                        title={env.public ? 'Click to require authentication' : 'Click to make public'}
+                      >
+                        {togglingAuth === env.env_slug ? (
+                          <span className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
+                        ) : env.public ? (
+                          <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM4.332 8.027a6.012 6.012 0 011.912-2.706C6.512 5.73 6.974 6 7.5 6A1.5 1.5 0 019 7.5V8a2 2 0 004 0 2 2 0 012 2v1a2 2 0 01-2 2 2 2 0 00-2 2 2 2 0 01-2 2h-.5a6.018 6.018 0 01-4.166-5.973z" clipRule="evenodd" /></svg>
+                        ) : (
+                          <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" /></svg>
+                        )}
+                        {env.public ? 'Public' : 'Auth'}
+                      </button>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs text-white/30">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" /></svg>
+                        Auth (forced)
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex items-center gap-2 justify-end">

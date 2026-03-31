@@ -273,6 +273,8 @@ async fn main() -> anyhow::Result<()> {
         git: git_service.clone(),
         backup: backup_pipeline.clone(),
         env_manager: env_manager.clone(),
+        edge: edge.clone(),
+        base_domain: env.base_domain.clone(),
     });
 
     let ipc_handle = tokio::spawn({

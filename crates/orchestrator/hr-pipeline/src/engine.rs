@@ -496,8 +496,8 @@ impl PipelineEngine {
     /// Health check step: wait for the app to start, then probe the health endpoint directly.
     async fn execute_health_check<T: PipelineTransport>(
         &self,
-        transport: &Arc<T>,
-        run_id: &str,
+        _transport: &Arc<T>,
+        _run_id: &str,
         app_slug: &str,
         target_env: &str,
         step_def: &PipelineStepDef,

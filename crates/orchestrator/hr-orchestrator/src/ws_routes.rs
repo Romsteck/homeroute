@@ -1737,8 +1737,18 @@ async fn handle_env_agent_message(
                 if let Some(env_ip) = env_record.ipv4_address {
                     let base_domain = &state.env.base_domain;
                     let ip_str = env_ip.to_string();
+                    let is_prod = env_record.env_type == hr_environment::types::EnvType::Production;
 
                     for app in &apps {
+                        // Auth rules:
+                        // - dev/acc: always require auth
+                        // - prod: require auth unless the app is marked public
+                        let app_public = is_prod && env_record.apps.iter()
+                            .find(|a| a.slug == app.slug)
+                            .map(|a| a.public)
+                            .unwrap_or(false);
+                        let auth_required = !app_public;
+
                         let domain = format!("{}.{}.{}", app.slug, env_slug, base_domain);
                         if let Err(e) = state.edge.set_app_route(
                             domain.clone(),
@@ -1746,7 +1756,7 @@ async fn handle_env_agent_message(
                             env_record.host_id.clone(),
                             ip_str.clone(),
                             app.port,
-                            false,
+                            auth_required,
                             vec![],
                             false,
                         ).await {
@@ -1756,11 +1766,11 @@ async fn handle_env_agent_message(
                                 "Failed to set env app route via edge IPC"
                             );
                         } else {
-                            info!(domain, env_slug, app_slug = app.slug, "Set env app route");
+                            info!(domain, env_slug, app_slug = app.slug, auth_required, "Set env app route");
                         }
                     }
 
-                    // Studio route → homeroute port 4003 (Rust SPA with code-server iframe)
+                    // Studio route → always require auth (admin tool)
                     let studio_domain = format!("studio.{}.{}", env_slug, base_domain);
                     if let Err(e) = state.edge.set_app_route(
                         studio_domain.clone(),
@@ -1768,7 +1778,7 @@ async fn handle_env_agent_message(
                         "local".to_string(),
                         "10.0.0.20".to_string(),
                         4003,
-                        false,
+                        true,
                         vec![],
                         false,
                     ).await {
@@ -1778,10 +1788,10 @@ async fn handle_env_agent_message(
                             "Failed to set env studio route via edge IPC"
                         );
                     } else {
-                        info!(domain = studio_domain, env_slug, "Set env studio route");
+                        info!(domain = studio_domain, env_slug, "Set env studio route (auth required)");
                     }
 
-                    // code-server route → env container:8443 (direct proxy for iframe)
+                    // code-server route → always require auth (admin tool)
                     let code_domain = format!("code.{}.{}", env_slug, base_domain);
                     if let Err(e) = state.edge.set_app_route(
                         code_domain.clone(),
@@ -1789,13 +1799,13 @@ async fn handle_env_agent_message(
                         env_record.host_id.clone(),
                         env_ip.to_string(),
                         8443,
-                        false,
+                        true,
                         vec![],
                         false,
                     ).await {
                         warn!(domain = code_domain, error = %e, "Failed to set code-server route");
                     } else {
-                        info!(domain = code_domain, env_slug, "Set code-server route");
+                        info!(domain = code_domain, env_slug, "Set code-server route (auth required)");
                     }
                 }
             }

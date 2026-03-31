@@ -32,6 +32,8 @@ export interface EnvApp {
   version: string | null
   running: boolean
   has_db: boolean
+  /** Whether the app is publicly accessible without auth (prod only). */
+  public?: boolean
   // Computed by frontend for compatibility
   status?: AppStatus
   url?: string
@@ -56,6 +58,8 @@ export interface AppEnvEntry {
   version: string
   status: AppStatus
   last_deploy?: string
+  /** Whether this app is public (no auth) in this env. Only meaningful for prod. */
+  public?: boolean
 }
 
 // --- Pipelines ---

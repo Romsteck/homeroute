@@ -190,6 +190,7 @@ export async function fetchAppDetail(appSlug: string): Promise<AppInfo> {
         version: app.version || 'unknown',
         status: app.running ? 'running' : 'stopped',
         last_deploy: '',
+        public: app.public,
       })
     }
   }
@@ -339,6 +340,24 @@ export async function fetchAppLogs(
     return json.data?.logs || json.data || ''
   } catch {
     return 'Failed to fetch logs'
+  }
+}
+
+// ── App auth toggle (prod) ──────────────────────────────────────
+
+export async function toggleAppAuth(
+  envSlug: string,
+  appSlug: string,
+  isPublic: boolean,
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/environments/${envSlug}/apps/${appSlug}/auth`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ public: isPublic }),
+  })
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({}))
+    throw new Error(json.error || 'Failed to toggle app auth')
   }
 }
 

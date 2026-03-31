@@ -22,6 +22,8 @@ pub struct OrchestratorHandler {
     pub git: Arc<GitService>,
     pub backup: Arc<BackupPipeline>,
     pub env_manager: Arc<EnvironmentManager>,
+    pub edge: Arc<hr_ipc::EdgeClient>,
+    pub base_domain: String,
 }
 
 impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
@@ -569,6 +571,40 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 match self.env_mcp_call(&env_slug, "db.query_data", query).await {
                     Ok(data) => IpcResponse::ok_data(data),
                     Err(e) => IpcResponse::err(format!("Failed to query DB: {e}")),
+                }
+            }
+            OrchestratorRequest::SetAppPublic { env_slug, app_slug, public } => {
+                match self.env_manager.set_app_public(&env_slug, &app_slug, public).await {
+                    Ok(port) => {
+                        // Re-register the edge route with updated auth_required
+                        let env = self.env_manager.get_by_slug(&env_slug).await;
+                        if let Some(env_record) = env {
+                            if let Some(ip) = env_record.ipv4_address {
+                                let domain = format!("{}.{}.{}", app_slug, env_slug, self.base_domain);
+                                let auth_required = !public;
+                                if let Err(e) = self.edge.set_app_route(
+                                    domain.clone(),
+                                    format!("env-{}-{}", env_slug, app_slug),
+                                    env_record.host_id.clone(),
+                                    ip.to_string(),
+                                    port,
+                                    auth_required,
+                                    vec![],
+                                    false,
+                                ).await {
+                                    warn!(domain, error = %e, "Failed to update edge route after auth toggle");
+                                } else {
+                                    info!(domain, public, auth_required, "Updated edge route auth");
+                                }
+                            }
+                        }
+                        IpcResponse::ok_data(serde_json::json!({
+                            "env_slug": env_slug,
+                            "app_slug": app_slug,
+                            "public": public,
+                        }))
+                    }
+                    Err(e) => IpcResponse::err(e.to_string()),
                 }
             }
             OrchestratorRequest::GetEnvironmentsMonitoringSummary => {

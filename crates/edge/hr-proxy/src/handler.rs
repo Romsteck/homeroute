@@ -621,10 +621,15 @@ async fn proxy_handler_inner(
                     if env_slug.contains('.') {
                         return None;
                     }
-                    let (ip, port) = cache.resolve_env(sub, env_slug)?;
+                    let (ip, port, env_type) = cache.resolve_env(sub, env_slug)?;
+                    // Auth rules:
+                    // - studio/code: always require auth (admin tools)
+                    // - dev/acc apps: always require auth
+                    // - prod apps: open by default (per-app toggle via explicit AppRoutes)
+                    let require_auth = sub == "studio" || sub == "code" || env_type != "prod";
                     debug!(
                         domain = domain_only, env = env_slug, ip = %ip, port = port,
-                        "Resolved wildcard env route"
+                        require_auth, "Resolved wildcard env route"
                     );
                     Some(RouteConfig {
                         id: format!("__env_{}", env_slug),
@@ -633,7 +638,7 @@ async fn proxy_handler_inner(
                         target_host: ip.to_string(),
                         target_port: port,
                         local_only: false,
-                        require_auth: false,
+                        require_auth,
                         enabled: true,
                         cert_id: None,
                     })

@@ -292,9 +292,16 @@ impl EnvironmentManager {
 
     /// Update the app list for an environment (from env-agent AppDiscovery).
     /// Only persists to disk if the app list actually changed.
-    pub async fn update_apps(&self, env_slug: &str, apps: Vec<EnvApp>) {
+    /// Preserves the `public` flag from existing state (env-agent doesn't send it).
+    pub async fn update_apps(&self, env_slug: &str, mut apps: Vec<EnvApp>) {
         let mut envs = self.environments.write().await;
         if let Some(env) = envs.iter_mut().find(|e| e.record.slug == env_slug) {
+            // Preserve `public` flag from existing apps (operator-set, not agent-reported)
+            for app in apps.iter_mut() {
+                if let Some(existing) = env.record.apps.iter().find(|a| a.slug == app.slug) {
+                    app.public = existing.public;
+                }
+            }
             let changed = env.record.apps != apps;
             env.record.last_heartbeat = Some(Utc::now());
             if changed {
@@ -303,6 +310,29 @@ impl EnvironmentManager {
                 self.persist().await;
             }
         }
+    }
+
+    /// Toggle the `public` flag for an app in a production environment.
+    /// Returns the app's port for re-registering the edge route.
+    pub async fn set_app_public(
+        &self,
+        env_slug: &str,
+        app_slug: &str,
+        public: bool,
+    ) -> anyhow::Result<u16> {
+        let mut envs = self.environments.write().await;
+        let env = envs.iter_mut().find(|e| e.record.slug == env_slug)
+            .ok_or_else(|| anyhow::anyhow!("Environment '{}' not found", env_slug))?;
+        if env.record.env_type != hr_environment::types::EnvType::Production {
+            anyhow::bail!("Auth toggle is only available for production environments");
+        }
+        let app = env.record.apps.iter_mut().find(|a| a.slug == app_slug)
+            .ok_or_else(|| anyhow::anyhow!("App '{}' not found in env '{}'", app_slug, env_slug))?;
+        let port = app.port;
+        app.public = public;
+        drop(envs);
+        self.persist().await;
+        Ok(port)
     }
 
     /// Register a WebSocket connection for an env-agent.
