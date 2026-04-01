@@ -1294,7 +1294,13 @@ async fn tool_store_get(id: Value, args: &Value) -> Value {
 
 const INTERNAL_API_BASE: &str = "http://127.0.0.1:4000/api";
 const INTERNAL_TOKEN_HEADER: &str = "X-Internal-Token";
-const INTERNAL_TOKEN: &str = "REDACTED_SECRET";
+
+fn internal_token() -> &'static str {
+    static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TOKEN.get_or_init(|| {
+        std::env::var("MCP_TOKEN").expect("MCP_TOKEN env var must be set")
+    })
+}
 
 fn internal_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -1307,7 +1313,7 @@ async fn internal_api_get(path: &str) -> Result<Value, String> {
     let client = internal_client();
     let resp = client
         .get(format!("{INTERNAL_API_BASE}{path}"))
-        .header(INTERNAL_TOKEN_HEADER, INTERNAL_TOKEN)
+        .header(INTERNAL_TOKEN_HEADER, internal_token())
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
@@ -1324,7 +1330,7 @@ async fn internal_api_post(path: &str, body: Value) -> Result<Value, String> {
     let client = internal_client();
     let resp = client
         .post(format!("{INTERNAL_API_BASE}{path}"))
-        .header(INTERNAL_TOKEN_HEADER, INTERNAL_TOKEN)
+        .header(INTERNAL_TOKEN_HEADER, internal_token())
         .json(&body)
         .send()
         .await
@@ -1342,7 +1348,7 @@ async fn internal_api_delete(path: &str) -> Result<Value, String> {
     let client = internal_client();
     let resp = client
         .delete(format!("{INTERNAL_API_BASE}{path}"))
-        .header(INTERNAL_TOKEN_HEADER, INTERNAL_TOKEN)
+        .header(INTERNAL_TOKEN_HEADER, internal_token())
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
