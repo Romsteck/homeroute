@@ -118,17 +118,6 @@ description = "Gestion de budget et depenses"
 # ── Pure Axum apps ────────────────────────────────────────────────────
 
 [[apps]]
-slug = "hub"
-name = "Hub"
-stack = "axum"
-port = 3500
-run_command = "./bin/hub"
-build_command = "cargo build --release"
-health_path = "/api/health"
-has_db = false
-description = "Hub central: todos, jobs, monitoring agents"
-
-[[apps]]
 slug = "myfrigo"
 name = "MyFrigo"
 stack = "axum"

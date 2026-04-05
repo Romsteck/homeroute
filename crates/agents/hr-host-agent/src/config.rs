@@ -18,18 +18,6 @@ pub struct Config {
     /// Role of this host in the infrastructure (dev, prod, backup).
     #[serde(default)]
     pub role: Option<HostRole>,
-
-    // ── MCP Project Manager ──
-    #[serde(default)]
-    pub mcp_port: Option<u16>,
-    #[serde(default)]
-    pub mcp_token: Option<String>,
-    #[serde(default)]
-    pub prod_server: Option<String>,
-    #[serde(default)]
-    pub prod_user: Option<String>,
-    #[serde(default)]
-    pub projects_registry_path: Option<String>,
 }
 
 fn default_reconnect() -> u64 {
@@ -46,15 +34,5 @@ impl Config {
 
     pub fn ws_url(&self) -> String {
         format!("ws://{}/api/hosts/agent/ws", self.homeroute_url)
-    }
-
-    pub fn mcp_enabled(&self) -> bool {
-        self.mcp_port.is_some() && self.mcp_token.is_some()
-    }
-
-    pub fn registry_path(&self) -> &str {
-        self.projects_registry_path
-            .as_deref()
-            .unwrap_or("/etc/hr-host-agent/projects.json")
     }
 }

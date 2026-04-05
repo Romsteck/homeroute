@@ -515,13 +515,6 @@ impl ContextGenerator {
              - `app.logs` — consulter les logs recents\n\
              - `app.health` — health check HTTP\n\
              \n\
-             ## Todos (todos.*)\n\
-             - `todos.list` — lister les todos du projet\n\
-             - `todos.create` — creer un todo\n\
-             - `todos.complete` — marquer termine\n\
-             - `todos.update` — mettre a jour\n\
-             - `todos.delete` — supprimer\n\
-             \n\
              ## Pipeline (pipeline.*)\n\
              - `pipeline.promote` — deployer vers l'env suivant\n\
              - `pipeline.status` — statut d'un deploiement\n\
@@ -540,13 +533,7 @@ impl ContextGenerator {
              - `secrets.list` — lister les variables d'env\n\
              - `secrets.get` — lire une variable\n\
              - `secrets.set` — definir une variable\n\
-             - `secrets.delete` — supprimer une variable\n\
-             \n\
-             ## Jobs (jobs.*)\n\
-             - `jobs.create` — lancer un job en arriere-plan\n\
-             - `jobs.list` — lister les jobs\n\
-             - `jobs.get` — details d'un job\n\
-             - `jobs.complete` — marquer un job termine\n",
+             - `secrets.delete` — supprimer une variable\n",
             name = app.name,
             slug = app.slug,
         )
@@ -606,11 +593,6 @@ impl ContextGenerator {
              - Utiliser `db.*` pour toutes les operations\n\
              - Ne JAMAIS acceder aux fichiers .db directement\n\
              - Faire un snapshot avant les modifications de schema: `db.snapshot`\n\
-             \n\
-             ## Todos\n\
-             - Consulter `todos.list` en debut de session\n\
-             - Creer des todos pour le travail de suivi: `todos.create`\n\
-             - Marquer complete quand termine: `todos.complete`\n\
              \n\
              ## Documentation\n\
              - Lire la doc avant de modifier l'app: `docs.get`\n\
@@ -1037,12 +1019,10 @@ mod tests {
         assert!(md.contains("db.list_tables"));
         assert!(md.contains("## App (app.*)"));
         assert!(md.contains("app.restart"));
-        assert!(md.contains("## Todos (todos.*)"));
         assert!(md.contains("## Pipeline (pipeline.*)"));
         assert!(md.contains("## Documentation (docs.*)"));
         assert!(md.contains("## Git (git.*)"));
         assert!(md.contains("## Secrets (secrets.*)"));
-        assert!(md.contains("## Jobs (jobs.*)"));
     }
 
     #[test]
@@ -1057,7 +1037,6 @@ mod tests {
         assert!(md.contains("## Deploiement"));
         assert!(md.contains("pipeline.promote"));
         assert!(md.contains("## Base de donnees"));
-        assert!(md.contains("## Todos"));
         assert!(md.contains("## Documentation"));
     }
 

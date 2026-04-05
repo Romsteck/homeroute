@@ -1,6 +1,5 @@
 import type {
   Environment,
-  Todo,
   PipelineRun,
   AppDocs,
   DbTable,
@@ -9,9 +8,6 @@ import type {
 } from "./types";
 
 const API_BASE = "/api";
-
-// TODO: proxy through our API to avoid CORS issues
-const HUB_API = "https://hub.mynetwk.biz/api";
 
 async function fetchJson<T>(url: string, init?: RequestInit, fallback?: T): Promise<T> {
   try {
@@ -89,38 +85,6 @@ export async function getEnvironment(envSlug: string): Promise<Environment> {
   } catch (e) {
     throw new Error(`Failed to load environment: ${(e as Error).message}`);
   }
-}
-
-// --- Todos (Hub MCP) ---
-
-export async function getTodos(context: string, status?: string): Promise<Todo[]> {
-  const params = new URLSearchParams({ context });
-  if (status) params.set("status", status);
-  // Try local proxy first (avoids CORS), fallback to direct Hub API
-  try {
-    const res = await fetch(`${API_BASE}/hub/todos?${params}`);
-    if (res.ok) {
-      const json = await res.json();
-      return Array.isArray(json) ? json : (json.data || json.todos || []);
-    }
-  } catch { /* proxy not available */ }
-  // Direct call (may fail due to CORS)
-  return fetchJson<Todo[]>(`${HUB_API}/todos?${params}`, undefined, []);
-}
-
-export async function completeTodo(id: string): Promise<void> {
-  await fetch(`${HUB_API}/todos/${id}/complete`, { method: "POST" });
-}
-
-export async function updateTodoStatus(
-  id: string,
-  status: "todo" | "in_progress" | "done",
-): Promise<void> {
-  await fetch(`${HUB_API}/todos/${id}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status }),
-  });
 }
 
 // --- Logs ---

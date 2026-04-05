@@ -3,7 +3,6 @@ import type { Environment, EnvApp, TabId } from "../types";
 import { ProjectSidebar } from "./ProjectSidebar";
 import { TabBar } from "./TabBar";
 import { CodeTab } from "../tabs/CodeTab";
-import { BoardTab } from "../tabs/BoardTab";
 import { DocsTab } from "../tabs/DocsTab";
 import { PipesTab } from "../tabs/PipesTab";
 import { DbTab } from "../tabs/DbTab";
@@ -29,7 +28,6 @@ function renderTab(tab: TabId, env: Environment, _app: EnvApp | null, appSlug: s
     );
   }
   switch (tab) {
-    case "board": return <BoardTab appSlug={appSlug} />;
     case "docs": return <DocsTab env={env} appSlug={appSlug} />;
     case "pipes": return <PipesTab env={env} appSlug={appSlug} />;
     case "db": return <DbTab env={env} appSlug={appSlug} />;

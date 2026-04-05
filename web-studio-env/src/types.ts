@@ -17,17 +17,6 @@ export interface Environment {
   code_server_port?: number;
 }
 
-export interface Todo {
-  id: string;
-  title: string;
-  description?: string;
-  context: string;
-  priority: "high" | "medium" | "low";
-  status: "todo" | "in_progress" | "done";
-  created_at: string;
-  completed_at?: string;
-}
-
 export interface PipelineRun {
   id: string;
   app_slug: string;
@@ -79,4 +68,4 @@ export interface DbQueryResult {
   row_count: number;
 }
 
-export type TabId = "code" | "board" | "docs" | "pipes" | "db" | "logs";
+export type TabId = "code" | "docs" | "pipes" | "db" | "logs";
