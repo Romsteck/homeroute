@@ -468,16 +468,29 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 };
                 let host_id = request.get("host_id").and_then(|v| v.as_str()).unwrap_or("medion").to_string();
                 match self.env_manager.create_environment(name, slug, env_type, host_id).await {
-                    Ok((record, token)) => IpcResponse::ok_data(serde_json::json!({
-                        "id": record.id,
-                        "name": record.name,
-                        "slug": record.slug,
-                        "env_type": record.env_type,
-                        "host_id": record.host_id,
-                        "container_name": record.container_name,
-                        "status": record.status,
-                        "token": token,
-                    })),
+                    Ok((record, token)) => {
+                        // Provision container with static IP
+                        let container_name = &record.container_name;
+                        let storage_path = std::path::Path::new("/var/lib/machines");
+                        if storage_path.join(container_name).exists() {
+                            if let Err(e) = hr_container::NspawnClient::write_network_config(container_name, storage_path, record.ipv4_address).await {
+                                tracing::warn!(container = container_name, %e, "Failed to write network config");
+                            }
+                        } else if let Err(e) = hr_container::NspawnClient::create_container(container_name, storage_path, "bridge:br0", true, record.ipv4_address).await {
+                            tracing::error!(container = container_name, %e, "Container provisioning failed");
+                        }
+                        IpcResponse::ok_data(serde_json::json!({
+                            "id": record.id,
+                            "name": record.name,
+                            "slug": record.slug,
+                            "env_type": record.env_type,
+                            "host_id": record.host_id,
+                            "container_name": record.container_name,
+                            "ipv4_address": record.ipv4_address.map(|ip| ip.to_string()),
+                            "status": record.status,
+                            "token": token,
+                        }))
+                    }
                     Err(e) => IpcResponse::err(format!("Failed to create environment: {e}")),
                 }
             }

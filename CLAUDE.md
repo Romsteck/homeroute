@@ -262,8 +262,9 @@ Les applications sont gérées via des **environnements** (env-dev, env-prod). C
 
 | Env | Container | IP | Apps | Studio |
 |-----|-----------|-----|------|--------|
-| dev | env-dev | 10.0.0.105 | 10 apps | studio.dev.mynetwk.biz |
-| prod | env-prod | 10.0.0.112 | 0 apps (à déployer) | studio.prod.mynetwk.biz |
+| dev | env-dev | 10.0.0.200 | 10 apps | studio.dev.mynetwk.biz |
+| acc | env-acc | 10.0.0.201 | 1 app | studio.acc.mynetwk.biz |
+| prod | env-prod | 10.0.0.202 | 1 app | studio.prod.mynetwk.biz |
 
 ### Développement (sources sur CloudMaster)
 

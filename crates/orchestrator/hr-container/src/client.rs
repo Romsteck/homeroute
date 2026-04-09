@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::net::Ipv4Addr;
 use std::path::Path;
 use tokio::process::Command;
 use tracing::{info, warn};
@@ -22,8 +23,8 @@ impl NspawnClient {
     /// Create and start a container: debootstrap rootfs, write .nspawn unit,
     /// write network config, machinectl start, wait for readiness.
     /// If `with_workspace` is true, a bind-mounted workspace directory is created.
-    pub async fn create_container(name: &str, storage_path: &Path, network_mode: &str, with_workspace: bool) -> Result<()> {
-        info!(container = name, storage = %storage_path.display(), network_mode, with_workspace, "Creating nspawn container");
+    pub async fn create_container(name: &str, storage_path: &Path, network_mode: &str, with_workspace: bool, static_ip: Option<Ipv4Addr>) -> Result<()> {
+        info!(container = name, storage = %storage_path.display(), network_mode, with_workspace, ?static_ip, "Creating nspawn container");
 
         // Bootstrap Ubuntu rootfs
         crate::rootfs::bootstrap_ubuntu(name, storage_path).await?;
@@ -37,7 +38,7 @@ impl NspawnClient {
         Self::write_nspawn_unit(name, storage_path, network_mode, with_workspace, &[]).await?;
 
         // Write network config inside rootfs
-        Self::write_network_config(name, storage_path).await?;
+        Self::write_network_config(name, storage_path, static_ip).await?;
 
         // Start the container
         Self::start_container(name).await?;
@@ -385,8 +386,9 @@ impl NspawnClient {
     }
 
     /// Write network configuration inside the container rootfs.
-    /// Sets up systemd-networkd for DHCP on host0/mv-* and resolv.conf pointing to HomeRoute DNS.
-    pub async fn write_network_config(name: &str, storage_path: &Path) -> Result<()> {
+    /// If `static_ip` is provided, configures a static address; otherwise falls back to DHCP.
+    /// Uses `80-container-host0.network` to override the systemd default DHCP config.
+    pub async fn write_network_config(name: &str, storage_path: &Path, static_ip: Option<Ipv4Addr>) -> Result<()> {
         let rootfs = storage_path.join(name);
 
         // Write systemd-networkd config for bridge (host0) interface
@@ -394,8 +396,23 @@ impl NspawnClient {
         tokio::fs::create_dir_all(&network_dir).await
             .context("failed to create network config dir")?;
 
-        let network_config = "[Match]\n\
+        let network_config = if let Some(ip) = static_ip {
+            format!(
+                "[Match]\n\
+                 Kind=veth\n\
+                 Name=host0\n\
+                 Virtualization=container\n\
+                 \n\
+                 [Network]\n\
+                 Address={ip}/24\n\
+                 Gateway=10.0.0.254\n\
+                 DNS=10.0.0.254\n"
+            )
+        } else {
+            "[Match]\n\
+             Kind=veth\n\
              Name=host0\n\
+             Virtualization=container\n\
              \n\
              [Network]\n\
              DHCP=yes\n\
@@ -403,10 +420,15 @@ impl NspawnClient {
              [DHCPv4]\n\
              UseHostname=false\n\
              UseDNS=no\n\
-             UseDomains=no\n";
+             UseDomains=no\n".to_string()
+        };
 
-        tokio::fs::write(network_dir.join("80-container.network"), network_config).await
+        // Use 80-container-host0.network to override the systemd default in /usr/lib/
+        tokio::fs::write(network_dir.join("80-container-host0.network"), &network_config).await
             .context("failed to write network config")?;
+
+        // Remove old config file if present
+        let _ = tokio::fs::remove_file(network_dir.join("80-container.network")).await;
 
         // Write resolv.conf pointing to HomeRoute DNS
         let resolv_path = rootfs.join("etc/resolv.conf");

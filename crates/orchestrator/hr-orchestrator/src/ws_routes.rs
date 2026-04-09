@@ -1350,7 +1350,7 @@ async fn handle_local_nspawn_import(
 
     // Write network config in rootfs
     if let Err(e) =
-        hr_container::NspawnClient::write_network_config(&container_name, sp).await
+        hr_container::NspawnClient::write_network_config(&container_name, sp, None).await
     {
         error!(
             transfer_id = %transfer_id,

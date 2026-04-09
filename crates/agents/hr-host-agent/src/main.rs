@@ -454,7 +454,7 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                         }
 
                                         // Write network config in rootfs
-                                        if let Err(e) = hr_container::NspawnClient::write_network_config(&container_name, sp).await {
+                                        if let Err(e) = hr_container::NspawnClient::write_network_config(&container_name, sp, None).await {
                                             let _ = tx_finalize.send(OutgoingWsMessage::Text(HostAgentMessage::ImportFailed {
                                                 transfer_id: tid,
                                                 error: format!("Failed to write network config: {}", e),
@@ -648,7 +648,7 @@ async fn run_connection(config: &Config) -> Result<(), String> {
                                 info!(container = %container_name, storage = %storage_path, network_mode = %network_mode, "Creating nspawn container");
                                 tokio::spawn(async move {
                                     let sp = std::path::Path::new(&storage_path);
-                                    match hr_container::NspawnClient::create_container(&container_name, sp, &network_mode, true).await {
+                                    match hr_container::NspawnClient::create_container(&container_name, sp, &network_mode, true, None).await {
                                         Ok(()) => {
                                             info!(container = %container_name, "Nspawn container created successfully");
                                         }

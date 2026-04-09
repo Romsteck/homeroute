@@ -1370,7 +1370,7 @@ async fn handle_local_nspawn_import(
     }
 
     // Write network config in rootfs
-    if let Err(e) = hr_container::NspawnClient::write_network_config(&container_name, sp).await {
+    if let Err(e) = hr_container::NspawnClient::write_network_config(&container_name, sp, None).await {
         tracing::error!(transfer_id = %transfer_id, %e, "Failed to write network config");
         registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Failed to write network config: {e}")).await;
         let _ = tokio::fs::remove_dir_all(&rootfs_dir).await;

@@ -1922,13 +1922,32 @@ async fn tool_envs_create(id: Value, args: &Value, state: &McpState) -> Value {
     };
     let host_id = args.get("host_id").and_then(|v| v.as_str()).unwrap_or("medion");
 
-    match state.env_manager.create_environment(name.into(), slug.into(), env_type, host_id.into()).await {
-        Ok((env, token)) => tool_success(id, json!({
-            "environment": serde_json::to_value(&env).unwrap_or(json!(null)),
-            "token": token,
-        })),
-        Err(e) => tool_error(id, &format!("Failed to create environment: {e}")),
+    let (env, token) = match state.env_manager.create_environment(name.into(), slug.into(), env_type, host_id.into()).await {
+        Ok(r) => r,
+        Err(e) => return tool_error(id, &format!("Failed to create environment: {e}")),
+    };
+
+    // Provision the container with the allocated static IP
+    let container_name = &env.container_name;
+    let storage_path = std::path::Path::new("/var/lib/machines");
+    if storage_path.join(container_name).exists() {
+        // Container rootfs already exists — just write the network config
+        if let Err(e) = hr_container::NspawnClient::write_network_config(container_name, storage_path, env.ipv4_address).await {
+            tracing::warn!(container = container_name, %e, "Failed to write network config for existing container");
+        }
+    } else {
+        // Bootstrap a new container with the static IP
+        if let Err(e) = hr_container::NspawnClient::create_container(container_name, storage_path, "bridge:br0", true, env.ipv4_address).await {
+            tracing::error!(container = container_name, %e, "Failed to provision container");
+            return tool_error(id, &format!("Environment created but container provisioning failed: {e}"));
+        }
     }
+
+    tool_success(id, json!({
+        "environment": serde_json::to_value(&env).unwrap_or(json!(null)),
+        "token": token,
+        "ipv4_address": env.ipv4_address.map(|ip| ip.to_string()),
+    }))
 }
 
 async fn tool_envs_action(id: Value, args: &Value, state: &McpState, action: &str) -> Value {

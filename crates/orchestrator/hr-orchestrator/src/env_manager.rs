@@ -96,6 +96,7 @@ impl EnvironmentManager {
     }
 
     /// Create a new environment. Returns (record, plaintext_token).
+    /// Automatically allocates a static IPv4 address from the 10.0.0.100-199 range.
     pub async fn create_environment(
         &self,
         name: String,
@@ -104,12 +105,13 @@ impl EnvironmentManager {
         host_id: String,
     ) -> anyhow::Result<(EnvironmentRecord, String)> {
         // Check slug uniqueness
-        {
+        let allocated_ip = {
             let envs = self.environments.read().await;
             if envs.iter().any(|e| e.record.slug == slug) {
                 anyhow::bail!("Environment with slug '{}' already exists", slug);
             }
-        }
+            self.allocate_ip(&envs)
+        };
 
         let token_clear = generate_token();
         let token_hash = hash_token(&token_clear)?;
@@ -124,7 +126,7 @@ impl EnvironmentManager {
             env_type,
             host_id,
             container_name,
-            ipv4_address: None,
+            ipv4_address: Some(allocated_ip),
             status: EnvStatus::Pending,
             agent_connected: false,
             agent_version: None,
@@ -152,10 +154,26 @@ impl EnvironmentManager {
         info!(
             id = record.id,
             slug = record.slug,
+            ip = %allocated_ip,
             "Environment created (token returned)"
         );
 
         Ok((record, token_clear))
+    }
+
+    /// Allocate the next available IPv4 address from the 10.0.0.200-250 range (env pool).
+    fn allocate_ip(&self, envs: &[StoredEnvRecord]) -> Ipv4Addr {
+        let used: std::collections::HashSet<Ipv4Addr> = envs
+            .iter()
+            .filter_map(|e| e.record.ipv4_address)
+            .collect();
+        for last_octet in 200..=250 {
+            let candidate = Ipv4Addr::new(10, 0, 0, last_octet);
+            if !used.contains(&candidate) {
+                return candidate;
+            }
+        }
+        Ipv4Addr::new(10, 0, 0, 200) // pool full, should never happen with 51 slots
     }
 
     /// Delete an environment by ID.
