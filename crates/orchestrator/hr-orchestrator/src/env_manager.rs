@@ -401,6 +401,18 @@ impl EnvironmentManager {
         }
     }
 
+    /// Broadcast a message to all connected env-agents. Returns count of agents notified.
+    pub async fn broadcast(&self, msg: EnvOrchestratorMessage) -> usize {
+        let conns = self.connections.read().await;
+        let mut count = 0;
+        for (_slug, tx) in conns.iter() {
+            if tx.send(msg.clone()).await.is_ok() {
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// Check if an env-agent is connected.
     pub async fn is_env_connected(&self, env_slug: &str) -> bool {
         let conns = self.connections.read().await;

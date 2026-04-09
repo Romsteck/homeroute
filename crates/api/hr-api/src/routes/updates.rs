@@ -34,7 +34,7 @@ pub fn router() -> Router<ApiState> {
         .route("/history", get(update_history))
         .route("/count", get(update_count))
         .route("/upgrade-hosts", post(upgrade_hosts))
-        .route("/upgrade-containers", post(upgrade_containers))
+        .route("/upgrade-environments", post(upgrade_environments))
 }
 
 const LAST_CHECK_PATH: &str = "/var/lib/server-dashboard/last-update-check.json";
@@ -629,13 +629,16 @@ async fn upgrade_target(
         });
     } else {
         // Determine if target is a host-agent or container agent from scan results
-        let is_host = match state.orchestrator.request(&OrchestratorRequest::GetScanResults).await {
+        // Determine target type from scan results
+        let target_type = match state.orchestrator.request(&OrchestratorRequest::GetScanResults).await {
             Ok(r) => r.data.as_ref()
                 .and_then(|d| d.get(&req.target_id))
-                .and_then(|t| t.get("target_type").and_then(|v| v.as_str()).map(|s| s == "remote_host" || s == "main_host"))
-                .unwrap_or(false),
-            _ => false,
+                .and_then(|t| t.get("target_type").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .unwrap_or_default(),
+            _ => String::new(),
         };
+        let is_host = target_type == "remote_host" || target_type == "main_host";
+        let is_env = target_type == "environment";
 
         let send_result = if is_host && req.category == "apt" {
             // Host-agent — send RunAptUpgrade via SendHostCommand
@@ -645,8 +648,19 @@ async fn upgrade_target(
                 host_id: req.target_id.clone(),
                 command: cmd,
             }).await
+        } else if is_env {
+            // Env-agent — send RunUpgrade via SendToEnv
+            info!(target_id = %req.target_id, category = %req.category, "Sending RunUpgrade to env-agent via IPC");
+            let msg = json!({
+                "type": "run_upgrade",
+                "category": req.category,
+            });
+            state.orchestrator.request(&OrchestratorRequest::SendToEnv {
+                env_slug: req.target_id.clone(),
+                message: msg,
+            }).await
         } else {
-            // Container agent — send RunUpgrade via SendToAgent
+            // Container agent (legacy) — send RunUpgrade via SendToAgent
             info!(target_id = %req.target_id, category = %req.category, "Sending RunUpgrade to agent via IPC");
             let msg = json!({
                 "type": "run_upgrade",
@@ -935,7 +949,7 @@ async fn upgrade_hosts(State(state): State<ApiState>) -> Json<Value> {
     Json(json!({"success": true, "launched": launched}))
 }
 
-async fn upgrade_containers(State(state): State<ApiState>) -> Json<Value> {
+async fn upgrade_environments(State(state): State<ApiState>) -> Json<Value> {
     let targets = match state.orchestrator.request(&OrchestratorRequest::GetScanResults).await {
         Ok(r) if r.ok => r.data.unwrap_or(json!({})),
         Ok(r) => return Json(json!({"success": false, "error": r.error.unwrap_or_else(|| "Orchestrator error".into())})),
@@ -945,9 +959,9 @@ async fn upgrade_containers(State(state): State<ApiState>) -> Json<Value> {
     let mut launched = vec![];
     if let Some(obj) = targets.as_object() {
         for (id, t) in obj {
-            let is_container = t.get("target_type").and_then(|v| v.as_str()) == Some("container");
+            let is_env = t.get("target_type").and_then(|v| v.as_str()) == Some("environment");
             let has_updates = t.get("os_upgradable").and_then(|v| v.as_u64()).unwrap_or(0) > 0;
-            if is_container && has_updates {
+            if is_env && has_updates {
                 let target_name = t.get("name").and_then(|v| v.as_str()).unwrap_or(id).to_string();
                 let _ = state.update_log.insert(id, &target_name, "apt", None, "started", None);
                 let _ = state.events.update_scan.send(
@@ -957,8 +971,8 @@ async fn upgrade_containers(State(state): State<ApiState>) -> Json<Value> {
                     }
                 );
                 let msg = json!({"type": "run_upgrade", "category": "apt"});
-                let _ = state.orchestrator.request(&OrchestratorRequest::SendToAgent {
-                    app_id: id.clone(),
+                let _ = state.orchestrator.request(&OrchestratorRequest::SendToEnv {
+                    env_slug: id.clone(),
                     message: msg,
                 }).await;
                 launched.push(id.clone());

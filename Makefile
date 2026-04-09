@@ -201,12 +201,11 @@ env-agent:
 
 # Deploy env-agent to ALL environment containers + update studio-env frontend
 # Binary path: /usr/bin/env-agent (standardized across all envs)
-ENV_CONTAINERS := env-dev env-prod
 deploy-env-agent: env-agent studio-env
 	@echo "Deploying Studio Env frontend..."
 	@rsync -az --delete web-studio-env/dist/ $(PROD_HOST):$(PROD_DIR)/web-studio-env/dist/
 	@echo "✓ Studio Env frontend deployed"
-	@for ENV in $(ENV_CONTAINERS); do \
+	@for ENV in $$(ssh $(PROD_HOST) "sudo machinectl list --no-legend" | awk '/^env-/{print $$1}'); do \
 		echo "Deploying env-agent to $$ENV..."; \
 		LEADER=$$(ssh $(PROD_HOST) "sudo machinectl show $$ENV -p Leader --value 2>/dev/null"); \
 		if [ -z "$$LEADER" ]; then \

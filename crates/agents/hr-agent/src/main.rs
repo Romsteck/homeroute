@@ -3,10 +3,8 @@ mod connection;
 mod mcp;
 mod metrics;
 mod proxy;
-mod scan;
 mod studio;
 mod update;
-mod upgrade;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -368,48 +366,6 @@ async fn handle_registry_message(
                     Err(e) => error!(filename = %filename, error = %e, "Failed to write rule file"),
                 }
             }
-        }
-
-        RegistryMessage::RunUpdateScan => {
-            info!("Update scan requested");
-            let tx = outbound_tx.clone();
-            let is_dev = is_dev_flag.load(Ordering::Relaxed);
-            tokio::spawn(async move {
-                let r = scan::run_scan(is_dev).await;
-                let _ = tx.send(AgentMessage::UpdateScanResult {
-                    os_upgradable: r.os_upgradable,
-                    os_security: r.os_security,
-                    claude_cli_installed: r.claude_cli_installed,
-                    claude_cli_latest: r.claude_cli_latest,
-                    code_server_installed: r.code_server_installed,
-                    code_server_latest: r.code_server_latest,
-                    claude_ext_installed: r.claude_ext_installed,
-                    claude_ext_latest: r.claude_ext_latest,
-                    scan_error: r.scan_error,
-                }).await;
-            });
-        }
-
-        RegistryMessage::RunUpgrade { category } => {
-            info!(category = %category, "Upgrade requested");
-            let tx = outbound_tx.clone();
-            let is_dev = is_dev_flag.load(Ordering::Relaxed);
-            tokio::spawn(async move {
-                let _result = upgrade::run_upgrade(&category).await;
-                // After upgrade, re-scan and report updated state
-                let r = scan::run_scan(is_dev).await;
-                let _ = tx.send(AgentMessage::UpdateScanResult {
-                    os_upgradable: r.os_upgradable,
-                    os_security: r.os_security,
-                    claude_cli_installed: r.claude_cli_installed,
-                    claude_cli_latest: r.claude_cli_latest,
-                    code_server_installed: r.code_server_installed,
-                    code_server_latest: r.code_server_latest,
-                    claude_ext_installed: r.claude_ext_installed,
-                    claude_ext_latest: r.claude_ext_latest,
-                    scan_error: r.scan_error,
-                }).await;
-            });
         }
 
     }

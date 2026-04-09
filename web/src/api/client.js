@@ -164,7 +164,7 @@ export const upgradeTarget = (targetId, category) =>
 export const getUpdateHistory = (limit = 50) => api.get('/updates/history', { params: { limit } });
 export const getUpdateCount = () => api.get('/updates/count');
 export const upgradeAllHosts = () => api.post('/updates/upgrade-hosts', {}, { timeout: 1800000 });
-export const upgradeAllContainers = () => api.post('/updates/upgrade-containers', {}, { timeout: 1800000 });
+export const upgradeAllEnvironments = () => api.post('/updates/upgrade-environments', {}, { timeout: 1800000 });
 
 // ========== Backup ==========
 export const getBackupStatus = () => api.get('/backup/status');

@@ -170,14 +170,6 @@ pub enum RegistryMessage {
         /// Vec of (filename, content) pairs, e.g. [("homeroute-deploy.md", "# Deploy...")]
         rules: Vec<(String, String)>,
     },
-    /// Registry asks agent to run an update scan.
-    #[serde(rename = "run_update_scan")]
-    RunUpdateScan,
-    /// Registry asks agent to perform a specific upgrade.
-    #[serde(rename = "run_upgrade")]
-    RunUpgrade {
-        category: String,
-    },
 }
 
 // ── Dataverse Query Types ────────────────────────────────────────

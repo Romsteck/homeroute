@@ -1709,36 +1709,23 @@ impl AgentRegistry {
 
     // ── Unified Update Scan ────────────────────────────────────────
 
-    /// Broadcast RunUpdateScan to all connected agents and host-agents.
-    /// Also refreshes the server-side latest versions cache.
-    /// Returns count of targets notified.
-    pub async fn trigger_update_scan(&self) -> usize {
-        // Refresh latest versions server-side (1 request instead of N agents)
-        self.refresh_latest_versions().await;
-
+    /// Broadcast RunUpdateScan to all connected host-agents only.
+    /// Returns count of host-agents notified.
+    pub async fn trigger_host_update_scan(&self) -> usize {
         let mut count = 0;
 
-        // Send to all container agents
-        let conns = self.connections.read().await;
-        for (_app_id, conn) in conns.iter() {
-            let _ = conn.tx.send(RegistryMessage::RunUpdateScan).await;
-            count += 1;
-        }
-        drop(conns);
-
-        // Send to all host-agents
         let host_conns = self.host_connections.read().await;
         for (_host_id, conn) in host_conns.iter() {
             let _ = conn.tx.send(OutgoingHostMessage::Text(HostRegistryMessage::RunUpdateScan)).await;
             count += 1;
         }
 
-        info!(count, "Triggered update scan for all targets");
+        info!(count, "Triggered update scan for host-agents");
         count
     }
 
     /// Fetch latest versions from external APIs (server-side, avoids agent rate limits).
-    async fn refresh_latest_versions(&self) {
+    pub async fn refresh_latest_versions(&self) {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .build()

@@ -164,16 +164,6 @@ async fn handle_agent_ws(state: WsState, mut socket: WebSocket) {
         tokio::select! {
             // Registry -> Agent
             Some(msg) = rx.recv() => {
-                // Log non-trivial messages being forwarded to agent
-                match &msg {
-                    RegistryMessage::RunUpgrade { category } => {
-                        info!(app_id, category, "Forwarding RunUpgrade to agent WebSocket");
-                    }
-                    RegistryMessage::RunUpdateScan => {
-                        info!(app_id, "Forwarding RunUpdateScan to agent WebSocket");
-                    }
-                    _ => {}
-                }
                 let json = match serde_json::to_string(&msg) {
                     Ok(j) => j,
                     Err(_) => continue,
@@ -327,64 +317,8 @@ async fn handle_agent_message(
                 }
             }
         }
-        Ok(AgentMessage::UpdateScanResult {
-            os_upgradable,
-            os_security,
-            claude_cli_installed,
-            claude_cli_latest,
-            code_server_installed,
-            code_server_latest,
-            claude_ext_installed,
-            claude_ext_latest,
-            scan_error,
-        }) => {
-            info!(
-                app_id,
-                os_upgradable,
-                os_security,
-                "Agent update scan result"
-            );
-            if let Some(app) = registry.get_application(app_id).await {
-                // Read latest agent version from version file
-                let agent_version_latest = std::fs::read_to_string(
-                    "/opt/homeroute/data/agent-binaries/hr-agent.version",
-                )
-                .ok()
-                .map(|s| s.trim().to_string());
-
-                let mut target = hr_common::events::UpdateTarget {
-                    id: app_id.to_string(),
-                    name: app.name.clone(),
-                    target_type: "container".to_string(),
-                    environment: Some(format!("{:?}", app.environment).to_lowercase()),
-                    online: true,
-                    os_upgradable,
-                    os_security,
-                    agent_version: app.agent_version.clone(),
-                    agent_version_latest,
-                    claude_cli_installed,
-                    claude_cli_latest,
-                    code_server_installed,
-                    code_server_latest,
-                    claude_ext_installed,
-                    claude_ext_latest,
-                    scan_error,
-                    scanned_at: chrono::Utc::now().to_rfc3339(),
-                };
-                // Fill missing *_latest from server-side cache (avoids GitHub rate limits)
-                registry.fill_latest_versions(&mut target).await;
-                registry
-                    .scan_results
-                    .write()
-                    .await
-                    .insert(app_id.to_string(), target.clone());
-                let _ = state.events.update_scan.send(
-                    hr_common::events::UpdateScanEvent::TargetScanned {
-                        scan_id: String::new(),
-                        target,
-                    },
-                );
-            }
+        Ok(AgentMessage::UpdateScanResult { .. }) => {
+            // Legacy container update scan — no longer used
         }
         Err(e) => {
             warn!(app_id, "Invalid agent message: {e}");
@@ -1853,6 +1787,50 @@ async fn handle_env_agent_message(
             debug!(env_slug, hostname, total_memory_mb, available_memory_mb, cpu_usage_percent, "Env-agent host metrics");
             // Store total memory for the environment (convert MB to bytes)
             env_manager.update_host_memory(env_slug, total_memory_mb * 1024 * 1024).await;
+        }
+        Ok(EnvAgentMessage::UpdateScanResult {
+            os_upgradable, os_security,
+            claude_cli_installed, code_server_installed, claude_ext_installed,
+            scan_error,
+        }) => {
+            info!(env_slug, os_upgradable, os_security, "Env-agent update scan result");
+            if let Some(env_record) = env_manager.get_by_slug(env_slug).await {
+                let agent_version_latest = std::fs::read_to_string(
+                    "/opt/homeroute/data/agent-binaries/env-agent.version"
+                ).ok().map(|s| s.trim().to_string());
+
+                let mut target = hr_common::events::UpdateTarget {
+                    id: env_slug.to_string(),
+                    name: env_record.name.clone(),
+                    target_type: "environment".to_string(),
+                    environment: Some(format!("{:?}", env_record.env_type).to_lowercase()),
+                    online: true,
+                    os_upgradable,
+                    os_security,
+                    agent_version: env_record.agent_version.clone(),
+                    agent_version_latest,
+                    claude_cli_installed,
+                    claude_cli_latest: None,
+                    code_server_installed,
+                    code_server_latest: None,
+                    claude_ext_installed,
+                    claude_ext_latest: None,
+                    scan_error,
+                    scanned_at: chrono::Utc::now().to_rfc3339(),
+                };
+                state.registry.fill_latest_versions(&mut target).await;
+                state.registry.scan_results.write().await
+                    .insert(env_slug.to_string(), target.clone());
+                let _ = state.events.update_scan.send(
+                    hr_common::events::UpdateScanEvent::TargetScanned {
+                        scan_id: String::new(),
+                        target,
+                    }
+                );
+            }
+        }
+        Ok(EnvAgentMessage::UpgradeResult { category, success, error }) => {
+            info!(env_slug, category, success, ?error, "Env-agent upgrade result");
         }
         Err(e) => {
             warn!(env_slug, error = %e, "Failed to parse env-agent message");

@@ -90,9 +90,12 @@ export function UpdateTableRow({ target, upgradeState = {}, onUpgrade }) {
           <span className="text-sm text-gray-200 truncate">{target.name}</span>
           {target.environment && (
             <span className={`text-[10px] px-1 py-px shrink-0 ${
-              target.environment === 'development' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'
+              target.environment === 'development' ? 'bg-blue-500/20 text-blue-400' :
+              target.environment === 'acceptance' ? 'bg-yellow-500/20 text-yellow-400' :
+              'bg-purple-500/20 text-purple-400'
             }`}>
-              {target.environment === 'development' ? 'DEV' : 'PROD'}
+              {target.environment === 'development' ? 'DEV' :
+               target.environment === 'acceptance' ? 'ACC' : 'PROD'}
             </span>
           )}
           {target.scan_error && (

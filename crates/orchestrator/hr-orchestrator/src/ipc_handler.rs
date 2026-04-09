@@ -407,8 +407,26 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
 
             // ── Updates scan ─────────────────────────────────────
             OrchestratorRequest::ScanUpdates => {
-                let count = self.registry.trigger_update_scan().await;
-                IpcResponse::ok_data(serde_json::json!({"agents_scanned": count}))
+                // Refresh latest versions server-side
+                self.registry.refresh_latest_versions().await;
+                // Broadcast to host-agents only (container agents removed)
+                let host_count = self.registry.trigger_host_update_scan().await;
+                // Broadcast to env-agents
+                let env_count = self.env_manager.broadcast(
+                    hr_environment::protocol::EnvOrchestratorMessage::RunUpdateScan
+                ).await;
+                IpcResponse::ok_data(serde_json::json!({"agents_scanned": host_count + env_count}))
+            }
+            OrchestratorRequest::SendToEnv { env_slug, message } => {
+                match serde_json::from_value::<hr_environment::protocol::EnvOrchestratorMessage>(message) {
+                    Ok(msg) => {
+                        match self.env_manager.send_to_env(&env_slug, msg).await {
+                            Ok(()) => IpcResponse::ok_empty(),
+                            Err(e) => IpcResponse::err(e.to_string()),
+                        }
+                    }
+                    Err(e) => IpcResponse::err(format!("Invalid env message: {e}")),
+                }
             }
             OrchestratorRequest::GetScanResults => {
                 let results = self.registry.scan_results.read().await;

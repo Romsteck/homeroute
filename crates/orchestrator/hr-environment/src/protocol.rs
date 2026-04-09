@@ -49,6 +49,30 @@ pub enum EnvAgentMessage {
     #[serde(rename = "error")]
     Error { message: String },
 
+    /// Agent reports update scan results.
+    #[serde(rename = "update_scan_result")]
+    UpdateScanResult {
+        os_upgradable: u32,
+        os_security: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        claude_cli_installed: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code_server_installed: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        claude_ext_installed: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scan_error: Option<String>,
+    },
+
+    /// Agent reports upgrade result.
+    #[serde(rename = "upgrade_result")]
+    UpgradeResult {
+        category: String,
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+
     /// App process status changed.
     #[serde(rename = "app_status")]
     AppStatus {
@@ -151,6 +175,14 @@ pub enum EnvOrchestratorMessage {
         app_slug: String,
         action: AppControlAction,
     },
+
+    /// Run an update scan (APT, claude-cli, code-server, etc.).
+    #[serde(rename = "run_update_scan")]
+    RunUpdateScan,
+
+    /// Run an upgrade for a specific category (apt, claude_cli, code_server, claude_ext).
+    #[serde(rename = "run_upgrade")]
+    RunUpgrade { category: String },
 
     /// Graceful shutdown of the entire environment.
     #[serde(rename = "shutdown")]

@@ -103,6 +103,10 @@ pub enum OrchestratorRequest {
     /// Toggle the public/auth flag for an app in a production environment.
     SetAppPublic { env_slug: String, app_slug: String, public: bool },
 
+    // ── Env-agent messaging ────────────────────────────────
+    /// Send a message to an env-agent via its WebSocket channel.
+    SendToEnv { env_slug: String, message: serde_json::Value },
+
     // ── Multi-host environments (7.6) ─────────────────────
     /// List environments running on a specific host.
     ListEnvironmentsByHost { host_id: String },

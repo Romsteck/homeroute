@@ -9,8 +9,10 @@ mod mcp;
 mod port_registry;
 mod proxy;
 mod scaffold;
+mod scan;
 mod secrets;
 mod supervisor;
+mod upgrade;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -636,6 +638,49 @@ async fn handle_orchestrator_message(
         EnvOrchestratorMessage::HostInfo { host_id, hostname, total_memory_mb, available_memory_mb } => {
             info!(host_id, hostname, total_memory_mb, available_memory_mb, "Received host info from orchestrator");
             // Store for local awareness if needed in the future
+        }
+
+        EnvOrchestratorMessage::RunUpdateScan => {
+            info!("Update scan requested");
+            let tx = outbound_tx.clone();
+            tokio::spawn(async move {
+                let r = scan::run_scan().await;
+                let _ = tx.send(EnvAgentMessage::UpdateScanResult {
+                    os_upgradable: r.os_upgradable,
+                    os_security: r.os_security,
+                    claude_cli_installed: r.claude_cli_installed,
+                    code_server_installed: r.code_server_installed,
+                    claude_ext_installed: r.claude_ext_installed,
+                    scan_error: r.scan_error,
+                }).await;
+            });
+        }
+
+        EnvOrchestratorMessage::RunUpgrade { category } => {
+            info!(category = %category, "Upgrade requested");
+            let tx = outbound_tx.clone();
+            tokio::spawn(async move {
+                let result = upgrade::run_upgrade(&category).await;
+                let (success, error) = match result {
+                    Ok(()) => (true, None),
+                    Err(e) => (false, Some(e)),
+                };
+                let _ = tx.send(EnvAgentMessage::UpgradeResult {
+                    category: category.clone(),
+                    success,
+                    error,
+                }).await;
+                // Auto re-scan after upgrade
+                let r = scan::run_scan().await;
+                let _ = tx.send(EnvAgentMessage::UpdateScanResult {
+                    os_upgradable: r.os_upgradable,
+                    os_security: r.os_security,
+                    claude_cli_installed: r.claude_cli_installed,
+                    code_server_installed: r.code_server_installed,
+                    claude_ext_installed: r.claude_ext_installed,
+                    scan_error: r.scan_error,
+                }).await;
+            });
         }
 
         EnvOrchestratorMessage::Shutdown => {

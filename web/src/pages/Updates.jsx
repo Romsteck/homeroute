@@ -11,7 +11,7 @@ import {
   upgradeTarget,
   getUpdateHistory,
   upgradeAllHosts,
-  upgradeAllContainers,
+  upgradeAllEnvironments,
 } from '../api/client';
 import useWebSocket from '../hooks/useWebSocket';
 
@@ -161,14 +161,14 @@ function Updates() {
     });
   };
 
-  const handleUpgradeContainers = () => {
+  const handleUpgradeEnvironments = () => {
     setConfirmModal({
-      title: 'Mettre à jour tous les conteneurs',
-      message: 'Voulez-vous lancer la mise à jour APT sur tous les conteneurs ayant des mises à jour disponibles ?',
+      title: 'Mettre à jour tous les environnements',
+      message: 'Voulez-vous lancer la mise à jour APT sur tous les environnements ayant des mises à jour disponibles ?',
       onConfirm: async () => {
         setConfirmModal(null);
         try {
-          await upgradeAllContainers();
+          await upgradeAllEnvironments();
         } catch (e) {
           setMessage({ type: 'error', text: `Erreur : ${e.message}` });
         }
@@ -184,9 +184,9 @@ function Updates() {
     t.agent_version && t.agent_version_latest && t.agent_version !== t.agent_version_latest
   ).length;
   const hosts = targetList.filter(t => t.target_type === 'remote_host' || t.target_type === 'main_host');
-  const prodContainers = targetList.filter(t => t.target_type === 'container' && t.environment === 'production');
+  const environments = targetList.filter(t => t.target_type === 'environment');
   const hostsWithUpdates = hosts.filter(t => t.os_upgradable > 0).length;
-  const containersWithUpdates = prodContainers.filter(t => t.os_upgradable > 0).length;
+  const envsWithUpdates = environments.filter(t => t.os_upgradable > 0).length;
 
   if (loading) {
     return (
@@ -209,13 +209,13 @@ function Updates() {
               <Server className="w-4 h-4 mr-2" /> MàJ hôtes ({hostsWithUpdates})
             </Button>
           )}
-          {containersWithUpdates > 0 && (
+          {envsWithUpdates > 0 && (
             <Button
               variant="secondary"
-              onClick={handleUpgradeContainers}
+              onClick={handleUpgradeEnvironments}
               disabled={scanning || anyUpgradeRunning}
             >
-              <Package className="w-4 h-4 mr-2" /> MàJ conteneurs ({containersWithUpdates})
+              <Package className="w-4 h-4 mr-2" /> MàJ environnements ({envsWithUpdates})
             </Button>
           )}
           <Button
@@ -257,7 +257,7 @@ function Updates() {
         {scanning && (
           <div className="flex items-center gap-3 text-blue-400 py-2">
             <Loader2 className="w-4 h-4 animate-spin" />
-            <span className="text-sm">Interrogation de tous les hôtes et containers...</span>
+            <span className="text-sm">Interrogation de tous les hôtes et environnements...</span>
           </div>
         )}
 
@@ -282,14 +282,14 @@ function Updates() {
           </Section>
         )}
 
-        {/* PROD containers */}
-        {prodContainers.length > 0 && (
-          <Section title={`Containers PROD (${prodContainers.length})`}>
+        {/* Environments */}
+        {environments.length > 0 && (
+          <Section title={`Environnements (${environments.length})`}>
             <div className="overflow-x-auto">
               <table className="w-full text-sm min-w-[500px]">
                 <UpdateTableHead />
                 <tbody>
-                  {prodContainers.map(t => (
+                  {environments.map(t => (
                     <UpdateTableRow
                       key={t.id}
                       target={t}
