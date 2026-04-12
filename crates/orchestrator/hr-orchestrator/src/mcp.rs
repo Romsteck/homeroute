@@ -503,7 +503,11 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
             "app.health" | "app.regenerate_context" | "app.delete" |
             "git.log" | "git.branches" |
             "studio.refresh_context" |
-            "secrets.list" | "secrets.get" | "secrets.set" | "secrets.delete"
+            "secrets.list" | "secrets.get" | "secrets.set" | "secrets.delete" |
+            // Project-scoped simplified names
+            "status" | "start" | "stop" | "restart" | "exec" | "logs" |
+            "db_tables" | "db_schema" | "db_query" | "db_exec" | "db_snapshot" |
+            "docs_read" | "docs_write" | "git_log" | "git_branches"
         );
         if needs_slug {
             if arguments.get("slug").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
