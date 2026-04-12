@@ -198,6 +198,14 @@ export const getAppDbTable = (slug, table) => api.get(`/apps/${slug}/db/tables/$
 export const queryAppDb = (slug, sql, params) => api.post(`/apps/${slug}/db/query`, { sql, params });
 export const snapshotAppDb = (slug) => api.post(`/apps/${slug}/db/snapshot`);
 export const executeAppDb = (slug, sql, params) => api.post(`/apps/${slug}/db/execute`, { sql, params });
+export const queryAppDbRows = (slug, table, body) => api.post(`/apps/${slug}/db/tables/${table}/rows`, body);
+export const getAppDbSchema = (slug) => api.get(`/apps/${slug}/db/schema`);
+export const syncAppDbSchema = (slug) => api.post(`/apps/${slug}/db/sync`);
+export const createAppDbTable = (slug, body) => api.post(`/apps/${slug}/db/tables`, body);
+export const dropAppDbTable = (slug, table) => api.delete(`/apps/${slug}/db/tables/${table}`);
+export const addAppDbColumn = (slug, table, body) => api.post(`/apps/${slug}/db/tables/${table}/columns`, body);
+export const removeAppDbColumn = (slug, table, column) => api.delete(`/apps/${slug}/db/tables/${table}/columns/${column}`);
+export const createAppDbRelation = (slug, body) => api.post(`/apps/${slug}/db/relations`, body);
 
 // ========== Logs ==========
 export const getLogs = (params = {}) => api.get('/logs', { params });

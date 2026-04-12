@@ -4,7 +4,7 @@ import {
   listApps,
   getAppDbTables,
   getAppDbTable,
-  queryAppDb,
+  queryAppDbRows,
   executeAppDb,
   snapshotAppDb,
 } from '../api/client';
@@ -94,7 +94,6 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
         );
         setAppsWithTables(results);
 
-        // If propAppSlug is set (embedded mode), auto-select first table
         if (propAppSlug && !selectedTable) {
           const appData = results.find(r => r.app.slug === propAppSlug);
           if (appData && appData.tables.length > 0) {
@@ -124,38 +123,47 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
     setError(null);
 
     try {
-      let where = '';
-      const allFilters = [...filters];
-      if (allFilters.length > 0) {
-        const clauses = allFilters.map(f => {
-          if (f.op === 'is_null') return `"${f.column}" IS NULL`;
-          if (f.op === 'not_null') return `"${f.column}" IS NOT NULL`;
-          const sqlOp = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=', like: 'LIKE' }[f.op] || '=';
-          return `"${f.column}" ${sqlOp} '${(f.value || '').replace(/'/g, "''")}'`;
-        });
-        where = ' WHERE ' + clauses.join(' AND ');
-      }
-
-      const order = sortColumn ? ` ORDER BY "${sortColumn}" ${sortDesc ? 'DESC' : 'ASC'}` : '';
-      const limit = ` LIMIT ${pageSize} OFFSET ${currentPage * pageSize}`;
-      const sql = `SELECT * FROM "${selectedTable}"${where}${order}${limit}`;
-      const countSql = `SELECT COUNT(*) as cnt FROM "${selectedTable}"${where}`;
-
-      const [schemaRes, queryRes, countRes] = await Promise.all([
-        getAppDbTable(appSlug, selectedTable),
-        queryAppDb(appSlug, sql),
-        queryAppDb(appSlug, countSql),
-      ]);
-
+      // Fetch schema first to know relations for expand
+      const schemaRes = await getAppDbTable(appSlug, selectedTable);
       const schemaData = unwrap(schemaRes);
-      const queryData = unwrap(queryRes);
-      const countData = unwrap(countRes);
-
       setSchema(schemaData);
+
+      // Build expand list from Lookup relations
+      const expand = (schemaData?.relations || []).map(r => r.from_column);
+
+      // Build structured filters from UI filters
+      const apiFilters = filters.map(f => {
+        const opMap = { eq: 'eq', neq: 'ne', gt: 'gt', gte: 'gte', lt: 'lt', lte: 'lte', like: 'like', is_null: 'is_null', not_null: 'is_not_null' };
+        return {
+          column: f.column,
+          op: opMap[f.op] || 'eq',
+          value: f.value,
+        };
+      });
+
+      // Use the new structured query endpoint
+      const queryRes = await queryAppDbRows(appSlug, selectedTable, {
+        filters: apiFilters,
+        limit: pageSize,
+        offset: currentPage * pageSize,
+        order_by: sortColumn || undefined,
+        order_desc: sortDesc,
+        expand,
+      });
+      const queryData = unwrap(queryRes);
+
+      // Also get total count (without pagination)
+      const countRes = await queryAppDbRows(appSlug, selectedTable, {
+        filters: apiFilters,
+        limit: 1,
+        offset: 0,
+      });
+      const countTotal = unwrap(countRes)?.total || queryData?.total || 0;
+
       setResult({
         columns: queryData?.columns || [],
         rows: queryData?.rows || [],
-        total_count: countData?.rows?.[0]?.cnt || queryData?.total || 0,
+        total_count: countTotal,
       });
     } catch (e) {
       setError(e.message);
@@ -172,7 +180,7 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
     if (searchTimeout.current) clearTimeout(searchTimeout.current);
     searchTimeout.current = setTimeout(() => {
       if (value.trim() && schema?.columns) {
-        const textCol = schema.columns.find(c => !c.primary_key && isTextType(c.data_type || c.field_type));
+        const textCol = schema.columns.find(c => !c.primary_key && isTextType(c.field_type));
         if (textCol) {
           setFilters(prev => {
             const without = prev.filter(f => f.op !== 'like' || !f.value?.startsWith?.('%'));
@@ -283,9 +291,10 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
   // ── Export CSV ──
   function handleExportCSV() {
     if (!result || result.rows.length === 0) return;
-    const headers = result.columns.join(',');
+    const visibleCols = result.columns.filter(c => !c.endsWith('_display'));
+    const headers = visibleCols.join(',');
     const rows = result.rows.map(row =>
-      result.columns.map(col => {
+      visibleCols.map(col => {
         const val = row[col];
         if (val == null) return '';
         const str = String(val);
@@ -452,7 +461,13 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
 
       {/* Modals */}
       {showAddRow && schema && (
-        <AddRowModal columns={schema.columns || []} onInsert={handleInsertRow} onClose={() => setShowAddRow(false)} />
+        <AddRowModal
+          columns={schema.columns || []}
+          relations={schema.relations || []}
+          appSlug={selectedAppSlug}
+          onInsert={handleInsertRow}
+          onClose={() => setShowAddRow(false)}
+        />
       )}
       {showDeleteConfirm && (
         <DeleteConfirmModal count={selectedRows.size} onConfirm={handleDeleteSelected} onClose={() => setShowDeleteConfirm(false)} />
@@ -464,5 +479,5 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
 function isTextType(type) {
   if (!type) return false;
   const t = type.toLowerCase();
-  return ['text', 'varchar', 'char', 'string', 'clob', 'nvarchar', 'nchar'].some(k => t.includes(k));
+  return ['text', 'varchar', 'char', 'string', 'email', 'url', 'phone'].some(k => t.includes(k));
 }

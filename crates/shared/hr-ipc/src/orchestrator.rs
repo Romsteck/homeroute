@@ -214,6 +214,58 @@ pub enum OrchestratorRequest {
         sql: String,
         params: Vec<serde_json::Value>,
     },
+    /// Structured query: SELECT rows with filters, pagination, and optional Lookup expansion.
+    AppDbQueryRows {
+        slug: String,
+        table: String,
+        #[serde(default)]
+        filters: Vec<serde_json::Value>,
+        #[serde(default)]
+        limit: Option<u64>,
+        #[serde(default)]
+        offset: Option<u64>,
+        #[serde(default)]
+        order_by: Option<String>,
+        #[serde(default)]
+        order_desc: Option<bool>,
+        #[serde(default)]
+        expand: Vec<String>,
+    },
+    /// Sync SQLite tables into Dataverse metadata.
+    AppDbSyncSchema {
+        slug: String,
+    },
+    /// Get full database schema (all tables + relations + version).
+    AppDbGetSchema {
+        slug: String,
+    },
+    /// Create a new table.
+    AppDbCreateTable {
+        slug: String,
+        definition: serde_json::Value,
+    },
+    /// Drop a table.
+    AppDbDropTable {
+        slug: String,
+        table: String,
+    },
+    /// Add a column to a table.
+    AppDbAddColumn {
+        slug: String,
+        table: String,
+        column: serde_json::Value,
+    },
+    /// Remove a column from a table.
+    AppDbRemoveColumn {
+        slug: String,
+        table: String,
+        column: String,
+    },
+    /// Create a relation between tables.
+    AppDbCreateRelation {
+        slug: String,
+        relation: serde_json::Value,
+    },
     /// Take a SQLite snapshot of the app database.
     AppDbSnapshot {
         slug: String,

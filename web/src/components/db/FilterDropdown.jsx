@@ -13,7 +13,7 @@ const OPS = [
   { value: 'not_null', label: 'NOT NULL' },
 ];
 
-export function FilterDropdown({ column, currentFilter, onFilterChange }) {
+export function FilterDropdown({ column, fieldType, choices, currentFilter, onFilterChange }) {
   const [open, setOpen] = useState(false);
   const [op, setOp] = useState(currentFilter?.op || 'eq');
   const [value, setValue] = useState(currentFilter?.value ?? '');
@@ -28,8 +28,8 @@ export function FilterDropdown({ column, currentFilter, onFilterChange }) {
   const apply = () => {
     if (op === 'is_null' || op === 'not_null') {
       onFilterChange(column, { column, op, value: null });
-    } else if (value.trim()) {
-      onFilterChange(column, { column, op, value: value.trim() });
+    } else if (String(value).trim() !== '' || fieldType === 'Boolean') {
+      onFilterChange(column, { column, op, value: fieldType === 'Boolean' ? value : String(value).trim() });
     }
     setOpen(false);
   };
@@ -42,6 +42,13 @@ export function FilterDropdown({ column, currentFilter, onFilterChange }) {
   };
 
   const hasFilter = !!currentFilter;
+  const needsValue = op !== 'is_null' && op !== 'not_null';
+
+  // Determine input type based on field type
+  let inputType = 'text';
+  if (fieldType === 'Number' || fieldType === 'Decimal' || fieldType === 'Currency' || fieldType === 'Percent') inputType = 'number';
+  if (fieldType === 'Date') inputType = 'date';
+  if (fieldType === 'DateTime') inputType = 'datetime-local';
 
   return (
     <div className="relative inline-block" ref={ref}>
@@ -64,9 +71,29 @@ export function FilterDropdown({ column, currentFilter, onFilterChange }) {
           >
             {OPS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
-          {op !== 'is_null' && op !== 'not_null' && (
+          {needsValue && fieldType === 'Boolean' && (
+            <select
+              value={value}
+              onChange={e => setValue(e.target.value)}
+              className="w-full bg-gray-900 text-white text-xs rounded px-2 py-1.5 border border-gray-600 mb-2"
+            >
+              <option value="1">Vrai</option>
+              <option value="0">Faux</option>
+            </select>
+          )}
+          {needsValue && fieldType === 'Choice' && choices?.length > 0 && (
+            <select
+              value={value}
+              onChange={e => setValue(e.target.value)}
+              className="w-full bg-gray-900 text-white text-xs rounded px-2 py-1.5 border border-gray-600 mb-2"
+            >
+              <option value="">--</option>
+              {choices.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          )}
+          {needsValue && fieldType !== 'Boolean' && !(fieldType === 'Choice' && choices?.length > 0) && (
             <input
-              type="text"
+              type={inputType}
               value={value}
               onChange={e => setValue(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && apply()}

@@ -12,7 +12,8 @@ use hr_apps::{AppSupervisor, ContextGenerator, DbManager, ProcessStatus};
 use hr_common::logging::{LogQuery, LogStore};
 use hr_ipc::EdgeClient;
 use hr_ipc::types::{
-    AppDbQueryResult, AppDbSnapshotData, AppDbTableColumn, AppDbTableSchema, AppDbTablesData,
+    AppDbQueryResult, AppDbRelation, AppDbSnapshotData, AppDbTableColumn, AppDbTableSchema,
+    AppDbTablesData,
     AppExecResult, AppListData, AppLogEntry, AppLogsData, AppStatusData, ApplicationDto,
     IpcResponse,
 };
@@ -525,6 +526,18 @@ impl AppsContext {
                             field_type: format!("{:?}", c.field_type),
                             required: c.required,
                             unique: c.unique,
+                            choices: c.choices,
+                            formula_expression: c.formula_expression,
+                        })
+                        .collect(),
+                    relations: schema
+                        .relations
+                        .into_iter()
+                        .map(|r| AppDbRelation {
+                            from_column: r.from_column,
+                            to_table: r.to_table,
+                            to_column: r.to_column,
+                            display_column: r.display_column,
                         })
                         .collect(),
                     row_count: schema.row_count,
@@ -579,6 +592,144 @@ impl AppsContext {
                 warn!(slug = %slug, error = %e, "AppDbExecute failed");
                 IpcResponse::err(format!("execute: {e}"))
             }
+        }
+    }
+
+    pub async fn db_query_rows(
+        &self,
+        slug: String,
+        table: String,
+        filters_json: Vec<serde_json::Value>,
+        limit: Option<u64>,
+        offset: Option<u64>,
+        order_by: Option<String>,
+        order_desc: Option<bool>,
+        expand: Vec<String>,
+    ) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+
+        // Parse filters from JSON
+        let filters: Vec<hr_apps::Filter> = filters_json
+            .iter()
+            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+            .collect();
+
+        let pagination = hr_apps::Pagination {
+            limit: limit.unwrap_or(100),
+            offset: offset.unwrap_or(0),
+            order_by,
+            order_desc: order_desc.unwrap_or(false),
+        };
+
+        match self
+            .db_manager
+            .select_rows_expanded(&slug, &table, &filters, &pagination, &expand)
+            .await
+        {
+            Ok(q) => {
+                info!(slug = %slug, table = %table, rows = q.total, expand = ?expand, "AppDbQueryRows ok");
+                IpcResponse::ok_data(AppDbQueryResult {
+                    columns: q.columns,
+                    rows: q.rows,
+                    total: q.total,
+                })
+            }
+            Err(e) => {
+                warn!(slug = %slug, table = %table, error = %e, "AppDbQueryRows failed");
+                IpcResponse::err(format!("query_rows: {e}"))
+            }
+        }
+    }
+
+    pub async fn db_sync_schema(&self, slug: String) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        match self.db_manager.sync_schema(&slug).await {
+            Ok(r) => {
+                info!(slug = %slug, tables = r.tables_added.len(), columns = r.columns_added.len(), relations = r.relations_added, "Schema sync done");
+                IpcResponse::ok_data(r)
+            }
+            Err(e) => IpcResponse::err(format!("sync_schema: {e}")),
+        }
+    }
+
+    pub async fn db_get_schema(&self, slug: String) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        match self.db_manager.get_schema(&slug).await {
+            Ok(schema) => IpcResponse::ok_data(schema),
+            Err(e) => IpcResponse::err(format!("get_schema: {e}")),
+        }
+    }
+
+    pub async fn db_create_table(&self, slug: String, definition: serde_json::Value) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        let def: hr_apps::TableDefinition = match serde_json::from_value(definition) {
+            Ok(d) => d,
+            Err(e) => return IpcResponse::err(format!("invalid table definition: {e}")),
+        };
+        info!(slug = %slug, table = %def.name, "Creating table");
+        match self.db_manager.create_table(&slug, def).await {
+            Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
+            Err(e) => IpcResponse::err(format!("create_table: {e}")),
+        }
+    }
+
+    pub async fn db_drop_table(&self, slug: String, table: String) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        info!(slug = %slug, table = %table, "Dropping table");
+        match self.db_manager.drop_table(&slug, &table).await {
+            Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
+            Err(e) => IpcResponse::err(format!("drop_table: {e}")),
+        }
+    }
+
+    pub async fn db_add_column(&self, slug: String, table: String, column: serde_json::Value) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        let col: hr_apps::ColumnDefinition = match serde_json::from_value(column) {
+            Ok(c) => c,
+            Err(e) => return IpcResponse::err(format!("invalid column definition: {e}")),
+        };
+        info!(slug = %slug, table = %table, column = %col.name, "Adding column");
+        match self.db_manager.add_column(&slug, &table, col).await {
+            Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
+            Err(e) => IpcResponse::err(format!("add_column: {e}")),
+        }
+    }
+
+    pub async fn db_remove_column(&self, slug: String, table: String, column: String) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        info!(slug = %slug, table = %table, column = %column, "Removing column");
+        match self.db_manager.remove_column(&slug, &table, &column).await {
+            Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
+            Err(e) => IpcResponse::err(format!("remove_column: {e}")),
+        }
+    }
+
+    pub async fn db_create_relation(&self, slug: String, relation: serde_json::Value) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        let rel: hr_apps::RelationDefinition = match serde_json::from_value(relation) {
+            Ok(r) => r,
+            Err(e) => return IpcResponse::err(format!("invalid relation definition: {e}")),
+        };
+        info!(slug = %slug, from = %rel.from_table, to = %rel.to_table, "Creating relation");
+        match self.db_manager.create_relation(&slug, rel).await {
+            Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
+            Err(e) => IpcResponse::err(format!("create_relation: {e}")),
         }
     }
 

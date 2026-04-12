@@ -229,12 +229,26 @@ pub struct AppDbTableColumn {
     pub field_type: String,
     pub required: bool,
     pub unique: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formula_expression: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppDbRelation {
+    pub from_column: String,
+    pub to_table: String,
+    pub to_column: String,
+    pub display_column: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppDbTableSchema {
     pub name: String,
     pub columns: Vec<AppDbTableColumn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relations: Vec<AppDbRelation>,
     pub row_count: u64,
 }
 

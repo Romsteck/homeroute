@@ -43,6 +43,15 @@ pub fn generate_ddl(op: &MigrationOp) -> Vec<String> {
                 "\"updated_at\" TEXT NOT NULL DEFAULT (datetime('now'))".to_string(),
             ];
             for col in &table.columns {
+                if col.field_type == FieldType::Formula {
+                    if let Some(ref expr) = col.formula_expression {
+                        cols.push(format!(
+                            "\"{}\" TEXT GENERATED ALWAYS AS ({}) STORED",
+                            col.name, expr
+                        ));
+                        continue;
+                    }
+                }
                 let mut def = format!("\"{}\" {}", col.name, col.field_type.sqlite_type());
                 if col.required {
                     def.push_str(" NOT NULL");
@@ -62,6 +71,10 @@ pub fn generate_ddl(op: &MigrationOp) -> Vec<String> {
             )]
         }
         MigrationOp::AddColumn { table, column } => {
+            if column.field_type == FieldType::Formula {
+                // SQLite does not support ALTER TABLE ADD COLUMN ... GENERATED ALWAYS AS
+                return vec![];
+            }
             let mut def = format!(
                 "ALTER TABLE \"{}\" ADD COLUMN \"{}\" {}",
                 table,

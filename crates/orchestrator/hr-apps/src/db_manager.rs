@@ -9,15 +9,17 @@ use serde_json::Value;
 use tokio::sync::{Mutex, RwLock};
 use tracing::info;
 
-use hr_db::engine::DataverseEngine;
-use hr_db::query::{Filter, Pagination, query_rows};
-use hr_db::schema::{ColumnDefinition, FieldType};
+use hr_db::engine::{DataverseEngine, SyncResult};
+use hr_db::query::{Filter, Pagination, query_rows, query_rows_expanded};
+use hr_db::schema::{ColumnDefinition, DatabaseSchema, FieldType, RelationDefinition, TableDefinition};
 
 /// Schema description for a single SQLite table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableSchema {
     pub name: String,
     pub columns: Vec<TableColumn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relations: Vec<TableRelation>,
     pub row_count: u64,
 }
 
@@ -27,6 +29,18 @@ pub struct TableColumn {
     pub field_type: FieldType,
     pub required: bool,
     pub unique: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formula_expression: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableRelation {
+    pub from_column: String,
+    pub to_table: String,
+    pub to_column: String,
+    pub display_column: String,
 }
 
 impl From<&ColumnDefinition> for TableColumn {
@@ -36,6 +50,8 @@ impl From<&ColumnDefinition> for TableColumn {
             field_type: c.field_type.clone(),
             required: c.required,
             unique: c.unique,
+            choices: c.choices.clone(),
+            formula_expression: c.formula_expression.clone(),
         }
     }
 }
@@ -78,18 +94,42 @@ impl DbManager {
         Ok(schema.tables.into_iter().map(|t| t.name).collect())
     }
 
-    /// Describe a single table (columns + row count).
+    /// Describe a single table (columns + row count + relations).
     pub async fn describe_table(&self, slug: &str, table: &str) -> Result<TableSchema> {
         let engine = self.get_engine(slug).await?;
         let engine = engine.lock().await;
-        let table_def = engine
-            .get_table(table)
-            .map_err(|e| anyhow!("{e}"))?
+        let schema = engine.get_schema().map_err(|e| anyhow!("{e}"))?;
+        let table_def = schema
+            .tables
+            .iter()
+            .find(|t| t.name == table)
             .ok_or_else(|| anyhow!("table not found: {table}"))?;
         let row_count = engine.count_rows(table).unwrap_or(0);
+
+        // Build relations for this table's Lookup columns
+        let mut relations = Vec::new();
+        for rel in &schema.relations {
+            if rel.from_table == table {
+                // Determine display column on target table
+                let display_col = schema
+                    .tables
+                    .iter()
+                    .find(|t| t.name == rel.to_table)
+                    .map(|t| find_display_column(&t.columns))
+                    .unwrap_or_else(|| "id".to_string());
+                relations.push(TableRelation {
+                    from_column: rel.from_column.clone(),
+                    to_table: rel.to_table.clone(),
+                    to_column: rel.to_column.clone(),
+                    display_column: display_col,
+                });
+            }
+        }
+
         Ok(TableSchema {
-            name: table_def.name,
+            name: table_def.name.clone(),
             columns: table_def.columns.iter().map(TableColumn::from).collect(),
+            relations,
             row_count,
         })
     }
@@ -202,6 +242,129 @@ impl DbManager {
         })
     }
 
+    /// Structured query with optional Lookup expansion via LEFT JOIN.
+    pub async fn select_rows_expanded(
+        &self,
+        slug: &str,
+        table: &str,
+        filters: &[Filter],
+        pagination: &Pagination,
+        expand: &[String],
+    ) -> Result<QueryResult> {
+        let engine = self.get_engine(slug).await?;
+        let engine = engine.lock().await;
+
+        if expand.is_empty() {
+            let rows = query_rows(engine.connection(), table, filters, pagination)
+                .map_err(|e| anyhow!("{e}"))?;
+            let columns = rows
+                .first()
+                .and_then(|v| v.as_object())
+                .map(|o| o.keys().cloned().collect())
+                .unwrap_or_default();
+            let total = engine.count_rows(table).unwrap_or(0);
+            return Ok(QueryResult {
+                columns,
+                rows,
+                total,
+            });
+        }
+
+        // Resolve expand columns to join info from relations
+        let schema = engine.get_schema().map_err(|e| anyhow!("{e}"))?;
+        let mut expand_info = Vec::new();
+        for col_name in expand {
+            if let Some(rel) = schema
+                .relations
+                .iter()
+                .find(|r| r.from_table == table && r.from_column == *col_name)
+            {
+                let display_col = schema
+                    .tables
+                    .iter()
+                    .find(|t| t.name == rel.to_table)
+                    .map(|t| find_display_column(&t.columns))
+                    .unwrap_or_else(|| "id".to_string());
+                expand_info.push((col_name.as_str(), rel.to_table.as_str(), rel.to_column.as_str(), display_col));
+            }
+        }
+
+        let expand_refs: Vec<(&str, &str, &str, &str)> = expand_info
+            .iter()
+            .map(|(a, b, c, d)| (*a, *b, *c, d.as_str()))
+            .collect();
+
+        let rows = query_rows_expanded(
+            engine.connection(),
+            table,
+            filters,
+            pagination,
+            &expand_refs,
+        )
+        .map_err(|e| anyhow!("{e}"))?;
+
+        let columns = rows
+            .first()
+            .and_then(|v| v.as_object())
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default();
+        let total = engine.count_rows(table).unwrap_or(0);
+        Ok(QueryResult {
+            columns,
+            rows,
+            total,
+        })
+    }
+
+    /// Sync SQLite tables into Dataverse metadata.
+    pub async fn sync_schema(&self, slug: &str) -> Result<SyncResult> {
+        let engine = self.get_engine(slug).await?;
+        let engine = engine.lock().await;
+        engine.sync_schema().map_err(|e| anyhow!("{e}"))
+    }
+
+    /// Get full database schema (tables + relations + version).
+    pub async fn get_schema(&self, slug: &str) -> Result<DatabaseSchema> {
+        let engine = self.get_engine(slug).await?;
+        let engine = engine.lock().await;
+        engine.get_schema().map_err(|e| anyhow!("{e}"))
+    }
+
+    /// Create a new table from a TableDefinition.
+    pub async fn create_table(&self, slug: &str, definition: TableDefinition) -> Result<u64> {
+        let engine = self.get_engine(slug).await?;
+        let engine = engine.lock().await;
+        engine.create_table(&definition).map_err(|e| anyhow!("{e}"))
+    }
+
+    /// Drop a table.
+    pub async fn drop_table(&self, slug: &str, table: &str) -> Result<u64> {
+        let engine = self.get_engine(slug).await?;
+        let engine = engine.lock().await;
+        engine.drop_table(table).map_err(|e| anyhow!("{e}"))
+    }
+
+    /// Add a column to a table.
+    pub async fn add_column(&self, slug: &str, table: &str, column: ColumnDefinition) -> Result<u64> {
+        let engine = self.get_engine(slug).await?;
+        let engine = engine.lock().await;
+        engine.add_column(table, &column).map_err(|e| anyhow!("{e}"))
+    }
+
+    /// Remove a column from a table.
+    pub async fn remove_column(&self, slug: &str, table: &str, column: &str) -> Result<u64> {
+        let engine = self.get_engine(slug).await?;
+        let engine = engine.lock().await;
+        engine.remove_column(table, column).map_err(|e| anyhow!("{e}"))
+    }
+
+    /// Create a relation between tables.
+    pub async fn create_relation(&self, slug: &str, relation: RelationDefinition) -> Result<u64> {
+        let engine = self.get_engine(slug).await?;
+        let engine = engine.lock().await;
+        engine.create_relation(&relation).map_err(|e| anyhow!("{e}"))
+    }
+
     async fn get_engine(&self, slug: &str) -> Result<Arc<Mutex<DataverseEngine>>> {
         {
             let engines = self.engines.read().await;
@@ -217,12 +380,39 @@ impl DbManager {
         }
         let engine =
             DataverseEngine::open(&db_path).map_err(|e| anyhow!("open db for '{slug}': {e}"))?;
+
+        // Auto-sync: import SQLite tables into Dataverse metadata on first load
+        match engine.sync_schema() {
+            Ok(r) if !r.tables_added.is_empty() => {
+                info!(app_slug = slug, tables = ?r.tables_added, "auto-sync imported tables");
+            }
+            Err(e) => {
+                tracing::warn!(app_slug = slug, error = %e, "auto-sync failed");
+            }
+            _ => {}
+        }
+
         let engine = Arc::new(Mutex::new(engine));
         let mut engines = self.engines.write().await;
         engines.insert(slug.to_string(), engine.clone());
         info!(app_slug = slug, path = %db_path.display(), "db opened");
         Ok(engine)
     }
+}
+
+/// Heuristic: pick the best "display" column for a table.
+/// Prefers "name", "title", "label", then first Text column, then "id".
+fn find_display_column(columns: &[ColumnDefinition]) -> String {
+    for preferred in &["name", "title", "label"] {
+        if columns.iter().any(|c| c.name == *preferred) {
+            return preferred.to_string();
+        }
+    }
+    columns
+        .iter()
+        .find(|c| c.field_type == FieldType::Text)
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| "id".to_string())
 }
 
 fn json_to_sql(v: &Value) -> Box<dyn rusqlite::types::ToSql> {

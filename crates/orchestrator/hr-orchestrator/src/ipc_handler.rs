@@ -556,6 +556,41 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
             OrchestratorRequest::AppDbExecute { slug, sql, params } => {
                 self.apps_ctx().db_execute(slug, sql, params).await
             }
+            OrchestratorRequest::AppDbQueryRows {
+                slug,
+                table,
+                filters,
+                limit,
+                offset,
+                order_by,
+                order_desc,
+                expand,
+            } => {
+                self.apps_ctx()
+                    .db_query_rows(slug, table, filters, limit, offset, order_by, order_desc, expand)
+                    .await
+            }
+            OrchestratorRequest::AppDbSyncSchema { slug } => {
+                self.apps_ctx().db_sync_schema(slug).await
+            }
+            OrchestratorRequest::AppDbGetSchema { slug } => {
+                self.apps_ctx().db_get_schema(slug).await
+            }
+            OrchestratorRequest::AppDbCreateTable { slug, definition } => {
+                self.apps_ctx().db_create_table(slug, definition).await
+            }
+            OrchestratorRequest::AppDbDropTable { slug, table } => {
+                self.apps_ctx().db_drop_table(slug, table).await
+            }
+            OrchestratorRequest::AppDbAddColumn { slug, table, column } => {
+                self.apps_ctx().db_add_column(slug, table, column).await
+            }
+            OrchestratorRequest::AppDbRemoveColumn { slug, table, column } => {
+                self.apps_ctx().db_remove_column(slug, table, column).await
+            }
+            OrchestratorRequest::AppDbCreateRelation { slug, relation } => {
+                self.apps_ctx().db_create_relation(slug, relation).await
+            }
             OrchestratorRequest::AppDbSnapshot { slug } => self.apps_ctx().db_snapshot(slug).await,
         }
     }

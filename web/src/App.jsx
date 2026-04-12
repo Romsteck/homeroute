@@ -24,6 +24,7 @@ import Apps from './pages/Apps';
 import AppDetail from './pages/AppDetail';
 import Studio from './pages/Studio';
 import DbExplorer from './pages/DbExplorer';
+import SchemaPage from './pages/SchemaPage';
 import Logs from './pages/Logs';
 
 // Component to protect routes that require authentication
@@ -120,6 +121,7 @@ function AppRoutes() {
               <Route path="/apps" element={<Navigate to="/studio" replace />} />
               <Route path="/apps/:slug" element={<Navigate to="/studio" replace />} />
               <Route path="/database" element={<DbExplorer />} />
+              <Route path="/schema" element={<SchemaPage />} />
               <Route path="/docs" element={<Docs />} />
               <Route path="/docs/:appId" element={<Docs />} />
             </Routes>

@@ -28,6 +28,58 @@ pub enum FieldType {
 }
 
 impl FieldType {
+    /// Infer a FieldType from a SQLite column type + column name heuristics.
+    pub fn from_sqlite_affinity(sqlite_type: &str, col_name: &str) -> Self {
+        let ty = sqlite_type.to_uppercase();
+        let name = col_name.to_lowercase();
+
+        // Name-based heuristics (more specific, checked first)
+        if name == "id" || name.ends_with("_id") {
+            if ty.contains("INTEGER") {
+                return if name == "id" {
+                    Self::AutoIncrement
+                } else {
+                    Self::Number // could be Lookup, resolved later via FK detection
+                };
+            }
+        }
+        if name.ends_with("_at") || name == "created_at" || name == "updated_at" {
+            return Self::DateTime;
+        }
+        if name.contains("date") {
+            return Self::Date;
+        }
+        if name.contains("email") {
+            return Self::Email;
+        }
+        if name.contains("url") || name.contains("link") || name.contains("href") {
+            return Self::Url;
+        }
+        if name.contains("phone") || name.contains("tel") {
+            return Self::Phone;
+        }
+        if name.starts_with("is_") || name.starts_with("has_") || name == "active" || name == "enabled" {
+            return Self::Boolean;
+        }
+
+        // SQLite type affinity
+        if ty.contains("INT") {
+            return Self::Number;
+        }
+        if ty.contains("REAL") || ty.contains("FLOAT") || ty.contains("DOUBLE") || ty.contains("NUMERIC") {
+            return Self::Decimal;
+        }
+        if ty.contains("BLOB") {
+            return Self::Json;
+        }
+        if ty.contains("BOOL") {
+            return Self::Boolean;
+        }
+
+        // Default: TEXT → Text
+        Self::Text
+    }
+
     /// Returns the SQLite column type for this field type.
     pub fn sqlite_type(&self) -> &'static str {
         match self {
@@ -67,6 +119,9 @@ pub struct ColumnDefinition {
     /// Available choices for Choice/MultiChoice fields.
     #[serde(default)]
     pub choices: Vec<String>,
+    /// SQL expression for Formula fields (GENERATED ALWAYS AS).
+    #[serde(default)]
+    pub formula_expression: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

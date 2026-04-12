@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Server, Shield, Globe, Settings,
   ArrowLeftRight, RefreshCw, LogOut, Activity,
   User, HardDrive, Lock, Boxes, Code2, Database,
-  Store as StoreIcon, GitBranch, Archive, X, ListTodo, Zap, BookOpen, ExternalLink, ScrollText
+  Store as StoreIcon, GitBranch, Archive, X, ListTodo, Zap, BookOpen, ExternalLink, ScrollText, TableProperties
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useEffect, useState } from 'react';
@@ -35,6 +35,7 @@ const navGroups = [
     items: [
       { to: '/studio', icon: Code2, label: 'Studio', highlight: true },
       { to: '/database', icon: Database, label: 'Base de donnees' },
+      { to: '/schema', icon: TableProperties, label: 'Schema' },
       { to: '/store', icon: StoreIcon, label: 'Store' },
       { to: '/git', icon: GitBranch, label: 'Git' },
       { to: '/docs', icon: BookOpen, label: 'Docs' },

@@ -82,6 +82,10 @@ pub enum ValidationError {
     RelationTableNotFound(String),
     #[error("Relation references non-existent column '{0}' in table '{1}'")]
     RelationColumnNotFound(String, String),
+    #[error("Formula field '{0}' requires a formula_expression")]
+    MissingFormulaExpression(String),
+    #[error("Field '{0}' has formula_expression but is not a Formula type")]
+    UnexpectedFormulaExpression(String),
 }
 
 pub fn validate_identifier(name: &str) -> Result<(), ValidationError> {
@@ -135,6 +139,17 @@ pub fn validate_column(col: &ColumnDefinition) -> Result<(), ValidationError> {
         && col.choices.is_empty()
     {
         return Err(ValidationError::EmptyChoices(col.name.clone()));
+    }
+    if col.field_type == FieldType::Formula {
+        match &col.formula_expression {
+            None => return Err(ValidationError::MissingFormulaExpression(col.name.clone())),
+            Some(expr) if expr.trim().is_empty() => {
+                return Err(ValidationError::MissingFormulaExpression(col.name.clone()))
+            }
+            _ => {}
+        }
+    } else if col.formula_expression.is_some() {
+        return Err(ValidationError::UnexpectedFormulaExpression(col.name.clone()));
     }
     Ok(())
 }
