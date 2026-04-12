@@ -10,12 +10,11 @@ path = "src/main.rs"
 [dependencies]
 hr-common = { path = "../../shared/hr-common" }
 hr-ipc = { path = "../../shared/hr-ipc" }
+hr-apps = { path = "../hr-apps" }
 hr-registry = { path = "../hr-registry" }
 hr-container = { path = "../hr-container" }
 hr-git = { path = "../hr-git" }
 hr-acme = { path = "../../edge/hr-acme" }
-hr-environment = { workspace = true }
-hr-pipeline = { workspace = true }
 
 tokio = { workspace = true }
 tracing = { workspace = true }

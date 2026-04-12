@@ -1,10 +1,10 @@
 use axum::{
+    Json, Router,
     extract::State,
     routing::{get, post, put},
-    Json, Router,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use hr_registry::cloudflare;
 
@@ -35,9 +35,8 @@ async fn status(State(state): State<ApiState>) -> Json<Value> {
         _ => None,
     };
 
-    let configured = env.cf_api_token.is_some()
-        && env.cf_zone_id.is_some()
-        && env.cf_record_name.is_some();
+    let configured =
+        env.cf_api_token.is_some() && env.cf_zone_id.is_some() && env.cf_record_name.is_some();
 
     // Determine sync status: AAAA record should match on-prem IPv6
     let in_sync = ipv6.as_deref() == cf_ip.as_deref();
@@ -51,7 +50,7 @@ async fn status(State(state): State<ApiState>) -> Json<Value> {
     // Mask the API token for display (show last 4 chars only)
     let masked_token = env.cf_api_token.as_ref().map(|t| {
         if t.len() > 4 {
-            format!("****{}", &t[t.len()-4..])
+            format!("****{}", &t[t.len() - 4..])
         } else {
             "****".to_string()
         }
@@ -59,7 +58,11 @@ async fn status(State(state): State<ApiState>) -> Json<Value> {
 
     // Parse last update info from logs
     let last_update = log.lines().rev().find(|l| l.contains("Updated ")).map(|l| {
-        l.trim_start_matches('[').split(']').next().unwrap_or("").to_string()
+        l.trim_start_matches('[')
+            .split(']')
+            .next()
+            .unwrap_or("")
+            .to_string()
     });
 
     Json(json!({
@@ -98,13 +101,19 @@ async fn force_update(State(state): State<ApiState>) -> Json<Value> {
     };
     let record_name = match &env.cf_record_name {
         Some(r) => r,
-        None => return Json(json!({"success": false, "error": "Nom d'enregistrement non configure"})),
+        None => {
+            return Json(json!({"success": false, "error": "Nom d'enregistrement non configure"}));
+        }
     };
 
     // Update AAAA record with on-prem IPv6
     let ipv6 = match get_ipv6_address(&env.cf_interface).await {
         Some(ip) => ip,
-        None => return Json(json!({"success": false, "error": "Impossible de determiner l'adresse IPv6"})),
+        None => {
+            return Json(
+                json!({"success": false, "error": "Impossible de determiner l'adresse IPv6"}),
+            );
+        }
     };
 
     match cloudflare::upsert_aaaa_record(token, zone_id, record_name, &ipv6, env.cf_proxied).await {
@@ -146,7 +155,9 @@ async fn update_token(Json(body): Json<UpdateTokenRequest>) -> Json<Value> {
         return Json(json!({"success": false, "error": e.to_string()}));
     }
 
-    Json(json!({"success": true, "message": "Token mis a jour. Redemarrez le service pour appliquer."}))
+    Json(
+        json!({"success": true, "message": "Token mis a jour. Redemarrez le service pour appliquer."}),
+    )
 }
 
 #[derive(Deserialize)]
@@ -193,7 +204,9 @@ async fn update_config(Json(body): Json<UpdateConfigRequest>) -> Json<Value> {
         return Json(json!({"success": false, "error": e.to_string()}));
     }
 
-    Json(json!({"success": true, "message": "Configuration mise a jour. Redemarrez le service pour appliquer."}))
+    Json(
+        json!({"success": true, "message": "Configuration mise a jour. Redemarrez le service pour appliquer."}),
+    )
 }
 
 async fn get_ipv6_address(interface: &str) -> Option<String> {

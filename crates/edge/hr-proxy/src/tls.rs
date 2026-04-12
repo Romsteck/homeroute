@@ -1,14 +1,14 @@
-use rustls::server::{ClientHello, ResolvesServerCert};
-use rustls::sign::CertifiedKey;
+use anyhow::{Context, Result};
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::{ClientHello, ResolvesServerCert};
+use rustls::sign::CertifiedKey;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use anyhow::{Context, Result};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 /// SNI-based certificate resolver for rustls
 #[derive(Debug)]
@@ -61,7 +61,8 @@ impl SniResolver {
 
     /// List loaded domains
     pub fn loaded_domains(&self) -> Vec<String> {
-        self.certs.read()
+        self.certs
+            .read()
             .map(|certs| certs.keys().cloned().collect())
             .unwrap_or_default()
     }
@@ -77,7 +78,9 @@ impl SniResolver {
 
     /// Replace all certificates atomically (for SIGHUP reload)
     pub fn replace_all(&self, new_certs: HashMap<String, Arc<CertifiedKey>>) -> Result<()> {
-        let mut certs = self.certs.write()
+        let mut certs = self
+            .certs
+            .write()
             .map_err(|_| anyhow::anyhow!("Lock poisoned during certificate replacement"))?;
         *certs = new_certs;
         Ok(())
@@ -123,16 +126,23 @@ impl ResolvesServerCert for SniResolver {
         // falls back to a direct connection instead of getting a cert mismatch.
         drop(certs); // Release read lock before acquiring another
 
-        let is_local = self.local_domain.read().ok()
-            .and_then(|ld| ld.as_ref().map(|d| {
-                server_name == d.as_str() || server_name.ends_with(&format!(".{}", d))
-            }))
+        let is_local = self
+            .local_domain
+            .read()
+            .ok()
+            .and_then(|ld| {
+                ld.as_ref()
+                    .map(|d| server_name == d.as_str() || server_name.ends_with(&format!(".{}", d)))
+            })
             .unwrap_or(true); // if no local_domain set, allow fallback (backwards compat)
 
         if is_local {
             if let Ok(default) = self.default_cert.read() {
                 if let Some(key) = default.clone() {
-                    warn!("No specific cert for local SNI: {}, using fallback", server_name);
+                    warn!(
+                        "No specific cert for local SNI: {}, using fallback",
+                        server_name
+                    );
                     return Some(key);
                 }
             }
@@ -141,7 +151,10 @@ impl ResolvesServerCert for SniResolver {
             return None;
         }
 
-        warn!("No certificate found for SNI: {} and no fallback available", server_name);
+        warn!(
+            "No certificate found for SNI: {} and no fallback available",
+            server_name
+        );
         None
     }
 }
@@ -166,15 +179,22 @@ impl TlsManager {
     /// Load a certificate for a specific domain
     pub fn load_certificate(&self, domain: &str, cert_id: &str) -> Result<()> {
         let certified_key = self.load_certified_key(cert_id)?;
-        self.resolver.insert(domain.to_string(), Arc::new(certified_key));
+        self.resolver
+            .insert(domain.to_string(), Arc::new(certified_key));
         info!("Loaded TLS certificate for domain: {}", domain);
         Ok(())
     }
 
     /// Load a CertifiedKey from cert_id without inserting it
     fn load_certified_key(&self, cert_id: &str) -> Result<CertifiedKey> {
-        let cert_path = self.ca_storage_path.join("certs").join(format!("{}.crt", cert_id));
-        let key_path = self.ca_storage_path.join("keys").join(format!("{}.key", cert_id));
+        let cert_path = self
+            .ca_storage_path
+            .join("certs")
+            .join(format!("{}.crt", cert_id));
+        let key_path = self
+            .ca_storage_path
+            .join("keys")
+            .join(format!("{}.key", cert_id));
 
         let certs = load_certs(&cert_path)?;
         let key = load_private_key(&key_path)?;
@@ -189,20 +209,36 @@ impl TlsManager {
     pub fn set_fallback_certificate(&self, cert_id: &str) -> Result<()> {
         let certified_key = self.load_certified_key(cert_id)?;
         self.resolver.set_default_cert(Arc::new(certified_key));
-        info!("Fallback TLS certificate configured with cert_id: {}", cert_id);
+        info!(
+            "Fallback TLS certificate configured with cert_id: {}",
+            cert_id
+        );
         Ok(())
     }
 
     /// Load a certificate from PEM file paths (for ACME/Let's Encrypt certs)
-    pub fn load_certificate_from_pem(&self, domain: &str, cert_path: &str, key_path: &str) -> Result<()> {
+    pub fn load_certificate_from_pem(
+        &self,
+        domain: &str,
+        cert_path: &str,
+        key_path: &str,
+    ) -> Result<()> {
         let certified_key = load_certified_key_from_paths(cert_path, key_path)?;
-        self.resolver.insert(domain.to_string(), Arc::new(certified_key));
-        info!("Loaded TLS certificate for domain: {} (from {})", domain, cert_path);
+        self.resolver
+            .insert(domain.to_string(), Arc::new(certified_key));
+        info!(
+            "Loaded TLS certificate for domain: {} (from {})",
+            domain, cert_path
+        );
         Ok(())
     }
 
     /// Load a CertifiedKey from PEM file paths without inserting it
-    pub fn load_cert_from_files(&self, cert_path: &std::path::Path, key_path: &std::path::Path) -> Result<Arc<CertifiedKey>> {
+    pub fn load_cert_from_files(
+        &self,
+        cert_path: &std::path::Path,
+        key_path: &std::path::Path,
+    ) -> Result<Arc<CertifiedKey>> {
         let certified_key = load_certified_key_from_paths(
             &cert_path.to_string_lossy(),
             &key_path.to_string_lossy(),
@@ -275,7 +311,10 @@ impl TlsManager {
         info!("Certificate reload completed atomically");
 
         if !load_errors.is_empty() {
-            warn!("Some certificates failed to load during reload: {:?}", load_errors);
+            warn!(
+                "Some certificates failed to load during reload: {:?}",
+                load_errors
+            );
         }
 
         Ok(())
@@ -295,8 +334,8 @@ fn load_certified_key_from_paths(cert_path: &str, key_path: &str) -> Result<Cert
 
 /// Load certificates from a PEM file
 fn load_certs(path: &PathBuf) -> Result<Vec<CertificateDer<'static>>> {
-    let file = File::open(path)
-        .with_context(|| format!("Failed to open certificate file: {:?}", path))?;
+    let file =
+        File::open(path).with_context(|| format!("Failed to open certificate file: {:?}", path))?;
     let mut reader = BufReader::new(file);
 
     let certs = rustls_pemfile::certs(&mut reader)
@@ -312,12 +351,11 @@ fn load_certs(path: &PathBuf) -> Result<Vec<CertificateDer<'static>>> {
 
 /// Load private key from a PEM file
 fn load_private_key(path: &PathBuf) -> Result<PrivateKeyDer<'static>> {
-    let file = File::open(path)
-        .with_context(|| format!("Failed to open private key file: {:?}", path))?;
+    let file =
+        File::open(path).with_context(|| format!("Failed to open private key file: {:?}", path))?;
     let mut reader = BufReader::new(file);
 
-    let key = rustls_pemfile::private_key(&mut reader)
-        .context("Failed to parse private key")?;
+    let key = rustls_pemfile::private_key(&mut reader).context("Failed to parse private key")?;
 
     key.ok_or_else(|| anyhow::anyhow!("No private key found in file"))
 }

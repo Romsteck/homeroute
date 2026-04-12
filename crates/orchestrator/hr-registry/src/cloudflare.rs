@@ -270,7 +270,10 @@ pub async fn delete_record_by_name(
     // Delete the record
     delete_record(token, zone_id, &record_id).await?;
 
-    info!(record = record_name, "Deleted Cloudflare AAAA record by name");
+    info!(
+        record = record_name,
+        "Deleted Cloudflare AAAA record by name"
+    );
     Ok(Some(record_id))
 }
 
@@ -453,7 +456,12 @@ pub async fn switch_to_relay_dns(
         }
     }
 
-    info!(base_domain, vps_ipv4, app_count = app_slugs.len(), "Cloudflare DNS switched to relay mode");
+    info!(
+        base_domain,
+        vps_ipv4,
+        app_count = app_slugs.len(),
+        "Cloudflare DNS switched to relay mode"
+    );
     Ok(())
 }
 
@@ -492,7 +500,12 @@ pub async fn switch_to_direct_dns(
         }
     }
 
-    info!(base_domain, onprem_ipv6, app_count = app_slugs.len(), "Cloudflare DNS switched to direct mode");
+    info!(
+        base_domain,
+        onprem_ipv6,
+        app_count = app_slugs.len(),
+        "Cloudflare DNS switched to direct mode"
+    );
     Ok(())
 }
 

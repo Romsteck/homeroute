@@ -41,7 +41,10 @@ pub async fn git_cgi(
     if !body.is_empty() {
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
-            stdin.write_all(body).await.context("Failed to write body to git http-backend stdin")?;
+            stdin
+                .write_all(body)
+                .await
+                .context("Failed to write body to git http-backend stdin")?;
             drop(stdin);
         }
     }
@@ -63,8 +66,8 @@ pub async fn git_cgi(
 /// Parse a CGI response (headers + body separated by empty line).
 fn parse_cgi_response(raw: &[u8]) -> anyhow::Result<CgiResponse> {
     // Find the header/body boundary: \r\n\r\n or \n\n
-    let (header_end, body_start) = find_header_boundary(raw)
-        .context("Failed to find header/body boundary in CGI response")?;
+    let (header_end, body_start) =
+        find_header_boundary(raw).context("Failed to find header/body boundary in CGI response")?;
 
     let header_bytes = &raw[..header_end];
     let body = raw[body_start..].to_vec();
@@ -114,18 +117,12 @@ fn parse_cgi_response(raw: &[u8]) -> anyhow::Result<CgiResponse> {
 /// Returns (header_end_offset, body_start_offset).
 fn find_header_boundary(data: &[u8]) -> Option<(usize, usize)> {
     // Check for \r\n\r\n
-    if let Some(pos) = data
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-    {
+    if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
         return Some((pos, pos + 4));
     }
 
     // Check for \n\n
-    if let Some(pos) = data
-        .windows(2)
-        .position(|w| w == b"\n\n")
-    {
+    if let Some(pos) = data.windows(2).position(|w| w == b"\n\n") {
         return Some((pos, pos + 2));
     }
 

@@ -1,4 +1,4 @@
-use rusqlite::{params_from_iter, Connection};
+use rusqlite::{Connection, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -115,11 +115,7 @@ pub fn query_rows(
 }
 
 /// Insert rows into a table. Returns the number of rows inserted.
-pub fn insert_rows(
-    conn: &Connection,
-    table: &str,
-    rows: &[Value],
-) -> Result<usize, EngineError> {
+pub fn insert_rows(conn: &Connection, table: &str, rows: &[Value]) -> Result<usize, EngineError> {
     validate_identifier(table).map_err(EngineError::Validation)?;
     if rows.is_empty() {
         return Ok(0);
@@ -267,16 +263,11 @@ fn build_filter_clause(
                     let placeholders: Vec<&str> = arr.iter().map(|_| "?").collect();
                     let vals: Vec<Box<dyn rusqlite::types::ToSql>> =
                         arr.iter().map(|v| json_to_sql_value(v)).collect();
-                    (
-                        format!("\"{}\" IN ({})", col, placeholders.join(",")),
-                        vals,
-                    )
+                    (format!("\"{}\" IN ({})", col, placeholders.join(",")), vals)
                 } else {
                     (
                         format!("\"{}\" IN (?)", col),
-                        vec![json_to_sql_value(
-                            value.as_ref().unwrap_or(&Value::Null),
-                        )],
+                        vec![json_to_sql_value(value.as_ref().unwrap_or(&Value::Null))],
                     )
                 }
             } else {

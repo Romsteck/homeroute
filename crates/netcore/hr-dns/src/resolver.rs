@@ -40,14 +40,20 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
 
     // 1. DHCP lease hostname lookup (expand-hosts)
     if config.expand_hosts && !config.local_domain.is_empty() {
-        let hostname = if let Some(stripped) = name.strip_suffix(&format!(".{}", config.local_domain)) {
-            Some(stripped.to_string())
-        } else {
-            None
-        };
+        let hostname =
+            if let Some(stripped) = name.strip_suffix(&format!(".{}", config.local_domain)) {
+                Some(stripped.to_string())
+            } else {
+                None
+            };
 
         if let Some(hostname) = hostname {
-            if let Some(ip) = state_read.lease_store.read().await.find_ip_by_hostname(&hostname) {
+            if let Some(ip) = state_read
+                .lease_store
+                .read()
+                .await
+                .find_ip_by_hostname(&hostname)
+            {
                 debug!("Resolved {} via DHCP lease -> {}", name, ip);
                 if qtype == RecordType::A || qtype == RecordType::ANY {
                     return ResolveResult {
@@ -98,7 +104,10 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
     // only A record exists) — return NODATA to prevent wildcard/upstream from
     // returning the server IPv6, which would bypass direct container access.
     if has_static_exact {
-        debug!("Static record exists for {} but not type {:?} — NODATA", name, qtype);
+        debug!(
+            "Static record exists for {} but not type {:?} — NODATA",
+            name, qtype
+        );
         return ResolveResult {
             records: vec![],
             rcode: RCODE_NOERROR,
@@ -123,7 +132,10 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
 
                 if qtype == matching_type || qtype == RecordType::ANY {
                     if let Some(record) = parse_static_record(name, static_rec, matching_type) {
-                        debug!("Resolved {} via wildcard static record ({})", name, wildcard);
+                        debug!(
+                            "Resolved {} via wildcard static record ({})",
+                            name, wildcard
+                        );
                         return ResolveResult {
                             records: vec![record],
                             rcode: RCODE_NOERROR,
@@ -135,7 +147,10 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
             }
         }
         if has_wildcard_record {
-            debug!("Wildcard static record exists for {} but not type {:?} — NODATA", name, qtype);
+            debug!(
+                "Wildcard static record exists for {} but not type {:?} — NODATA",
+                name, qtype
+            );
             return ResolveResult {
                 records: vec![],
                 rcode: RCODE_NOERROR,
@@ -165,7 +180,10 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
             // without the suffix.  Without this, the upstream Cloudflare
             // wildcard *.mynetwk.biz would return a valid IP, causing a
             // certificate mismatch on Stripe, Facebook, etc.
-            debug!("Rejecting deep subdomain of local domain: {} (search-domain noise)", name);
+            debug!(
+                "Rejecting deep subdomain of local domain: {} (search-domain noise)",
+                name
+            );
             return ResolveResult {
                 records: vec![],
                 rcode: RCODE_NXDOMAIN,
@@ -253,7 +271,9 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
     }
 
     // 5. Cache lookup (including negative cache)
-    if let Some((cached_records, is_negative)) = state_read.dns_cache.get_with_negative(name, qtype).await {
+    if let Some((cached_records, is_negative)) =
+        state_read.dns_cache.get_with_negative(name, qtype).await
+    {
         if is_negative {
             debug!("Resolved {} via negative cache (NXDOMAIN)", name);
             return ResolveResult {
@@ -263,7 +283,11 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
                 blocked: false,
             };
         }
-        debug!("Resolved {} via cache ({} records)", name, cached_records.len());
+        debug!(
+            "Resolved {} via cache ({} records)",
+            name,
+            cached_records.len()
+        );
         return ResolveResult {
             records: cached_records,
             rcode: RCODE_NOERROR,
@@ -284,17 +308,30 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
                     // Cache only answer records (not authority/additional)
                     // OPT records already filtered by parse_response_sections
                     if !parsed.answers.is_empty() {
-                        state_read.dns_cache.insert(name, qtype, &parsed.answers).await;
-                    } else if rcode == RCODE_NXDOMAIN || (rcode == RCODE_NOERROR && parsed.answers.is_empty()) {
+                        state_read
+                            .dns_cache
+                            .insert(name, qtype, &parsed.answers)
+                            .await;
+                    } else if rcode == RCODE_NXDOMAIN
+                        || (rcode == RCODE_NOERROR && parsed.answers.is_empty())
+                    {
                         // Negative caching (RFC 2308): cache NXDOMAIN/NODATA
                         // Extract TTL from SOA record in authority section
                         let neg_ttl = extract_soa_negative_ttl(&parsed.authority);
                         if neg_ttl > 0 {
-                            state_read.dns_cache.insert_negative(name, qtype, neg_ttl).await;
+                            state_read
+                                .dns_cache
+                                .insert_negative(name, qtype, neg_ttl)
+                                .await;
                         }
                     }
 
-                    debug!("Resolved {} via upstream ({} answers, rcode={})", name, parsed.answers.len(), rcode);
+                    debug!(
+                        "Resolved {} via upstream ({} answers, rcode={})",
+                        name,
+                        parsed.answers.len(),
+                        rcode
+                    );
                     ResolveResult {
                         records: parsed.answers,
                         rcode,
@@ -377,9 +414,7 @@ fn parse_static_record(name: &str, rec: &StaticRecord, rtype: RecordType) -> Opt
             let ip: Ipv6Addr = rec.value.parse().ok()?;
             Some(DnsRecord::aaaa(name, ip, rec.ttl))
         }
-        RecordType::CNAME => {
-            Some(DnsRecord::cname(name, &rec.value, rec.ttl))
-        }
+        RecordType::CNAME => Some(DnsRecord::cname(name, &rec.value, rec.ttl)),
         _ => None,
     }
 }

@@ -13,7 +13,9 @@ pub struct NetcoreClient {
 
 impl NetcoreClient {
     pub fn new(socket_path: impl Into<PathBuf>) -> Self {
-        Self { socket_path: socket_path.into() }
+        Self {
+            socket_path: socket_path.into(),
+        }
     }
 
     pub fn socket_path(&self) -> &Path {
@@ -75,11 +77,20 @@ impl NetcoreClient {
         value: String,
         ttl: u32,
     ) -> Result<IpcResponse> {
-        self.request(&IpcRequest::DnsAddStaticRecord { name, record_type, value, ttl }).await
+        self.request(&IpcRequest::DnsAddStaticRecord {
+            name,
+            record_type,
+            value,
+            ttl,
+        })
+        .await
     }
 
     pub async fn dns_remove_static_records_by_value(&self, value: &str) -> Result<IpcResponse> {
-        self.request(&IpcRequest::DnsRemoveStaticRecordsByValue { value: value.to_string() }).await
+        self.request(&IpcRequest::DnsRemoveStaticRecordsByValue {
+            value: value.to_string(),
+        })
+        .await
     }
 
     pub async fn dhcp_leases(&self) -> Result<Vec<LeaseInfo>> {
@@ -98,11 +109,17 @@ impl NetcoreClient {
     }
 
     pub async fn adblock_whitelist_add(&self, domain: &str) -> Result<IpcResponse> {
-        self.request(&IpcRequest::AdblockWhitelistAdd { domain: domain.to_string() }).await
+        self.request(&IpcRequest::AdblockWhitelistAdd {
+            domain: domain.to_string(),
+        })
+        .await
     }
 
     pub async fn adblock_whitelist_remove(&self, domain: &str) -> Result<IpcResponse> {
-        self.request(&IpcRequest::AdblockWhitelistRemove { domain: domain.to_string() }).await
+        self.request(&IpcRequest::AdblockWhitelistRemove {
+            domain: domain.to_string(),
+        })
+        .await
     }
 
     pub async fn adblock_update(&self) -> Result<AdblockUpdateResult> {
@@ -113,7 +130,11 @@ impl NetcoreClient {
         extract_data(resp)
     }
 
-    pub async fn adblock_search(&self, query: &str, limit: Option<usize>) -> Result<AdblockSearchResult> {
+    pub async fn adblock_search(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+    ) -> Result<AdblockSearchResult> {
         let resp = self
             .request(&IpcRequest::AdblockSearch {
                 query: query.to_string(),

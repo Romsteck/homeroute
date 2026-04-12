@@ -1,10 +1,10 @@
 use axum::{
+    Json, Router,
     extract::{Query, State},
     routing::{delete, get, post},
-    Json, Router,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::state::ApiState;
 
@@ -20,9 +20,11 @@ pub fn router() -> Router<ApiState> {
 async fn stats(State(state): State<ApiState>) -> Json<Value> {
     match state.netcore.adblock_stats().await {
         Ok(s) => {
-            let sources: Vec<Value> = s.sources.iter().map(|src| {
-                json!({"name": src.name, "url": src.url})
-            }).collect();
+            let sources: Vec<Value> = s
+                .sources
+                .iter()
+                .map(|src| json!({"name": src.name, "url": src.url}))
+                .collect();
             Json(json!({
                 "success": true,
                 "stats": {
@@ -87,9 +89,11 @@ async fn remove_whitelist(
 async fn trigger_update(State(state): State<ApiState>) -> Json<Value> {
     match state.netcore.adblock_update().await {
         Ok(result) => {
-            let source_results: Vec<Value> = result.sources.iter().map(|r| {
-                json!({"name": r.name, "domains": r.domains})
-            }).collect();
+            let source_results: Vec<Value> = result
+                .sources
+                .iter()
+                .map(|r| json!({"name": r.name, "domains": r.domains}))
+                .collect();
             Json(json!({
                 "success": true,
                 "total_domains": result.total_domains,
@@ -105,10 +109,7 @@ struct SearchQuery {
     q: Option<String>,
 }
 
-async fn search(
-    State(state): State<ApiState>,
-    Query(query): Query<SearchQuery>,
-) -> Json<Value> {
+async fn search(State(state): State<ApiState>, Query(query): Query<SearchQuery>) -> Json<Value> {
     let q = query.q.unwrap_or_default();
     if q.is_empty() {
         return Json(json!({"success": true, "results": [], "query": ""}));

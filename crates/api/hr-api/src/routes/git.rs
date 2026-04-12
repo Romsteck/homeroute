@@ -2,14 +2,14 @@
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use hr_ipc::orchestrator::OrchestratorRequest;
 use serde::Deserialize;
 use serde_json::json;
 use tracing::error;
-use hr_ipc::orchestrator::OrchestratorRequest;
 
 use crate::state::ApiState;
 
@@ -30,10 +30,7 @@ pub fn router() -> Router<ApiState> {
         // Smart HTTP protocol endpoints (large body limit for push)
         .route("/repos/{slug_git}/info/refs", get(git_info_refs))
         .route("/repos/{slug_git}/git-upload-pack", post(git_upload_pack))
-        .route(
-            "/repos/{slug_git}/git-receive-pack",
-            post(git_receive_pack),
-        )
+        .route("/repos/{slug_git}/git-receive-pack", post(git_receive_pack))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024)) // 2 GB for git push
 }
 
@@ -60,7 +57,11 @@ fn err_from_ipc(r: hr_ipc::types::IpcResponse) -> axum::response::Response {
 // ── Management handlers (via IPC) ──────────────────────────
 
 async fn list_repos(State(state): State<ApiState>) -> impl IntoResponse {
-    match state.orchestrator.request(&OrchestratorRequest::ListRepos).await {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::ListRepos)
+        .await
+    {
         Ok(r) if r.ok => {
             let repos = r.data.unwrap_or(json!([]));
             Json(json!({"repos": repos})).into_response()
@@ -71,13 +72,19 @@ async fn list_repos(State(state): State<ApiState>) -> impl IntoResponse {
 }
 
 async fn get_repo(State(state): State<ApiState>, Path(slug): Path<String>) -> impl IntoResponse {
-    match state.orchestrator.request(&OrchestratorRequest::GetRepo { slug }).await {
-        Ok(r) if r.ok => {
-            match r.data {
-                Some(repo) => Json(json!({"repo": repo})).into_response(),
-                None => (StatusCode::NOT_FOUND, Json(json!({"error": "Repository not found"}))).into_response(),
-            }
-        }
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::GetRepo { slug })
+        .await
+    {
+        Ok(r) if r.ok => match r.data {
+            Some(repo) => Json(json!({"repo": repo})).into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "Repository not found"})),
+            )
+                .into_response(),
+        },
         Ok(r) => err_from_ipc(r),
         Err(e) => err_ipc(e),
     }
@@ -97,7 +104,14 @@ async fn get_commits(
     Path(slug): Path<String>,
     Query(q): Query<CommitsQuery>,
 ) -> impl IntoResponse {
-    match state.orchestrator.request(&OrchestratorRequest::GetCommits { slug, limit: q.limit }).await {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::GetCommits {
+            slug,
+            limit: q.limit,
+        })
+        .await
+    {
         Ok(r) if r.ok => {
             let commits = r.data.unwrap_or(json!([]));
             Json(json!({"commits": commits})).into_response()
@@ -111,7 +125,11 @@ async fn get_branches(
     State(state): State<ApiState>,
     Path(slug): Path<String>,
 ) -> impl IntoResponse {
-    match state.orchestrator.request(&OrchestratorRequest::GetBranches { slug }).await {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::GetBranches { slug })
+        .await
+    {
         Ok(r) if r.ok => {
             let branches = r.data.unwrap_or(json!([]));
             Json(json!({"branches": branches})).into_response()
@@ -127,7 +145,11 @@ async fn trigger_sync(
     State(state): State<ApiState>,
     Path(slug): Path<String>,
 ) -> impl IntoResponse {
-    match state.orchestrator.request_long(&OrchestratorRequest::TriggerSync { slug }).await {
+    match state
+        .orchestrator
+        .request_long(&OrchestratorRequest::TriggerSync { slug })
+        .await
+    {
         Ok(r) if r.ok => Json(json!({"ok": true})).into_response(),
         Ok(r) => err_from_ipc(r),
         Err(e) => err_ipc(e),
@@ -135,7 +157,11 @@ async fn trigger_sync(
 }
 
 async fn sync_all(State(state): State<ApiState>) -> impl IntoResponse {
-    match state.orchestrator.request_long(&OrchestratorRequest::SyncAll).await {
+    match state
+        .orchestrator
+        .request_long(&OrchestratorRequest::SyncAll)
+        .await
+    {
         Ok(r) if r.ok => {
             let data = r.data.unwrap_or(json!({"ok": true}));
             Json(data).into_response()
@@ -148,7 +174,11 @@ async fn sync_all(State(state): State<ApiState>) -> impl IntoResponse {
 // ── SSH key handlers (via IPC) ─────────────────────────────
 
 async fn get_ssh_key(State(state): State<ApiState>) -> impl IntoResponse {
-    match state.orchestrator.request(&OrchestratorRequest::GetSshKey).await {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::GetSshKey)
+        .await
+    {
         Ok(r) if r.ok => {
             let data = r.data.unwrap_or(json!(null));
             Json(data).into_response()
@@ -159,7 +189,11 @@ async fn get_ssh_key(State(state): State<ApiState>) -> impl IntoResponse {
 }
 
 async fn generate_ssh_key(State(state): State<ApiState>) -> impl IntoResponse {
-    match state.orchestrator.request(&OrchestratorRequest::GenerateSshKey).await {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::GenerateSshKey)
+        .await
+    {
         Ok(r) if r.ok => {
             let data = r.data.unwrap_or(json!(null));
             Json(data).into_response()
@@ -172,7 +206,11 @@ async fn generate_ssh_key(State(state): State<ApiState>) -> impl IntoResponse {
 // ── Config handlers (via IPC) ──────────────────────────────
 
 async fn get_config(State(state): State<ApiState>) -> impl IntoResponse {
-    match state.orchestrator.request(&OrchestratorRequest::GetGitConfig).await {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::GetGitConfig)
+        .await
+    {
         Ok(r) if r.ok => {
             let data = r.data.unwrap_or(json!(null));
             Json(data).into_response()
@@ -196,7 +234,11 @@ async fn update_config(
         "github_token": req.github_token,
         "github_org": req.github_org,
     });
-    match state.orchestrator.request_long(&OrchestratorRequest::UpdateGitConfig { config }).await {
+    match state
+        .orchestrator
+        .request_long(&OrchestratorRequest::UpdateGitConfig { config })
+        .await
+    {
         Ok(r) if r.ok => {
             let data = r.data.unwrap_or(json!({"ok": true}));
             Json(data).into_response()

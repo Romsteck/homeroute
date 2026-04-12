@@ -82,10 +82,7 @@ pub async fn create_acme_challenge_record(
         return Err(format!("Cloudflare API error: {}", err_msg));
     }
 
-    let record_id = body
-        .result
-        .ok_or("No result in response")?
-        .id;
+    let record_id = body.result.ok_or("No result in response")?.id;
 
     info!(record_name, record_id = %record_id, "Created ACME challenge TXT record");
     Ok(record_id)
@@ -98,7 +95,10 @@ pub async fn delete_challenge_record(
     record_id: &str,
 ) -> Result<(), String> {
     let client = reqwest::Client::new();
-    let url = format!("{}/zones/{}/dns_records/{}", CF_API_BASE, zone_id, record_id);
+    let url = format!(
+        "{}/zones/{}/dns_records/{}",
+        CF_API_BASE, zone_id, record_id
+    );
 
     debug!(record_id, "Deleting ACME challenge TXT record");
 

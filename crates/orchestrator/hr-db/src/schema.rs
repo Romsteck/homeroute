@@ -31,9 +31,16 @@ impl FieldType {
     /// Returns the SQLite column type for this field type.
     pub fn sqlite_type(&self) -> &'static str {
         match self {
-            Self::Text | Self::Email | Self::Url | Self::Phone
-            | Self::Json | Self::Uuid | Self::Choice | Self::MultiChoice
-            | Self::Formula | Self::Duration => "TEXT",
+            Self::Text
+            | Self::Email
+            | Self::Url
+            | Self::Phone
+            | Self::Json
+            | Self::Uuid
+            | Self::Choice
+            | Self::MultiChoice
+            | Self::Formula
+            | Self::Duration => "TEXT",
             Self::Number | Self::AutoIncrement => "INTEGER",
             Self::Decimal | Self::Currency | Self::Percent => "REAL",
             Self::Boolean => "INTEGER", // 0/1

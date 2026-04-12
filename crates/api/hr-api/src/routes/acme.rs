@@ -1,10 +1,10 @@
 use axum::{
+    Json, Router,
     extract::State,
     routing::{get, post},
-    Json, Router,
 };
 use hr_acme::WildcardType;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{error, info};
 
 use crate::state::ApiState;
@@ -21,7 +21,9 @@ pub fn router() -> Router<ApiState> {
 /// Get ACME status and certificate overview
 async fn status(State(state): State<ApiState>) -> Json<Value> {
     let certs = state.acme.list_certificates().unwrap_or_default();
-    let global_cert = certs.iter().find(|c| c.wildcard_type == WildcardType::Global);
+    let global_cert = certs
+        .iter()
+        .find(|c| c.wildcard_type == WildcardType::Global);
 
     Json(json!({
         "success": true,

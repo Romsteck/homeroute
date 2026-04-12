@@ -35,8 +35,10 @@ pub struct EventBus {
     pub task_update: broadcast::Sender<crate::tasks::TaskUpdateEvent>,
     /// Energy metrics events (energy poller → websocket)
     pub energy_metrics: broadcast::Sender<EnergyMetricsEvent>,
-    /// Environment status events (env poller → websocket for maker portal)
-    pub env_status: broadcast::Sender<EnvStatusEvent>,
+    /// Log entry events (logging layer → websocket for live log viewer)
+    pub log_entry: broadcast::Sender<crate::logging::LogEntry>,
+    /// App state change events (supervisor → websocket for live status)
+    pub app_state: broadcast::Sender<AppStateEvent>,
 }
 
 impl EventBus {
@@ -58,7 +60,8 @@ impl EventBus {
             backup_live: broadcast::channel(64).0,
             task_update: broadcast::channel(64).0,
             energy_metrics: broadcast::channel(64).0,
-            env_status: broadcast::channel(64).0,
+            log_entry: broadcast::channel(512).0,
+            app_state: broadcast::channel(64).0,
         }
     }
 }
@@ -98,17 +101,42 @@ pub struct AgentStatusEvent {
 #[serde(tag = "type", content = "data")]
 pub enum UpdateEvent {
     Started,
-    Phase { phase: String, message: String },
-    Output { line: String },
-    AptComplete { packages: Vec<serde_json::Value>, security_count: usize },
-    SnapComplete { snaps: Vec<serde_json::Value> },
+    Phase {
+        phase: String,
+        message: String,
+    },
+    Output {
+        line: String,
+    },
+    AptComplete {
+        packages: Vec<serde_json::Value>,
+        security_count: usize,
+    },
+    SnapComplete {
+        snaps: Vec<serde_json::Value>,
+    },
     NeedrestartComplete(serde_json::Value),
-    Complete { success: bool, summary: serde_json::Value, duration: u64 },
+    Complete {
+        success: bool,
+        summary: serde_json::Value,
+        duration: u64,
+    },
     Cancelled,
-    Error { error: String },
-    UpgradeStarted { upgrade_type: String },
-    UpgradeOutput { line: String },
-    UpgradeComplete { upgrade_type: String, success: bool, duration: u64, error: Option<String> },
+    Error {
+        error: String,
+    },
+    UpgradeStarted {
+        upgrade_type: String,
+    },
+    UpgradeOutput {
+        line: String,
+    },
+    UpgradeComplete {
+        upgrade_type: String,
+        success: bool,
+        duration: u64,
+        error: Option<String>,
+    },
     UpgradeCancelled,
 }
 
@@ -352,6 +380,18 @@ pub struct CoreMetrics {
     pub max_freq_mhz: u32,
 }
 
+/// App state change event (supervisor → websocket for live status display).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppStateEvent {
+    pub slug: String,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    pub port: u16,
+    pub uptime_secs: u64,
+    pub restart_count: u32,
+}
+
 /// Energy metrics event (energy poller → websocket for frontend display).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnergyMetricsEvent {
@@ -370,29 +410,3 @@ pub struct EnergyMetricsEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub per_core: Option<Vec<CoreMetrics>>,
 }
-
-/// Environment status snapshot (poller → websocket for maker portal).
-/// Sent when any environment's status, agent connection, or app states change.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EnvStatusEvent {
-    pub environments: Vec<EnvStatusSnapshot>,
-}
-
-/// Snapshot of a single environment's status.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EnvStatusSnapshot {
-    pub slug: String,
-    pub status: String,
-    pub agent_connected: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_version: Option<String>,
-    pub apps: Vec<EnvAppSnapshot>,
-}
-
-/// Snapshot of a single app's status within an environment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EnvAppSnapshot {
-    pub slug: String,
-    pub running: bool,
-}
-

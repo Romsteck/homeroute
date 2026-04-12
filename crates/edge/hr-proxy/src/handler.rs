@@ -5,8 +5,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::TryStreamExt;
-use hr_auth::forward_auth::{check_forward_auth, ForwardAuthResult};
 use hr_auth::AuthService;
+use hr_auth::forward_auth::{ForwardAuthResult, check_forward_auth};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::rt::TokioIo;
@@ -16,7 +16,6 @@ use tokio::net::TcpStream;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{ProxyConfig, RouteConfig};
-use crate::env_routes::EnvRouteCache;
 use crate::logging::{self, AccessLogEntry, OptionalAccessLogger};
 use crate::metrics::ProxyMetrics;
 
@@ -59,8 +58,6 @@ pub struct ProxyState {
     app_routes_path: Option<std::path::PathBuf>,
     /// Per-domain request/error counters.
     pub metrics: ProxyMetrics,
-    /// Dynamic environment route cache ({app}.{env}.{base_domain} routing).
-    pub env_route_cache: Option<Arc<EnvRouteCache>>,
 }
 
 impl ProxyState {
@@ -79,9 +76,7 @@ impl ProxyState {
         Self {
             client,
             https_client,
-            snapshot: RwLock::new(ConfigSnapshot {
-                config,
-            }),
+            snapshot: RwLock::new(ConfigSnapshot { config }),
             access_logger,
             auth: None,
             management_port,
@@ -89,19 +84,12 @@ impl ProxyState {
             app_routes: RwLock::new(std::collections::HashMap::new()),
             app_routes_path: None,
             metrics: ProxyMetrics::new(),
-            env_route_cache: None,
         }
     }
 
     /// Set the auth service for forward-auth
     pub fn with_auth(mut self, auth: Arc<AuthService>) -> Self {
         self.auth = Some(auth);
-        self
-    }
-
-    /// Set the environment route cache for dynamic {app}.{env}.{domain} routing.
-    pub fn with_env_route_cache(mut self, cache: Arc<EnvRouteCache>) -> Self {
-        self.env_route_cache = Some(cache);
         self
     }
 
@@ -112,11 +100,16 @@ impl ProxyState {
         if path.exists() {
             match std::fs::read_to_string(&path) {
                 Ok(json) => {
-                    match serde_json::from_str::<std::collections::HashMap<String, AppRoute>>(&json) {
+                    match serde_json::from_str::<std::collections::HashMap<String, AppRoute>>(&json)
+                    {
                         Ok(routes) => {
                             let count = routes.len();
                             *self.app_routes.write().unwrap() = routes;
-                            info!("Loaded {} persisted app routes from {}", count, path.display());
+                            info!(
+                                "Loaded {} persisted app routes from {}",
+                                count,
+                                path.display()
+                            );
                         }
                         Err(e) => {
                             warn!("Failed to parse persisted app routes: {}", e);
@@ -194,33 +187,6 @@ impl ProxyState {
     }
 
     /// Reconcile app routes with the authoritative env route data.
-    /// - Removes stale env routes (app_id starting with "env-") not in `expected`
-    /// - Adds missing routes from `expected`
-    /// - Leaves non-env routes (legacy agents) untouched
-    pub fn sync_env_routes(&self, expected: &std::collections::HashMap<String, AppRoute>) {
-        let mut map = self.app_routes.write().unwrap();
-
-        // Remove stale env routes
-        map.retain(|domain, route| {
-            if route.app_id.starts_with("env-") {
-                expected.contains_key(domain)
-            } else {
-                true // keep non-env routes
-            }
-        });
-
-        // Add missing routes
-        for (domain, route) in expected {
-            if !map.contains_key(domain) {
-                info!(domain = domain.as_str(), "Adding missing env route");
-                map.insert(domain.clone(), route.clone());
-            }
-        }
-
-        drop(map);
-        self.persist_app_routes();
-    }
-
     /// Remove an application route by domain.
     pub fn remove_app_route(&self, domain: &str) {
         let mut map = self.app_routes.write().unwrap();
@@ -344,7 +310,10 @@ async fn proxy_handler_inner(
         if let Some(app_route) = state.get_app_route(domain_only) {
             // Block ALL traffic for local-only apps
             if app_route.local_only {
-                warn!("Blocked request for local-only app {} from {}", domain_only, client_ip);
+                warn!(
+                    "Blocked request for local-only app {} from {}",
+                    domain_only, client_ip
+                );
                 return Err(ProxyError::Forbidden);
             }
 
@@ -370,13 +339,7 @@ async fn proxy_handler_inner(
                                 .find_map(|c| c.trim().strip_prefix("auth_session="))
                         });
 
-                    match check_forward_auth(
-                        auth,
-                        cookie_value,
-                        domain_only,
-                        &req_uri,
-                        "https",
-                    ) {
+                    match check_forward_auth(auth, cookie_value, domain_only, &req_uri, "https") {
                         ForwardAuthResult::Success { user } => {
                             if let Ok(v) = HeaderValue::from_str(&user.username) {
                                 req.headers_mut().insert("X-Forwarded-User", v);
@@ -390,7 +353,11 @@ async fn proxy_handler_inner(
             }
 
             // Determine scheme based on target port (re-encrypt for agent port 443)
-            let scheme = if app_route.target_port == 443 { "https" } else { "http" };
+            let scheme = if app_route.target_port == 443 {
+                "https"
+            } else {
+                "http"
+            };
 
             let target_host_for_url = app_route.target_ip.to_string();
 
@@ -461,12 +428,13 @@ async fn proxy_handler_inner(
                 let domain_uri = format!(
                     "https://{}:443{}",
                     domain_only,
-                    req.uri().path_and_query().map(|pq| pq.to_string()).unwrap_or_else(|| "/".to_string())
+                    req.uri()
+                        .path_and_query()
+                        .map(|pq| pq.to_string())
+                        .unwrap_or_else(|| "/".to_string())
                 );
-                let agent_addr = std::net::SocketAddr::new(
-                    std::net::IpAddr::V4(app_route.target_ip),
-                    443,
-                );
+                let agent_addr =
+                    std::net::SocketAddr::new(std::net::IpAddr::V4(app_route.target_ip), 443);
                 let agent_client = reqwest::Client::builder()
                     .danger_accept_invalid_certs(true)
                     .resolve(domain_only, agent_addr)
@@ -518,9 +486,7 @@ async fn proxy_handler_inner(
             Some("/agents/ws".to_string())
         } else if req_path == "/api/host-agents/ws" {
             Some("/host-agents/ws".to_string())
-        } else if req_path.starts_with("/api/containers/")
-            && req_path.ends_with("/terminal")
-        {
+        } else if req_path.starts_with("/api/containers/") && req_path.ends_with("/terminal") {
             // /api/containers/{id}/terminal -> /containers/{id}/terminal
             let suffix = req_path.strip_prefix("/api").unwrap_or(req_path);
             Some(suffix.to_string())
@@ -604,53 +570,18 @@ async fn proxy_handler_inner(
         match state.find_route(&host) {
             Some(route) => route,
             None => {
-                // Try wildcard environment route: *.{env}.{base_domain}
-                // All traffic for an env goes to the env-agent internal proxy (port 80)
-                // which dispatches to the correct app based on the Host header.
-                debug!(domain = domain_only, "No static route found, trying env wildcard");
-                let env_route = state.env_route_cache.as_ref().and_then(|cache| {
-                    let suffix = format!(".{}", base_domain);
-                    let prefix = domain_only.strip_suffix(&suffix)?;
-                    // Extract env_slug: the part after the first dot
-                    // e.g. "trader.dev" → env_slug = "dev"
-                    // e.g. "studio.dev" → env_slug = "dev"
-                    let dot_pos = prefix.find('.')?;
-                    let sub = &prefix[..dot_pos];
-                    let env_slug = &prefix[dot_pos + 1..];
-                    // Reject if env_slug contains dots (too many segments)
-                    if env_slug.contains('.') {
-                        return None;
-                    }
-                    let (ip, port, env_type) = cache.resolve_env(sub, env_slug)?;
-                    // Auth rules:
-                    // - studio/code: always require auth (admin tools)
-                    // - dev/acc apps: always require auth
-                    // - prod apps: open by default (per-app toggle via explicit AppRoutes)
-                    let require_auth = sub == "studio" || sub == "code" || env_type != "prod";
-                    debug!(
-                        domain = domain_only, env = env_slug, ip = %ip, port = port,
-                        require_auth, "Resolved wildcard env route"
-                    );
-                    Some(RouteConfig {
-                        id: format!("__env_{}", env_slug),
-                        domain: domain_only.to_string(),
-                        backend: "rust".to_string(),
-                        target_host: ip.to_string(),
-                        target_port: port,
-                        local_only: false,
-                        require_auth,
-                        enabled: true,
-                        cert_id: None,
-                    })
-                });
-                env_route.ok_or(ProxyError::DomainNotFound(host.clone()))?
+                debug!(domain = domain_only, "No route found");
+                return Err(ProxyError::DomainNotFound(host.clone()));
             }
         }
     };
 
     // Block ALL traffic for local-only routes
     if route.local_only {
-        warn!("Blocked request for local-only route {} from {}", route.domain, client_ip);
+        warn!(
+            "Blocked request for local-only route {} from {}",
+            route.domain, client_ip
+        );
         return Err(ProxyError::Forbidden);
     }
 
@@ -685,7 +616,10 @@ async fn proxy_handler_inner(
             }
         } else {
             // No auth service configured but route requires auth
-            warn!("Route {} requires auth but no auth service configured", route.domain);
+            warn!(
+                "Route {} requires auth but no auth service configured",
+                route.domain
+            );
             return Err(ProxyError::AuthRequired(None));
         }
     }
@@ -758,14 +692,12 @@ async fn handle_websocket_upgrade(
     let client_upgrade = hyper::upgrade::on(&mut req);
 
     let backend_addr = format!("{}:{}", route.target_host, route.target_port);
-    let tcp_stream = TcpStream::connect(&backend_addr)
-        .await
-        .map_err(|e| {
-            ProxyError::UpstreamError(format!(
-                "Failed to connect to backend {}: {}",
-                backend_addr, e
-            ))
-        })?;
+    let tcp_stream = TcpStream::connect(&backend_addr).await.map_err(|e| {
+        ProxyError::UpstreamError(format!(
+            "Failed to connect to backend {}: {}",
+            backend_addr, e
+        ))
+    })?;
 
     let io = TokioIo::new(tcp_stream);
 
@@ -888,8 +820,7 @@ async fn proxy_via_reqwest(
         .map_err(|e| e.to_string())?;
 
     // Convert reqwest Response → axum Response
-    let status = StatusCode::from_u16(resp.status().as_u16())
-        .unwrap_or(StatusCode::BAD_GATEWAY);
+    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut response_builder = Response::builder().status(status);
 
     for (name, value) in resp.headers() {
@@ -900,7 +831,9 @@ async fn proxy_via_reqwest(
 
     // Stream the response body instead of buffering it entirely
     // This is critical for SSE (Server-Sent Events) and long-lived streaming responses
-    let body_stream = resp.bytes_stream().map_err(|e| std::io::Error::other(e.to_string()));
+    let body_stream = resp
+        .bytes_stream()
+        .map_err(|e| std::io::Error::other(e.to_string()));
     response_builder
         .body(Body::from_stream(body_stream))
         .map_err(|e| e.to_string())
@@ -922,14 +855,12 @@ async fn handle_websocket_upgrade_tls(
     let client_upgrade = hyper::upgrade::on(&mut req);
 
     let backend_addr = format!("{}:{}", route.target_host, route.target_port);
-    let tcp_stream = TcpStream::connect(&backend_addr)
-        .await
-        .map_err(|e| {
-            ProxyError::UpstreamError(format!(
-                "Failed to connect to backend {}: {}",
-                backend_addr, e
-            ))
-        })?;
+    let tcp_stream = TcpStream::connect(&backend_addr).await.map_err(|e| {
+        ProxyError::UpstreamError(format!(
+            "Failed to connect to backend {}: {}",
+            backend_addr, e
+        ))
+    })?;
 
     // Build a TLS config that skips certificate verification (trusted LAN)
     let tls_config = rustls::ClientConfig::builder()
@@ -939,7 +870,9 @@ async fn handle_websocket_upgrade_tls(
     let connector = TlsConnector::from(Arc::new(tls_config));
 
     let server_name = rustls::pki_types::ServerName::try_from(original_host.to_string())
-        .unwrap_or_else(|_| rustls::pki_types::ServerName::try_from("localhost".to_string()).unwrap());
+        .unwrap_or_else(|_| {
+            rustls::pki_types::ServerName::try_from("localhost".to_string()).unwrap()
+        });
 
     let tls_stream = connector
         .connect(server_name, tcp_stream)
@@ -1121,9 +1054,7 @@ impl IntoResponse for ProxyError {
                 let (status, message) = match other {
                     ProxyError::InvalidUri(msg) => (StatusCode::BAD_REQUEST, msg),
                     ProxyError::UpstreamError(msg) => (StatusCode::BAD_GATEWAY, msg),
-                    ProxyError::Forbidden => {
-                        (StatusCode::FORBIDDEN, "Forbidden".to_string())
-                    }
+                    ProxyError::Forbidden => (StatusCode::FORBIDDEN, "Forbidden".to_string()),
                     ProxyError::DomainNotFound(domain) => (
                         StatusCode::NOT_FOUND,
                         format!("Domain not configured: {}", domain),

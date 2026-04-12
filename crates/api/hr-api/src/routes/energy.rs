@@ -1,12 +1,12 @@
 use axum::{
+    Json, Router,
     extract::Query,
     routing::{get, post},
-    Json, Router,
 };
 use chrono::Timelike;
 use hr_common::events::{CoreMetrics, EnergyMetricsEvent, EventBus};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -87,11 +87,7 @@ async fn ssh_cmd(ip: &str, cmd: &str) -> Option<String> {
     };
 
     if output.status.success() {
-        Some(
-            String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .to_string(),
-        )
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
         None
     }
@@ -140,10 +136,7 @@ pub async fn read_local_frequency() -> (f64, Option<f64>, Option<f64>, usize) {
     let mut max_freq = None;
 
     for i in 0..128 {
-        let cur = format!(
-            "/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq",
-            i
-        );
+        let cur = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq", i);
         match tokio::fs::read_to_string(&cur).await {
             Ok(val) => {
                 if let Ok(khz) = val.trim().parse::<u64>() {
@@ -153,10 +146,8 @@ pub async fn read_local_frequency() -> (f64, Option<f64>, Option<f64>, usize) {
             Err(_) => break,
         }
         if i == 0 {
-            let min_path =
-                format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_min_freq", i);
-            let max_path =
-                format!("/sys/devices/system/cpu/cpu{}/cpufreq/cpuinfo_max_freq", i);
+            let min_path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_min_freq", i);
+            let max_path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/cpuinfo_max_freq", i);
             min_freq = tokio::fs::read_to_string(&min_path)
                 .await
                 .ok()
@@ -203,54 +194,35 @@ async fn read_local_model() -> String {
 }
 
 async fn read_local_available_governors() -> Vec<String> {
-    tokio::fs::read_to_string(
-        "/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors",
-    )
-    .await
-    .map(|s| {
-        s.trim()
-            .split_whitespace()
-            .map(String::from)
-            .collect()
-    })
-    .unwrap_or_default()
+    tokio::fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors")
+        .await
+        .map(|s| s.trim().split_whitespace().map(String::from).collect())
+        .unwrap_or_default()
 }
 
 pub async fn read_local_per_core() -> Vec<CoreMetrics> {
     let mut cores = Vec::new();
     for i in 0..128u32 {
-        let gov_path = format!(
-            "/sys/devices/system/cpu/cpu{}/cpufreq/scaling_governor",
-            i
-        );
+        let gov_path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_governor", i);
         let governor = match tokio::fs::read_to_string(&gov_path).await {
             Ok(s) => s.trim().to_string(),
             Err(_) => break,
         };
-        let cur_path = format!(
-            "/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq",
-            i
-        );
+        let cur_path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq", i);
         let frequency_mhz = tokio::fs::read_to_string(&cur_path)
             .await
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
             .map(|khz| (khz / 1000) as u32)
             .unwrap_or(0);
-        let min_path = format!(
-            "/sys/devices/system/cpu/cpu{}/cpufreq/scaling_min_freq",
-            i
-        );
+        let min_path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_min_freq", i);
         let min_freq_mhz = tokio::fs::read_to_string(&min_path)
             .await
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
             .map(|khz| (khz / 1000) as u32)
             .unwrap_or(0);
-        let max_path = format!(
-            "/sys/devices/system/cpu/cpu{}/cpufreq/cpuinfo_max_freq",
-            i
-        );
+        let max_path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/cpuinfo_max_freq", i);
         let max_freq_mhz = tokio::fs::read_to_string(&max_path)
             .await
             .ok()
@@ -453,9 +425,12 @@ async fn current_mode(Query(q): Query<HostQuery>) -> Json<Value> {
     };
 
     let governor = if let Some(ip) = host.ip {
-        ssh_cmd(ip, "cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null")
-            .await
-            .unwrap_or_default()
+        ssh_cmd(
+            ip,
+            "cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null",
+        )
+        .await
+        .unwrap_or_default()
     } else {
         read_local_governor().await
     };
@@ -538,10 +513,7 @@ async fn apply_mode_on_host(host: &EnergyHost, mode: &str) -> Result<(), String>
     } else {
         // Local sysfs writes
         for i in 0..128 {
-            let gov_path = format!(
-                "/sys/devices/system/cpu/cpu{}/cpufreq/scaling_governor",
-                i
-            );
+            let gov_path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_governor", i);
             if tokio::fs::metadata(&gov_path).await.is_err() {
                 break;
             }
@@ -557,17 +529,12 @@ async fn apply_mode_on_host(host: &EnergyHost, mode: &str) -> Result<(), String>
                 }
             }
 
-            let max_path = format!(
-                "/sys/devices/system/cpu/cpu{}/cpufreq/cpuinfo_max_freq",
-                i
-            );
+            let max_path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/cpuinfo_max_freq", i);
             if let Ok(max_str) = tokio::fs::read_to_string(&max_path).await {
                 if let Ok(max_khz) = max_str.trim().parse::<u64>() {
                     let target = max_khz * max_pct as u64 / 100;
-                    let scaling_max = format!(
-                        "/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq",
-                        i
-                    );
+                    let scaling_max =
+                        format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i);
                     let _ = tokio::fs::write(&scaling_max, target.to_string()).await;
                 }
             }
@@ -621,7 +588,10 @@ async fn set_governor_core(
 
     match result {
         Some(out) if out.contains("OK") => {
-            info!("Governor set to {} on core {} of {}", body.governor, core, host.id);
+            info!(
+                "Governor set to {} on core {} of {}",
+                body.governor, core, host.id
+            );
             Json(json!({"success": true, "core": core, "governor": body.governor}))
         }
         _ => Json(json!({"success": false, "error": "Echec ecriture governor"})),
@@ -648,23 +618,26 @@ async fn set_governor_all(
         );
         match ssh_cmd(ip, &script).await {
             Some(out) if out.contains("OK") => {
-                info!("Governor set to {} on all cores of {}", body.governor, host.id);
+                info!(
+                    "Governor set to {} on all cores of {}",
+                    body.governor, host.id
+                );
                 Json(json!({"success": true, "governor": body.governor}))
             }
             _ => Json(json!({"success": false, "error": "SSH failed"})),
         }
     } else {
         for i in 0..128u32 {
-            let path = format!(
-                "/sys/devices/system/cpu/cpu{}/cpufreq/scaling_governor",
-                i
-            );
+            let path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_governor", i);
             if tokio::fs::metadata(&path).await.is_err() {
                 break;
             }
             let _ = tokio::fs::write(&path, &body.governor).await;
         }
-        info!("Governor set to {} on all cores of {}", body.governor, host.id);
+        info!(
+            "Governor set to {} on all cores of {}",
+            body.governor, host.id
+        );
         Json(json!({"success": true, "governor": body.governor}))
     }
 }
@@ -840,25 +813,25 @@ pub async fn energy_metrics_poller(events: Arc<EventBus>) {
                 match read_remote_metrics(ip).await {
                     Some(m) => {
                         let key = host.id.to_string();
-                        let cpu_percent =
-                            if let Some((idle, total)) = parse_cpu_stat(&m.cpu_stat_line) {
-                                let pct =
-                                    if let Some(&(prev_idle, prev_total)) = prev_stats.get(&key) {
-                                        let di = idle.saturating_sub(prev_idle) as f64;
-                                        let dt = total.saturating_sub(prev_total) as f64;
-                                        if dt > 0.0 {
-                                            ((1.0 - di / dt) * 1000.0).round() / 10.0
-                                        } else {
-                                            0.0
-                                        }
-                                    } else {
-                                        0.0
-                                    };
-                                prev_stats.insert(key, (idle, total));
-                                pct
+                        let cpu_percent = if let Some((idle, total)) =
+                            parse_cpu_stat(&m.cpu_stat_line)
+                        {
+                            let pct = if let Some(&(prev_idle, prev_total)) = prev_stats.get(&key) {
+                                let di = idle.saturating_sub(prev_idle) as f64;
+                                let dt = total.saturating_sub(prev_total) as f64;
+                                if dt > 0.0 {
+                                    ((1.0 - di / dt) * 1000.0).round() / 10.0
+                                } else {
+                                    0.0
+                                }
                             } else {
                                 0.0
                             };
+                            prev_stats.insert(key, (idle, total));
+                            pct
+                        } else {
+                            0.0
+                        };
 
                         let model = if let Some(cached) = cached_models.get(host.id) {
                             cached.clone()
@@ -904,7 +877,10 @@ pub async fn energy_metrics_poller(events: Arc<EventBus>) {
                             model: String::new(),
                             per_core: None,
                         });
-                        warn!("Energy metrics: host {} ({}) unreachable via SSH", host.name, ip);
+                        warn!(
+                            "Energy metrics: host {} ({}) unreachable via SSH",
+                            host.name, ip
+                        );
                     }
                 }
             }
@@ -930,7 +906,10 @@ pub async fn energy_schedule_enforcer(_events: Arc<EventBus>) {
             Err(_) => continue,
         };
 
-        let enabled = config.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        let enabled = config
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if !enabled {
             if night_active {
                 // Schedule was disabled while night was active — restore modes
@@ -979,9 +958,7 @@ pub async fn energy_schedule_enforcer(_events: Arc<EventBus>) {
             }
             night_active = true;
         } else if !in_night && night_active {
-            info!(
-                "Energy night mode ending, restoring modes"
-            );
+            info!("Energy night mode ending, restoring modes");
             for host in HOSTS {
                 let mode = read_stored_mode(host.id).await;
                 let _ = apply_mode_on_host(host, &mode).await;

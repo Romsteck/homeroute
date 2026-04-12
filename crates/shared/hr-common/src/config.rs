@@ -50,12 +50,8 @@ impl Default for EnvConfig {
             cf_interface: "eno1".to_string(),
             cf_proxied: true,
             ddns_cron: "*/2 * * * *".to_string(),
-            proxy_config_path: PathBuf::from(
-                "/var/lib/server-dashboard/rust-proxy-config.json",
-            ),
-            dns_dhcp_config_path: PathBuf::from(
-                "/var/lib/server-dashboard/dns-dhcp-config.json",
-            ),
+            proxy_config_path: PathBuf::from("/var/lib/server-dashboard/rust-proxy-config.json"),
+            dns_dhcp_config_path: PathBuf::from("/var/lib/server-dashboard/dns-dhcp-config.json"),
             reverseproxy_config_path: PathBuf::from(
                 "/var/lib/server-dashboard/reverseproxy-config.json",
             ),
@@ -135,10 +131,7 @@ impl EnvConfig {
             load_dotenv(path);
         } else {
             // Chercher .env dans le répertoire courant ou /opt/homeroute
-            let candidates = [
-                PathBuf::from("/opt/homeroute/.env"),
-                PathBuf::from(".env"),
-            ];
+            let candidates = [PathBuf::from("/opt/homeroute/.env"), PathBuf::from(".env")];
             for candidate in &candidates {
                 if candidate.exists() {
                     load_dotenv(candidate);

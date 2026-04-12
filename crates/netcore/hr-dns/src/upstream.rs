@@ -1,9 +1,9 @@
-use std::net::SocketAddr;
-use std::time::Duration;
 use anyhow::Result;
 use rand::Rng;
-use tokio::net::{TcpStream, UdpSocket};
+use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::timeout;
 use tracing::debug;
 
@@ -33,7 +33,10 @@ impl UpstreamForwarder {
             })
             .collect();
 
-        Self { servers, timeout_ms }
+        Self {
+            servers,
+            timeout_ms,
+        }
     }
 
     /// Forward a DNS query to upstream servers via UDP.
@@ -60,12 +63,18 @@ impl UpstreamForwarder {
         for (i, server) in self.servers.iter().enumerate() {
             let t = if i == 0 { half_timeout } else { full_timeout };
 
-            match self.forward_udp(&upstream_query, *server, t, upstream_txid).await {
+            match self
+                .forward_udp(&upstream_query, *server, t, upstream_txid)
+                .await
+            {
                 Ok(mut response) => {
                     // Check TC (truncated) flag
                     if response.len() >= 4 && response[2] & 0x02 != 0 {
                         debug!("Response truncated from {}, retrying TCP", server);
-                        if let Ok(mut tcp_response) = self.forward_tcp(&upstream_query, *server, full_timeout).await {
+                        if let Ok(mut tcp_response) = self
+                            .forward_tcp(&upstream_query, *server, full_timeout)
+                            .await
+                        {
                             // Restore original client TXID
                             if tcp_response.len() >= 2 {
                                 tcp_response[0] = (original_txid >> 8) as u8;
@@ -142,7 +151,12 @@ impl UpstreamForwarder {
         Ok(buf)
     }
 
-    async fn forward_tcp(&self, query: &[u8], server: SocketAddr, dur: Duration) -> Result<Vec<u8>> {
+    async fn forward_tcp(
+        &self,
+        query: &[u8],
+        server: SocketAddr,
+        dur: Duration,
+    ) -> Result<Vec<u8>> {
         let mut stream = timeout(dur, TcpStream::connect(server)).await??;
 
         // TCP DNS: 2-byte length prefix

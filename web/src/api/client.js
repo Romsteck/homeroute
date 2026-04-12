@@ -11,7 +11,6 @@ api.interceptors.response.use(
   (response) => {
     // Check if response indicates session expired
     if (response.data && response.data.success === false && response.data.error === 'Session expiree') {
-      // Force cookie deletion by setting it to expire immediately
       document.cookie = 'auth_session=; path=/; expires=Thu, 01 Jan 1970 00:00:00 UTC; domain=' + window.location.hostname;
       document.cookie = 'auth_session=; path=/; expires=Thu, 01 Jan 1970 00:00:00 UTC';
     }
@@ -27,6 +26,17 @@ api.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+/**
+ * Unwrap the API envelope: {data: X, success: true} → X
+ * Use this in new pages instead of accessing res.data.data manually.
+ * Legacy pages that check res.data.success should NOT use this.
+ */
+export function unwrapApi(res) {
+  const body = res.data;
+  if (body && typeof body === 'object' && 'data' in body) return body.data;
+  return body;
+}
 
 // Dashboard (aggregated)
 export const getDashboard = () => api.get('/dashboard');
@@ -164,7 +174,6 @@ export const upgradeTarget = (targetId, category) =>
 export const getUpdateHistory = (limit = 50) => api.get('/updates/history', { params: { limit } });
 export const getUpdateCount = () => api.get('/updates/count');
 export const upgradeAllHosts = () => api.post('/updates/upgrade-hosts', {}, { timeout: 1800000 });
-export const upgradeAllEnvironments = () => api.post('/updates/upgrade-environments', {}, { timeout: 1800000 });
 
 // ========== Backup ==========
 export const getBackupStatus = () => api.get('/backup/status');
@@ -172,15 +181,27 @@ export const getBackupRepos = () => api.get('/backup/repos');
 export const getBackupJobs = () => api.get('/backup/jobs');
 export const triggerBackup = () => api.post('/backup/trigger');
 
-// ========== Environments ==========
-export const getEnvironments = () => api.get('/environments');
-export const getEnvironment = (slug) => api.get(`/environments/${slug}`);
-export const getEnvironmentApps = (slug) => api.get(`/environments/${slug}/apps`);
-export const createEnvironment = (data) => api.post('/environments', data);
-export const updateEnvironment = (slug, data) => api.put(`/environments/${slug}`, data);
-export const startEnvironment = (slug) => api.post(`/environments/${slug}/start`);
-export const stopEnvironment = (slug) => api.post(`/environments/${slug}/stop`);
-export const deleteEnvironment = (slug) => api.delete(`/environments/${slug}`);
+// ========== Apps ==========
+export const listApps = () => api.get('/apps');
+export const getApp = (slug) => api.get(`/apps/${slug}`);
+export const createApp = (data) => api.post('/apps', data);
+export const updateApp = (slug, data) => api.patch(`/apps/${slug}`, data);
+export const deleteApp = (slug) => api.delete(`/apps/${slug}`);
+export const controlApp = (slug, action) => api.post(`/apps/${slug}/control`, { action });
+export const getAppStatus = (slug) => api.get(`/apps/${slug}/status`);
+export const getAppLogs = (slug, params) => api.get(`/apps/${slug}/logs`, { params });
+export const getAppEnv = (slug) => api.get(`/apps/${slug}/env`);
+export const updateAppEnv = (slug, env) => api.put(`/apps/${slug}/env`, { env });
+// Apps DB
+export const getAppDbTables = (slug) => api.get(`/apps/${slug}/db/tables`);
+export const getAppDbTable = (slug, table) => api.get(`/apps/${slug}/db/tables/${table}`);
+export const queryAppDb = (slug, sql, params) => api.post(`/apps/${slug}/db/query`, { sql, params });
+export const snapshotAppDb = (slug) => api.post(`/apps/${slug}/db/snapshot`);
+export const executeAppDb = (slug, sql, params) => api.post(`/apps/${slug}/db/execute`, { sql, params });
+
+// ========== Logs ==========
+export const getLogs = (params = {}) => api.get('/logs', { params });
+export const getLogStats = () => api.get('/logs/stats');
 
 // ========== Docs ==========
 export const getDocsList = () => api.get('/docs');

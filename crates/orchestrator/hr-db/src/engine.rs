@@ -1,10 +1,10 @@
 use std::path::Path;
 
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use tracing::info;
 
-use crate::migration::{generate_ddl, MigrationOp};
+use crate::migration::{MigrationOp, generate_ddl};
 use crate::schema::*;
 use crate::validation::*;
 
@@ -162,8 +162,7 @@ impl DataverseEngine {
         let version = self.bump_version_in_tx(&tx)?;
 
         // Record migration
-        let ops_json =
-            serde_json::to_string(&[MigrationOp::CreateTable(table.clone())]).unwrap();
+        let ops_json = serde_json::to_string(&[MigrationOp::CreateTable(table.clone())]).unwrap();
         tx.execute(
             "INSERT INTO _dv_migrations (description, operations, applied_at) VALUES (?1, ?2, ?3)",
             params![format!("Create table '{}'", table.name), ops_json, now],
@@ -275,7 +274,9 @@ impl DataverseEngine {
         let tx = self.conn.unchecked_transaction()?;
         let now = Utc::now().to_rfc3339();
 
-        let op = MigrationOp::DropTable { table: table_name.to_string() };
+        let op = MigrationOp::DropTable {
+            table: table_name.to_string(),
+        };
         for sql in generate_ddl(&op) {
             tx.execute_batch(&sql)?;
         }
@@ -308,11 +309,7 @@ impl DataverseEngine {
     }
 
     /// Remove a column from a table.
-    pub fn remove_column(
-        &self,
-        table_name: &str,
-        column_name: &str,
-    ) -> Result<u64, EngineError> {
+    pub fn remove_column(&self, table_name: &str, column_name: &str) -> Result<u64, EngineError> {
         validate_identifier(table_name)?;
         validate_identifier(column_name)?;
 
@@ -403,8 +400,10 @@ impl DataverseEngine {
 
         let version = self.bump_version_in_tx(&tx)?;
 
-        let ops_json =
-            serde_json::to_string(&[MigrationOp::CreateRelation { relation: rel.clone() }]).unwrap();
+        let ops_json = serde_json::to_string(&[MigrationOp::CreateRelation {
+            relation: rel.clone(),
+        }])
+        .unwrap();
         tx.execute(
             "INSERT INTO _dv_migrations (description, operations, applied_at) VALUES (?1, ?2, ?3)",
             params![
@@ -575,7 +574,10 @@ impl DataverseEngine {
     /// Export migration records applied after the given schema version.
     /// Each record contains the migration id (used as version marker),
     /// description, operations list, and application timestamp.
-    pub fn export_migrations_since(&self, since_version: u64) -> Result<Vec<MigrationRecord>, EngineError> {
+    pub fn export_migrations_since(
+        &self,
+        since_version: u64,
+    ) -> Result<Vec<MigrationRecord>, EngineError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, description, operations, applied_at FROM _dv_migrations WHERE id > ?1 ORDER BY id",
         )?;
@@ -591,8 +593,7 @@ impl DataverseEngine {
         let mut records = Vec::new();
         for row in rows {
             let (id, description, ops_json, applied_at) = row?;
-            let operations: Vec<MigrationOp> = serde_json::from_str(&ops_json)
-                .unwrap_or_default();
+            let operations: Vec<MigrationOp> = serde_json::from_str(&ops_json).unwrap_or_default();
             records.push(MigrationRecord {
                 id: id as u64,
                 description,

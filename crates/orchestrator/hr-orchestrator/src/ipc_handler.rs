@@ -6,24 +6,44 @@ use hr_ipc::orchestrator::OrchestratorRequest;
 use hr_ipc::server::IpcHandler;
 use hr_ipc::types::IpcResponse;
 
-use hr_common::events::{PowerAction, WakeResult};
-
-const BACKUP_SERVER_HOST_ID: &str = "877bcb76-4fb8-4164-940c-707201adf9bc";
 use hr_git::GitService;
+use hr_registry::AgentRegistry;
 use hr_registry::protocol::{HostRegistryMessage, RegistryMessage};
 use hr_registry::types::UpdateApplicationRequest;
-use hr_registry::AgentRegistry;
 
+use hr_common::events::{PowerAction, WakeResult};
+
+use crate::apps_handler::AppsContext;
 use crate::backup_pipeline::BackupPipeline;
-use crate::env_manager::EnvironmentManager;
+
+use hr_apps::{AppSupervisor, ContextGenerator, DbManager};
+
+const BACKUP_SERVER_HOST_ID: &str = "877bcb76-4fb8-4164-940c-707201adf9bc";
 
 pub struct OrchestratorHandler {
     pub registry: Arc<AgentRegistry>,
     pub git: Arc<GitService>,
     pub backup: Arc<BackupPipeline>,
-    pub env_manager: Arc<EnvironmentManager>,
     pub edge: Arc<hr_ipc::EdgeClient>,
     pub base_domain: String,
+    pub app_supervisor: AppSupervisor,
+    pub db_manager: DbManager,
+    pub context_generator: Arc<ContextGenerator>,
+    pub log_store: Arc<hr_common::logging::LogStore>,
+}
+
+impl OrchestratorHandler {
+    fn apps_ctx(&self) -> AppsContext {
+        AppsContext {
+            supervisor: self.app_supervisor.clone(),
+            db_manager: self.db_manager.clone(),
+            context_generator: self.context_generator.clone(),
+            edge: self.edge.clone(),
+            git: self.git.clone(),
+            base_domain: self.base_domain.clone(),
+            log_store: self.log_store.clone(),
+        }
+    }
 }
 
 impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
@@ -44,8 +64,6 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 let connected = self.registry.is_agent_connected(&app_id).await;
                 IpcResponse::ok_data(connected)
             }
-
-            // ── Applications extended ────────────────────────────
             OrchestratorRequest::UpdateApplication { id, request } => {
                 let req: UpdateApplicationRequest = match serde_json::from_value(request) {
                     Ok(r) => r,
@@ -65,14 +83,11 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 }
             }
             OrchestratorRequest::ExecInContainer { app_id, commands } => {
-                // Look up the app to determine host_id and container_name
                 let app = match self.registry.get_application(&app_id).await {
                     Some(a) => a,
                     None => return IpcResponse::err("Application not found"),
                 };
-
                 if app.host_id == "local" {
-                    // Local exec via machinectl shell
                     let cmd_str = commands.join(" ");
                     match tokio::process::Command::new("machinectl")
                         .args(["shell", &app.container_name, "/bin/bash", "-c", &cmd_str])
@@ -87,12 +102,11 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                         Err(e) => IpcResponse::err(format!("Failed to exec: {e}")),
                     }
                 } else {
-                    // Remote exec via host-agent
-                    match self.registry.exec_in_remote_container(
-                        &app.host_id,
-                        &app.container_name,
-                        commands,
-                    ).await {
+                    match self
+                        .registry
+                        .exec_in_remote_container(&app.host_id, &app.container_name, commands)
+                        .await
+                    {
                         Ok((success, stdout, stderr)) => IpcResponse::ok_data(serde_json::json!({
                             "success": success,
                             "stdout": stdout,
@@ -102,12 +116,16 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                     }
                 }
             }
-            OrchestratorRequest::ExecRemoteContainer { host_id, container_name, commands } => {
-                match self.registry.exec_in_remote_container(
-                    &host_id,
-                    &container_name,
-                    commands,
-                ).await {
+            OrchestratorRequest::ExecRemoteContainer {
+                host_id,
+                container_name,
+                commands,
+            } => {
+                match self
+                    .registry
+                    .exec_in_remote_container(&host_id, &container_name, commands)
+                    .await
+                {
                     Ok((success, stdout, stderr)) => IpcResponse::ok_data(serde_json::json!({
                         "success": success,
                         "stdout": stdout,
@@ -124,17 +142,15 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                         return IpcResponse::err(format!("Invalid message: {e}"));
                     }
                 };
-                let msg_type = message.get("type").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                let msg_type = message
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string();
                 info!(app_id = %app_id, msg_type = %msg_type, "IPC SendToAgent dispatching");
                 match self.registry.send_to_agent(&app_id, msg).await {
-                    Ok(()) => {
-                        info!(app_id = %app_id, msg_type = %msg_type, "IPC SendToAgent delivered");
-                        IpcResponse::ok_empty()
-                    }
-                    Err(e) => {
-                        warn!(app_id = %app_id, error = %e, "IPC SendToAgent failed");
-                        IpcResponse::err(format!("Failed to send to agent: {e}"))
-                    }
+                    Ok(()) => IpcResponse::ok_empty(),
+                    Err(e) => IpcResponse::err(format!("Failed to send to agent: {e}")),
                 }
             }
             OrchestratorRequest::TriggerAgentUpdate { agent_ids } => {
@@ -154,36 +170,29 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                     Some(a) => a,
                     None => return IpcResponse::err("Application not found"),
                 };
-
                 if app.host_id == "local" {
                     match self.registry.fix_agent_via_exec(&app_id).await {
-                        Ok(output) => {
-                            info!(app_id = app_id, "Agent fixed via machinectl exec");
-                            IpcResponse::ok_data(serde_json::json!({"success": true, "output": output}))
-                        }
+                        Ok(output) => IpcResponse::ok_data(
+                            serde_json::json!({"success": true, "output": output}),
+                        ),
                         Err(e) => IpcResponse::err(format!("Failed to fix agent: {e}")),
                     }
                 } else {
-                    let api_port = 4000u16;
-                    let cmd = vec![
-                        format!(
-                            "curl -fsSL http://10.0.0.254:{}/api/applications/agents/binary \
+                    let cmd = vec![format!(
+                        "curl -fsSL http://10.0.0.254:4000/api/applications/agents/binary \
                              -o /usr/local/bin/hr-agent.new && \
                              chmod +x /usr/local/bin/hr-agent.new && \
                              mv /usr/local/bin/hr-agent.new /usr/local/bin/hr-agent && \
-                             systemctl restart hr-agent",
-                            api_port
+                             systemctl restart hr-agent"
+                    )];
+                    match self
+                        .registry
+                        .exec_in_remote_container(&app.host_id, &app.container_name, cmd)
+                        .await
+                    {
+                        Ok((true, stdout, _)) => IpcResponse::ok_data(
+                            serde_json::json!({"success": true, "output": stdout}),
                         ),
-                    ];
-                    match self.registry.exec_in_remote_container(
-                        &app.host_id,
-                        &app.container_name,
-                        cmd,
-                    ).await {
-                        Ok((true, stdout, _)) => {
-                            info!(app_id = app_id, "Agent fixed via remote exec");
-                            IpcResponse::ok_data(serde_json::json!({"success": true, "output": stdout}))
-                        }
                         Ok((false, _, stderr)) => {
                             IpcResponse::err(format!("Fix command failed: {stderr}"))
                         }
@@ -197,78 +206,60 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                     Some(ids) => apps.into_iter().filter(|a| ids.contains(&a.id)).collect(),
                     None => apps,
                 };
-
                 let mut updated = 0u32;
                 for app in &target_apps {
                     if self.registry.is_agent_connected(&app.id).await {
-                        // Send UpdateRules via the registry's internal push_rules mechanism.
-                        // The registry handles rendering rules templates per-app.
                         let msg = RegistryMessage::UpdateRules { rules: vec![] };
                         if self.registry.send_to_agent(&app.id, msg).await.is_ok() {
                             updated += 1;
                         }
                     }
                 }
-
                 IpcResponse::ok_data(serde_json::json!({
                     "updated": updated,
                     "total": target_apps.len(),
                 }))
             }
-            // ── Git ──────────────────────────────────────────────
-            OrchestratorRequest::ListRepos => {
-                match self.git.list_repos().await {
-                    Ok(repos) => IpcResponse::ok_data(repos),
-                    Err(e) => IpcResponse::err(format!("Failed to list repos: {e}")),
-                }
-            }
-            OrchestratorRequest::GetRepo { slug } => {
-                match self.git.get_repo(&slug).await {
-                    Ok(Some(repo)) => IpcResponse::ok_data(repo),
-                    Ok(None) => IpcResponse::err("Repository not found"),
-                    Err(e) => IpcResponse::err(format!("Failed to get repo: {e}")),
-                }
-            }
-            OrchestratorRequest::CreateRepo { slug } => {
-                match self.git.create_repo(&slug).await {
-                    Ok(path) => IpcResponse::ok_data(serde_json::json!({
-                        "path": path.display().to_string()
-                    })),
-                    Err(e) => IpcResponse::err(format!("Failed to create repo: {e}")),
-                }
-            }
-            OrchestratorRequest::DeleteRepo { slug } => {
-                match self.git.delete_repo(&slug).await {
-                    Ok(()) => IpcResponse::ok_empty(),
-                    Err(e) => IpcResponse::err(format!("Failed to delete repo: {e}")),
-                }
-            }
 
-            // ── Git extended ─────────────────────────────────────
+            // ── Git ──────────────────────────────────────────────
+            OrchestratorRequest::ListRepos => match self.git.list_repos().await {
+                Ok(repos) => IpcResponse::ok_data(repos),
+                Err(e) => IpcResponse::err(format!("Failed to list repos: {e}")),
+            },
+            OrchestratorRequest::GetRepo { slug } => match self.git.get_repo(&slug).await {
+                Ok(Some(repo)) => IpcResponse::ok_data(repo),
+                Ok(None) => IpcResponse::err("Repository not found"),
+                Err(e) => IpcResponse::err(format!("Failed to get repo: {e}")),
+            },
+            OrchestratorRequest::CreateRepo { slug } => match self.git.create_repo(&slug).await {
+                Ok(path) => IpcResponse::ok_data(serde_json::json!({
+                    "path": path.display().to_string()
+                })),
+                Err(e) => IpcResponse::err(format!("Failed to create repo: {e}")),
+            },
+            OrchestratorRequest::DeleteRepo { slug } => match self.git.delete_repo(&slug).await {
+                Ok(()) => IpcResponse::ok_empty(),
+                Err(e) => IpcResponse::err(format!("Failed to delete repo: {e}")),
+            },
             OrchestratorRequest::GetCommits { slug, limit } => {
                 match self.git.get_commits(&slug, limit).await {
                     Ok(commits) => IpcResponse::ok_data(commits),
                     Err(e) => IpcResponse::err(format!("Failed to get commits: {e}")),
                 }
             }
-            OrchestratorRequest::GetBranches { slug } => {
-                match self.git.get_branches(&slug).await {
-                    Ok(branches) => IpcResponse::ok_data(branches),
-                    Err(e) => IpcResponse::err(format!("Failed to get branches: {e}")),
-                }
-            }
-            OrchestratorRequest::TriggerSync { slug } => {
-                match self.git.trigger_sync(&slug).await {
-                    Ok(()) => IpcResponse::ok_empty(),
-                    Err(e) => IpcResponse::err(format!("Failed to sync: {e}")),
-                }
-            }
+            OrchestratorRequest::GetBranches { slug } => match self.git.get_branches(&slug).await {
+                Ok(branches) => IpcResponse::ok_data(branches),
+                Err(e) => IpcResponse::err(format!("Failed to get branches: {e}")),
+            },
+            OrchestratorRequest::TriggerSync { slug } => match self.git.trigger_sync(&slug).await {
+                Ok(()) => IpcResponse::ok_empty(),
+                Err(e) => IpcResponse::err(format!("Failed to sync: {e}")),
+            },
             OrchestratorRequest::SyncAll => {
                 let config = match self.git.load_config().await {
                     Ok(c) => c,
                     Err(e) => return IpcResponse::err(format!("Failed to load git config: {e}")),
                 };
-
                 let mut synced = 0u32;
                 let mut errors = Vec::new();
                 for (slug, mirror) in &config.mirrors {
@@ -282,43 +273,34 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                         }
                     }
                 }
-
                 IpcResponse::ok_data(serde_json::json!({
                     "synced": synced,
                     "errors": errors,
                 }))
             }
-            OrchestratorRequest::GetSshKey => {
-                match self.git.get_ssh_key().await {
-                    Ok(info) => IpcResponse::ok_data(info),
-                    Err(e) => IpcResponse::err(format!("Failed to get SSH key: {e}")),
-                }
-            }
-            OrchestratorRequest::GenerateSshKey => {
-                match self.git.generate_ssh_key().await {
-                    Ok(info) => IpcResponse::ok_data(info),
-                    Err(e) => IpcResponse::err(format!("Failed to generate SSH key: {e}")),
-                }
-            }
-            OrchestratorRequest::GetGitConfig => {
-                match self.git.load_config().await {
-                    Ok(config) => IpcResponse::ok_data(config),
-                    Err(e) => IpcResponse::err(format!("Failed to load git config: {e}")),
-                }
-            }
+            OrchestratorRequest::GetSshKey => match self.git.get_ssh_key().await {
+                Ok(info) => IpcResponse::ok_data(info),
+                Err(e) => IpcResponse::err(format!("Failed to get SSH key: {e}")),
+            },
+            OrchestratorRequest::GenerateSshKey => match self.git.generate_ssh_key().await {
+                Ok(info) => IpcResponse::ok_data(info),
+                Err(e) => IpcResponse::err(format!("Failed to generate SSH key: {e}")),
+            },
+            OrchestratorRequest::GetGitConfig => match self.git.load_config().await {
+                Ok(config) => IpcResponse::ok_data(config),
+                Err(e) => IpcResponse::err(format!("Failed to load git config: {e}")),
+            },
             OrchestratorRequest::UpdateGitConfig { config } => {
                 let cfg: hr_git::types::GitConfig = match serde_json::from_value(config) {
                     Ok(c) => c,
                     Err(e) => return IpcResponse::err(format!("Invalid git config: {e}")),
                 };
-
-                // Save the config
                 match self.git.save_config(&cfg).await {
                     Ok(()) => {
-                        // Update mirrors based on config changes
                         for (slug, mirror) in &cfg.mirrors {
                             if mirror.enabled {
-                                if let Err(e) = self.git.enable_mirror(slug, &cfg.github_org).await {
+                                if let Err(e) = self.git.enable_mirror(slug, &cfg.github_org).await
+                                {
                                     warn!(slug = slug, error = %e, "Failed to enable mirror");
                                 }
                             } else {
@@ -336,17 +318,20 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
             // ── Host operations ──────────────────────────────────
             OrchestratorRequest::ListHostConnections => {
                 let conns = self.registry.host_connections.read().await;
-                let hosts: Vec<serde_json::Value> = conns.iter().map(|(id, conn)| {
-                    serde_json::json!({
-                        "host_id": id,
-                        "host_name": conn.host_name,
-                        "connected_at": conn.connected_at.to_rfc3339(),
-                        "last_heartbeat": conn.last_heartbeat.to_rfc3339(),
-                        "version": conn.version,
-                        "metrics": conn.metrics,
-                        "containers": conn.containers,
+                let hosts: Vec<serde_json::Value> = conns
+                    .iter()
+                    .map(|(id, conn)| {
+                        serde_json::json!({
+                            "host_id": id,
+                            "host_name": conn.host_name,
+                            "connected_at": conn.connected_at.to_rfc3339(),
+                            "last_heartbeat": conn.last_heartbeat.to_rfc3339(),
+                            "version": conn.version,
+                            "metrics": conn.metrics,
+                            "containers": conn.containers,
+                        })
                     })
-                }).collect();
+                    .collect();
                 IpcResponse::ok_data(hosts)
             }
             OrchestratorRequest::IsHostConnected { host_id } => {
@@ -381,17 +366,23 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 }
             }
             OrchestratorRequest::HostPowerAction { host_id, action } => {
-                // Guard: never power off the local machine (backup server = router post-migration)
-                if host_id == BACKUP_SERVER_HOST_ID && (action == "shutdown" || action == "poweroff") {
-                    warn!("Blocked PowerOff request for backup server (local machine). This would shut down the router.");
-                    return IpcResponse::ok_data(serde_json::json!({"status": "blocked", "reason": "Cannot power off the local backup server"}));
+                if host_id == BACKUP_SERVER_HOST_ID
+                    && (action == "shutdown" || action == "poweroff")
+                {
+                    return IpcResponse::ok_data(
+                        serde_json::json!({"status": "blocked", "reason": "Cannot power off the local backup server"}),
+                    );
                 }
                 let power_action = match action.as_str() {
                     "shutdown" => PowerAction::Shutdown,
                     "reboot" => PowerAction::Reboot,
                     _ => return IpcResponse::err(format!("Unknown power action: {action}")),
                 };
-                if let Err(e) = self.registry.request_power_action(&host_id, power_action).await {
+                if let Err(e) = self
+                    .registry
+                    .request_power_action(&host_id, power_action)
+                    .await
+                {
                     return IpcResponse::err(e);
                 }
                 let msg = match action.as_str() {
@@ -407,26 +398,9 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
 
             // ── Updates scan ─────────────────────────────────────
             OrchestratorRequest::ScanUpdates => {
-                // Refresh latest versions server-side
                 self.registry.refresh_latest_versions().await;
-                // Broadcast to host-agents only (container agents removed)
                 let host_count = self.registry.trigger_host_update_scan().await;
-                // Broadcast to env-agents
-                let env_count = self.env_manager.broadcast(
-                    hr_environment::protocol::EnvOrchestratorMessage::RunUpdateScan
-                ).await;
-                IpcResponse::ok_data(serde_json::json!({"agents_scanned": host_count + env_count}))
-            }
-            OrchestratorRequest::SendToEnv { env_slug, message } => {
-                match serde_json::from_value::<hr_environment::protocol::EnvOrchestratorMessage>(message) {
-                    Ok(msg) => {
-                        match self.env_manager.send_to_env(&env_slug, msg).await {
-                            Ok(()) => IpcResponse::ok_empty(),
-                            Err(e) => IpcResponse::err(e.to_string()),
-                        }
-                    }
-                    Err(e) => IpcResponse::err(format!("Invalid env message: {e}")),
-                }
+                IpcResponse::ok_data(serde_json::json!({"agents_scanned": host_count}))
             }
             OrchestratorRequest::GetScanResults => {
                 let results = self.registry.scan_results.read().await;
@@ -434,7 +408,10 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
             }
             OrchestratorRequest::StoreScanResult { target } => {
                 if let (Some(id), Ok(t)) = (
-                    target.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    target
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                     serde_json::from_value::<hr_common::events::UpdateTarget>(target),
                 ) {
                     self.registry.scan_results.write().await.insert(id, t);
@@ -461,220 +438,14 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 }
             }
 
-            // ── Environments ────────────────────────────────────
-            OrchestratorRequest::ListEnvironments => {
-                let envs = self.env_manager.list_environments().await;
-                IpcResponse::ok_data(envs)
-            }
-            OrchestratorRequest::GetEnvironment { id } => {
-                // Try by ID first, then by slug
-                let env = self.env_manager.get_environment(&id).await
-                    .or(self.env_manager.get_by_slug(&id).await);
-                match env {
-                    Some(env) => IpcResponse::ok_data(env),
-                    None => IpcResponse::err("Environment not found"),
-                }
-            }
-            OrchestratorRequest::CreateEnvironment { request } => {
-                let name = request.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let slug = request.get("slug").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let env_type_str = request.get("env_type").and_then(|v| v.as_str()).unwrap_or("dev");
-                let env_type = match env_type_str {
-                    "prod" | "production" => hr_environment::EnvType::Production,
-                    "acc" | "acceptance" => hr_environment::EnvType::Acceptance,
-                    _ => hr_environment::EnvType::Development,
-                };
-                let host_id = request.get("host_id").and_then(|v| v.as_str()).unwrap_or("medion").to_string();
-                match self.env_manager.create_environment(name, slug, env_type, host_id).await {
-                    Ok((record, token)) => {
-                        // Provision container with static IP
-                        let container_name = &record.container_name;
-                        let storage_path = std::path::Path::new("/var/lib/machines");
-                        if storage_path.join(container_name).exists() {
-                            if let Err(e) = hr_container::NspawnClient::write_network_config(container_name, storage_path, record.ipv4_address).await {
-                                tracing::warn!(container = container_name, %e, "Failed to write network config");
-                            }
-                        } else if let Err(e) = hr_container::NspawnClient::create_container(container_name, storage_path, "bridge:br0", true, record.ipv4_address).await {
-                            tracing::error!(container = container_name, %e, "Container provisioning failed");
-                        }
-                        IpcResponse::ok_data(serde_json::json!({
-                            "id": record.id,
-                            "name": record.name,
-                            "slug": record.slug,
-                            "env_type": record.env_type,
-                            "host_id": record.host_id,
-                            "container_name": record.container_name,
-                            "ipv4_address": record.ipv4_address.map(|ip| ip.to_string()),
-                            "status": record.status,
-                            "token": token,
-                        }))
-                    }
-                    Err(e) => IpcResponse::err(format!("Failed to create environment: {e}")),
-                }
-            }
-            OrchestratorRequest::UpdateEnvironment { id, request } => {
-                let name = request.get("name").and_then(|v| v.as_str()).map(String::from);
-                let slug = request.get("slug").and_then(|v| v.as_str()).map(String::from);
-                match self.env_manager.update_environment(&id, name, slug).await {
-                    Ok(()) => IpcResponse::ok_empty(),
-                    Err(e) => IpcResponse::err(format!("Failed to update environment: {e}")),
-                }
-            }
-            OrchestratorRequest::DeleteEnvironment { id } => {
-                match self.env_manager.delete_environment(&id).await {
-                    Ok(()) => IpcResponse::ok_empty(),
-                    Err(e) => IpcResponse::err(format!("Failed to delete environment: {e}")),
-                }
-            }
-            OrchestratorRequest::StartEnvironment { id } => {
-                self.env_manager.update_environment_status(&id, hr_environment::EnvStatus::Provisioning).await;
-                IpcResponse::ok_empty()
-            }
-            OrchestratorRequest::StopEnvironment { id } => {
-                self.env_manager.update_environment_status(&id, hr_environment::EnvStatus::Stopped).await;
-                IpcResponse::ok_empty()
-            }
-
-            // ── Environment sub-resources ─────────────────────────
-            OrchestratorRequest::GetEnvironmentApps { env_slug } => {
-                match self.env_manager.get_by_slug(&env_slug).await {
-                    Some(env) => IpcResponse::ok_data(serde_json::json!(env.apps)),
-                    None => IpcResponse::err("Environment not found"),
-                }
-            }
-            OrchestratorRequest::GetEnvironmentMonitoring { env_slug } => {
-                match self.env_manager.get_by_slug(&env_slug).await {
-                    Some(env) => {
-                        // Return env status + apps health summary
-                        let apps_summary: Vec<serde_json::Value> = env.apps.iter().map(|a| {
-                            serde_json::json!({
-                                "slug": a.slug,
-                                "name": a.name,
-                                "running": a.running,
-                                "version": a.version,
-                            })
-                        }).collect();
-                        IpcResponse::ok_data(serde_json::json!({
-                            "slug": env.slug,
-                            "status": env.status,
-                            "agent_connected": env.agent_connected,
-                            "agent_version": env.agent_version,
-                            "last_heartbeat": env.last_heartbeat,
-                            "apps": apps_summary,
-                        }))
-                    }
-                    None => IpcResponse::err("Environment not found"),
-                }
-            }
-            OrchestratorRequest::ControlEnvironmentApp { env_slug, app_slug, action } => {
-                let action = match action.as_str() {
-                    "start" => hr_environment::AppControlAction::Start,
-                    "stop" => hr_environment::AppControlAction::Stop,
-                    "restart" => hr_environment::AppControlAction::Restart,
-                    _ => return IpcResponse::err(format!("Invalid action: {action}. Use start, stop, or restart")),
-                };
-                match self.env_manager.send_to_env(
-                    &env_slug,
-                    hr_environment::EnvOrchestratorMessage::AppControl { app_slug, action },
-                ).await {
-                    Ok(()) => IpcResponse::ok_empty(),
-                    Err(e) => IpcResponse::err(format!("Failed to send control command: {e}")),
-                }
-            }
-            OrchestratorRequest::GetEnvironmentAppLogs { env_slug, app_slug, lines } => {
-                // Proxy to env-agent MCP for app logs
-                let args = serde_json::json!({
-                    "app_slug": app_slug,
-                    "lines": lines.unwrap_or(100),
-                });
-                match self.env_mcp_call(&env_slug, "app.logs", args).await {
-                    Ok(data) => IpcResponse::ok_data(data),
-                    Err(e) => IpcResponse::err(format!("Failed to get app logs: {e}")),
-                }
-            }
-            OrchestratorRequest::GetEnvironmentDbTables { env_slug } => {
-                match self.env_mcp_call(&env_slug, "db.list_tables", serde_json::json!({})).await {
-                    Ok(data) => IpcResponse::ok_data(data),
-                    Err(e) => IpcResponse::err(format!("Failed to list DB tables: {e}")),
-                }
-            }
-            OrchestratorRequest::QueryEnvironmentDb { env_slug, query } => {
-                match self.env_mcp_call(&env_slug, "db.query_data", query).await {
-                    Ok(data) => IpcResponse::ok_data(data),
-                    Err(e) => IpcResponse::err(format!("Failed to query DB: {e}")),
-                }
-            }
-            OrchestratorRequest::SetAppPublic { env_slug, app_slug, public } => {
-                match self.env_manager.set_app_public(&env_slug, &app_slug, public).await {
-                    Ok(port) => {
-                        // Re-register the edge route with updated auth_required
-                        let env = self.env_manager.get_by_slug(&env_slug).await;
-                        if let Some(env_record) = env {
-                            if let Some(ip) = env_record.ipv4_address {
-                                let domain = format!("{}.{}.{}", app_slug, env_slug, self.base_domain);
-                                let auth_required = !public;
-                                if let Err(e) = self.edge.set_app_route(
-                                    domain.clone(),
-                                    format!("env-{}-{}", env_slug, app_slug),
-                                    env_record.host_id.clone(),
-                                    ip.to_string(),
-                                    port,
-                                    auth_required,
-                                    vec![],
-                                    false,
-                                ).await {
-                                    warn!(domain, error = %e, "Failed to update edge route after auth toggle");
-                                } else {
-                                    info!(domain, public, auth_required, "Updated edge route auth");
-                                }
-                            }
-                        }
-                        IpcResponse::ok_data(serde_json::json!({
-                            "env_slug": env_slug,
-                            "app_slug": app_slug,
-                            "public": public,
-                        }))
-                    }
-                    Err(e) => IpcResponse::err(e.to_string()),
-                }
-            }
-            OrchestratorRequest::GetEnvironmentsMonitoringSummary => {
-                let envs = self.env_manager.list_environments().await;
-                let summary: Vec<serde_json::Value> = envs.iter().map(|env| {
-                    let running_apps = env.apps.iter().filter(|a| a.running).count();
-                    serde_json::json!({
-                        "slug": env.slug,
-                        "name": env.name,
-                        "env_type": env.env_type,
-                        "status": env.status,
-                        "agent_connected": env.agent_connected,
-                        "apps_running": running_apps,
-                        "apps_total": env.apps.len(),
-                    })
-                }).collect();
-                IpcResponse::ok_data(serde_json::json!(summary))
-            }
-
-            // ── Multi-host environments (7.6) ─────────────────────
-            OrchestratorRequest::ListEnvironmentsByHost { host_id } => {
-                let envs = self.env_manager.list_by_host(&host_id).await;
-                IpcResponse::ok_data(envs)
-            }
-            OrchestratorRequest::GetHostCapacity { host_id } => {
-                let capacity = self.env_manager.get_host_capacity(&host_id).await;
-                IpcResponse::ok_data(capacity)
-            }
-
             // ── Backup pipeline ───────────────────────────────────
-            OrchestratorRequest::TriggerBackup => {
-                match self.backup.trigger().await {
-                    Ok(()) => IpcResponse::ok_data(serde_json::json!({
-                        "message": "Backup pipeline started",
-                        "status": "running"
-                    })),
-                    Err(e) => IpcResponse::err(e),
-                }
-            }
+            OrchestratorRequest::TriggerBackup => match self.backup.trigger().await {
+                Ok(()) => IpcResponse::ok_data(serde_json::json!({
+                    "message": "Backup pipeline started",
+                    "status": "running"
+                })),
+                Err(e) => IpcResponse::err(e),
+            },
             OrchestratorRequest::GetBackupStatus => {
                 let status = self.backup.get_status().await;
                 IpcResponse::ok_data(status)
@@ -691,79 +462,101 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 let progress = self.backup.get_progress().await;
                 IpcResponse::ok_data(progress)
             }
-            OrchestratorRequest::CancelBackup => {
-                match self.backup.cancel().await {
-                    Ok(()) => IpcResponse::ok_data(serde_json::json!({
-                        "message": "Backup cancelled"
-                    })),
-                    Err(e) => IpcResponse::err(e),
-                }
-            }
+            OrchestratorRequest::CancelBackup => match self.backup.cancel().await {
+                Ok(()) => IpcResponse::ok_data(serde_json::json!({"message": "Backup cancelled"})),
+                Err(e) => IpcResponse::err(e),
+            },
             OrchestratorRequest::GetBackupLive => {
                 let status = self.backup.get_status().await;
                 let repos = self.backup.get_repos().await;
                 let jobs = self.backup.get_jobs().await;
                 let progress = self.backup.get_progress().await;
-                let status_val = serde_json::to_value(&status).unwrap_or_default();
-                let repos_val = serde_json::to_value(&repos).unwrap_or_default();
-                let jobs_val = serde_json::to_value(&jobs).unwrap_or_default();
-                let progress_val = serde_json::to_value(&progress).unwrap_or_default();
                 IpcResponse::ok_data(serde_json::json!({
-                    "status": status_val,
-                    "repos": repos_val,
-                    "jobs": jobs_val,
-                    "progress": progress_val,
+                    "status": serde_json::to_value(&status).unwrap_or_default(),
+                    "repos": serde_json::to_value(&repos).unwrap_or_default(),
+                    "jobs": serde_json::to_value(&jobs).unwrap_or_default(),
+                    "progress": serde_json::to_value(&progress).unwrap_or_default(),
                 }))
             }
-        }
-    }
-}
 
-impl OrchestratorHandler {
-    /// Call an MCP tool on an env-agent's HTTP endpoint (port 4010).
-    async fn env_mcp_call(
-        &self,
-        env_slug: &str,
-        tool: &str,
-        arguments: serde_json::Value,
-    ) -> anyhow::Result<serde_json::Value> {
-        let env = self.env_manager.get_by_slug(env_slug).await
-            .ok_or_else(|| anyhow::anyhow!("Environment {env_slug} not found"))?;
-
-        let ip = env.ipv4_address
-            .ok_or_else(|| anyhow::anyhow!("Environment {env_slug} has no IP address"))?;
-
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": tool,
-                "arguments": arguments,
+            // ── Apps (V3 — direct supervision via hr-apps) ────────
+            OrchestratorRequest::AppList => self.apps_ctx().list().await,
+            OrchestratorRequest::AppGet { slug } => self.apps_ctx().get(&slug).await,
+            OrchestratorRequest::AppCreate {
+                slug,
+                name,
+                stack,
+                has_db,
+                visibility,
+                run_command,
+                build_command,
+                health_path,
+            } => {
+                self.apps_ctx()
+                    .create(
+                        slug,
+                        name,
+                        stack,
+                        has_db,
+                        visibility,
+                        run_command,
+                        build_command,
+                        health_path,
+                    )
+                    .await
             }
-        });
-
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()?;
-
-        let resp = client
-            .post(format!("http://{}:4010/mcp", ip))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("MCP call to env-agent {env_slug} failed: {e}"))?;
-
-        if !resp.status().is_success() {
-            anyhow::bail!("Env-agent MCP returned status {}", resp.status());
+            OrchestratorRequest::AppUpdate {
+                slug,
+                name,
+                visibility,
+                run_command,
+                build_command,
+                health_path,
+                env_vars,
+            } => {
+                self.apps_ctx()
+                    .update(
+                        slug,
+                        name,
+                        visibility,
+                        run_command,
+                        build_command,
+                        health_path,
+                        env_vars,
+                    )
+                    .await
+            }
+            OrchestratorRequest::AppDelete { slug, keep_data } => {
+                self.apps_ctx().delete(slug, keep_data).await
+            }
+            OrchestratorRequest::AppControl { slug, action } => {
+                self.apps_ctx().control(slug, action).await
+            }
+            OrchestratorRequest::AppStatus { slug } => self.apps_ctx().status(&slug).await,
+            OrchestratorRequest::AppLogs { slug, limit, level } => {
+                self.apps_ctx().logs(slug, limit, level).await
+            }
+            OrchestratorRequest::AppExec {
+                slug,
+                command,
+                timeout_secs,
+            } => self.apps_ctx().exec(slug, command, timeout_secs).await,
+            OrchestratorRequest::AppRegenerateContext { slug } => {
+                self.apps_ctx().regenerate_context(slug).await
+            }
+            OrchestratorRequest::AppDbListTables { slug } => {
+                self.apps_ctx().db_list_tables(slug).await
+            }
+            OrchestratorRequest::AppDbDescribeTable { slug, table } => {
+                self.apps_ctx().db_describe_table(slug, table).await
+            }
+            OrchestratorRequest::AppDbQuery { slug, sql, params } => {
+                self.apps_ctx().db_query(slug, sql, params).await
+            }
+            OrchestratorRequest::AppDbExecute { slug, sql, params } => {
+                self.apps_ctx().db_execute(slug, sql, params).await
+            }
+            OrchestratorRequest::AppDbSnapshot { slug } => self.apps_ctx().db_snapshot(slug).await,
         }
-
-        let json: serde_json::Value = resp.json().await?;
-
-        if let Some(err) = json.get("error") {
-            anyhow::bail!("Env-agent MCP error: {err}");
-        }
-
-        Ok(json.get("result").cloned().unwrap_or(serde_json::Value::Null))
     }
 }

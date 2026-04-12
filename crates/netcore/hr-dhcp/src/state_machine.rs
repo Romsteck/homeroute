@@ -82,7 +82,13 @@ fn handle_discover(
     }
 
     // DHCPOFFER: ciaddr is always 0 (RFC 2131 §4.3.1)
-    Some(packet.build_reply(DHCPOFFER, offered_ip, server_ip, Ipv4Addr::UNSPECIFIED, options))
+    Some(packet.build_reply(
+        DHCPOFFER,
+        offered_ip,
+        server_ip,
+        Ipv4Addr::UNSPECIFIED,
+        options,
+    ))
 }
 
 fn handle_request(
@@ -96,7 +102,10 @@ fn handle_request(
     // Check if this REQUEST is for us (server identifier matches)
     if let Some(requested_server) = packet.server_id() {
         if requested_server != server_ip {
-            debug!("DHCPREQUEST from {} for different server {}", mac, requested_server);
+            debug!(
+                "DHCPREQUEST from {} for different server {}",
+                mac, requested_server
+            );
             return None;
         }
     }
@@ -127,7 +136,10 @@ fn handle_request(
         && packet.ciaddr == Ipv4Addr::UNSPECIFIED;
 
     if is_init_reboot && lease_store.get_lease_by_mac(&mac).is_none() {
-        debug!("INIT-REBOOT from {} for {} — no record, staying silent", mac, requested_ip);
+        debug!(
+            "INIT-REBOOT from {} for {} — no record, staying silent",
+            mac, requested_ip
+        );
         return None;
     }
 
@@ -135,16 +147,18 @@ fn handle_request(
     let range_start: Ipv4Addr = config.range_start.parse().ok()?;
     let range_end: Ipv4Addr = config.range_end.parse().ok()?;
 
-    let is_static = config
-        .static_leases
-        .iter()
-        .any(|s| s.mac.to_lowercase() == mac && s.ip.parse::<Ipv4Addr>().ok() == Some(requested_ip));
+    let is_static = config.static_leases.iter().any(|s| {
+        s.mac.to_lowercase() == mac && s.ip.parse::<Ipv4Addr>().ok() == Some(requested_ip)
+    });
 
     let ip_u32 = u32::from(requested_ip);
     let in_range = ip_u32 >= u32::from(range_start) && ip_u32 <= u32::from(range_end);
 
     if !is_static && !in_range {
-        warn!("DHCPNAK: {} requested {} which is out of range", mac, requested_ip);
+        warn!(
+            "DHCPNAK: {} requested {} which is out of range",
+            mac, requested_ip
+        );
         return Some(build_nak(packet, server_ip));
     }
 
@@ -156,7 +170,10 @@ fn handle_request(
                 .unwrap()
                 .as_secs();
             if existing.expiry > now {
-                warn!("DHCPNAK: {} requested {} which is leased to {}", mac, requested_ip, existing.mac);
+                warn!(
+                    "DHCPNAK: {} requested {} which is leased to {}",
+                    mac, requested_ip, existing.mac
+                );
                 return Some(build_nak(packet, server_ip));
             }
         }
@@ -185,7 +202,10 @@ fn handle_request(
         client_id: packet.client_id(),
     });
 
-    info!("DHCPACK {} to {} (hostname: {:?})", requested_ip, mac, hostname);
+    info!(
+        "DHCPACK {} to {} (hostname: {:?})",
+        requested_ip, mac, hostname
+    );
 
     let mut options = build_standard_options(config, server_ip);
     if let Some(ref h) = hostname {
@@ -204,7 +224,10 @@ fn handle_release(packet: &DhcpPacket, lease_store: &mut LeaseStore) {
         // Validate that the releasing client actually owns this lease
         if let Some(lease) = lease_store.get_lease(ip) {
             if lease.mac != mac {
-                warn!("DHCPRELEASE from {} for {} — MAC mismatch (leased to {})", mac, ip, lease.mac);
+                warn!(
+                    "DHCPRELEASE from {} for {} — MAC mismatch (leased to {})",
+                    mac, ip, lease.mac
+                );
                 return;
             }
         }
@@ -223,7 +246,13 @@ fn handle_inform(
 
     let options = build_standard_options(config, server_ip);
     // INFORM: yiaddr must be 0, client already has an IP; ciaddr from client
-    Some(packet.build_reply(DHCPACK, Ipv4Addr::UNSPECIFIED, server_ip, packet.ciaddr, options))
+    Some(packet.build_reply(
+        DHCPACK,
+        Ipv4Addr::UNSPECIFIED,
+        server_ip,
+        packet.ciaddr,
+        options,
+    ))
 }
 
 fn handle_decline(packet: &DhcpPacket, lease_store: &mut LeaseStore) {
@@ -232,11 +261,17 @@ fn handle_decline(packet: &DhcpPacket, lease_store: &mut LeaseStore) {
         // Validate that the declining client actually owns this lease
         if let Some(lease) = lease_store.get_lease(ip) {
             if lease.mac != mac {
-                warn!("DHCPDECLINE from {} for {} — MAC mismatch (leased to {})", mac, ip, lease.mac);
+                warn!(
+                    "DHCPDECLINE from {} for {} — MAC mismatch (leased to {})",
+                    mac, ip, lease.mac
+                );
                 return;
             }
         }
-        warn!("DHCPDECLINE from {} for {} — marking IP as conflicted (10 min hold)", mac, ip);
+        warn!(
+            "DHCPDECLINE from {} for {} — marking IP as conflicted (10 min hold)",
+            mac, ip
+        );
         // Remove the lease and mark the IP as conflicted so it won't be
         // re-offered for 10 minutes. This breaks the DECLINE loop that occurs
         // when the IP is already in use by another host (e.g. a container).
@@ -261,7 +296,7 @@ fn build_standard_options(config: &DhcpConfig, server_ip: Ipv4Addr) -> Vec<DhcpO
     let mut opts = vec![
         DhcpOption::server_id(server_ip),
         DhcpOption::lease_time(lease),
-        DhcpOption::renewal_time(lease / 2),       // T1 = 50% of lease
+        DhcpOption::renewal_time(lease / 2), // T1 = 50% of lease
         DhcpOption::rebinding_time(lease * 7 / 8), // T2 = 87.5% of lease
     ];
 

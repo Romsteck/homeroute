@@ -94,9 +94,7 @@ fn test_session_remember_me() {
     let dir = tempdir().unwrap();
     let store = SessionStore::new(dir.path()).unwrap();
 
-    let (session_id, _) = store
-        .create("admin", None, None, true)
-        .unwrap();
+    let (session_id, _) = store.create("admin", None, None, true).unwrap();
 
     let info = store.validate(&session_id).unwrap().unwrap();
     assert!(info.remember_me);

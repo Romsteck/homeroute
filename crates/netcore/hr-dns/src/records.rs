@@ -105,7 +105,10 @@ pub enum RData {
     CNAME(String),
     PTR(String),
     NS(String),
-    MX { preference: u16, exchange: String },
+    MX {
+        preference: u16,
+        exchange: String,
+    },
     TXT(String),
     SOA {
         mname: String,

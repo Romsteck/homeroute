@@ -92,7 +92,8 @@ impl AcmeManager {
 
         // Save account credentials
         let creds_json = serde_json::to_string_pretty(&credentials)?;
-        self.storage.write_file(self.storage.account_path(), &creds_json)?;
+        self.storage
+            .write_file(self.storage.account_path(), &creds_json)?;
 
         info!(email = %email, "Created new Let's Encrypt account");
         Ok(account)
@@ -140,10 +141,9 @@ impl AcmeManager {
             .map_err(|e| AcmeError::ProtocolError(format!("Failed to create order: {}", e)))?;
 
         // Process authorizations (DNS-01 challenges)
-        let authorizations = order
-            .authorizations()
-            .await
-            .map_err(|e| AcmeError::ProtocolError(format!("Failed to get authorizations: {}", e)))?;
+        let authorizations = order.authorizations().await.map_err(|e| {
+            AcmeError::ProtocolError(format!("Failed to get authorizations: {}", e))
+        })?;
 
         let mut challenge_records: Vec<(String, String)> = Vec::new();
 
@@ -245,8 +245,10 @@ impl AcmeManager {
 
         // Generate CSR and finalize order
         info!("Generating CSR and finalizing order...");
-        let mut params = rcgen::CertificateParams::new(vec![wildcard_domain.clone()])
-            .map_err(|e| AcmeError::ProtocolError(format!("Failed to create cert params: {}", e)))?;
+        let mut params =
+            rcgen::CertificateParams::new(vec![wildcard_domain.clone()]).map_err(|e| {
+                AcmeError::ProtocolError(format!("Failed to create cert params: {}", e))
+            })?;
         params.distinguished_name = rcgen::DistinguishedName::new();
 
         let key_pair = rcgen::KeyPair::generate()
@@ -286,7 +288,8 @@ impl AcmeManager {
         let chain_path = self.storage.chain_path(&wildcard_type);
 
         self.storage.write_file(&cert_path, &cert_chain)?;
-        self.storage.write_file(&key_path, &key_pair.serialize_pem())?;
+        self.storage
+            .write_file(&key_path, &key_pair.serialize_pem())?;
         self.storage.write_file(&chain_path, &cert_chain)?;
 
         let now = Utc::now();
@@ -376,38 +379,6 @@ impl AcmeManager {
     /// Request the global wildcard certificate
     pub async fn request_global_wildcard(&self) -> AcmeResult<CertificateInfo> {
         self.request_wildcard(WildcardType::Global).await
-    }
-
-    /// Request a wildcard certificate for a specific environment.
-    /// Issues `*.{slug}.{base_domain}` via DNS-01 challenge.
-    pub async fn request_env_wildcard(&self, slug: &str) -> AcmeResult<CertificateInfo> {
-        self.request_wildcard(WildcardType::Environment { slug: slug.to_string() }).await
-    }
-
-
-    /// Request a wildcard certificate for a specific application.
-    /// DEPRECATED: Per-app wildcards are no longer issued. Returns an error.
-    #[deprecated(note = "Per-app wildcard certs have been removed. Only the global wildcard is issued.")]
-    pub async fn request_app_wildcard(&self, slug: &str) -> AcmeResult<CertificateInfo> {
-        Err(AcmeError::ConfigError(format!(
-            "Per-app wildcard certs are disabled (slug: {}). Only global wildcard is issued.",
-            slug
-        )))
-    }
-
-    /// Get certificate info for a specific application.
-    /// DEPRECATED: Per-app wildcards no longer exist. Always returns CertificateNotFound.
-    #[deprecated(note = "Per-app wildcard certs have been removed.")]
-    pub fn get_app_certificate(&self, slug: &str) -> AcmeResult<CertificateInfo> {
-        Err(AcmeError::CertificateNotFound(format!("app-{}", slug)))
-    }
-
-    /// Delete certificate for a specific application.
-    /// DEPRECATED: Per-app wildcards no longer exist. This is a no-op.
-    #[deprecated(note = "Per-app wildcard certs have been removed.")]
-    pub fn delete_app_certificate(&self, slug: &str) -> AcmeResult<()> {
-        let _ = slug;
-        Ok(())
     }
 
     /// Get the base domain

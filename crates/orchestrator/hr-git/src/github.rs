@@ -34,11 +34,16 @@ impl GitHubClient {
         let output = Command::new("curl")
             .args([
                 "-s",
-                "-X", "POST",
-                "-H", &format!("Authorization: Bearer {}", self.token),
-                "-H", "Accept: application/vnd.github+json",
-                "-H", "Content-Type: application/json",
-                "-d", &payload.to_string(),
+                "-X",
+                "POST",
+                "-H",
+                &format!("Authorization: Bearer {}", self.token),
+                "-H",
+                "Accept: application/vnd.github+json",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                &payload.to_string(),
                 &url,
             ])
             .output()
@@ -71,10 +76,14 @@ impl GitHubClient {
         let output = Command::new("curl")
             .args([
                 "-s",
-                "-o", "/dev/null",
-                "-w", "%{http_code}",
-                "-H", &format!("Authorization: Bearer {}", self.token),
-                "-H", "Accept: application/vnd.github+json",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "-H",
+                &format!("Authorization: Bearer {}", self.token),
+                "-H",
+                "Accept: application/vnd.github+json",
                 &url,
             ])
             .output()

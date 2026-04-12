@@ -1,5 +1,5 @@
-use axum::{extract::State, routing::get, Json, Router};
-use serde_json::{json, Value};
+use axum::{Json, Router, extract::State, routing::get};
+use serde_json::{Value, json};
 use std::time::Duration;
 
 use hr_ipc::orchestrator::OrchestratorRequest;
@@ -103,7 +103,9 @@ async fn fetch_cpu_ram() -> Option<(f64, f64)> {
                 }
             }
             if total_kb > 0 {
-                let pct = ((total_kb - available_kb) as f64 / total_kb as f64 * 100.0 * 10.0).round() / 10.0;
+                let pct = ((total_kb - available_kb) as f64 / total_kb as f64 * 100.0 * 10.0)
+                    .round()
+                    / 10.0;
                 Some(pct)
             } else {
                 None
@@ -131,7 +133,9 @@ async fn fetch_apps(state: &ApiState) -> Option<(usize, usize)> {
     let timeout = Duration::from_secs(2);
     let resp = tokio::time::timeout(
         timeout,
-        state.orchestrator.request(&OrchestratorRequest::ListApplications),
+        state
+            .orchestrator
+            .request(&OrchestratorRequest::ListApplications),
     )
     .await
     .ok()?

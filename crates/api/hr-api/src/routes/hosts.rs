@@ -1,15 +1,18 @@
 use axum::{
-    extract::{Path, State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    Json, Router,
+    extract::{
+        Path, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
+    },
     response::IntoResponse,
     routing::{get, post, put},
-    Json, Router,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use hr_ipc::orchestrator::OrchestratorRequest;
 use crate::state::ApiState;
+use hr_ipc::orchestrator::OrchestratorRequest;
 
 const HOSTS_FILE: &str = "/data/hosts.json";
 const SSH_KEY_PATH: &str = "/data/ssh/id_rsa";
@@ -90,7 +93,11 @@ pub async fn ensure_hosts_file() {
     let mut hosts: Vec<Value> = Vec::new();
 
     for server in &servers {
-        let id = server.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+        let id = server
+            .get("id")
+            .and_then(|i| i.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let host = json!({
             "id": id,
@@ -128,22 +135,32 @@ async fn list_hosts(State(state): State<ApiState>) -> Json<Value> {
 
     // Override status based on live host connections via IPC
     // IPC returns a JSON array of connection objects; build a map keyed by host_id
-    let conn_map: std::collections::HashMap<String, serde_json::Value> = match state.orchestrator.request(&OrchestratorRequest::ListHostConnections).await {
-        Ok(r) if r.ok => {
-            r.data.unwrap_or(json!([]))
-                .as_array()
-                .unwrap_or(&vec![])
-                .iter()
-                .filter_map(|c| {
-                    c.get("host_id").and_then(|id| id.as_str()).map(|id| (id.to_string(), c.clone()))
-                })
-                .collect()
-        }
+    let conn_map: std::collections::HashMap<String, serde_json::Value> = match state
+        .orchestrator
+        .request(&OrchestratorRequest::ListHostConnections)
+        .await
+    {
+        Ok(r) if r.ok => r
+            .data
+            .unwrap_or(json!([]))
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|c| {
+                c.get("host_id")
+                    .and_then(|id| id.as_str())
+                    .map(|id| (id.to_string(), c.clone()))
+            })
+            .collect(),
         _ => std::collections::HashMap::new(),
     };
     if let Some(arr) = hosts.as_array_mut() {
         for host in arr.iter_mut() {
-            if let Some(id) = host.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()) {
+            if let Some(id) = host
+                .get("id")
+                .and_then(|i| i.as_str())
+                .map(|s| s.to_string())
+            {
                 let conn_data = conn_map.get(&id);
                 let connected = conn_data.is_some();
                 if !connected && host.get("status").and_then(|s| s.as_str()) == Some("online") {
@@ -205,26 +222,35 @@ async fn get_local_interfaces() -> Result<Vec<Value>, String> {
     let raw: Vec<Value> = serde_json::from_str(&stdout).map_err(|e| e.to_string())?;
 
     // Normalize to match the format stored in hosts.json: { ifname, address, ipv4, is_up }
-    let normalized: Vec<Value> = raw.iter().filter_map(|iface| {
-        let ifname = iface.get("ifname")?.as_str()?;
-        let address = iface.get("address").and_then(|a| a.as_str()).unwrap_or("");
-        let operstate = iface.get("operstate").and_then(|o| o.as_str()).unwrap_or("unknown");
-        let ipv4 = iface.get("addr_info")
-            .and_then(|a| a.as_array())
-            .and_then(|addrs| {
-                addrs.iter().find_map(|a| {
-                    if a.get("family").and_then(|f| f.as_str()) == Some("inet") {
-                        a.get("local").and_then(|l| l.as_str()).map(String::from)
-                    } else { None }
-                })
-            });
-        Some(json!({
-            "ifname": ifname,
-            "address": address,
-            "ipv4": ipv4,
-            "is_up": operstate == "UP" || operstate == "up",
-        }))
-    }).collect();
+    let normalized: Vec<Value> = raw
+        .iter()
+        .filter_map(|iface| {
+            let ifname = iface.get("ifname")?.as_str()?;
+            let address = iface.get("address").and_then(|a| a.as_str()).unwrap_or("");
+            let operstate = iface
+                .get("operstate")
+                .and_then(|o| o.as_str())
+                .unwrap_or("unknown");
+            let ipv4 = iface
+                .get("addr_info")
+                .and_then(|a| a.as_array())
+                .and_then(|addrs| {
+                    addrs.iter().find_map(|a| {
+                        if a.get("family").and_then(|f| f.as_str()) == Some("inet") {
+                            a.get("local").and_then(|l| l.as_str()).map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+                });
+            Some(json!({
+                "ifname": ifname,
+                "address": address,
+                "ipv4": ipv4,
+                "is_up": operstate == "UP" || operstate == "up",
+            }))
+        })
+        .collect();
     Ok(normalized)
 }
 
@@ -257,7 +283,10 @@ async fn update_local_config(
 async fn get_host(Path(id): Path<String>) -> Json<Value> {
     let data = load_hosts().await;
     if let Some(hosts) = data.get("hosts").and_then(|s| s.as_array()) {
-        if let Some(host) = hosts.iter().find(|h| h.get("id").and_then(|i| i.as_str()) == Some(&id)) {
+        if let Some(host) = hosts
+            .iter()
+            .find(|h| h.get("id").and_then(|i| i.as_str()) == Some(&id))
+        {
             return Json(json!({"success": true, "host": host}));
         }
     }
@@ -282,8 +311,12 @@ struct AddHostRequest {
     groups: Vec<String>,
 }
 
-fn default_port() -> u16 { 22 }
-fn default_user() -> String { "root".to_string() }
+fn default_port() -> u16 {
+    22
+}
+fn default_user() -> String {
+    "root".to_string()
+}
 
 async fn add_host(Json(body): Json<AddHostRequest>) -> Json<Value> {
     if let Err(e) = ensure_ssh_key().await {
@@ -301,7 +334,9 @@ async fn add_host(Json(body): Json<AddHostRequest>) -> Json<Value> {
         interfaces.as_ref().ok().and_then(|ifaces| {
             ifaces.iter().find_map(|i| {
                 let name = i.get("ifname").and_then(|n| n.as_str()).unwrap_or("");
-                if body.interface.as_deref() == Some(name) || (body.interface.is_none() && name != "lo") {
+                if body.interface.as_deref() == Some(name)
+                    || (body.interface.is_none() && name != "lo")
+                {
                     i.get("address").and_then(|a| a.as_str()).map(String::from)
                 } else {
                     None
@@ -327,7 +362,16 @@ async fn add_host(Json(body): Json<AddHostRequest>) -> Json<Value> {
     });
 
     // Deploy hr-host-agent on the remote host
-    if let Err(e) = deploy_host_agent(&body.host, body.port, &body.username, body.password.as_deref(), &body.name, detected_lan_interface.as_deref()).await {
+    if let Err(e) = deploy_host_agent(
+        &body.host,
+        body.port,
+        &body.username,
+        body.password.as_deref(),
+        &body.name,
+        detected_lan_interface.as_deref(),
+    )
+    .await
+    {
         return Json(json!({"success": false, "error": format!("Agent deploy failed: {}", e)}));
     }
     tracing::info!("hr-host-agent deployed on {}", body.host);
@@ -368,7 +412,10 @@ async fn add_host(Json(body): Json<AddHostRequest>) -> Json<Value> {
 async fn update_host(Path(id): Path<String>, Json(updates): Json<Value>) -> Json<Value> {
     let mut data = load_hosts().await;
     if let Some(hosts) = data.get_mut("hosts").and_then(|s| s.as_array_mut()) {
-        if let Some(host) = hosts.iter_mut().find(|h| h.get("id").and_then(|i| i.as_str()) == Some(&id)) {
+        if let Some(host) = hosts
+            .iter_mut()
+            .find(|h| h.get("id").and_then(|i| i.as_str()) == Some(&id))
+        {
             if let Some(obj) = updates.as_object() {
                 for (k, v) in obj {
                     if k != "id" && k != "schedules" {
@@ -413,7 +460,10 @@ async fn test_connection(Path(id): Path<String>) -> Json<Value> {
 
     let addr = host.get("host").and_then(|h| h.as_str()).unwrap_or("");
     let port = host.get("port").and_then(|p| p.as_u64()).unwrap_or(22) as u16;
-    let user = host.get("username").and_then(|u| u.as_str()).unwrap_or("root");
+    let user = host
+        .get("username")
+        .and_then(|u| u.as_str())
+        .unwrap_or("root");
 
     match ssh_command(addr, port, user, "echo ok").await {
         Ok(output) => Json(json!({"success": true, "output": output.trim()})),
@@ -430,7 +480,10 @@ async fn get_host_info(Path(id): Path<String>) -> Json<Value> {
 
     let addr = host.get("host").and_then(|h| h.as_str()).unwrap_or("");
     let port = host.get("port").and_then(|p| p.as_u64()).unwrap_or(22) as u16;
-    let user = host.get("username").and_then(|u| u.as_str()).unwrap_or("root");
+    let user = host
+        .get("username")
+        .and_then(|u| u.as_str())
+        .unwrap_or("root");
 
     let info_cmd = "hostname && uname -r && uptime -p && free -b | head -2 && df -B1 / | tail -1";
     match ssh_command(addr, port, user, info_cmd).await {
@@ -442,12 +495,19 @@ async fn get_host_info(Path(id): Path<String>) -> Json<Value> {
 // ── Power actions ────────────────────────────────────────────────────────
 
 async fn wake(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Value> {
-    match state.orchestrator.request(&OrchestratorRequest::WakeHost {
-        host_id: id.clone(),
-    }).await {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::WakeHost {
+            host_id: id.clone(),
+        })
+        .await
+    {
         Ok(r) if r.ok => {
             let data = r.data.unwrap_or(json!({}));
-            let action = data.get("action").and_then(|a| a.as_str()).unwrap_or("wol_sent");
+            let action = data
+                .get("action")
+                .and_then(|a| a.as_str())
+                .unwrap_or("wol_sent");
             Json(json!({"success": true, "action": action}))
         }
         Ok(r) => {
@@ -461,10 +521,15 @@ async fn wake(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Val
                 Some(h) => h,
                 None => return Json(json!({"success": false, "error": format!("IPC error: {e}")})),
             };
-            let mac = match host.get("wol_mac").and_then(|m| m.as_str())
-                .or_else(|| host.get("mac").and_then(|m| m.as_str())) {
+            let mac = match host
+                .get("wol_mac")
+                .and_then(|m| m.as_str())
+                .or_else(|| host.get("mac").and_then(|m| m.as_str()))
+            {
                 Some(m) => m,
-                None => return Json(json!({"success": false, "error": "Adresse MAC non configuree"})),
+                None => {
+                    return Json(json!({"success": false, "error": "Adresse MAC non configuree"}));
+                }
             };
             match hr_registry::AgentRegistry::send_wol_packet(mac).await {
                 Ok(()) => Json(json!({"success": true, "action": "wol_sent", "mac": mac})),
@@ -475,10 +540,14 @@ async fn wake(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Val
 }
 
 async fn shutdown_host(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Value> {
-    match state.orchestrator.request(&OrchestratorRequest::HostPowerAction {
-        host_id: id.clone(),
-        action: "shutdown".to_string(),
-    }).await {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::HostPowerAction {
+            host_id: id.clone(),
+            action: "shutdown".to_string(),
+        })
+        .await
+    {
         Ok(r) if r.ok => Json(json!({"success": true, "action": "poweroff", "via": "agent"})),
         _ => {
             // SSH fallback
@@ -493,10 +562,14 @@ async fn shutdown_host(Path(id): Path<String>, State(state): State<ApiState>) ->
 }
 
 async fn reboot_host(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Value> {
-    match state.orchestrator.request(&OrchestratorRequest::HostPowerAction {
-        host_id: id.clone(),
-        action: "reboot".to_string(),
-    }).await {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::HostPowerAction {
+            host_id: id.clone(),
+            action: "reboot".to_string(),
+        })
+        .await
+    {
         Ok(r) if r.ok => Json(json!({"success": true, "action": "reboot", "via": "agent"})),
         _ => {
             // SSH fallback
@@ -519,12 +592,19 @@ struct BulkRequest {
 async fn bulk_wake(State(state): State<ApiState>, Json(body): Json<BulkRequest>) -> Json<Value> {
     let mut results = Vec::new();
     for id in &body.host_ids {
-        match state.orchestrator.request(&OrchestratorRequest::WakeHost {
-            host_id: id.clone(),
-        }).await {
+        match state
+            .orchestrator
+            .request(&OrchestratorRequest::WakeHost {
+                host_id: id.clone(),
+            })
+            .await
+        {
             Ok(r) if r.ok => {
                 let data = r.data.clone().unwrap_or(json!({}));
-                let action = data.get("action").and_then(|a| a.as_str()).unwrap_or("wol_sent");
+                let action = data
+                    .get("action")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("wol_sent");
                 results.push(json!({"id": id, "success": true, "action": action}));
             }
             Ok(r) => {
@@ -535,10 +615,14 @@ async fn bulk_wake(State(state): State<ApiState>, Json(body): Json<BulkRequest>)
                 // Fallback: direct WOL
                 let data = load_hosts().await;
                 if let Some(host) = find_host(&data, id) {
-                    let mac = host.get("wol_mac").and_then(|m| m.as_str())
+                    let mac = host
+                        .get("wol_mac")
+                        .and_then(|m| m.as_str())
                         .or_else(|| host.get("mac").and_then(|m| m.as_str()));
                     if let Some(mac) = mac {
-                        let success = hr_registry::AgentRegistry::send_wol_packet(mac).await.is_ok();
+                        let success = hr_registry::AgentRegistry::send_wol_packet(mac)
+                            .await
+                            .is_ok();
                         results.push(json!({"id": id, "success": success}));
                     } else {
                         results.push(json!({"id": id, "success": false, "error": "No MAC"}));
@@ -571,7 +655,11 @@ struct SetWolMacRequest {
     mac: String,
 }
 
-async fn set_wol_mac(Path(id): Path<String>, State(state): State<ApiState>, Json(body): Json<SetWolMacRequest>) -> Json<Value> {
+async fn set_wol_mac(
+    Path(id): Path<String>,
+    State(state): State<ApiState>,
+    Json(body): Json<SetWolMacRequest>,
+) -> Json<Value> {
     let mut data = load_hosts().await;
     if let Some(host) = find_host_mut(&mut data, &id) {
         host["wol_mac"] = json!(body.mac);
@@ -583,10 +671,13 @@ async fn set_wol_mac(Path(id): Path<String>, State(state): State<ApiState>, Json
         return Json(json!({"success": false, "error": e}));
     }
     // Notify orchestrator to invalidate cached MAC via IPC
-    let _ = state.orchestrator.request(&OrchestratorRequest::SendHostCommand {
-        host_id: id,
-        command: json!({"type": "invalidate_mac_cache"}),
-    }).await;
+    let _ = state
+        .orchestrator
+        .request(&OrchestratorRequest::SendHostCommand {
+            host_id: id,
+            command: json!({"type": "invalidate_mac_cache"}),
+        })
+        .await;
     Json(json!({"success": true}))
 }
 
@@ -598,7 +689,9 @@ struct SetRoleRequest {
 async fn set_host_role(Path(id): Path<String>, Json(body): Json<SetRoleRequest>) -> Json<Value> {
     let valid_roles = ["none", "dev", "prod", "backup"];
     if !valid_roles.contains(&body.role.as_str()) {
-        return Json(json!({"success": false, "error": format!("Invalid role: {}. Valid: none, dev, prod, backup", body.role)}));
+        return Json(
+            json!({"success": false, "error": format!("Invalid role: {}. Valid: none, dev, prod, backup", body.role)}),
+        );
     }
 
     let mut data = load_hosts().await;
@@ -617,9 +710,17 @@ async fn set_host_role(Path(id): Path<String>, Json(body): Json<SetRoleRequest>)
 
 async fn get_host_metrics(Path(id): Path<String>, State(state): State<ApiState>) -> Json<Value> {
     // Get host connections via IPC (includes metrics)
-    let connections = match state.orchestrator.request(&OrchestratorRequest::ListHostConnections).await {
+    let connections = match state
+        .orchestrator
+        .request(&OrchestratorRequest::ListHostConnections)
+        .await
+    {
         Ok(r) if r.ok => r.data.unwrap_or(json!({})),
-        Ok(r) => return Json(json!({"success": false, "error": r.error.unwrap_or_else(|| "IPC error".to_string())})),
+        Ok(r) => {
+            return Json(
+                json!({"success": false, "error": r.error.unwrap_or_else(|| "IPC error".to_string())}),
+            );
+        }
         Err(e) => return Json(json!({"success": false, "error": format!("IPC error: {e}")})),
     };
     if let Some(conn) = connections.get(&id) {
@@ -646,7 +747,9 @@ async fn update_host_agents(State(state): State<ApiState>) -> Json<Value> {
     let mut buf = [0u8; 8192];
     loop {
         let n = file.read(&mut buf).unwrap_or(0);
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         ctx.update(&buf[..n]);
     }
     let sha256 = hex::encode(ctx.finish().as_ref());
@@ -660,7 +763,10 @@ async fn update_host_agents(State(state): State<ApiState>) -> Json<Value> {
         })
         .unwrap_or_else(|| "unknown".to_string());
 
-    let download_url = format!("http://{}:{}/api/hosts/agents/binary", HOMEROUTE_LAN_IP, API_PORT);
+    let download_url = format!(
+        "http://{}:{}/api/hosts/agents/binary",
+        HOMEROUTE_LAN_IP, API_PORT
+    );
 
     // Broadcast update command to all connected host agents via IPC
     // The orchestrator will iterate over all host connections
@@ -671,17 +777,26 @@ async fn update_host_agents(State(state): State<ApiState>) -> Json<Value> {
         "sha256": sha256,
     });
     // Send to a special "broadcast" host_id that the orchestrator routes to all hosts
-    let connections = match state.orchestrator.request(&OrchestratorRequest::ListHostConnections).await {
+    let connections = match state
+        .orchestrator
+        .request(&OrchestratorRequest::ListHostConnections)
+        .await
+    {
         Ok(r) if r.ok => r.data.unwrap_or(json!({})),
         _ => json!({}),
     };
     let mut notified = 0u32;
     if let Some(obj) = connections.as_object() {
         for host_id in obj.keys() {
-            if state.orchestrator.request(&OrchestratorRequest::SendHostCommand {
-                host_id: host_id.clone(),
-                command: cmd.clone(),
-            }).await.is_ok() {
+            if state
+                .orchestrator
+                .request(&OrchestratorRequest::SendHostCommand {
+                    host_id: host_id.clone(),
+                    command: cmd.clone(),
+                })
+                .await
+                .is_ok()
+            {
                 notified += 1;
             }
         }
@@ -696,7 +811,8 @@ async fn serve_host_agent_binary() -> impl IntoResponse {
             axum::http::StatusCode::OK,
             [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
             data,
-        ).into_response(),
+        )
+            .into_response(),
         Err(_) => (axum::http::StatusCode::NOT_FOUND, "Binary not found").into_response(),
     }
 }
@@ -707,14 +823,26 @@ async fn start_container(
     Path((id, name)): Path<(String, String)>,
     State(state): State<ApiState>,
 ) -> Json<Value> {
-    let container_name = if name.starts_with("hr-") { name } else { format!("hr-{name}") };
+    let container_name = if name.starts_with("hr-") {
+        name
+    } else {
+        format!("hr-{name}")
+    };
     let cmd = json!({"type": "start_container", "container_name": container_name});
-    match state.orchestrator.request(&OrchestratorRequest::SendHostCommand {
-        host_id: id,
-        command: cmd,
-    }).await {
-        Ok(r) if r.ok => Json(json!({"success": true, "message": format!("Start command sent for {}", container_name)})),
-        Ok(r) => Json(json!({"success": false, "error": r.error.unwrap_or_else(|| "Failed".to_string())})),
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::SendHostCommand {
+            host_id: id,
+            command: cmd,
+        })
+        .await
+    {
+        Ok(r) if r.ok => Json(
+            json!({"success": true, "message": format!("Start command sent for {}", container_name)}),
+        ),
+        Ok(r) => Json(
+            json!({"success": false, "error": r.error.unwrap_or_else(|| "Failed".to_string())}),
+        ),
         Err(e) => Json(json!({"success": false, "error": format!("IPC error: {e}")})),
     }
 }
@@ -723,14 +851,26 @@ async fn stop_container(
     Path((id, name)): Path<(String, String)>,
     State(state): State<ApiState>,
 ) -> Json<Value> {
-    let container_name = if name.starts_with("hr-") { name } else { format!("hr-{name}") };
+    let container_name = if name.starts_with("hr-") {
+        name
+    } else {
+        format!("hr-{name}")
+    };
     let cmd = json!({"type": "stop_container", "container_name": container_name});
-    match state.orchestrator.request(&OrchestratorRequest::SendHostCommand {
-        host_id: id,
-        command: cmd,
-    }).await {
-        Ok(r) if r.ok => Json(json!({"success": true, "message": format!("Stop command sent for {}", container_name)})),
-        Ok(r) => Json(json!({"success": false, "error": r.error.unwrap_or_else(|| "Failed".to_string())})),
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::SendHostCommand {
+            host_id: id,
+            command: cmd,
+        })
+        .await
+    {
+        Ok(r) if r.ok => Json(
+            json!({"success": true, "message": format!("Stop command sent for {}", container_name)}),
+        ),
+        Ok(r) => Json(
+            json!({"success": false, "error": r.error.unwrap_or_else(|| "Failed".to_string())}),
+        ),
         Err(e) => Json(json!({"success": false, "error": format!("IPC error: {e}")})),
     }
 }
@@ -739,14 +879,26 @@ async fn delete_container(
     Path((id, name)): Path<(String, String)>,
     State(state): State<ApiState>,
 ) -> Json<Value> {
-    let container_name = if name.starts_with("hr-") { name } else { format!("hr-{name}") };
+    let container_name = if name.starts_with("hr-") {
+        name
+    } else {
+        format!("hr-{name}")
+    };
     let cmd = json!({"type": "delete_container", "container_name": container_name});
-    match state.orchestrator.request(&OrchestratorRequest::SendHostCommand {
-        host_id: id,
-        command: cmd,
-    }).await {
-        Ok(r) if r.ok => Json(json!({"success": true, "message": format!("Delete command sent for {}", container_name)})),
-        Ok(r) => Json(json!({"success": false, "error": r.error.unwrap_or_else(|| "Failed".to_string())})),
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::SendHostCommand {
+            host_id: id,
+            command: cmd,
+        })
+        .await
+    {
+        Ok(r) if r.ok => Json(
+            json!({"success": true, "message": format!("Delete command sent for {}", container_name)}),
+        ),
+        Ok(r) => Json(
+            json!({"success": false, "error": r.error.unwrap_or_else(|| "Failed".to_string())}),
+        ),
         Err(e) => Json(json!({"success": false, "error": format!("IPC error: {e}")})),
     }
 }
@@ -762,11 +914,15 @@ async fn exec_on_host(
     State(state): State<ApiState>,
     Json(body): Json<ExecRequest>,
 ) -> Json<Value> {
-    match state.orchestrator.request_long(&OrchestratorRequest::ExecRemoteContainer {
-        host_id: id,
-        container_name: body.container_name,
-        commands: body.command,
-    }).await {
+    match state
+        .orchestrator
+        .request_long(&OrchestratorRequest::ExecRemoteContainer {
+            host_id: id,
+            container_name: body.container_name,
+            commands: body.command,
+        })
+        .await
+    {
         Ok(r) if r.ok => {
             let data = r.data.unwrap_or(json!({}));
             Json(json!({
@@ -775,17 +931,16 @@ async fn exec_on_host(
                 "stderr": data.get("stderr").and_then(|s| s.as_str()).unwrap_or(""),
             }))
         }
-        Ok(r) => Json(json!({"success": false, "error": r.error.unwrap_or_else(|| "Exec failed".to_string())})),
+        Ok(r) => Json(
+            json!({"success": false, "error": r.error.unwrap_or_else(|| "Exec failed".to_string())}),
+        ),
         Err(e) => Json(json!({"success": false, "error": format!("IPC error: {e}")})),
     }
 }
 
 // ── Host-agent WebSocket ─────────────────────────────────────────────────
 
-async fn host_agent_ws(
-    ws: WebSocketUpgrade,
-    State(state): State<ApiState>,
-) -> impl IntoResponse {
+async fn host_agent_ws(ws: WebSocketUpgrade, State(state): State<ApiState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_host_agent_socket(socket, state))
 }
 
@@ -806,7 +961,14 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
     let (host_id, host_name, version, role) = match auth_msg {
         Ok(Some(Ok(Message::Text(text)))) => {
             match serde_json::from_str::<HostAgentMessage>(&text) {
-                Ok(HostAgentMessage::Auth { token: _, host_name, version, lan_interface, container_storage_path, role }) => {
+                Ok(HostAgentMessage::Auth {
+                    token: _,
+                    host_name,
+                    version,
+                    lan_interface,
+                    container_storage_path,
+                    role,
+                }) => {
                     let mut data = load_hosts().await;
                     let host_id = data
                         .get("hosts")
@@ -824,13 +986,16 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                         if let Some(host) = find_host_mut(&mut data, id) {
                             let mut changed = false;
                             if let Some(ref iface) = lan_interface {
-                                if host.get("lan_interface").and_then(|v| v.as_str()) != Some(iface) {
+                                if host.get("lan_interface").and_then(|v| v.as_str()) != Some(iface)
+                                {
                                     host["lan_interface"] = json!(iface);
                                     changed = true;
                                 }
                             }
                             if let Some(ref sp) = container_storage_path {
-                                if host.get("container_storage_path").and_then(|v| v.as_str()) != Some(sp) {
+                                if host.get("container_storage_path").and_then(|v| v.as_str())
+                                    != Some(sp)
+                                {
                                     host["container_storage_path"] = json!(sp);
                                     changed = true;
                                 }
@@ -850,12 +1015,16 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
                         Some(id) => (id, host_name, version, role),
                         None => {
                             tracing::warn!("Host agent auth failed: unknown host '{}'", host_name);
-                            let _ = socket.send(Message::Text(
-                                serde_json::to_string(&HostRegistryMessage::AuthResult {
-                                    success: false,
-                                    error: Some("Unknown host".to_string()),
-                                }).unwrap().into()
-                            )).await;
+                            let _ = socket
+                                .send(Message::Text(
+                                    serde_json::to_string(&HostRegistryMessage::AuthResult {
+                                        success: false,
+                                        error: Some("Unknown host".to_string()),
+                                    })
+                                    .unwrap()
+                                    .into(),
+                                ))
+                                .await;
                             return;
                         }
                     }
@@ -873,12 +1042,18 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
     };
 
     // Send auth success
-    if socket.send(Message::Text(
-        serde_json::to_string(&HostRegistryMessage::AuthResult {
-            success: true,
-            error: None,
-        }).unwrap().into()
-    )).await.is_err() {
+    if socket
+        .send(Message::Text(
+            serde_json::to_string(&HostRegistryMessage::AuthResult {
+                success: true,
+                error: None,
+            })
+            .unwrap()
+            .into(),
+        ))
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -886,7 +1061,15 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
 
     // Register connection
     let (tx, mut rx) = mpsc::channel::<hr_registry::OutgoingHostMessage>(512);
-    registry.on_host_connected(host_id.clone(), host_name.clone(), tx, version.clone(), role).await;
+    registry
+        .on_host_connected(
+            host_id.clone(),
+            host_name.clone(),
+            tx,
+            version.clone(),
+            role,
+        )
+        .await;
 
     // Mark host online
     update_host_status(&host_id, "online", &state.events.host_status).await;
@@ -896,7 +1079,10 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
 
     // Track local nspawn imports (remote→local)
     #[derive(Debug, Clone, Copy, PartialEq)]
-    enum TransferPhase { ReceivingContainer, ReceivingWorkspace }
+    enum TransferPhase {
+        ReceivingContainer,
+        ReceivingWorkspace,
+    }
     #[allow(dead_code)]
     struct ActiveTransfer {
         container_name: String,
@@ -911,7 +1097,8 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
         app_id: String,
         transfer_id: String,
     }
-    let mut active_transfers: std::collections::HashMap<String, ActiveTransfer> = std::collections::HashMap::new();
+    let mut active_transfers: std::collections::HashMap<String, ActiveTransfer> =
+        std::collections::HashMap::new();
 
     // Pending binary chunk metadata: (transfer_id, sequence, checksum)
     // Set when TransferChunkBinary text arrives, consumed when the next Binary frame arrives.
@@ -1254,7 +1441,6 @@ async fn handle_host_agent_socket(mut socket: WebSocket, state: ApiState) {
     tracing::info!("Host agent disconnected: {} ({})", host_name, host_id);
 }
 
-
 // ── Local nspawn import for remote→local migration ─────────────────────
 
 async fn handle_local_nspawn_import(
@@ -1273,14 +1459,22 @@ async fn handle_local_nspawn_import(
     match tokio::fs::metadata(&import_path).await {
         Ok(m) if m.len() == 0 => {
             tracing::error!(transfer_id = %transfer_id, "Transfer file is empty");
-            registry.on_host_import_failed(&source_host_id, &transfer_id, "Transfer file is empty").await;
+            registry
+                .on_host_import_failed(&source_host_id, &transfer_id, "Transfer file is empty")
+                .await;
             let _ = tokio::fs::remove_file(&import_path).await;
             let _ = tokio::fs::remove_file(&ws_import_path).await;
             return;
         }
         Err(e) => {
             tracing::error!(transfer_id = %transfer_id, %e, "Transfer file missing");
-            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Transfer file missing: {e}")).await;
+            registry
+                .on_host_import_failed(
+                    &source_host_id,
+                    &transfer_id,
+                    &format!("Transfer file missing: {e}"),
+                )
+                .await;
             let _ = tokio::fs::remove_file(&ws_import_path).await;
             return;
         }
@@ -1295,7 +1489,13 @@ async fn handle_local_nspawn_import(
     // Create rootfs directory
     if let Err(e) = tokio::fs::create_dir_all(&rootfs_dir).await {
         tracing::error!(transfer_id = %transfer_id, %e, "Failed to create rootfs directory");
-        registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Failed to create rootfs dir: {e}")).await;
+        registry
+            .on_host_import_failed(
+                &source_host_id,
+                &transfer_id,
+                &format!("Failed to create rootfs dir: {e}"),
+            )
+            .await;
         let _ = tokio::fs::remove_file(&import_path).await;
         let _ = tokio::fs::remove_file(&ws_import_path).await;
         return;
@@ -1304,7 +1504,15 @@ async fn handle_local_nspawn_import(
     // Extract container tar
     tracing::info!(transfer_id = %transfer_id, container = %container_name, dir = %rootfs_dir, "Extracting container tar");
     let extract = tokio::process::Command::new("tar")
-        .args(["xf", &import_path, "--numeric-owner", "--xattrs", "--xattrs-include=*", "-C", &rootfs_dir])
+        .args([
+            "xf",
+            &import_path,
+            "--numeric-owner",
+            "--xattrs",
+            "--xattrs-include=*",
+            "-C",
+            &rootfs_dir,
+        ])
         .output()
         .await;
 
@@ -1315,7 +1523,13 @@ async fn handle_local_nspawn_import(
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             tracing::error!(transfer_id = %transfer_id, %stderr, "Container tar extraction failed");
-            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("tar extract failed: {stderr}")).await;
+            registry
+                .on_host_import_failed(
+                    &source_host_id,
+                    &transfer_id,
+                    &format!("tar extract failed: {stderr}"),
+                )
+                .await;
             let _ = tokio::fs::remove_dir_all(&rootfs_dir).await;
             let _ = tokio::fs::remove_file(&import_path).await;
             let _ = tokio::fs::remove_file(&ws_import_path).await;
@@ -1323,7 +1537,13 @@ async fn handle_local_nspawn_import(
         }
         Err(e) => {
             tracing::error!(transfer_id = %transfer_id, %e, "tar command error");
-            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("tar command error: {e}")).await;
+            registry
+                .on_host_import_failed(
+                    &source_host_id,
+                    &transfer_id,
+                    &format!("tar command error: {e}"),
+                )
+                .await;
             let _ = tokio::fs::remove_dir_all(&rootfs_dir).await;
             let _ = tokio::fs::remove_file(&import_path).await;
             let _ = tokio::fs::remove_file(&ws_import_path).await;
@@ -1337,7 +1557,15 @@ async fn handle_local_nspawn_import(
             tracing::warn!(transfer_id = %transfer_id, %e, "Failed to create workspace dir");
         }
         let ws_extract = tokio::process::Command::new("tar")
-            .args(["xf", &ws_import_path, "--numeric-owner", "--xattrs", "--xattrs-include=*", "-C", &ws_dir])
+            .args([
+                "xf",
+                &ws_import_path,
+                "--numeric-owner",
+                "--xattrs",
+                "--xattrs-include=*",
+                "-C",
+                &ws_dir,
+            ])
             .output()
             .await;
         match &ws_extract {
@@ -1359,22 +1587,48 @@ async fn handle_local_nspawn_import(
     let sp = std::path::Path::new(&storage_path);
 
     // Write .nspawn unit (dev containers get workspace bind, prod don't)
-    if let Err(e) = hr_container::NspawnClient::write_nspawn_unit(&container_name, sp, &network_mode, has_workspace, &[]).await {
+    if let Err(e) = hr_container::NspawnClient::write_nspawn_unit(
+        &container_name,
+        sp,
+        &network_mode,
+        has_workspace,
+        &[],
+    )
+    .await
+    {
         tracing::error!(transfer_id = %transfer_id, %e, "Failed to write nspawn unit");
-        registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Failed to write nspawn unit: {e}")).await;
+        registry
+            .on_host_import_failed(
+                &source_host_id,
+                &transfer_id,
+                &format!("Failed to write nspawn unit: {e}"),
+            )
+            .await;
         let _ = tokio::fs::remove_dir_all(&rootfs_dir).await;
-        if has_workspace { let _ = tokio::fs::remove_dir_all(&ws_dir).await; }
+        if has_workspace {
+            let _ = tokio::fs::remove_dir_all(&ws_dir).await;
+        }
         let _ = tokio::fs::remove_file(&import_path).await;
         let _ = tokio::fs::remove_file(&ws_import_path).await;
         return;
     }
 
     // Write network config in rootfs
-    if let Err(e) = hr_container::NspawnClient::write_network_config(&container_name, sp, None).await {
+    if let Err(e) =
+        hr_container::NspawnClient::write_network_config(&container_name, sp, None).await
+    {
         tracing::error!(transfer_id = %transfer_id, %e, "Failed to write network config");
-        registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Failed to write network config: {e}")).await;
+        registry
+            .on_host_import_failed(
+                &source_host_id,
+                &transfer_id,
+                &format!("Failed to write network config: {e}"),
+            )
+            .await;
         let _ = tokio::fs::remove_dir_all(&rootfs_dir).await;
-        if has_workspace { let _ = tokio::fs::remove_dir_all(&ws_dir).await; }
+        if has_workspace {
+            let _ = tokio::fs::remove_dir_all(&ws_dir).await;
+        }
         let _ = tokio::fs::remove_file(&import_path).await;
         let _ = tokio::fs::remove_file(&ws_import_path).await;
         return;
@@ -1384,11 +1638,15 @@ async fn handle_local_nspawn_import(
     match hr_container::NspawnClient::start_container(&container_name).await {
         Ok(()) => {
             tracing::info!(transfer_id = %transfer_id, container = %container_name, "Nspawn container started after local import");
-            registry.on_host_import_complete("local", &transfer_id, &container_name).await;
+            registry
+                .on_host_import_complete("local", &transfer_id, &container_name)
+                .await;
         }
         Err(e) => {
             tracing::error!(transfer_id = %transfer_id, %e, "Container start failed after import");
-            registry.on_host_import_failed(&source_host_id, &transfer_id, &format!("Start failed: {e}")).await;
+            registry
+                .on_host_import_failed(&source_host_id, &transfer_id, &format!("Start failed: {e}"))
+                .await;
         }
     }
 
@@ -1445,15 +1703,23 @@ fn find_host_mut<'a>(data: &'a mut Value, id: &str) -> Option<&'a mut Value> {
 async fn ssh_power_action(host: &Value, command: &str) -> Json<Value> {
     let addr = host.get("host").and_then(|h| h.as_str()).unwrap_or("");
     let port = host.get("port").and_then(|p| p.as_u64()).unwrap_or(22);
-    let user = host.get("username").and_then(|u| u.as_str()).unwrap_or("root");
+    let user = host
+        .get("username")
+        .and_then(|u| u.as_str())
+        .unwrap_or("root");
 
     let output = tokio::process::Command::new("ssh")
         .args([
-            "-i", SSH_KEY_PATH,
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "ConnectTimeout=15",
-            "-o", "BatchMode=yes",
-            "-p", &port.to_string(),
+            "-i",
+            SSH_KEY_PATH,
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "ConnectTimeout=15",
+            "-o",
+            "BatchMode=yes",
+            "-p",
+            &port.to_string(),
             &format!("{}@{}", user, addr),
             &format!("sudo {}", command),
         ])
@@ -1461,9 +1727,9 @@ async fn ssh_power_action(host: &Value, command: &str) -> Json<Value> {
         .await;
 
     match output {
-        Ok(o) if o.status.success() || o.status.code() == Some(255) => {
-            Json(json!({"success": true, "action": command.split_whitespace().next().unwrap_or(command)}))
-        }
+        Ok(o) if o.status.success() || o.status.code() == Some(255) => Json(
+            json!({"success": true, "action": command.split_whitespace().next().unwrap_or(command)}),
+        ),
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
             Json(json!({"success": false, "error": format!("SSH error: {}", stderr)}))
@@ -1494,7 +1760,8 @@ async fn ensure_ssh_key() -> Result<(), String> {
     let _ = tokio::fs::set_permissions(
         SSH_KEY_PATH,
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
-    ).await;
+    )
+    .await;
 
     Ok(())
 }
@@ -1531,11 +1798,16 @@ async fn setup_ssh_key(host: &str, port: u16, user: &str, password: &str) -> Res
 async fn ssh_command(host: &str, port: u16, user: &str, command: &str) -> Result<String, String> {
     let output = tokio::process::Command::new("ssh")
         .args([
-            "-i", SSH_KEY_PATH,
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "ConnectTimeout=15",
-            "-o", "BatchMode=yes",
-            "-p", &port.to_string(),
+            "-i",
+            SSH_KEY_PATH,
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "ConnectTimeout=15",
+            "-o",
+            "BatchMode=yes",
+            "-p",
+            &port.to_string(),
             &format!("{}@{}", user, host),
             command,
         ])
@@ -1551,12 +1823,14 @@ async fn ssh_command(host: &str, port: u16, user: &str, command: &str) -> Result
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-async fn get_remote_interfaces(
-    host: &str,
-    port: u16,
-    user: &str,
-) -> Result<Vec<Value>, String> {
-    let output = ssh_command(host, port, user, "ip -j addr show 2>/dev/null || ip addr show").await?;
+async fn get_remote_interfaces(host: &str, port: u16, user: &str) -> Result<Vec<Value>, String> {
+    let output = ssh_command(
+        host,
+        port,
+        user,
+        "ip -j addr show 2>/dev/null || ip addr show",
+    )
+    .await?;
 
     if let Ok(ifaces) = serde_json::from_str::<Vec<Value>>(&output) {
         return Ok(ifaces);
@@ -1593,7 +1867,14 @@ async fn get_remote_interfaces(
 
 // ── Host-agent deployment ────────────────────────────────────────────────
 
-async fn deploy_host_agent(host: &str, port: u16, user: &str, password: Option<&str>, host_name: &str, lan_interface: Option<&str>) -> Result<(), String> {
+async fn deploy_host_agent(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: Option<&str>,
+    host_name: &str,
+    lan_interface: Option<&str>,
+) -> Result<(), String> {
     if tokio::fs::metadata(HOST_AGENT_BINARY).await.is_err() {
         return Err("hr-host-agent binary not found".to_string());
     }
@@ -1603,10 +1884,14 @@ async fn deploy_host_agent(host: &str, port: u16, user: &str, password: Option<&
     // 1. SCP binary to /tmp/
     let scp_output = tokio::process::Command::new("scp")
         .args([
-            "-i", SSH_KEY_PATH,
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "ConnectTimeout=15",
-            "-P", &port.to_string(),
+            "-i",
+            SSH_KEY_PATH,
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "ConnectTimeout=15",
+            "-P",
+            &port.to_string(),
             HOST_AGENT_BINARY,
             &format!("{}@{}:/tmp/hr-host-agent", user, host),
         ])

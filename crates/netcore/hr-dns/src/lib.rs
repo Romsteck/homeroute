@@ -1,11 +1,11 @@
-pub mod config;
-pub mod records;
-pub mod packet;
 pub mod cache;
-pub mod upstream;
+pub mod config;
+pub mod logging;
+pub mod packet;
+pub mod records;
 pub mod resolver;
 pub mod server;
-pub mod logging;
+pub mod upstream;
 
 pub use config::DnsConfig;
 
@@ -25,7 +25,9 @@ pub struct DnsState {
 
 impl DnsState {
     pub fn server_ip(&self) -> std::net::Ipv4Addr {
-        self.config.listen_addresses.first()
+        self.config
+            .listen_addresses
+            .first()
             .and_then(|s| s.parse().ok())
             .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED)
     }

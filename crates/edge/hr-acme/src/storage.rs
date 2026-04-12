@@ -1,6 +1,7 @@
 use crate::types::{AcmeResult, CertificateInfo, WildcardType};
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::{info, warn};
 
 /// ACME certificate storage management
 pub struct AcmeStorage {
@@ -36,9 +37,7 @@ impl AcmeStorage {
 
     /// Path to private key file by cert ID string
     pub fn key_path_by_id(&self, cert_id: &str) -> PathBuf {
-        self.base_path
-            .join("keys")
-            .join(format!("{}.key", cert_id))
+        self.base_path.join("keys").join(format!("{}.key", cert_id))
     }
 
     /// Path to full chain certificate by cert ID string
@@ -115,5 +114,74 @@ impl AcmeStorage {
     /// Check if certificate files exist
     pub fn cert_exists(&self, wildcard_type: &WildcardType) -> bool {
         self.cert_path(wildcard_type).exists() && self.key_path(wildcard_type).exists()
+    }
+
+    /// Remove legacy per-environment wildcard certificates from disk and the index.
+    ///
+    /// Targets the old `wildcard-env-*` IDs left over from the dismantled environments
+    /// system. Files in `certs/` and `keys/` matching that prefix are deleted, and any
+    /// matching entries are stripped from `index.json`. Returns the list of cert IDs
+    /// that were removed.
+    ///
+    /// This method is intentionally not invoked at startup. It is exposed for an admin
+    /// endpoint or one-shot script to call when cleanup is desired.
+    pub async fn cleanup_legacy_env_certs(&self) -> AcmeResult<Vec<String>> {
+        let mut removed: Vec<String> = Vec::new();
+
+        // Walk certs/ and keys/ directories looking for legacy IDs.
+        for sub in ["certs", "keys"] {
+            let dir = self.base_path.join(sub);
+            if !dir.exists() {
+                continue;
+            }
+            let entries = match fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(dir = %dir.display(), error = %e, "Failed to read ACME storage dir");
+                    continue;
+                }
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if !name.starts_with("wildcard-env-") {
+                    continue;
+                }
+                match fs::remove_file(&path) {
+                    Ok(()) => {
+                        info!(file = %path.display(), "Removed legacy env wildcard file");
+                        // Track unique cert IDs (stem before first dot)
+                        let id = name.split('.').next().unwrap_or(name).to_string();
+                        let id = id.trim_end_matches("-chain").to_string();
+                        if !removed.contains(&id) {
+                            removed.push(id);
+                        }
+                    }
+                    Err(e) => {
+                        warn!(file = %path.display(), error = %e, "Failed to remove legacy env wildcard file");
+                    }
+                }
+            }
+        }
+
+        // Strip matching entries from the index.
+        let index = self.load_index().unwrap_or_default();
+        let before = index.len();
+        let filtered: Vec<CertificateInfo> = index
+            .into_iter()
+            .filter(|c| !c.id.starts_with("wildcard-env-"))
+            .collect();
+        if filtered.len() != before {
+            self.save_index(&filtered)?;
+        }
+
+        info!(
+            certs_removed = removed.len(),
+            "Cleaned up legacy env-specific wildcard certs"
+        );
+
+        Ok(removed)
     }
 }

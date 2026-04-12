@@ -1,8 +1,8 @@
-pub mod types;
+pub mod cloudflare;
 pub mod protocol;
 pub mod state;
-pub mod cloudflare;
+pub mod types;
 
-pub use types::*;
 pub use protocol::*;
 pub use state::{AgentRegistry, HostConnection, MigrationResult, OutgoingHostMessage};
+pub use types::*;

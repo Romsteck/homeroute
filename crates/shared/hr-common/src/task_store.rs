@@ -111,12 +111,7 @@ impl TaskStore {
         task
     }
 
-    pub async fn update_task_status(
-        &self,
-        id: &str,
-        status: TaskStatus,
-        error_msg: Option<&str>,
-    ) {
+    pub async fn update_task_status(&self, id: &str, status: TaskStatus, error_msg: Option<&str>) {
         let now = chrono::Utc::now().to_rfc3339();
         let status_str = status.to_string();
         let conn = self.conn.lock().await;
@@ -196,11 +191,9 @@ impl TaskStore {
                     return (vec![], 0);
                 }
             };
-            stmt.query_map(rusqlite::params![limit, offset], |row| {
-                Ok(row_to_task(row))
-            })
-            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default()
+            stmt.query_map(rusqlite::params![limit, offset], |row| Ok(row_to_task(row)))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default()
         };
 
         (tasks, total)

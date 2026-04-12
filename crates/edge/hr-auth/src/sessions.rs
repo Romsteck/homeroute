@@ -186,10 +186,7 @@ impl SessionStore {
     /// Supprime toutes les sessions d'un utilisateur
     pub fn delete_by_user(&self, user_id: &str) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM sessions WHERE user_id = ?1",
-            params![user_id],
-        )?;
+        conn.execute("DELETE FROM sessions WHERE user_id = ?1", params![user_id])?;
         Ok(())
     }
 

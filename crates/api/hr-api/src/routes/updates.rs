@@ -1,20 +1,19 @@
 use axum::{
+    Json, Router,
     extract::State,
     routing::{get, post},
-    Json, Router,
 };
 use hr_common::events::UpdateEvent;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
-use hr_ipc::orchestrator::OrchestratorRequest;
 use crate::state::ApiState;
+use hr_ipc::orchestrator::OrchestratorRequest;
 
 static CHECK_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static UPGRADE_RUNNING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static UPGRADE_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn router() -> Router<ApiState> {
     Router::new()
@@ -117,9 +116,7 @@ async fn run_check(State(state): State<ApiState>) -> Json<Value> {
             .await;
 
         let snap_packages = match snap_output {
-            Ok(o) if o.status.success() => {
-                parse_snap_list(&String::from_utf8_lossy(&o.stdout))
-            }
+            Ok(o) if o.status.success() => parse_snap_list(&String::from_utf8_lossy(&o.stdout)),
             _ => vec![],
         };
 
@@ -407,15 +404,20 @@ pub async fn run_background_scan(
     orchestrator: std::sync::Arc<hr_ipc::orchestrator::OrchestratorClient>,
 ) {
     let scan_id = uuid::Uuid::new_v4().to_string();
-    let _ = events.update_scan.send(
-        hr_common::events::UpdateScanEvent::ScanStarted { scan_id: scan_id.clone() }
-    );
+    let _ = events
+        .update_scan
+        .send(hr_common::events::UpdateScanEvent::ScanStarted {
+            scan_id: scan_id.clone(),
+        });
 
     let scan_id_clone = scan_id.clone();
     tokio::spawn(async move {
         // Fan-out to all agents and host-agents via orchestrator
-        let resp = orchestrator.request_long(&OrchestratorRequest::ScanUpdates).await;
-        let expected = resp.ok()
+        let resp = orchestrator
+            .request_long(&OrchestratorRequest::ScanUpdates)
+            .await;
+        let expected = resp
+            .ok()
             .and_then(|r| r.data)
             .and_then(|d| d.get("agents_scanned").and_then(|v| v.as_u64()))
             .unwrap_or(0) as usize;
@@ -424,16 +426,21 @@ pub async fn run_background_scan(
         let mut seen = std::collections::HashSet::new();
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            if let Ok(r) = orchestrator.request(&OrchestratorRequest::GetScanResults).await {
+            if let Ok(r) = orchestrator
+                .request(&OrchestratorRequest::GetScanResults)
+                .await
+            {
                 if let Some(obj) = r.data.as_ref().and_then(|d| d.as_object()) {
                     for (id, val) in obj {
                         if seen.insert(id.clone()) {
-                            if let Ok(t) = serde_json::from_value::<hr_common::events::UpdateTarget>(val.clone()) {
+                            if let Ok(t) = serde_json::from_value::<hr_common::events::UpdateTarget>(
+                                val.clone(),
+                            ) {
                                 let _ = events.update_scan.send(
                                     hr_common::events::UpdateScanEvent::TargetScanned {
                                         scan_id: scan_id_clone.clone(),
                                         target: t,
-                                    }
+                                    },
                                 );
                             }
                         }
@@ -444,9 +451,11 @@ pub async fn run_background_scan(
                 }
             }
         }
-        let _ = events.update_scan.send(
-            hr_common::events::UpdateScanEvent::ScanComplete { scan_id: scan_id_clone }
-        );
+        let _ = events
+            .update_scan
+            .send(hr_common::events::UpdateScanEvent::ScanComplete {
+                scan_id: scan_id_clone,
+            });
     });
 }
 
@@ -454,17 +463,23 @@ async fn scan_all(State(state): State<ApiState>) -> Json<Value> {
     let scan_id = uuid::Uuid::new_v4().to_string();
 
     // Emit scan started event
-    let _ = state.events.update_scan.send(
-        hr_common::events::UpdateScanEvent::ScanStarted { scan_id: scan_id.clone() }
-    );
+    let _ = state
+        .events
+        .update_scan
+        .send(hr_common::events::UpdateScanEvent::ScanStarted {
+            scan_id: scan_id.clone(),
+        });
 
     // Fan-out to all agents and host-agents via orchestrator
     let scan_id_clone = scan_id.clone();
     let events = state.events.clone();
     let orchestrator = state.orchestrator.clone();
     tokio::spawn(async move {
-        let resp = orchestrator.request_long(&OrchestratorRequest::ScanUpdates).await;
-        let expected = resp.ok()
+        let resp = orchestrator
+            .request_long(&OrchestratorRequest::ScanUpdates)
+            .await;
+        let expected = resp
+            .ok()
             .and_then(|r| r.data)
             .and_then(|d| d.get("agents_scanned").and_then(|v| v.as_u64()))
             .unwrap_or(0) as usize;
@@ -474,16 +489,21 @@ async fn scan_all(State(state): State<ApiState>) -> Json<Value> {
         let mut seen = std::collections::HashSet::new();
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            if let Ok(r) = orchestrator.request(&OrchestratorRequest::GetScanResults).await {
+            if let Ok(r) = orchestrator
+                .request(&OrchestratorRequest::GetScanResults)
+                .await
+            {
                 if let Some(obj) = r.data.as_ref().and_then(|d| d.as_object()) {
                     for (id, val) in obj {
                         if seen.insert(id.clone()) {
-                            if let Ok(t) = serde_json::from_value::<hr_common::events::UpdateTarget>(val.clone()) {
+                            if let Ok(t) = serde_json::from_value::<hr_common::events::UpdateTarget>(
+                                val.clone(),
+                            ) {
                                 let _ = events.update_scan.send(
                                     hr_common::events::UpdateScanEvent::TargetScanned {
                                         scan_id: scan_id_clone.clone(),
                                         target: t,
-                                    }
+                                    },
                                 );
                             }
                         }
@@ -494,16 +514,23 @@ async fn scan_all(State(state): State<ApiState>) -> Json<Value> {
                 }
             }
         }
-        let _ = events.update_scan.send(
-            hr_common::events::UpdateScanEvent::ScanComplete { scan_id: scan_id_clone }
-        );
+        let _ = events
+            .update_scan
+            .send(hr_common::events::UpdateScanEvent::ScanComplete {
+                scan_id: scan_id_clone,
+            });
     });
 
     // Get targets count from orchestrator
-    let targets_count = match state.orchestrator.request(&OrchestratorRequest::GetScanResults).await {
-        Ok(r) if r.ok => {
-            r.data.and_then(|d| d.as_object().map(|o| o.len())).unwrap_or(0)
-        }
+    let targets_count = match state
+        .orchestrator
+        .request(&OrchestratorRequest::GetScanResults)
+        .await
+    {
+        Ok(r) if r.ok => r
+            .data
+            .and_then(|d| d.as_object().map(|o| o.len()))
+            .unwrap_or(0),
         _ => 0,
     };
 
@@ -515,7 +542,11 @@ async fn scan_all(State(state): State<ApiState>) -> Json<Value> {
 }
 
 async fn scan_all_results(State(state): State<ApiState>) -> Json<Value> {
-    let targets = match state.orchestrator.request(&OrchestratorRequest::GetScanResults).await {
+    let targets = match state
+        .orchestrator
+        .request(&OrchestratorRequest::GetScanResults)
+        .await
+    {
         Ok(r) if r.ok => r.data.unwrap_or(json!({})),
         _ => json!({}),
     };
@@ -538,16 +569,21 @@ async fn upgrade_target(
 ) -> Json<Value> {
     // Log the upgrade start
     let _ = state.update_log.insert(
-        &req.target_id, &req.target_id, &req.category,
-        None, "started", None,
+        &req.target_id,
+        &req.target_id,
+        &req.category,
+        None,
+        "started",
+        None,
     );
 
-    let _ = state.events.update_scan.send(
-        hr_common::events::UpdateScanEvent::UpgradeStarted {
+    let _ = state
+        .events
+        .update_scan
+        .send(hr_common::events::UpdateScanEvent::UpgradeStarted {
             target_id: req.target_id.clone(),
             category: req.category.clone(),
-        }
-    );
+        });
 
     if req.category == "hr_agent" {
         // Agent binary update — use TriggerAgentUpdate (pushes binary + restart)
@@ -557,12 +593,17 @@ async fn upgrade_target(
         let update_log = state.update_log.clone();
 
         tokio::spawn(async move {
-            let result = orchestrator.request_long(&OrchestratorRequest::TriggerAgentUpdate {
-                agent_ids: Some(vec![target_id.clone()]),
-            }).await;
+            let result = orchestrator
+                .request_long(&OrchestratorRequest::TriggerAgentUpdate {
+                    agent_ids: Some(vec![target_id.clone()]),
+                })
+                .await;
             let (success, error) = match result {
                 Ok(r) if r.ok => (true, None),
-                Ok(r) => (false, Some(r.error.unwrap_or_else(|| "Unknown error".into()))),
+                Ok(r) => (
+                    false,
+                    Some(r.error.unwrap_or_else(|| "Unknown error".into())),
+                ),
                 Err(e) => (false, Some(e.to_string())),
             };
 
@@ -570,28 +611,42 @@ async fn upgrade_target(
                 // Wait for agent to reconnect after restart, then trigger re-scan
                 // so the scan_results cache gets the new agent version
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                let _ = orchestrator.request(&OrchestratorRequest::SendToAgent {
-                    app_id: target_id.clone(),
-                    message: serde_json::json!({"type": "run_update_scan"}),
-                }).await;
+                let _ = orchestrator
+                    .request(&OrchestratorRequest::SendToAgent {
+                        app_id: target_id.clone(),
+                        message: serde_json::json!({"type": "run_update_scan"}),
+                    })
+                    .await;
                 // Poll until scan_results shows the updated agent version
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
                 let mut updated = false;
                 while tokio::time::Instant::now() < deadline {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    if let Ok(r) = orchestrator.request(&OrchestratorRequest::GetScanResults).await {
+                    if let Ok(r) = orchestrator
+                        .request(&OrchestratorRequest::GetScanResults)
+                        .await
+                    {
                         if let Some(target) = r.data.as_ref().and_then(|d| d.get(&target_id)) {
-                            let av = target.get("agent_version").and_then(|v| v.as_str()).unwrap_or("");
-                            let al = target.get("agent_version_latest").and_then(|v| v.as_str()).unwrap_or("");
+                            let av = target
+                                .get("agent_version")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let al = target
+                                .get("agent_version_latest")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
                             if !av.is_empty() && av == al {
                                 updated = true;
                                 // Relay updated target to frontend
-                                if let Ok(t) = serde_json::from_value::<hr_common::events::UpdateTarget>(target.clone()) {
+                                if let Ok(t) = serde_json::from_value::<
+                                    hr_common::events::UpdateTarget,
+                                >(target.clone())
+                                {
                                     let _ = events.update_scan.send(
                                         hr_common::events::UpdateScanEvent::TargetScanned {
                                             scan_id: String::new(),
                                             target: t,
-                                        }
+                                        },
                                     );
                                 }
                                 break;
@@ -601,14 +656,19 @@ async fn upgrade_target(
                 }
                 if !updated {
                     // Relay whatever we have even if version didn't change
-                    if let Ok(r) = orchestrator.request(&OrchestratorRequest::GetScanResults).await {
+                    if let Ok(r) = orchestrator
+                        .request(&OrchestratorRequest::GetScanResults)
+                        .await
+                    {
                         if let Some(target) = r.data.as_ref().and_then(|d| d.get(&target_id)) {
-                            if let Ok(t) = serde_json::from_value::<hr_common::events::UpdateTarget>(target.clone()) {
+                            if let Ok(t) = serde_json::from_value::<hr_common::events::UpdateTarget>(
+                                target.clone(),
+                            ) {
                                 let _ = events.update_scan.send(
                                     hr_common::events::UpdateScanEvent::TargetScanned {
                                         scan_id: String::new(),
                                         target: t,
-                                    }
+                                    },
                                 );
                             }
                         }
@@ -618,47 +678,48 @@ async fn upgrade_target(
 
             let status = if success { "success" } else { "failed" };
             let _ = update_log.update_status(&target_id, "hr_agent", status, error.as_deref());
-            let _ = events.update_scan.send(
-                hr_common::events::UpdateScanEvent::UpgradeComplete {
+            let _ = events
+                .update_scan
+                .send(hr_common::events::UpdateScanEvent::UpgradeComplete {
                     target_id: target_id.clone(),
                     category: "hr_agent".to_string(),
                     success,
                     error,
-                }
-            );
+                });
         });
     } else {
         // Determine if target is a host-agent or container agent from scan results
         // Determine target type from scan results
-        let target_type = match state.orchestrator.request(&OrchestratorRequest::GetScanResults).await {
-            Ok(r) => r.data.as_ref()
+        let target_type = match state
+            .orchestrator
+            .request(&OrchestratorRequest::GetScanResults)
+            .await
+        {
+            Ok(r) => r
+                .data
+                .as_ref()
                 .and_then(|d| d.get(&req.target_id))
-                .and_then(|t| t.get("target_type").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .and_then(|t| {
+                    t.get("target_type")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
                 .unwrap_or_default(),
             _ => String::new(),
         };
         let is_host = target_type == "remote_host" || target_type == "main_host";
-        let is_env = target_type == "environment";
 
         let send_result = if is_host && req.category == "apt" {
             // Host-agent — send RunAptUpgrade via SendHostCommand
             info!(target_id = %req.target_id, category = %req.category, "Sending RunAptUpgrade to host-agent via IPC");
             let cmd = json!({"type": "RunAptUpgrade", "data": {"full_upgrade": false}});
-            state.orchestrator.request(&OrchestratorRequest::SendHostCommand {
-                host_id: req.target_id.clone(),
-                command: cmd,
-            }).await
-        } else if is_env {
-            // Env-agent — send RunUpgrade via SendToEnv
-            info!(target_id = %req.target_id, category = %req.category, "Sending RunUpgrade to env-agent via IPC");
-            let msg = json!({
-                "type": "run_upgrade",
-                "category": req.category,
-            });
-            state.orchestrator.request(&OrchestratorRequest::SendToEnv {
-                env_slug: req.target_id.clone(),
-                message: msg,
-            }).await
+            state
+                .orchestrator
+                .request(&OrchestratorRequest::SendHostCommand {
+                    host_id: req.target_id.clone(),
+                    command: cmd,
+                })
+                .await
         } else {
             // Container agent (legacy) — send RunUpgrade via SendToAgent
             info!(target_id = %req.target_id, category = %req.category, "Sending RunUpgrade to agent via IPC");
@@ -666,28 +727,38 @@ async fn upgrade_target(
                 "type": "run_upgrade",
                 "category": req.category,
             });
-            state.orchestrator.request(&OrchestratorRequest::SendToAgent {
-                app_id: req.target_id.clone(),
-                message: msg,
-            }).await
+            state
+                .orchestrator
+                .request(&OrchestratorRequest::SendToAgent {
+                    app_id: req.target_id.clone(),
+                    message: msg,
+                })
+                .await
         };
 
         // Check for IPC transport error or orchestrator-level error
         let ipc_err = match &send_result {
             Err(e) => Some(format!("IPC error: {e}")),
-            Ok(r) if !r.ok => Some(r.error.clone().unwrap_or_else(|| "Agent non connecté".into())),
+            Ok(r) if !r.ok => Some(
+                r.error
+                    .clone()
+                    .unwrap_or_else(|| "Agent non connecté".into()),
+            ),
             _ => None,
         };
         if let Some(err) = ipc_err {
             warn!(target_id = %req.target_id, category = %req.category, error = %err, "RunUpgrade send failed");
-            let _ = state.update_log.update_status(&req.target_id, &req.category, "failed", Some(&err));
+            let _ =
+                state
+                    .update_log
+                    .update_status(&req.target_id, &req.category, "failed", Some(&err));
             let _ = state.events.update_scan.send(
                 hr_common::events::UpdateScanEvent::UpgradeComplete {
                     target_id: req.target_id,
                     category: req.category,
                     success: false,
                     error: Some(err.clone()),
-                }
+                },
             );
             return Json(json!({"success": false, "error": err}));
         }
@@ -703,8 +774,13 @@ async fn upgrade_target(
 
         // Capture the baseline value of the field that should change after upgrade.
         // This avoids false positives from concurrent scans changing scanned_at.
-        let baseline_value = match orchestrator.request(&OrchestratorRequest::GetScanResults).await {
-            Ok(r) => r.data.as_ref()
+        let baseline_value = match orchestrator
+            .request(&OrchestratorRequest::GetScanResults)
+            .await
+        {
+            Ok(r) => r
+                .data
+                .as_ref()
                 .and_then(|d| d.get(&target_id))
                 .map(|t| extract_upgrade_field(t, &category)),
             _ => None,
@@ -716,7 +792,10 @@ async fn upgrade_target(
             let mut success = false;
             while tokio::time::Instant::now() < deadline {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                if let Ok(r) = orchestrator.request(&OrchestratorRequest::GetScanResults).await {
+                if let Ok(r) = orchestrator
+                    .request(&OrchestratorRequest::GetScanResults)
+                    .await
+                {
                     if let Some(target) = r.data.as_ref().and_then(|d| d.get(&target_id)) {
                         let current_value = extract_upgrade_field(target, &category);
                         if let Some(ref baseline) = baseline_value {
@@ -728,30 +807,37 @@ async fn upgrade_target(
                                 );
                                 success = true;
                                 // Relay updated target to frontend
-                                if let Ok(t) = serde_json::from_value::<hr_common::events::UpdateTarget>(target.clone()) {
+                                if let Ok(t) = serde_json::from_value::<
+                                    hr_common::events::UpdateTarget,
+                                >(target.clone())
+                                {
                                     let _ = events.update_scan.send(
                                         hr_common::events::UpdateScanEvent::TargetScanned {
                                             scan_id: String::new(),
                                             target: t,
-                                        }
+                                        },
                                     );
                                 }
                                 break;
                             }
                         } else {
                             // No baseline (first scan) -- fall back to scanned_at change
-                            let new_scanned_at = target.get("scanned_at")
+                            let new_scanned_at = target
+                                .get("scanned_at")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string());
                             if new_scanned_at.is_some() {
                                 info!(target_id = %target_id, "No baseline, using first scan result");
                                 success = true;
-                                if let Ok(t) = serde_json::from_value::<hr_common::events::UpdateTarget>(target.clone()) {
+                                if let Ok(t) = serde_json::from_value::<
+                                    hr_common::events::UpdateTarget,
+                                >(target.clone())
+                                {
                                     let _ = events.update_scan.send(
                                         hr_common::events::UpdateScanEvent::TargetScanned {
                                             scan_id: String::new(),
                                             target: t,
-                                        }
+                                        },
                                     );
                                 }
                                 break;
@@ -769,14 +855,14 @@ async fn upgrade_target(
                 warn!(target_id = %target_id, category = %category, "Upgrade polling timed out (600s)");
             }
             let _ = update_log.update_status(&target_id, &category, status, error);
-            let _ = events.update_scan.send(
-                hr_common::events::UpdateScanEvent::UpgradeComplete {
+            let _ = events
+                .update_scan
+                .send(hr_common::events::UpdateScanEvent::UpgradeComplete {
                     target_id,
                     category,
                     success,
                     error: error.map(|s| s.to_string()),
-                }
-            );
+                });
         });
     }
 
@@ -846,7 +932,13 @@ impl UpdateAuditLog {
         Some(conn.last_insert_rowid())
     }
 
-    pub fn update_status(&self, target_id: &str, category: &str, status: &str, error: Option<&str>) {
+    pub fn update_status(
+        &self,
+        target_id: &str,
+        category: &str,
+        status: &str,
+        error: Option<&str>,
+    ) {
         if let Ok(conn) = self.conn.lock() {
             let _ = conn.execute(
                 "UPDATE update_history SET status = ?1, error = ?2
@@ -895,7 +987,11 @@ impl UpdateAuditLog {
 // ── Update count endpoint ──────────────────────────────────────
 
 async fn update_count(State(state): State<ApiState>) -> Json<Value> {
-    let count = match state.orchestrator.request(&OrchestratorRequest::GetScanResults).await {
+    let count = match state
+        .orchestrator
+        .request(&OrchestratorRequest::GetScanResults)
+        .await
+    {
         Ok(r) if r.ok => {
             let targets = r.data.unwrap_or(json!({}));
             if let Some(obj) = targets.as_object() {
@@ -914,9 +1010,17 @@ async fn update_count(State(state): State<ApiState>) -> Json<Value> {
 // ── Batch upgrade endpoints ────────────────────────────────────
 
 async fn upgrade_hosts(State(state): State<ApiState>) -> Json<Value> {
-    let targets = match state.orchestrator.request(&OrchestratorRequest::GetScanResults).await {
+    let targets = match state
+        .orchestrator
+        .request(&OrchestratorRequest::GetScanResults)
+        .await
+    {
         Ok(r) if r.ok => r.data.unwrap_or(json!({})),
-        Ok(r) => return Json(json!({"success": false, "error": r.error.unwrap_or_else(|| "Orchestrator error".into())})),
+        Ok(r) => {
+            return Json(
+                json!({"success": false, "error": r.error.unwrap_or_else(|| "Orchestrator error".into())}),
+            );
+        }
         Err(e) => return Json(json!({"success": false, "error": format!("IPC error: {e}")})),
     };
 
@@ -928,19 +1032,28 @@ async fn upgrade_hosts(State(state): State<ApiState>) -> Json<Value> {
             let is_host = tt == "remote_host" || tt == "main_host";
             let has_updates = t.get("os_upgradable").and_then(|v| v.as_u64()).unwrap_or(0) > 0;
             if is_host && has_updates {
-                let target_name = t.get("name").and_then(|v| v.as_str()).unwrap_or(id).to_string();
-                let _ = state.update_log.insert(id, &target_name, "apt", None, "started", None);
+                let target_name = t
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(id)
+                    .to_string();
+                let _ = state
+                    .update_log
+                    .insert(id, &target_name, "apt", None, "started", None);
                 let _ = state.events.update_scan.send(
                     hr_common::events::UpdateScanEvent::UpgradeStarted {
                         target_id: id.clone(),
                         category: "apt".to_string(),
-                    }
+                    },
                 );
                 let cmd = json!({"type": "RunAptUpgrade", "data": {"full_upgrade": false}});
-                let _ = state.orchestrator.request(&OrchestratorRequest::SendHostCommand {
-                    host_id: id.clone(),
-                    command: cmd,
-                }).await;
+                let _ = state
+                    .orchestrator
+                    .request(&OrchestratorRequest::SendHostCommand {
+                        host_id: id.clone(),
+                        command: cmd,
+                    })
+                    .await;
                 launched.push(id.clone());
             }
         }
@@ -949,38 +1062,8 @@ async fn upgrade_hosts(State(state): State<ApiState>) -> Json<Value> {
     Json(json!({"success": true, "launched": launched}))
 }
 
-async fn upgrade_environments(State(state): State<ApiState>) -> Json<Value> {
-    let targets = match state.orchestrator.request(&OrchestratorRequest::GetScanResults).await {
-        Ok(r) if r.ok => r.data.unwrap_or(json!({})),
-        Ok(r) => return Json(json!({"success": false, "error": r.error.unwrap_or_else(|| "Orchestrator error".into())})),
-        Err(e) => return Json(json!({"success": false, "error": format!("IPC error: {e}")})),
-    };
-
-    let mut launched = vec![];
-    if let Some(obj) = targets.as_object() {
-        for (id, t) in obj {
-            let is_env = t.get("target_type").and_then(|v| v.as_str()) == Some("environment");
-            let has_updates = t.get("os_upgradable").and_then(|v| v.as_u64()).unwrap_or(0) > 0;
-            if is_env && has_updates {
-                let target_name = t.get("name").and_then(|v| v.as_str()).unwrap_or(id).to_string();
-                let _ = state.update_log.insert(id, &target_name, "apt", None, "started", None);
-                let _ = state.events.update_scan.send(
-                    hr_common::events::UpdateScanEvent::UpgradeStarted {
-                        target_id: id.clone(),
-                        category: "apt".to_string(),
-                    }
-                );
-                let msg = json!({"type": "run_upgrade", "category": "apt"});
-                let _ = state.orchestrator.request(&OrchestratorRequest::SendToEnv {
-                    env_slug: id.clone(),
-                    message: msg,
-                }).await;
-                launched.push(id.clone());
-            }
-        }
-    }
-
-    Json(json!({"success": true, "launched": launched}))
+async fn upgrade_environments(State(_state): State<ApiState>) -> Json<Value> {
+    Json(json!({"success": true, "launched": []}))
 }
 
 /// Extract the relevant field value from scan results based on upgrade category.
@@ -995,7 +1078,8 @@ fn extract_upgrade_field(target: &Value, category: &str) -> String {
         "apt" => "os_upgradable",
         _ => "scanned_at", // fallback for unknown categories
     };
-    target.get(field_name)
+    target
+        .get(field_name)
         .map(|v| match v {
             Value::String(s) => s.clone(),
             Value::Number(n) => n.to_string(),

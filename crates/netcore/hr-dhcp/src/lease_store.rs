@@ -1,8 +1,8 @@
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 /// A DHCP lease
@@ -85,9 +85,9 @@ impl LeaseStore {
                 }
             };
 
-            let hostname = parts.get(3).and_then(|h| {
-                if *h == "*" { None } else { Some(h.to_string()) }
-            });
+            let hostname = parts
+                .get(3)
+                .and_then(|h| if *h == "*" { None } else { Some(h.to_string()) });
             let client_id = parts.get(4).map(|s| s.to_string());
 
             self.add_lease_inner(Lease {
@@ -132,8 +132,7 @@ impl LeaseStore {
     fn add_lease_inner(&mut self, lease: Lease) {
         self.by_mac.insert(lease.mac.clone(), lease.ip);
         if let Some(ref hostname) = lease.hostname {
-            self.by_hostname
-                .insert(hostname.to_lowercase(), lease.ip);
+            self.by_hostname.insert(hostname.to_lowercase(), lease.ip);
         }
         self.leases.insert(lease.ip, lease);
     }
@@ -252,7 +251,8 @@ impl LeaseStore {
         }
 
         // Purge expired conflict holds
-        self.conflicted_ips.retain(|_, hold_until| *hold_until > now);
+        self.conflicted_ips
+            .retain(|_, hold_until| *hold_until > now);
 
         count
     }
@@ -274,10 +274,11 @@ impl LeaseStore {
             if let Some(lease) = self.leases.get(&ip) {
                 if lease.mac == mac_lower {
                     let ip_u32 = u32::from(ip);
-                    let in_range = ip_u32 >= u32::from(range_start) && ip_u32 <= u32::from(range_end);
-                    let is_static = static_leases.iter().any(|(smac, sip, _)| {
-                        smac.to_lowercase() == mac_lower && *sip == ip
-                    });
+                    let in_range =
+                        ip_u32 >= u32::from(range_start) && ip_u32 <= u32::from(range_end);
+                    let is_static = static_leases
+                        .iter()
+                        .any(|(smac, sip, _)| smac.to_lowercase() == mac_lower && *sip == ip);
                     if in_range || is_static {
                         return Some((ip, lease.hostname.clone()));
                     }

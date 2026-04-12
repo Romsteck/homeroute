@@ -70,10 +70,7 @@ enum PdFsmState {
 }
 
 /// Run the DHCPv6-PD client. This function never returns under normal operation.
-pub async fn run_pd_client(
-    config: Ipv6Config,
-    prefix_tx: PrefixSender,
-) -> Result<()> {
+pub async fn run_pd_client(config: Ipv6Config, prefix_tx: PrefixSender) -> Result<()> {
     if !config.pd_enabled {
         info!("DHCPv6-PD client disabled");
         std::future::pending::<()>().await;
@@ -148,7 +145,10 @@ pub async fn run_pd_client(
                             }
                         };
                         info!("Received ADVERTISE from server");
-                        fsm = PdFsmState::Requesting { server_duid, ia_pd_data };
+                        fsm = PdFsmState::Requesting {
+                            server_duid,
+                            ia_pd_data,
+                        };
                     }
                     Err(e) => {
                         warn!("SOLICIT failed: {}, retrying in 5s", e);
@@ -157,16 +157,23 @@ pub async fn run_pd_client(
                 }
             }
 
-            PdFsmState::Requesting { ref server_duid, ref ia_pd_data } => {
+            PdFsmState::Requesting {
+                ref server_duid,
+                ref ia_pd_data,
+            } => {
                 let xid = random_xid();
-                let request = build_request(
-                    &xid, &client_duid, server_duid, iaid, ia_pd_data,
-                );
+                let request = build_request(&xid, &client_duid, server_duid, iaid, ia_pd_data);
 
                 let server_duid_clone = server_duid.clone();
                 match request_exchange(&socket, &request, &server_addr, &mut recv_buf, &xid).await {
                     Ok(reply_opts) => {
-                        match process_reply(&reply_opts, &config, &client_duid, &server_duid_clone, iaid) {
+                        match process_reply(
+                            &reply_opts,
+                            &config,
+                            &client_duid,
+                            &server_duid_clone,
+                            iaid,
+                        ) {
                             Ok(pd_state) => {
                                 info!(
                                     "DHCPv6-PD BOUND: delegated {} → subnet {}",
@@ -195,7 +202,11 @@ pub async fn run_pd_client(
 
             PdFsmState::Bound { ref state } => {
                 // Wait until T1 to renew
-                let t1 = if state.t1 > 0 { state.t1 } else { state.valid_lifetime / 2 };
+                let t1 = if state.t1 > 0 {
+                    state.t1
+                } else {
+                    state.valid_lifetime / 2
+                };
                 let elapsed = now_secs().saturating_sub(state.obtained_at);
                 let wait = (t1 as u64).saturating_sub(elapsed);
 
@@ -204,19 +215,30 @@ pub async fn run_pd_client(
                     tokio::time::sleep(Duration::from_secs(wait)).await;
                 }
 
-                fsm = PdFsmState::Renewing { state: state.clone() };
+                fsm = PdFsmState::Renewing {
+                    state: state.clone(),
+                };
             }
 
             PdFsmState::Renewing { ref state } => {
                 let xid = random_xid();
                 let renew = build_renew(
-                    &xid, &client_duid, &state.server_duid, iaid,
+                    &xid,
+                    &client_duid,
+                    &state.server_duid,
+                    iaid,
                     config.pd_prefix_hint_len,
                 );
 
                 match request_exchange(&socket, &renew, &server_addr, &mut recv_buf, &xid).await {
                     Ok(reply_opts) => {
-                        match process_reply(&reply_opts, &config, &client_duid, &state.server_duid, iaid) {
+                        match process_reply(
+                            &reply_opts,
+                            &config,
+                            &client_duid,
+                            &state.server_duid,
+                            iaid,
+                        ) {
                             Ok(new_state) => {
                                 info!(
                                     "DHCPv6-PD RENEWED: {} → {}",
@@ -230,13 +252,17 @@ pub async fn run_pd_client(
                             }
                             Err(e) => {
                                 warn!("RENEW reply parse failed: {}, trying REBIND", e);
-                                fsm = PdFsmState::Rebinding { state: state.clone() };
+                                fsm = PdFsmState::Rebinding {
+                                    state: state.clone(),
+                                };
                             }
                         }
                     }
                     Err(e) => {
                         warn!("RENEW failed: {}, trying REBIND", e);
-                        fsm = PdFsmState::Rebinding { state: state.clone() };
+                        fsm = PdFsmState::Rebinding {
+                            state: state.clone(),
+                        };
                     }
                 }
             }
@@ -252,16 +278,20 @@ pub async fn run_pd_client(
                 }
 
                 let xid = random_xid();
-                let rebind = build_rebind(
-                    &xid, &client_duid, iaid, config.pd_prefix_hint_len,
-                );
+                let rebind = build_rebind(&xid, &client_duid, iaid, config.pd_prefix_hint_len);
 
                 match request_exchange(&socket, &rebind, &server_addr, &mut recv_buf, &xid).await {
                     Ok(reply_opts) => {
                         // Extract server DUID from the rebind reply
                         let new_server_duid = extract_option_from_slice(&reply_opts, OPT_SERVERID)
                             .unwrap_or_else(|| state.server_duid.clone());
-                        match process_reply(&reply_opts, &config, &client_duid, &new_server_duid, iaid) {
+                        match process_reply(
+                            &reply_opts,
+                            &config,
+                            &client_duid,
+                            &new_server_duid,
+                            iaid,
+                        ) {
                             Ok(new_state) => {
                                 info!("DHCPv6-PD REBOUND: {}", new_state.delegated_prefix);
                                 publish_prefix(&prefix_tx, &new_state);
@@ -403,12 +433,7 @@ fn build_renew(
     buf
 }
 
-fn build_rebind(
-    xid: &[u8; 3],
-    client_duid: &[u8],
-    iaid: u32,
-    hint_len: u8,
-) -> Vec<u8> {
+fn build_rebind(xid: &[u8; 3], client_duid: &[u8], iaid: u32, hint_len: u8) -> Vec<u8> {
     let mut buf = Vec::with_capacity(128);
 
     buf.push(MSG_REBIND);
@@ -437,7 +462,7 @@ fn build_ia_pd(iaid: u32, t1: u32, t2: u32, hint_prefix_len: Option<u8>) -> Vec<
         let mut prefix_data = Vec::with_capacity(25);
         prefix_data.extend_from_slice(&0u32.to_be_bytes()); // preferred lifetime
         prefix_data.extend_from_slice(&0u32.to_be_bytes()); // valid lifetime
-        prefix_data.push(plen);                              // prefix length
+        prefix_data.push(plen); // prefix length
         prefix_data.extend_from_slice(&Ipv6Addr::UNSPECIFIED.octets()); // prefix (hint)
 
         // Sub-option header
@@ -459,7 +484,9 @@ fn append_option(buf: &mut Vec<u8>, code: u16, data: &[u8]) {
 
 /// Extract an option from a DHCPv6 message payload (after the 4-byte header).
 fn extract_option(msg: &[u8], option_code: u16) -> Option<Vec<u8>> {
-    if msg.len() < 4 { return None; }
+    if msg.len() < 4 {
+        return None;
+    }
     extract_option_from_slice(&msg[4..], option_code)
 }
 
@@ -568,17 +595,25 @@ async fn solicit_exchange(
 
     for attempt in 0..10 {
         debug!("Sending SOLICIT (attempt {})", attempt + 1);
-        socket.send_to(solicit, std::net::SocketAddr::V6(*dest)).await
+        socket
+            .send_to(solicit, std::net::SocketAddr::V6(*dest))
+            .await
             .context("Failed to send SOLICIT")?;
 
         match recv_with_timeout(socket, recv_buf, timeout).await {
             Ok(len) => {
-                if len >= 4 && recv_buf[0] == MSG_ADVERTISE
-                    && recv_buf[1] == xid[0] && recv_buf[2] == xid[1] && recv_buf[3] == xid[2]
+                if len >= 4
+                    && recv_buf[0] == MSG_ADVERTISE
+                    && recv_buf[1] == xid[0]
+                    && recv_buf[2] == xid[1]
+                    && recv_buf[3] == xid[2]
                 {
                     return Ok(recv_buf[..len].to_vec());
                 }
-                debug!("Received non-matching message type={} (expecting ADVERTISE)", recv_buf[0]);
+                debug!(
+                    "Received non-matching message type={} (expecting ADVERTISE)",
+                    recv_buf[0]
+                );
             }
             Err(_) => {
                 debug!("SOLICIT timeout ({}ms)", timeout.as_millis());
@@ -614,13 +649,18 @@ async fn request_exchange(
 
     for attempt in 0..10 {
         debug!("Sending {} (attempt {})", msg_name, attempt + 1);
-        socket.send_to(request, std::net::SocketAddr::V6(*dest)).await
+        socket
+            .send_to(request, std::net::SocketAddr::V6(*dest))
+            .await
             .context(format!("Failed to send {}", msg_name))?;
 
         match recv_with_timeout(socket, recv_buf, timeout).await {
             Ok(len) => {
-                if len >= 4 && recv_buf[0] == MSG_REPLY
-                    && recv_buf[1] == xid[0] && recv_buf[2] == xid[1] && recv_buf[3] == xid[2]
+                if len >= 4
+                    && recv_buf[0] == MSG_REPLY
+                    && recv_buf[1] == xid[0]
+                    && recv_buf[2] == xid[1]
+                    && recv_buf[3] == xid[2]
                 {
                     return Ok(recv_buf[..len].to_vec());
                 }
@@ -638,11 +678,7 @@ async fn request_exchange(
     anyhow::bail!("{}: no REPLY received after retries", msg_name)
 }
 
-async fn recv_with_timeout(
-    socket: &UdpSocket,
-    buf: &mut [u8],
-    timeout: Duration,
-) -> Result<usize> {
+async fn recv_with_timeout(socket: &UdpSocket, buf: &mut [u8], timeout: Duration) -> Result<usize> {
     match tokio::time::timeout(timeout, socket.recv_from(buf)).await {
         Ok(Ok((len, _src))) => Ok(len),
         Ok(Err(e)) => anyhow::bail!("recv error: {}", e),
@@ -674,13 +710,13 @@ fn process_reply(
         }
     }
 
-    let ia_pd_data = extract_option(reply, OPT_IA_PD)
-        .context("REPLY missing IA_PD option")?;
+    let ia_pd_data = extract_option(reply, OPT_IA_PD).context("REPLY missing IA_PD option")?;
 
-    let ia_pd = parse_ia_pd(&ia_pd_data)
-        .context("Failed to parse IA_PD")?;
+    let ia_pd = parse_ia_pd(&ia_pd_data).context("Failed to parse IA_PD")?;
 
-    let prefix_info = ia_pd.prefixes.first()
+    let prefix_info = ia_pd
+        .prefixes
+        .first()
         .context("IA_PD contains no IA_PREFIX")?;
 
     if prefix_info.valid_lifetime == 0 {
@@ -756,7 +792,9 @@ fn publish_prefix(tx: &PrefixSender, state: &PdState) {
 
 fn parse_prefix_str(s: &str) -> Option<(Ipv6Addr, u8)> {
     let parts: Vec<&str> = s.split('/').collect();
-    if parts.len() != 2 { return None; }
+    if parts.len() != 2 {
+        return None;
+    }
     let addr: Ipv6Addr = parts[0].parse().ok()?;
     let len: u8 = parts[1].parse().ok()?;
     Some((addr, len))

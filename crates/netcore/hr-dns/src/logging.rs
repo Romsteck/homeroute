@@ -2,7 +2,7 @@ use chrono::Utc;
 use serde::Serialize;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
-use tracing::{error, debug};
+use tracing::{debug, error};
 
 #[derive(Serialize)]
 struct QueryLogEntry {

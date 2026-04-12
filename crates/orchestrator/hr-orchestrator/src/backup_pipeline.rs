@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -208,12 +208,18 @@ impl SshSession {
 
         let output = tokio::process::Command::new("ssh")
             .args([
-                "-o", "ControlMaster=yes",
-                "-o", &format!("ControlPath={}", control_path.display()),
-                "-o", "ControlPersist=600",
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=10",
+                "-o",
+                "ControlMaster=yes",
+                "-o",
+                &format!("ControlPath={}", control_path.display()),
+                "-o",
+                "ControlPersist=600",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
                 "-fN",
                 &format!("{BACKUP_SSH_USER}@{BACKUP_SSH_HOST}"),
             ])
@@ -247,8 +253,10 @@ impl SshSession {
     async fn run_command(&self, cmd: &str) -> Result<String, String> {
         let output = tokio::process::Command::new("ssh")
             .args([
-                "-o", &format!("ControlPath={}", self.control_path.display()),
-                "-o", "BatchMode=yes",
+                "-o",
+                &format!("ControlPath={}", self.control_path.display()),
+                "-o",
+                "BatchMode=yes",
                 &format!("{BACKUP_SSH_USER}@{BACKUP_SSH_HOST}"),
             ])
             .arg(cmd)
@@ -258,7 +266,10 @@ impl SshSession {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("SSH command failed (exit {}): {stderr}", output.status));
+            return Err(format!(
+                "SSH command failed (exit {}): {stderr}",
+                output.status
+            ));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -267,8 +278,10 @@ impl SshSession {
     async fn close(&self) {
         let _ = tokio::process::Command::new("ssh")
             .args([
-                "-o", &format!("ControlPath={}", self.control_path.display()),
-                "-O", "exit",
+                "-o",
+                &format!("ControlPath={}", self.control_path.display()),
+                "-O",
+                "exit",
                 &format!("{BACKUP_SSH_USER}@{BACKUP_SSH_HOST}"),
             ])
             .output()
@@ -378,7 +391,13 @@ impl BackupPipeline {
             let started = Instant::now();
             let result = tokio::time::timeout(
                 Duration::from_secs(TOTAL_PIPELINE_TIMEOUT_SECS),
-                run_pipeline(status.clone(), progress.clone(), events.clone(), cancelled.clone(), rsync_pid.clone()),
+                run_pipeline(
+                    status.clone(),
+                    progress.clone(),
+                    events.clone(),
+                    cancelled.clone(),
+                    rsync_pid.clone(),
+                ),
             )
             .await;
             let elapsed = started.elapsed().as_secs();
@@ -506,7 +525,8 @@ async fn run_pipeline(
     let ssh = SshSession::start().await?;
 
     // Ensure base backup directory exists on remote
-    ssh.run_command(&format!("mkdir -p {BACKUP_BASE_DIR}")).await?;
+    ssh.run_command(&format!("mkdir -p {BACKUP_BASE_DIR}"))
+        .await?;
 
     let mut any_success = false;
     let mut all_success = true;
@@ -586,11 +606,7 @@ async fn run_pipeline(
                 repo_status.last_files_total = files_total;
                 repo_status.last_files_changed = files_changed;
                 repo_status.last_transferred_bytes = transferred_bytes;
-                repo_status.last_error = if success {
-                    None
-                } else {
-                    Some(message.clone())
-                };
+                repo_status.last_error = if success { None } else { Some(message.clone()) };
             }
 
             s.jobs.insert(
@@ -830,7 +846,10 @@ async fn run_repo_backup(
         p.files_total = Some(file_count);
         p.detail = Some(format!("Scan {}… {} fichiers", repo.name, file_count));
     }
-    info!("WS backup:live → phase=Scanning files_total={} repo={}", file_count, repo.name);
+    info!(
+        "WS backup:live → phase=Scanning files_total={} repo={}",
+        file_count, repo.name
+    );
     emit_backup_live(&events, &status, &progress).await;
 
     // Build rsync command
@@ -889,7 +908,10 @@ async fn run_repo_backup(
         _ => 0,
     };
     if pre_total_bytes > 0 {
-        info!(repo = repo.name, pre_total_bytes, "Pre-measured source size with du");
+        info!(
+            repo = repo.name,
+            pre_total_bytes, "Pre-measured source size with du"
+        );
     }
 
     let mut child = cmd
@@ -965,7 +987,8 @@ async fn run_repo_backup(
 
                         // Recompute progress from stable total_bytes
                         let progress_pct = if total_bytes > 0 {
-                            (update.bytes_transferred as f64 / total_bytes as f64 * 100.0).min(100.0)
+                            (update.bytes_transferred as f64 / total_bytes as f64 * 100.0)
+                                .min(100.0)
                         } else {
                             update.percentage
                         };
@@ -976,21 +999,24 @@ async fn run_repo_backup(
                         let now_ema = Instant::now();
                         let dt = now_ema.duration_since(last_ema_time).as_secs_f64();
                         if dt > 0.05 {
-                            let bytes_delta = update.bytes_transferred.saturating_sub(last_ema_bytes) as f64;
+                            let bytes_delta =
+                                update.bytes_transferred.saturating_sub(last_ema_bytes) as f64;
                             let current_speed = bytes_delta / dt;
                             if ema_speed < 1.0 {
                                 ema_speed = current_speed; // init on first sample
                             } else {
-                                ema_speed = ema_alpha * current_speed + (1.0 - ema_alpha) * ema_speed;
+                                ema_speed =
+                                    ema_alpha * current_speed + (1.0 - ema_alpha) * ema_speed;
                             }
                             last_ema_time = now_ema;
                             last_ema_bytes = update.bytes_transferred;
                         }
-                        let smooth_remaining = if ema_speed > 1.0 && total_bytes > update.bytes_transferred {
-                            ((total_bytes - update.bytes_transferred) as f64 / ema_speed) as u64
-                        } else {
-                            update.remaining_secs.unwrap_or(0)
-                        };
+                        let smooth_remaining =
+                            if ema_speed > 1.0 && total_bytes > update.bytes_transferred {
+                                ((total_bytes - update.bytes_transferred) as f64 / ema_speed) as u64
+                            } else {
+                                update.remaining_secs.unwrap_or(0)
+                            };
                         let smooth_speed_str = format_speed(ema_speed);
 
                         // Phase transition: scanning → transferring on first progress line
@@ -1029,7 +1055,11 @@ async fn run_repo_backup(
                             last_broadcast = Instant::now();
                             info!(
                                 "WS backup:live → phase=Transferring progress={:.1}% files_total={} files_changed={} speed={} bytes={}",
-                                progress_pct, last_files_total, last_files_changed, smooth_speed_str, update.bytes_transferred
+                                progress_pct,
+                                last_files_total,
+                                last_files_changed,
+                                smooth_speed_str,
+                                update.bytes_transferred
                             );
                             emit_backup_live(&events, &status, &progress).await;
                         }
@@ -1072,7 +1102,10 @@ async fn run_repo_backup(
             stderr = %stderr.trim(),
             "rsync failed"
         );
-        return Err(format!("rsync exited with code {exit_code}: {}", stderr.trim()));
+        return Err(format!(
+            "rsync exited with code {exit_code}: {}",
+            stderr.trim()
+        ));
     }
 
     if exit_code == 24 {
@@ -1193,8 +1226,7 @@ fn next_scheduled_run_secs() -> u64 {
     let now = Utc::now();
     let target_hour = 20u32;
     let secs_today_at_target = target_hour as i64 * 3600;
-    let secs_now =
-        now.hour() as i64 * 3600 + now.minute() as i64 * 60 + now.second() as i64;
+    let secs_now = now.hour() as i64 * 3600 + now.minute() as i64 * 60 + now.second() as i64;
     let secs_until = if secs_now < secs_today_at_target {
         secs_today_at_target - secs_now
     } else {

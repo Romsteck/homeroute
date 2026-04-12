@@ -24,8 +24,12 @@ pub struct Ipv6Config {
     pub pd_subnet_id: u16,
 }
 
-fn default_ra_lifetime() -> u32 { 1800 }
-fn default_pd_prefix_hint_len() -> u8 { 56 }
+fn default_ra_lifetime() -> u32 {
+    1800
+}
+fn default_pd_prefix_hint_len() -> u8 {
+    56
+}
 
 impl Default for Ipv6Config {
     fn default() -> Self {

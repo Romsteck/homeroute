@@ -1,13 +1,13 @@
 use axum::{
-    extract::State,
-    extract::Path,
-    http::{header, HeaderMap},
-    routing::{delete, get, post},
     Json, Router,
+    extract::Path,
+    extract::State,
+    http::{HeaderMap, header},
+    routing::{delete, get, post},
 };
 use axum_extra::extract::CookieJar;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::state::ApiState;
 
@@ -48,7 +48,12 @@ fn cookie_domain(headers: &HeaderMap, base_domain: &str) -> Option<String> {
     }
 }
 
-fn build_set_cookie(session_id: &str, max_age_secs: Option<i64>, headers: &HeaderMap, base_domain: &str) -> String {
+fn build_set_cookie(
+    session_id: &str,
+    max_age_secs: Option<i64>,
+    headers: &HeaderMap,
+    base_domain: &str,
+) -> String {
     let domain = cookie_domain(headers, base_domain);
     let proto = headers
         .get("x-forwarded-proto")
@@ -82,7 +87,11 @@ async fn login(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
-) -> (axum::http::StatusCode, [(header::HeaderName, String); 1], Json<Value>) {
+) -> (
+    axum::http::StatusCode,
+    [(header::HeaderName, String); 1],
+    Json<Value>,
+) {
     let username = "admin";
 
     if body.code.is_empty() {
@@ -112,28 +121,36 @@ async fn login(
         );
     }
 
-    let ip = headers.get("x-real-ip")
+    let ip = headers
+        .get("x-real-ip")
         .or_else(|| headers.get("x-forwarded-for"))
         .and_then(|v| v.to_str().ok());
     let ua = headers.get("user-agent").and_then(|v| v.to_str().ok());
 
-    let (session_id, expires_at) = match state.auth.sessions.create(
-        username, ip, ua, body.remember_me,
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!("Session creation failed: {}", e);
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                [(header::SET_COOKIE, String::new())],
-                Json(json!({"success": false, "error": "Erreur lors de la connexion"})),
-            );
-        }
-    };
+    let (session_id, expires_at) =
+        match state
+            .auth
+            .sessions
+            .create(username, ip, ua, body.remember_me)
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("Session creation failed: {}", e);
+                return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    [(header::SET_COOKIE, String::new())],
+                    Json(json!({"success": false, "error": "Erreur lors de la connexion"})),
+                );
+            }
+        };
 
     state.auth.users.update_last_login(username);
 
-    let max_age = if body.remember_me { Some(30 * 24 * 60 * 60) } else { None };
+    let max_age = if body.remember_me {
+        Some(30 * 24 * 60 * 60)
+    } else {
+        None
+    };
     let cookie = build_set_cookie(&session_id, max_age, &headers, &state.auth.base_domain);
 
     (
@@ -176,7 +193,11 @@ async fn check(
     State(state): State<ApiState>,
     headers: HeaderMap,
     jar: CookieJar,
-) -> (axum::http::StatusCode, [(header::HeaderName, String); 1], Json<Value>) {
+) -> (
+    axum::http::StatusCode,
+    [(header::HeaderName, String); 1],
+    Json<Value>,
+) {
     let session_id = match jar.get("auth_session") {
         Some(c) => c.value().to_string(),
         None => {
@@ -229,7 +250,9 @@ async fn me(
             let clear = clear_cookie(&headers, base);
             return (
                 [(header::SET_COOKIE, clear)],
-                Json(json!({"success": false, "user": null, "error": "Session expiree", "authUrl": auth_url})),
+                Json(
+                    json!({"success": false, "user": null, "error": "Session expiree", "authUrl": auth_url}),
+                ),
             );
         }
     };
@@ -241,7 +264,9 @@ async fn me(
             let clear = clear_cookie(&headers, base);
             return (
                 [(header::SET_COOKIE, clear)],
-                Json(json!({"success": false, "user": null, "error": "Utilisateur non trouve", "authUrl": auth_url})),
+                Json(
+                    json!({"success": false, "user": null, "error": "Utilisateur non trouve", "authUrl": auth_url}),
+                ),
             );
         }
     };
@@ -276,15 +301,29 @@ async fn list_sessions(
 ) -> (axum::http::StatusCode, Json<Value>) {
     let session_id = match jar.get("auth_session") {
         Some(c) => c.value().to_string(),
-        None => return (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"success": false, "error": "Non authentifie"}))),
+        None => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(json!({"success": false, "error": "Non authentifie"})),
+            );
+        }
     };
 
     let session = match state.auth.sessions.validate(&session_id) {
         Ok(Some(s)) => s,
-        _ => return (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"success": false, "error": "Session expiree"}))),
+        _ => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(json!({"success": false, "error": "Session expiree"})),
+            );
+        }
     };
 
-    let sessions = state.auth.sessions.get_by_user(&session.user_id).unwrap_or_default();
+    let sessions = state
+        .auth
+        .sessions
+        .get_by_user(&session.user_id)
+        .unwrap_or_default();
 
     let sessions_json: Vec<Value> = sessions
         .iter()
@@ -301,7 +340,10 @@ async fn list_sessions(
         })
         .collect();
 
-    (axum::http::StatusCode::OK, Json(json!({"success": true, "sessions": sessions_json})))
+    (
+        axum::http::StatusCode::OK,
+        Json(json!({"success": true, "sessions": sessions_json})),
+    )
 }
 
 async fn revoke_session(
@@ -311,25 +353,48 @@ async fn revoke_session(
 ) -> (axum::http::StatusCode, Json<Value>) {
     let session_id = match jar.get("auth_session") {
         Some(c) => c.value().to_string(),
-        None => return (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"success": false, "error": "Non authentifie"}))),
+        None => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(json!({"success": false, "error": "Non authentifie"})),
+            );
+        }
     };
 
     if target_id == session_id {
-        return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"success": false, "error": "Utilisez /logout pour deconnecter la session actuelle"})));
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(
+                json!({"success": false, "error": "Utilisez /logout pour deconnecter la session actuelle"}),
+            ),
+        );
     }
 
     let session = match state.auth.sessions.validate(&session_id) {
         Ok(Some(s)) => s,
-        _ => return (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"success": false, "error": "Session expiree"}))),
+        _ => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(json!({"success": false, "error": "Session expiree"})),
+            );
+        }
     };
 
     let target = match state.auth.sessions.get(&target_id) {
         Ok(Some(s)) => s,
-        _ => return (axum::http::StatusCode::NOT_FOUND, Json(json!({"success": false, "error": "Session non trouvee"}))),
+        _ => {
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(json!({"success": false, "error": "Session non trouvee"})),
+            );
+        }
     };
 
     if target.user_id != session.user_id {
-        return (axum::http::StatusCode::NOT_FOUND, Json(json!({"success": false, "error": "Session non trouvee"})));
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(json!({"success": false, "error": "Session non trouvee"})),
+        );
     }
 
     let _ = state.auth.sessions.delete(&target_id);
@@ -354,13 +419,21 @@ async fn forward_check(
     axum::extract::Query(query): axum::extract::Query<ForwardCheckQuery>,
     headers: HeaderMap,
 ) -> (axum::http::StatusCode, Json<Value>) {
-    use hr_auth::forward_auth::{check_forward_auth, ForwardAuthResult};
+    use hr_auth::forward_auth::{ForwardAuthResult, check_forward_auth};
 
     // Query params take precedence over headers (agent use case)
-    let forwarded_host = query.host.as_deref()
-        .or_else(|| headers.get("x-forwarded-host").and_then(|v| v.to_str().ok()))
+    let forwarded_host = query
+        .host
+        .as_deref()
+        .or_else(|| {
+            headers
+                .get("x-forwarded-host")
+                .and_then(|v| v.to_str().ok())
+        })
         .unwrap_or("");
-    let forwarded_uri = query.uri.as_deref()
+    let forwarded_uri = query
+        .uri
+        .as_deref()
         .or_else(|| headers.get("x-forwarded-uri").and_then(|v| v.to_str().ok()))
         .unwrap_or("/");
     let forwarded_proto = headers
@@ -378,13 +451,21 @@ async fn forward_check(
             })
         });
 
-    match check_forward_auth(&state.auth, cookie_value, forwarded_host, forwarded_uri, forwarded_proto) {
-        ForwardAuthResult::Success { user } => {
-            (axum::http::StatusCode::OK, Json(json!({"user": user.username})))
-        }
-        ForwardAuthResult::Unauthorized { login_url } => {
-            (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"login_url": login_url})))
-        }
+    match check_forward_auth(
+        &state.auth,
+        cookie_value,
+        forwarded_host,
+        forwarded_uri,
+        forwarded_proto,
+    ) {
+        ForwardAuthResult::Success { user } => (
+            axum::http::StatusCode::OK,
+            Json(json!({"user": user.username})),
+        ),
+        ForwardAuthResult::Unauthorized { login_url } => (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(json!({"login_url": login_url})),
+        ),
     }
 }
 
@@ -400,17 +481,33 @@ async fn change_code(
 ) -> (axum::http::StatusCode, Json<Value>) {
     let session_id = match jar.get("auth_session") {
         Some(c) => c.value().to_string(),
-        None => return (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"success": false, "error": "Non authentifie"}))),
+        None => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(json!({"success": false, "error": "Non authentifie"})),
+            );
+        }
     };
     match state.auth.sessions.validate(&session_id) {
-        Ok(Some(_)) => {},
-        _ => return (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"success": false, "error": "Session expiree"}))),
+        Ok(Some(_)) => {}
+        _ => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(json!({"success": false, "error": "Session expiree"})),
+            );
+        }
     };
     if body.new_code.len() < 8 {
-        return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"success": false, "error": "Le code doit contenir au moins 8 caracteres"})));
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({"success": false, "error": "Le code doit contenir au moins 8 caracteres"})),
+        );
     }
     match state.auth.users.change_password("admin", &body.new_code) {
         Ok(()) => (axum::http::StatusCode::OK, Json(json!({"success": true}))),
-        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"success": false, "error": e}))),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"success": false, "error": e})),
+        ),
     }
 }

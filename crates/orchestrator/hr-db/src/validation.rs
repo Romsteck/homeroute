@@ -1,18 +1,70 @@
-use crate::schema::{ColumnDefinition, DatabaseSchema, FieldType, RelationDefinition, TableDefinition};
+use crate::schema::{
+    ColumnDefinition, DatabaseSchema, FieldType, RelationDefinition, TableDefinition,
+};
 
 /// SQL reserved words that cannot be used as identifiers.
 const RESERVED_WORDS: &[&str] = &[
-    "select", "from", "where", "insert", "update", "delete", "create", "drop", "alter",
-    "table", "column", "index", "primary", "key", "foreign", "references", "null", "not",
-    "and", "or", "in", "like", "between", "join", "on", "group", "order", "by", "having",
-    "limit", "offset", "union", "all", "distinct", "as", "is", "exists", "case", "when",
-    "then", "else", "end", "values", "set", "into", "default", "constraint", "unique",
-    "check", "integer", "text", "real", "blob", "boolean",
+    "select",
+    "from",
+    "where",
+    "insert",
+    "update",
+    "delete",
+    "create",
+    "drop",
+    "alter",
+    "table",
+    "column",
+    "index",
+    "primary",
+    "key",
+    "foreign",
+    "references",
+    "null",
+    "not",
+    "and",
+    "or",
+    "in",
+    "like",
+    "between",
+    "join",
+    "on",
+    "group",
+    "order",
+    "by",
+    "having",
+    "limit",
+    "offset",
+    "union",
+    "all",
+    "distinct",
+    "as",
+    "is",
+    "exists",
+    "case",
+    "when",
+    "then",
+    "else",
+    "end",
+    "values",
+    "set",
+    "into",
+    "default",
+    "constraint",
+    "unique",
+    "check",
+    "integer",
+    "text",
+    "real",
+    "blob",
+    "boolean",
 ];
 
 #[derive(Debug, thiserror::Error)]
 pub enum ValidationError {
-    #[error("Invalid name '{0}': must be 1-64 chars, alphanumeric or underscore, start with letter")]
+    #[error(
+        "Invalid name '{0}': must be 1-64 chars, alphanumeric or underscore, start with letter"
+    )]
     InvalidName(String),
     #[error("Reserved SQL keyword: '{0}'")]
     ReservedWord(String),
@@ -79,7 +131,8 @@ pub fn validate_table_definition(
 
 pub fn validate_column(col: &ColumnDefinition) -> Result<(), ValidationError> {
     validate_identifier(&col.name)?;
-    if matches!(col.field_type, FieldType::Choice | FieldType::MultiChoice) && col.choices.is_empty()
+    if matches!(col.field_type, FieldType::Choice | FieldType::MultiChoice)
+        && col.choices.is_empty()
     {
         return Err(ValidationError::EmptyChoices(col.name.clone()));
     }

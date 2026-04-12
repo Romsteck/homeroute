@@ -26,7 +26,9 @@ impl EdgeHandler {
             if cert_path.exists() && key_path.exists() {
                 match self.tls_manager.load_cert_from_files(cert_path, key_path) {
                     Ok(certified_key) => {
-                        let domain = cert_info.wildcard_type.domain_pattern(&self.env.base_domain);
+                        let domain = cert_info
+                            .wildcard_type
+                            .domain_pattern(&self.env.base_domain);
                         self.tls_manager.add_cert(&domain, certified_key);
                         loaded += 1;
                     }
@@ -38,10 +40,10 @@ impl EdgeHandler {
         }
         // Re-set fallback cert
         if let Ok(cert_info) = self.acme.get_certificate(hr_acme::WildcardType::Global) {
-            if let Err(e) = self.tls_manager.set_fallback_certificate_from_pem(
-                &cert_info.cert_path,
-                &cert_info.key_path,
-            ) {
+            if let Err(e) = self
+                .tls_manager
+                .set_fallback_certificate_from_pem(&cert_info.cert_path, &cert_info.key_path)
+            {
                 warn!("Failed to re-set fallback certificate: {}", e);
             }
         }
@@ -85,9 +87,7 @@ impl IpcHandler<EdgeRequest, IpcResponse> for EdgeHandler {
                 self.proxy.remove_app_route(&domain);
                 IpcResponse::ok_empty()
             }
-            EdgeRequest::ListAppRoutes => {
-                IpcResponse::ok_data(self.proxy.list_app_routes())
-            }
+            EdgeRequest::ListAppRoutes => IpcResponse::ok_data(self.proxy.list_app_routes()),
 
             // ── Proxy config ──────────────────────────────────────
             EdgeRequest::ReloadConfig => {
@@ -103,9 +103,7 @@ impl IpcHandler<EdgeRequest, IpcResponse> for EdgeHandler {
                     Err(e) => IpcResponse::err(format!("Config reload failed: {}", e)),
                 }
             }
-            EdgeRequest::GetProxyConfig => {
-                IpcResponse::ok_data(self.proxy.config())
-            }
+            EdgeRequest::GetProxyConfig => IpcResponse::ok_data(self.proxy.config()),
             EdgeRequest::SaveProxyConfig { config } => {
                 match serde_json::to_string_pretty(&config) {
                     Ok(json) => {
@@ -118,18 +116,13 @@ impl IpcHandler<EdgeRequest, IpcResponse> for EdgeHandler {
                                 if let Err(e) =
                                     self.tls_manager.reload_certificates(&new_config.routes)
                                 {
-                                    return IpcResponse::err(format!(
-                                        "TLS reload failed: {}",
-                                        e
-                                    ));
+                                    return IpcResponse::err(format!("TLS reload failed: {}", e));
                                 }
                                 self.reload_acme_certs();
                                 self.proxy.reload_config(new_config);
                                 IpcResponse::ok_empty()
                             }
-                            Err(e) => {
-                                IpcResponse::err(format!("Config reload failed: {}", e))
-                            }
+                            Err(e) => IpcResponse::err(format!("Config reload failed: {}", e)),
                         }
                     }
                     Err(e) => IpcResponse::err(format!("Invalid config JSON: {}", e)),
@@ -144,27 +137,13 @@ impl IpcHandler<EdgeRequest, IpcResponse> for EdgeHandler {
                 Ok(certs) => IpcResponse::ok_data(certs),
                 Err(e) => IpcResponse::err(format!("{}", e)),
             },
-            EdgeRequest::AcmeRequestAppWildcard { slug: _ } => {
-                IpcResponse::err("Per-app wildcard certs have been removed. Use env wildcards.")
-            }
-            EdgeRequest::AcmeRequestEnvWildcard { env_slug } => {
-                match self.acme.request_env_wildcard(&env_slug).await {
-                    Ok(cert) => {
-                        // Load the new cert into the TLS manager
-                        let domain = format!("*.{}.{}", env_slug, self.env.base_domain);
-                        let cert_path = std::path::Path::new(&cert.cert_path);
-                        let key_path = std::path::Path::new(&cert.key_path);
-                        if let Ok(certified_key) = self.tls_manager.load_cert_from_files(cert_path, key_path) {
-                            self.tls_manager.add_cert(&domain, certified_key);
-                        }
-                        IpcResponse::ok_data(cert)
-                    }
-                    Err(e) => IpcResponse::err(format!("{}", e)),
-                }
-            }
-            EdgeRequest::AcmeRenewAll => {
-                IpcResponse::ok_data("renewal triggered")
-            }
+            EdgeRequest::AcmeRequestAppWildcard { slug: _ } => IpcResponse::err(
+                "Per-app wildcard certs have been removed. Only the global wildcard is issued.",
+            ),
+            EdgeRequest::AcmeRequestEnvWildcard { env_slug: _ } => IpcResponse::err(
+                "Per-env wildcard certs have been removed. Only the global wildcard is issued.",
+            ),
+            EdgeRequest::AcmeRenewAll => IpcResponse::ok_data("renewal triggered"),
 
             // ── Auth ──────────────────────────────────────────────
             EdgeRequest::AuthLogin {
@@ -264,7 +243,6 @@ impl IpcHandler<EdgeRequest, IpcResponse> for EdgeHandler {
                     "certificates": cert_expiry,
                 }))
             }
-
         }
     }
 }

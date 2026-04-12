@@ -19,8 +19,12 @@ pub enum MigrationOp {
         old_name: String,
         new_name: String,
     },
-    DropTable { table: String },
-    CreateRelation { relation: RelationDefinition },
+    DropTable {
+        table: String,
+    },
+    CreateRelation {
+        relation: RelationDefinition,
+    },
     DropRelation {
         from_table: String,
         from_column: String,

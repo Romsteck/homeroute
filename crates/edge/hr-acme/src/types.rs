@@ -37,15 +37,15 @@ impl Default for AcmeConfig {
 
 /// Type of wildcard certificate.
 ///
-/// Custom serde for backward compatibility:
+/// Only the global wildcard remains (`*.mynetwk.biz`). Per-environment wildcards
+/// have been removed along with the environments system.
+///
+/// Custom serde keeps backward compatibility for legacy index entries:
 /// - `"global"` or `"main"` → `Global`
-/// - `"env:{slug}"` → `Environment { slug }`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WildcardType {
-    /// *.mynetwk.biz — global wildcard (dashboard, all prod apps)
+    /// *.mynetwk.biz — global wildcard (covers all apps and the dashboard)
     Global,
-    /// *.{slug}.mynetwk.biz — per-environment wildcard
-    Environment { slug: String },
 }
 
 impl WildcardType {
@@ -53,7 +53,6 @@ impl WildcardType {
     pub fn domain_pattern(&self, base_domain: &str) -> String {
         match self {
             Self::Global => format!("*.{}", base_domain),
-            Self::Environment { slug } => format!("*.{}.{}", slug, base_domain),
         }
     }
 
@@ -61,7 +60,6 @@ impl WildcardType {
     pub fn id(&self) -> String {
         match self {
             Self::Global => "wildcard-global".to_string(),
-            Self::Environment { slug } => format!("wildcard-env-{}", slug),
         }
     }
 
@@ -69,7 +67,6 @@ impl WildcardType {
     pub fn display_name(&self) -> String {
         match self {
             Self::Global => "Global (Dashboard)".to_string(),
-            Self::Environment { slug } => format!("Environment ({})", slug),
         }
     }
 }
@@ -81,7 +78,6 @@ impl Serialize for WildcardType {
     {
         match self {
             Self::Global => serializer.serialize_str("global"),
-            Self::Environment { slug } => serializer.serialize_str(&format!("env:{}", slug)),
         }
     }
 }
@@ -99,7 +95,7 @@ impl<'de> Deserialize<'de> for WildcardType {
             type Value = WildcardType;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str(r#"a string ("global", "main", or "env:{slug}")"#)
+                formatter.write_str(r#"a string ("global" or "main")"#)
             }
 
             fn visit_str<E>(self, value: &str) -> Result<WildcardType, E>
@@ -108,17 +104,7 @@ impl<'de> Deserialize<'de> for WildcardType {
             {
                 match value {
                     "global" | "main" => Ok(WildcardType::Global),
-                    other if other.starts_with("env:") => {
-                        let slug = other[4..].to_string();
-                        if slug.is_empty() {
-                            return Err(de::Error::custom("env: wildcard type requires a slug"));
-                        }
-                        Ok(WildcardType::Environment { slug })
-                    }
-                    other => Err(de::Error::unknown_variant(
-                        other,
-                        &["global", "main", "env:{slug}"],
-                    )),
+                    other => Err(de::Error::unknown_variant(other, &["global", "main"])),
                 }
             }
         }
@@ -200,13 +186,6 @@ mod tests {
     }
 
     #[test]
-    fn test_wildcard_type_serialize_environment() {
-        let wt = WildcardType::Environment { slug: "dev".to_string() };
-        let json = serde_json::to_string(&wt).unwrap();
-        assert_eq!(json, r#""env:dev""#);
-    }
-
-    #[test]
     fn test_wildcard_type_deserialize_global() {
         let wt: WildcardType = serde_json::from_str(r#""global""#).unwrap();
         assert_eq!(wt, WildcardType::Global);
@@ -219,49 +198,25 @@ mod tests {
     }
 
     #[test]
-    fn test_wildcard_type_deserialize_environment() {
-        let wt: WildcardType = serde_json::from_str(r#""env:dev""#).unwrap();
-        assert_eq!(wt, WildcardType::Environment { slug: "dev".to_string() });
-    }
-
-    #[test]
-    fn test_wildcard_type_deserialize_environment_prod() {
-        let wt: WildcardType = serde_json::from_str(r#""env:prod""#).unwrap();
-        assert_eq!(wt, WildcardType::Environment { slug: "prod".to_string() });
-    }
-
-    #[test]
-    fn test_wildcard_type_deserialize_env_empty_slug_fails() {
-        let result = serde_json::from_str::<WildcardType>(r#""env:""#);
+    fn test_wildcard_type_deserialize_unknown_fails() {
+        let result = serde_json::from_str::<WildcardType>(r#""env:dev""#);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_wildcard_type_id() {
         assert_eq!(WildcardType::Global.id(), "wildcard-global");
-        assert_eq!(
-            WildcardType::Environment { slug: "dev".to_string() }.id(),
-            "wildcard-env-dev"
-        );
     }
 
     #[test]
     fn test_wildcard_type_domain_pattern() {
         let base = "mynetwk.biz";
         assert_eq!(WildcardType::Global.domain_pattern(base), "*.mynetwk.biz");
-        assert_eq!(
-            WildcardType::Environment { slug: "dev".to_string() }.domain_pattern(base),
-            "*.dev.mynetwk.biz"
-        );
     }
 
     #[test]
     fn test_wildcard_type_display_name() {
         assert_eq!(WildcardType::Global.display_name(), "Global (Dashboard)");
-        assert_eq!(
-            WildcardType::Environment { slug: "dev".to_string() }.display_name(),
-            "Environment (dev)"
-        );
     }
 
     #[test]
@@ -278,23 +233,5 @@ mod tests {
         }"#;
         let info: CertificateInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.wildcard_type, WildcardType::Global);
-    }
-
-    #[test]
-    fn test_certificate_info_with_env_wildcard() {
-        let json = r#"{
-            "id": "wildcard-env-dev",
-            "wildcard_type": "env:dev",
-            "domains": ["*.dev.mynetwk.biz"],
-            "issued_at": "2025-01-01T00:00:00Z",
-            "expires_at": "2025-04-01T00:00:00Z",
-            "cert_path": "/path/to/cert.crt",
-            "key_path": "/path/to/key.key"
-        }"#;
-        let info: CertificateInfo = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            info.wildcard_type,
-            WildcardType::Environment { slug: "dev".to_string() }
-        );
     }
 }

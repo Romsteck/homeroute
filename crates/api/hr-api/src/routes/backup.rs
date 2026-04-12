@@ -46,9 +46,14 @@ async fn trigger_backup(State(state): State<ApiState>) -> Json<serde_json::Value
     let orchestrator = state.orchestrator.clone();
     let events = state.events.clone();
     tokio::spawn(async move {
-        let step = task_ctx.step("trigger", "Démarrage du pipeline de sauvegarde").await;
+        let step = task_ctx
+            .step("trigger", "Démarrage du pipeline de sauvegarde")
+            .await;
 
-        match orchestrator.request(&OrchestratorRequest::TriggerBackup).await {
+        match orchestrator
+            .request(&OrchestratorRequest::TriggerBackup)
+            .await
+        {
             Ok(resp) if resp.ok => {
                 step.complete().await;
                 // Track backup_live events for completion
@@ -103,7 +108,11 @@ async fn trigger_backup(State(state): State<ApiState>) -> Json<serde_json::Value
 }
 
 async fn cancel_backup(State(state): State<ApiState>) -> Json<serde_json::Value> {
-    match state.orchestrator.request(&OrchestratorRequest::CancelBackup).await {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::CancelBackup)
+        .await
+    {
         Ok(resp) if resp.ok => Json(resp.data.unwrap_or(json!({"message": "Backup cancelled"}))),
         Ok(resp) => Json(json!({
             "success": false,
@@ -117,7 +126,11 @@ async fn cancel_backup(State(state): State<ApiState>) -> Json<serde_json::Value>
 }
 
 async fn get_backup_status(State(state): State<ApiState>) -> Json<serde_json::Value> {
-    match state.orchestrator.request(&OrchestratorRequest::GetBackupStatus).await {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::GetBackupStatus)
+        .await
+    {
         Ok(resp) if resp.ok => Json(resp.data.unwrap_or(json!({}))),
         Ok(resp) => Json(json!({
             "success": false,
@@ -131,7 +144,11 @@ async fn get_backup_status(State(state): State<ApiState>) -> Json<serde_json::Va
 }
 
 async fn get_backup_repos(State(state): State<ApiState>) -> Json<serde_json::Value> {
-    match state.orchestrator.request(&OrchestratorRequest::GetBackupRepos).await {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::GetBackupRepos)
+        .await
+    {
         Ok(resp) if resp.ok => Json(resp.data.unwrap_or(json!([]))),
         Ok(resp) => Json(json!({
             "success": false,
@@ -145,7 +162,11 @@ async fn get_backup_repos(State(state): State<ApiState>) -> Json<serde_json::Val
 }
 
 async fn get_backup_jobs(State(state): State<ApiState>) -> Json<serde_json::Value> {
-    match state.orchestrator.request(&OrchestratorRequest::GetBackupJobs).await {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::GetBackupJobs)
+        .await
+    {
         Ok(resp) if resp.ok => Json(resp.data.unwrap_or(json!([]))),
         Ok(resp) => Json(json!({
             "success": false,
@@ -159,7 +180,11 @@ async fn get_backup_jobs(State(state): State<ApiState>) -> Json<serde_json::Valu
 }
 
 async fn get_backup_progress(State(state): State<ApiState>) -> Json<serde_json::Value> {
-    match state.orchestrator.request(&OrchestratorRequest::GetBackupProgress).await {
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::GetBackupProgress)
+        .await
+    {
         Ok(resp) if resp.ok => Json(resp.data.unwrap_or(json!({"running": false}))),
         Ok(resp) => Json(json!({
             "success": false,

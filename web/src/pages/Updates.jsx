@@ -11,7 +11,6 @@ import {
   upgradeTarget,
   getUpdateHistory,
   upgradeAllHosts,
-  upgradeAllEnvironments,
 } from '../api/client';
 import useWebSocket from '../hooks/useWebSocket';
 
@@ -161,20 +160,6 @@ function Updates() {
     });
   };
 
-  const handleUpgradeEnvironments = () => {
-    setConfirmModal({
-      title: 'Mettre à jour tous les environnements',
-      message: 'Voulez-vous lancer la mise à jour APT sur tous les environnements ayant des mises à jour disponibles ?',
-      onConfirm: async () => {
-        setConfirmModal(null);
-        try {
-          await upgradeAllEnvironments();
-        } catch (e) {
-          setMessage({ type: 'error', text: `Erreur : ${e.message}` });
-        }
-      },
-    });
-  };
 
   // Derived stats
   const targetList = Object.values(targets);
@@ -184,9 +169,8 @@ function Updates() {
     t.agent_version && t.agent_version_latest && t.agent_version !== t.agent_version_latest
   ).length;
   const hosts = targetList.filter(t => t.target_type === 'remote_host' || t.target_type === 'main_host');
-  const environments = targetList.filter(t => t.target_type === 'environment');
+
   const hostsWithUpdates = hosts.filter(t => t.os_upgradable > 0).length;
-  const envsWithUpdates = environments.filter(t => t.os_upgradable > 0).length;
 
   if (loading) {
     return (
@@ -207,15 +191,6 @@ function Updates() {
               disabled={scanning || anyUpgradeRunning}
             >
               <Server className="w-4 h-4 mr-2" /> MàJ hôtes ({hostsWithUpdates})
-            </Button>
-          )}
-          {envsWithUpdates > 0 && (
-            <Button
-              variant="secondary"
-              onClick={handleUpgradeEnvironments}
-              disabled={scanning || anyUpgradeRunning}
-            >
-              <Package className="w-4 h-4 mr-2" /> MàJ environnements ({envsWithUpdates})
             </Button>
           )}
           <Button
@@ -282,26 +257,6 @@ function Updates() {
           </Section>
         )}
 
-        {/* Environments */}
-        {environments.length > 0 && (
-          <Section title={`Environnements (${environments.length})`}>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm min-w-[500px]">
-                <UpdateTableHead />
-                <tbody>
-                  {environments.map(t => (
-                    <UpdateTableRow
-                      key={t.id}
-                      target={t}
-                      upgradeState={upgradeStates[t.id] || {}}
-                      onUpgrade={handleUpgrade}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </Section>
-        )}
 
         {/* History */}
         {history.length > 0 && (

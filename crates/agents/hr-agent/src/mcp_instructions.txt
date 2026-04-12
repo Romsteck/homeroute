@@ -1,7 +1,0 @@
-Database MCP — Use the homeroute MCP server's db.* tools for all database operations.
-The database is managed centrally by hr-orchestrator.
-
-Schema tools: db.list_tables, db.describe_table, db.create_table, db.add_column, db.remove_column, db.drop_table, db.create_relation, db.get_schema, db.get_db_info
-Data tools: db.query_data, db.insert_data, db.update_data, db.delete_data, db.count_rows
-
-All tools require an app_id parameter (your app's slug).

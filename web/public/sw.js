@@ -1,13 +1,11 @@
-const CACHE_NAME = 'homeroute-v1';
+const CACHE_NAME = 'homeroute-v5';
 const STATIC_ASSETS = [
-  '/',
   '/manifest.json',
   '/favicon.svg',
   '/icon-192x192.svg',
   '/icon-512x512.svg'
 ];
 
-// Install: pre-cache static assets
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS))
@@ -15,7 +13,6 @@ self.addEventListener('install', (event) => {
   self.skipWaiting();
 });
 
-// Activate: clean old caches
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
@@ -25,30 +22,43 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
-// Fetch: network-first for API, cache-first for assets
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
-  // Network-first for API calls and socket.io
-  if (url.pathname.startsWith('/api') || url.pathname.startsWith('/socket.io')) {
+  // Network-first for API, socket.io, and HTML navigation
+  if (
+    url.pathname.startsWith('/api') ||
+    url.pathname.startsWith('/socket.io') ||
+    request.mode === 'navigate' ||
+    request.destination === 'document'
+  ) {
     event.respondWith(
       fetch(request).catch(() => caches.match(request))
     );
     return;
   }
 
-  // Cache-first for static assets
+  // Network-first for JS/CSS (hashed filenames handle versioning)
+  if (url.pathname.startsWith('/assets/')) {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response && response.status === 200) {
+            const clone = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
+          }
+          return response;
+        })
+        .catch(() => caches.match(request))
+    );
+    return;
+  }
+
+  // Cache-first for static icons/manifest only
   event.respondWith(
-    caches.match(request).then((cached) => {
-      const fetched = fetch(request).then((response) => {
-        if (response && response.status === 200 && response.type === 'basic') {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
-        }
-        return response;
-      });
-      return cached || fetched;
-    })
+    caches.match(request).then((cached) =>
+      cached || fetch(request)
+    )
   );
 });

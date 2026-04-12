@@ -16,7 +16,8 @@ pub async fn bootstrap_ubuntu(container_name: &str, storage_path: &Path) -> Resu
     info!(container = container_name, rootfs = %rootfs.display(), "Bootstrapping Ubuntu 24.04 rootfs");
 
     // Ensure parent directory exists
-    tokio::fs::create_dir_all(storage_path).await
+    tokio::fs::create_dir_all(storage_path)
+        .await
         .context("failed to create storage directory")?;
 
     // Run debootstrap
@@ -36,27 +37,34 @@ pub async fn bootstrap_ubuntu(container_name: &str, storage_path: &Path) -> Resu
         anyhow::bail!("debootstrap failed: {stderr}");
     }
 
-    info!(container = container_name, "debootstrap complete, configuring rootfs");
+    info!(
+        container = container_name,
+        "debootstrap complete, configuring rootfs"
+    );
 
     // Post-bootstrap configuration
 
     // 1. Empty machine-id (will be regenerated on first boot)
-    tokio::fs::write(rootfs.join("etc/machine-id"), "").await
+    tokio::fs::write(rootfs.join("etc/machine-id"), "")
+        .await
         .context("failed to write machine-id")?;
 
     // 1b. Set hostname to the container name
-    tokio::fs::write(rootfs.join("etc/hostname"), format!("{container_name}\n")).await
+    tokio::fs::write(rootfs.join("etc/hostname"), format!("{container_name}\n"))
+        .await
         .context("failed to write hostname")?;
 
     // 2. Enable systemd-networkd for DHCP
-    let networkd_link = rootfs.join("etc/systemd/system/multi-user.target.wants/systemd-networkd.service");
+    let networkd_link =
+        rootfs.join("etc/systemd/system/multi-user.target.wants/systemd-networkd.service");
     if let Some(parent) = networkd_link.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
     }
     let _ = tokio::fs::symlink(
         "/lib/systemd/system/systemd-networkd.service",
         &networkd_link,
-    ).await;
+    )
+    .await;
 
     // 3. Mask systemd-resolved to prevent DNS interference
     // (containers use static resolv.conf pointing to HomeRoute DNS)
@@ -69,17 +77,22 @@ pub async fn bootstrap_ubuntu(container_name: &str, storage_path: &Path) -> Resu
     tokio::fs::write(
         sysctl_dir.join("99-disable-ipv6.conf"),
         "net.ipv6.conf.all.disable_ipv6 = 1\nnet.ipv6.conf.default.disable_ipv6 = 1\n",
-    ).await.context("failed to write sysctl ipv6 config")?;
+    )
+    .await
+    .context("failed to write sysctl ipv6 config")?;
 
     // 4b. Force curl to use IPv4 (sysctl alone doesn't prevent AAAA DNS queries)
-    tokio::fs::write(rootfs.join("root/.curlrc"), "--ipv4\n").await
+    tokio::fs::write(rootfs.join("root/.curlrc"), "--ipv4\n")
+        .await
         .context("failed to write .curlrc")?;
 
     // 4c. Prefer IPv4 in getaddrinfo (affects all glibc-based DNS resolution)
     tokio::fs::write(
         rootfs.join("etc/gai.conf"),
         "precedence ::ffff:0:0/96  100\n",
-    ).await.context("failed to write gai.conf")?;
+    )
+    .await
+    .context("failed to write gai.conf")?;
 
     // 5. Install essential packages in the rootfs via chroot
     // (dbus is needed for machinectl shell, curl for runtime installs)
@@ -100,17 +113,29 @@ pub async fn bootstrap_ubuntu(container_name: &str, storage_path: &Path) -> Resu
 
     match chroot_output {
         Ok(o) if o.status.success() => {
-            info!(container = container_name, "Essential packages installed in rootfs");
+            info!(
+                container = container_name,
+                "Essential packages installed in rootfs"
+            );
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
-            warn!(container = container_name, "chroot package install had issues: {stderr}");
+            warn!(
+                container = container_name,
+                "chroot package install had issues: {stderr}"
+            );
         }
         Err(e) => {
-            warn!(container = container_name, "chroot failed: {e}, container may need manual setup");
+            warn!(
+                container = container_name,
+                "chroot failed: {e}, container may need manual setup"
+            );
         }
     }
 
-    info!(container = container_name, "Ubuntu 24.04 rootfs bootstrap complete");
+    info!(
+        container = container_name,
+        "Ubuntu 24.04 rootfs bootstrap complete"
+    );
     Ok(())
 }

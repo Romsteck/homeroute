@@ -1,8 +1,11 @@
 use axum::{
-    extract::{State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    Router,
+    extract::{
+        State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
+    },
     response::IntoResponse,
     routing::get,
-    Router,
 };
 use serde_json::json;
 use tokio::sync::broadcast;
@@ -14,10 +17,7 @@ pub fn router() -> Router<ApiState> {
     Router::new().route("/ws", get(ws_handler))
 }
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<ApiState>,
-) -> impl IntoResponse {
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<ApiState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
@@ -35,7 +35,8 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut backup_live_rx = state.events.backup_live.subscribe();
     let mut task_update_rx = state.events.task_update.subscribe();
     let mut energy_metrics_rx = state.events.energy_metrics.subscribe();
-    let mut env_status_rx = state.events.env_status.subscribe();
+    let mut log_rx = state.events.log_entry.subscribe();
+    let mut app_state_rx = state.events.app_state.subscribe();
 
     loop {
         tokio::select! {
@@ -350,12 +351,31 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                 }
             }
 
-            // Environment status events (for maker portal)
-            result = env_status_rx.recv() => {
+            // Log entry events (live log viewer)
+            result = log_rx.recv() => {
+                match result {
+                    Ok(entry) => {
+                        let msg = json!({
+                            "type": "log:entry",
+                            "data": entry
+                        });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("WebSocket log_entry lagged by {}", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // App state change events (real-time from supervisor)
+            result = app_state_rx.recv() => {
                 match result {
                     Ok(event) => {
                         let msg = json!({
-                            "type": "env:status",
+                            "type": "app:state",
                             "data": event
                         });
                         if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
@@ -363,7 +383,7 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("WebSocket env_status lagged by {}", n);
+                        warn!("WebSocket app_state lagged by {}", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

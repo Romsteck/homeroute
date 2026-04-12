@@ -1,6 +1,6 @@
 use argon2::{
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Algorithm, Argon2, Params, Version,
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -89,7 +89,10 @@ impl UserStore {
         let data = self.load();
         data.users.get(username).map(|ud| UserInfo {
             username: username.to_string(),
-            displayname: ud.displayname.clone().unwrap_or_else(|| username.to_string()),
+            displayname: ud
+                .displayname
+                .clone()
+                .unwrap_or_else(|| username.to_string()),
             email: ud.email.clone().unwrap_or_default(),
             created: ud.created.clone(),
             last_login: ud.last_login.clone(),
@@ -102,7 +105,10 @@ impl UserStore {
         data.users.get(username).and_then(|ud| {
             ud.password.as_ref().map(|pw| UserWithPassword {
                 username: username.to_string(),
-                displayname: ud.displayname.clone().unwrap_or_else(|| username.to_string()),
+                displayname: ud
+                    .displayname
+                    .clone()
+                    .unwrap_or_else(|| username.to_string()),
                 email: ud.email.clone().unwrap_or_default(),
                 password_hash: pw.clone(),
             })
@@ -148,8 +154,8 @@ impl UserStore {
 pub fn hash_password(password: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut rand_core::OsRng);
     // Paramètres identiques au backend Node.js : memoryCost=65536, timeCost=3, parallelism=4
-    let params = Params::new(65536, 3, 4, None)
-        .map_err(|e| anyhow::anyhow!("Argon2 params error: {e}"))?;
+    let params =
+        Params::new(65536, 3, 4, None).map_err(|e| anyhow::anyhow!("Argon2 params error: {e}"))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let hash = argon2
         .hash_password(password.as_bytes(), &salt)

@@ -3,7 +3,9 @@
 use std::net::Ipv4Addr;
 use thiserror::Error;
 
-use crate::options::{self, DhcpOption, OPT_MSG_TYPE, OPT_REQUESTED_IP, OPT_SERVER_ID, OPT_HOSTNAME, OPT_CLIENT_ID};
+use crate::options::{
+    self, DhcpOption, OPT_CLIENT_ID, OPT_HOSTNAME, OPT_MSG_TYPE, OPT_REQUESTED_IP, OPT_SERVER_ID,
+};
 
 /// DHCP magic cookie
 pub const MAGIC_COOKIE: [u8; 4] = [0x63, 0x82, 0x53, 0x63];

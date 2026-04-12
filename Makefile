@@ -7,7 +7,7 @@ PROD_HOST := romain@10.0.0.20
 PROD_DIR  := /opt/homeroute
 PROD_API  := http://10.0.0.20:4000
 
-.PHONY: server netcore edge orchestrator web web-make studio studio-env all deploy deploy-prod deploy-netcore deploy-edge deploy-orchestrator deploy-studio-env test clean store agent agent-prod host-agent host-agent-prod check-prod check-not-prod env-agent provision-env-dev provision-env-prod deploy-web-make
+.PHONY: server netcore edge orchestrator web all deploy deploy-prod deploy-netcore deploy-edge deploy-orchestrator deploy-studio test clean store host-agent host-agent-prod check-prod check-not-prod
 
 SHELL := /bin/bash
 
@@ -34,7 +34,7 @@ netcore:
 edge:
 	cd crates && cargo build --release -p hr-edge
 
-# Build hr-orchestrator binary (Containers/Registry/Git)
+# Build hr-orchestrator binary (hr-apps supervisor, Git, DB)
 orchestrator:
 	cd crates && cargo build --release -p hr-orchestrator
 
@@ -46,32 +46,8 @@ server:
 web:
 	cd web && npm run build
 
-# Build Maker Portal frontend (environments, pipelines, DB explorer)
-web-make:
-	cd web-make && pnpm install --frozen-lockfile && pnpm build
-
-# Deploy Maker Portal to production (static files served by homeroute)
-deploy-web-make: check-prod web-make
-	@echo "Deploying Maker Portal to production..."
-	rsync -az --delete web-make/dist/ $(PROD_HOST):$(PROD_DIR)/web-make/dist/
-	@echo "✓ Maker Portal deployed"
-
-# Deploy Studio Env to production (static files served by homeroute on port 4003)
-deploy-studio-env: check-prod studio-env
-	@echo "Deploying Studio Env to production..."
-	rsync -az --delete web-studio-env/dist/ $(PROD_HOST):$(PROD_DIR)/web-studio-env/dist/
-	@echo "✓ Studio Env deployed"
-
-# Build Studio frontend (Claude Code headless UI — legacy per-app)
-studio:
-	cd web-studio && npm install --silent && npm run build
-
-# Build Studio Env frontend (environment studio — studio.{env}.mynetwk.biz)
-studio-env:
-	cd web-studio-env && pnpm install --frozen-lockfile && pnpm build
-
-# Full build (studio + studio-env + netcore + edge + orchestrator + server + frontend)
-all: studio studio-env netcore edge orchestrator server web
+# Full build (netcore + edge + orchestrator + server + frontend)
+all: netcore edge orchestrator server web
 
 # Deploy locally (only works on prod server itself)
 deploy: check-not-prod all
@@ -88,8 +64,6 @@ deploy-prod: check-prod all
 	rsync -az --info=progress2 crates/target/release/hr-orchestrator $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-orchestrator
 	rsync -az --info=progress2 crates/target/release/hr-netcore $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-netcore
 	rsync -az --delete web/dist/ $(PROD_HOST):$(PROD_DIR)/web/dist/
-	rsync -az --delete web-studio/dist/ $(PROD_HOST):$(PROD_DIR)/web-studio/dist/
-	rsync -az --delete web-studio-env/dist/ $(PROD_HOST):$(PROD_DIR)/web-studio-env/dist/
 	rsync -az systemd/ $(PROD_HOST):$(PROD_DIR)/systemd/
 	ssh $(PROD_HOST) 'sudo cp $(PROD_DIR)/systemd/*.service /etc/systemd/system/ && sudo systemctl daemon-reload'
 	ssh $(PROD_HOST) 'sudo systemctl restart hr-edge && sudo systemctl restart hr-orchestrator && sudo systemctl restart homeroute'
@@ -106,7 +80,7 @@ deploy-edge: check-prod edge
 	@sleep 2
 	@echo "✓ hr-edge deployed"
 
-# Deploy hr-orchestrator separately (Containers/Registry/Git)
+# Deploy hr-orchestrator separately (hr-apps supervisor, Git, DB)
 deploy-orchestrator: check-prod orchestrator
 	@echo "Deploying hr-orchestrator to production..."
 	rsync -az --info=progress2 crates/target/release/hr-orchestrator $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-orchestrator
@@ -122,33 +96,16 @@ deploy-netcore: check-prod netcore
 	@sleep 1
 	@echo "✓ hr-netcore deployed"
 
+# Install / refresh code-server on the production router (studio.mynetwk.biz → 127.0.0.1:8443)
+deploy-studio: check-prod
+	@echo "Installing/refreshing code-server on production..."
+	rsync -az scripts/setup-studio.sh $(PROD_HOST):$(PROD_DIR)/scripts/setup-studio.sh
+	ssh $(PROD_HOST) 'sudo bash $(PROD_DIR)/scripts/setup-studio.sh'
+	@echo "✓ Studio (code-server) ready on studio.mynetwk.biz"
+
 # Run tests
 test:
 	cd crates && cargo test
-
-# Build hr-agent binary (auto-increments version)
-agent:
-	@CURRENT=$$(grep '^version' crates/agents/hr-agent/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/') && \
-	MAJOR=$$(echo "$$CURRENT" | cut -d. -f1) && \
-	MINOR=$$(echo "$$CURRENT" | cut -d. -f2) && \
-	PATCH=$$(echo "$$CURRENT" | cut -d. -f3) && \
-	NEW_PATCH=$$((PATCH + 1)) && \
-	NEW_VERSION="$$MAJOR.$$MINOR.$$NEW_PATCH" && \
-	sed -i "s/^version = \"$$CURRENT\"/version = \"$$NEW_VERSION\"/" crates/agents/hr-agent/Cargo.toml && \
-	echo "Building hr-agent v$$NEW_VERSION..." && \
-	cd crates && cargo build --release -p hr-agent && cd .. && \
-	cp crates/target/release/hr-agent data/agent-binaries/hr-agent && \
-	echo "$$NEW_VERSION" > data/agent-binaries/hr-agent.version && \
-	echo "hr-agent v$$NEW_VERSION → data/agent-binaries/" && \
-	echo "Run: make agent-prod   (to push to production containers)"
-
-# Deploy hr-agent (LEGACY — only used by calendar if still running)
-agent-prod: check-prod
-	@echo "⚠ Legacy: pushing hr-agent to production (use deploy-env-agent for environments)"
-	rsync -az data/agent-binaries/ $(PROD_HOST):$(PROD_DIR)/data/agent-binaries/
-	ssh $(PROD_HOST) 'curl -sf -X POST http://127.0.0.1:4000/api/applications/agents/update' \
-		&& echo "✓ Agent update triggered on production" \
-		|| echo "⛔ Agent update failed"
 
 # Build hr-host-agent binary (auto-increments version)
 host-agent:
@@ -192,46 +149,6 @@ store:
 	APK_SIZE=$$(stat -c%s /opt/homeroute/data/store/client/homeroute-store.apk) && \
 	echo "{\"version\":\"$$NEW_NAME\",\"changelog\":\"\",\"size_bytes\":$$APK_SIZE}" > /opt/homeroute/data/store/client/version.json && \
 	echo "Deployed store v$$NEW_NAME → /api/store/client/apk"
-
-# Build env-agent binary (environment agent for nspawn containers)
-env-agent:
-	cd crates && cargo build --release -p env-agent
-	@cp crates/target/release/env-agent data/agent-binaries/env-agent 2>/dev/null || true
-	@echo "env-agent built → crates/target/release/env-agent"
-
-# Deploy env-agent to ALL environment containers + update studio-env frontend
-# Binary path: /usr/bin/env-agent (standardized across all envs)
-deploy-env-agent: env-agent studio-env
-	@echo "Deploying Studio Env frontend..."
-	@rsync -az --delete web-studio-env/dist/ $(PROD_HOST):$(PROD_DIR)/web-studio-env/dist/
-	@echo "✓ Studio Env frontend deployed"
-	@for ENV in $$(ssh $(PROD_HOST) "sudo machinectl list --no-legend" | awk '/^env-/{print $$1}'); do \
-		echo "Deploying env-agent to $$ENV..."; \
-		LEADER=$$(ssh $(PROD_HOST) "sudo machinectl show $$ENV -p Leader --value 2>/dev/null"); \
-		if [ -z "$$LEADER" ]; then \
-			echo "  ⚠ $$ENV not running, skipping"; \
-			continue; \
-		fi; \
-		ssh $(PROD_HOST) "sudo nsenter -t $$LEADER -m -u -i -n -p -- systemctl stop env-agent 2>/dev/null"; \
-		rsync -az crates/target/release/env-agent $(PROD_HOST):/var/lib/machines/$$ENV/usr/bin/env-agent --rsync-path="sudo rsync"; \
-		ssh $(PROD_HOST) "sudo nsenter -t $$LEADER -m -u -i -n -p -- systemctl start env-agent"; \
-		echo "  ✓ $$ENV updated"; \
-	done
-	@echo "All env-agents deployed"
-
-# Provision dev environment on Medion (info only — run script on router)
-provision-env-dev:
-	@echo "To provision the DEV environment (env-dev, 10.0.0.200):"
-	@echo "  On the router:  ./scripts/provision-env-dev.sh"
-	@echo "  From dev:       ssh root@10.0.0.254 'bash -s' < scripts/provision-env-dev.sh"
-	@echo "  Dry run:        ./scripts/provision-env-dev.sh --dry-run"
-
-# Provision prod environment on Medion (info only — run script on router)
-provision-env-prod:
-	@echo "To provision the PROD environment (env-prod, 10.0.0.202):"
-	@echo "  On the router:  ./scripts/provision-env-prod.sh"
-	@echo "  From dev:       ssh root@10.0.0.254 'bash -s' < scripts/provision-env-prod.sh"
-	@echo "  Dry run:        ./scripts/provision-env-prod.sh --dry-run"
 
 # Clean build artifacts
 clean:

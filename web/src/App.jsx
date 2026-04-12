@@ -20,7 +20,11 @@ import Profile from './pages/Profile';
 import Backup from './pages/Backup';
 import Energy from './pages/Energy';
 import Docs from './pages/Docs';
-import Environments from './pages/Environments';
+import Apps from './pages/Apps';
+import AppDetail from './pages/AppDetail';
+import Studio from './pages/Studio';
+import DbExplorer from './pages/DbExplorer';
+import Logs from './pages/Logs';
 
 // Component to protect routes that require authentication
 function ProtectedRoute({ children }) {
@@ -109,9 +113,13 @@ function AppRoutes() {
               <Route path="/git" element={<Git />} />
               <Route path="/backup" element={<Backup />} />
               <Route path="/energy" element={<Energy />} />
+              <Route path="/logs" element={<Logs />} />
               <Route path="/tasks" element={<Tasks />} />
               <Route path="/tasks/:id" element={<TaskDetail />} />
-              <Route path="/environments" element={<Environments />} />
+              <Route path="/studio" element={<Studio />} />
+              <Route path="/apps" element={<Navigate to="/studio" replace />} />
+              <Route path="/apps/:slug" element={<Navigate to="/studio" replace />} />
+              <Route path="/database" element={<DbExplorer />} />
               <Route path="/docs" element={<Docs />} />
               <Route path="/docs/:appId" element={<Docs />} />
             </Routes>

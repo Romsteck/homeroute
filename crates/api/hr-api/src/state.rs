@@ -1,13 +1,14 @@
-use hr_auth::AuthService;
 use hr_acme::AcmeManager;
+use hr_auth::AuthService;
 use hr_common::config::EnvConfig;
 use hr_common::events::EventBus;
-use hr_common::task_store::TaskStore;
 use hr_common::service_registry::SharedServiceRegistry;
-use hr_ipc::{NetcoreClient, EdgeClient};
-use hr_ipc::orchestrator::OrchestratorClient;
+use hr_common::task_store::TaskStore;
 use hr_git::GitService;
+use hr_ipc::orchestrator::OrchestratorClient;
+use hr_ipc::{EdgeClient, NetcoreClient};
 
+use hr_common::logging::LogStore;
 use hr_registry::AgentRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -34,6 +35,9 @@ pub struct ApiState {
 
     /// Task queue store (SQLite).
     pub task_store: Arc<TaskStore>,
+
+    /// Centralized log store.
+    pub log_store: Arc<LogStore>,
 
     /// Path to dns-dhcp-config.json
     pub dns_dhcp_config_path: PathBuf,

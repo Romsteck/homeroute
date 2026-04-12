@@ -24,7 +24,6 @@ pub struct ProxyConfig {
     #[serde(default = "default_ca_path")]
     pub ca_storage_path: PathBuf,
 
-
     /// Routes configurées
     #[serde(default)]
     pub routes: Vec<RouteConfig>,
@@ -34,10 +33,18 @@ pub struct ProxyConfig {
     pub access_log_path: Option<String>,
 }
 
-fn default_http_port() -> u16 { 80 }
-fn default_https_port() -> u16 { 443 }
-fn default_tls_mode() -> String { "local-ca".to_string() }
-fn default_ca_path() -> PathBuf { PathBuf::from("/var/lib/server-dashboard/ca") }
+fn default_http_port() -> u16 {
+    80
+}
+fn default_https_port() -> u16 {
+    443
+}
+fn default_tls_mode() -> String {
+    "local-ca".to_string()
+}
+fn default_ca_path() -> PathBuf {
+    PathBuf::from("/var/lib/server-dashboard/ca")
+}
 /// Configuration d'une route
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteConfig {
@@ -74,8 +81,12 @@ pub struct RouteConfig {
     pub cert_id: Option<String>,
 }
 
-fn default_backend() -> String { "rust".to_string() }
-fn default_enabled() -> bool { true }
+fn default_backend() -> String {
+    "rust".to_string()
+}
+fn default_enabled() -> bool {
+    true
+}
 
 impl ProxyConfig {
     /// Charge la configuration depuis un fichier JSON
@@ -94,10 +105,7 @@ impl ProxyConfig {
 
     /// Retourne uniquement les routes actives
     pub fn active_routes(&self) -> Vec<&RouteConfig> {
-        self.routes
-            .iter()
-            .filter(|r| r.enabled)
-            .collect()
+        self.routes.iter().filter(|r| r.enabled).collect()
     }
 
     /// Retourne les routes groupées par domaine

@@ -1,9 +1,9 @@
 use axum::{
+    Json, Router,
     extract::State,
     routing::{get, post},
-    Json, Router,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::state::ApiState;
 
@@ -18,7 +18,9 @@ pub fn router() -> Router<ApiState> {
 async fn status(State(state): State<ApiState>) -> Json<Value> {
     match state.netcore.service_status().await {
         Ok(services) => {
-            let active = services.iter().any(|s| s.name.starts_with("dns-") && s.state == "running");
+            let active = services
+                .iter()
+                .any(|s| s.name.starts_with("dns-") && s.state == "running");
             Json(json!({
                 "success": true,
                 "active": active,
@@ -66,10 +68,7 @@ async fn get_config(State(state): State<ApiState>) -> Json<Value> {
     }
 }
 
-async fn update_config(
-    State(state): State<ApiState>,
-    Json(body): Json<Value>,
-) -> Json<Value> {
+async fn update_config(State(state): State<ApiState>, Json(body): Json<Value>) -> Json<Value> {
     let config_path = &state.dns_dhcp_config_path;
 
     // Write the new config

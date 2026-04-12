@@ -54,9 +54,15 @@ impl ProxyMetrics {
     pub fn record_request(&self, domain: &str, status: u16) {
         self.global_total.fetch_add(1, Ordering::Relaxed);
         match status {
-            200..=299 => { self.global_2xx.fetch_add(1, Ordering::Relaxed); }
-            400..=499 => { self.global_4xx.fetch_add(1, Ordering::Relaxed); }
-            500..=599 => { self.global_5xx.fetch_add(1, Ordering::Relaxed); }
+            200..=299 => {
+                self.global_2xx.fetch_add(1, Ordering::Relaxed);
+            }
+            400..=499 => {
+                self.global_4xx.fetch_add(1, Ordering::Relaxed);
+            }
+            500..=599 => {
+                self.global_5xx.fetch_add(1, Ordering::Relaxed);
+            }
             _ => {}
         }
 

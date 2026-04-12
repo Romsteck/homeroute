@@ -9,6 +9,7 @@ hr-auth = { path = "../../edge/hr-auth" }
 hr-acme = { path = "../../edge/hr-acme" }
 hr-proxy = { path = "../../edge/hr-proxy" }
 hr-ipc = { path = "../../shared/hr-ipc" }
+hr-apps = { path = "../../orchestrator/hr-apps" }
 
 hr-registry = { path = "../../orchestrator/hr-registry" }
 hr-tunnel = { path = "../../edge/hr-tunnel" }

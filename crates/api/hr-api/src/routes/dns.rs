@@ -1,9 +1,5 @@
-use axum::{
-    extract::State,
-    routing::get,
-    Json, Router,
-};
-use serde_json::{json, Value};
+use axum::{Json, Router, extract::State, routing::get};
+use serde_json::{Value, json};
 
 use crate::state::ApiState;
 

@@ -2,8 +2,8 @@ import { NavLink, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Server, Shield, Globe, Settings,
   ArrowLeftRight, RefreshCw, LogOut, Activity,
-  User, HardDrive, Lock, Layers,
-  Store as StoreIcon, GitBranch, Archive, X, ListTodo, Zap, BookOpen, ExternalLink
+  User, HardDrive, Lock, Boxes, Code2, Database,
+  Store as StoreIcon, GitBranch, Archive, X, ListTodo, Zap, BookOpen, ExternalLink, ScrollText
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useEffect, useState } from 'react';
@@ -33,8 +33,8 @@ const navGroups = [
   {
     label: 'Applications',
     items: [
-      { to: '/environments', icon: Layers, label: 'Environnements', highlight: true },
-      { href: 'https://make.mynetwk.biz', icon: ExternalLink, label: 'Maker Portal', external: true },
+      { to: '/studio', icon: Code2, label: 'Studio', highlight: true },
+      { to: '/database', icon: Database, label: 'Base de donnees' },
       { to: '/store', icon: StoreIcon, label: 'Store' },
       { to: '/git', icon: GitBranch, label: 'Git' },
       { to: '/docs', icon: BookOpen, label: 'Docs' },
@@ -48,7 +48,7 @@ const navGroups = [
       { to: '/updates', icon: RefreshCw, label: 'Mises à jour' },
       { to: '/energy', icon: Zap, label: 'Energie' },
       { to: '/backup', icon: Archive, label: 'Backup' },
-      { to: '/tasks', icon: ListTodo, label: 'Activité' },
+      { to: '/logs', icon: ScrollText, label: 'Logs' },
     ],
   },
 ];

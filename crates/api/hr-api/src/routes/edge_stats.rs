@@ -1,9 +1,4 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    routing::get,
-    Json, Router,
-};
+use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use hr_ipc::edge::EdgeRequest;
 
 use crate::state::ApiState;

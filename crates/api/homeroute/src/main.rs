@@ -1,24 +1,38 @@
-use hr_auth::AuthService;
 use hr_acme::{AcmeConfig, AcmeManager};
+use hr_auth::AuthService;
 use hr_common::config::EnvConfig;
 use hr_common::events::EventBus;
+use hr_common::logging::{LogService, LogStore, LoggingLayer};
 use hr_common::service_registry::new_service_registry;
-use hr_common::supervisor::{spawn_supervised, ServicePriority};
-use hr_ipc::{NetcoreClient, EdgeClient};
-use hr_ipc::orchestrator::OrchestratorClient;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use hr_common::supervisor::{ServicePriority, spawn_supervised};
 use hr_git::GitService;
+use hr_ipc::orchestrator::OrchestratorClient;
+use hr_ipc::{EdgeClient, NetcoreClient};
+use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 use tracing::info;
+use tracing_subscriber::Layer as _;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,homeroute=debug".parse().unwrap()),
+    // Initialize centralized log store
+    let log_store = Arc::new(
+        LogStore::new(Path::new("/opt/homeroute/data/logs.db")).expect("Failed to init log store"),
+    );
+
+    // Initialize logging with custom layer
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer().with_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "info,homeroute=debug".parse().unwrap()),
+            ),
         )
+        .with(LoggingLayer::new(log_store.clone(), LogService::Homeroute))
         .init();
 
     info!("HomeRoute starting...");
@@ -54,7 +68,9 @@ async fn main() -> anyhow::Result<()> {
         } else {
             "https://acme-v02.api.letsencrypt.org/directory".to_string()
         },
-        account_email: env.acme_email.clone()
+        account_email: env
+            .acme_email
+            .clone()
             .unwrap_or_else(|| format!("admin@{}", env.base_domain)),
         renewal_threshold_days: 30,
     };
@@ -62,19 +78,32 @@ async fn main() -> anyhow::Result<()> {
     acme.init().await?;
     info!(
         "ACME manager initialized ({})",
-        if acme.is_initialized() { "account loaded" } else { "new account created" }
+        if acme.is_initialized() {
+            "account loaded"
+        } else {
+            "new account created"
+        }
     );
 
     // ── IPC clients ───────────────────────────────────────────────────
 
     let netcore = Arc::new(NetcoreClient::new("/run/hr-netcore.sock"));
-    info!("Netcore IPC client configured (socket: {})", netcore.socket_path().display());
+    info!(
+        "Netcore IPC client configured (socket: {})",
+        netcore.socket_path().display()
+    );
 
     let edge = Arc::new(EdgeClient::new("/run/hr-edge.sock"));
-    info!("Edge IPC client configured (socket: {})", edge.socket_path().display());
+    info!(
+        "Edge IPC client configured (socket: {})",
+        edge.socket_path().display()
+    );
 
     let orchestrator = Arc::new(OrchestratorClient::new("/run/hr-orchestrator.sock"));
-    info!("Orchestrator IPC client configured (socket: {})", orchestrator.socket_path().display());
+    info!(
+        "Orchestrator IPC client configured (socket: {})",
+        orchestrator.socket_path().display()
+    );
 
     // ── Management API ────────────────────────────────────────────────
 
@@ -108,14 +137,11 @@ async fn main() -> anyhow::Result<()> {
         git: Some(Arc::new(GitService::new())),
         update_log,
         task_store: task_store.clone(),
+        log_store: log_store.clone(),
     };
 
-    let api_router = hr_api::build_router(api_state.clone());
-    let make_router = hr_api::build_make_router(api_state.clone());
-    let studio_router = hr_api::build_studio_router(api_state);
+    let api_router = hr_api::build_router(api_state);
     let api_port = env.api_port;
-    let make_port = 4002u16;
-    let studio_port = 4003u16;
 
     let reg = service_registry.clone();
     spawn_supervised("api", ServicePriority::Important, reg, move || {
@@ -130,33 +156,16 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Maker Portal on a dedicated port (make.mynetwk.biz → proxy → :4002)
-    let reg = service_registry.clone();
-    spawn_supervised("maker-portal", ServicePriority::Important, reg, move || {
-        let router = make_router.clone();
-        let port = make_port;
-        async move {
-            let addr: SocketAddr = format!("[::]:{}", port).parse()?;
-            let listener = tokio::net::TcpListener::bind(addr).await?;
-            info!("Maker Portal listening on {}", addr);
-            axum::serve(listener, router).await?;
-            Ok(())
-        }
-    });
 
-    // Studio on a dedicated port (studio.{env}.mynetwk.biz → proxy → :4003)
-    let reg = service_registry.clone();
-    spawn_supervised("studio", ServicePriority::Important, reg, move || {
-        let router = studio_router.clone();
-        let port = studio_port;
-        async move {
-            let addr: SocketAddr = format!("[::]:{}", port).parse()?;
-            let listener = tokio::net::TcpListener::bind(addr).await?;
-            info!("Studio listening on {}", addr);
-            axum::serve(listener, router).await?;
-            Ok(())
-        }
-    });
+    // ── Event stream (receive push events from orchestrator) ──────────
+    {
+        let events = events.clone();
+        tokio::spawn(async move {
+            let socket_path = std::path::Path::new(hr_ipc::event_stream::EVENT_STREAM_SOCKET);
+            hr_ipc::event_stream::connect_event_stream(socket_path, events).await;
+        });
+        info!("Event stream client connecting to {}", hr_ipc::event_stream::EVENT_STREAM_SOCKET);
+    }
 
     // ── Background tasks ────────────────────────────────────────────────
 
@@ -171,8 +180,14 @@ async fn main() -> anyhow::Result<()> {
                 let read_cpu = || -> Option<(u64, u64)> {
                     let content = std::fs::read_to_string("/proc/stat").ok()?;
                     let line = content.lines().next()?;
-                    let vals: Vec<u64> = line.split_whitespace().skip(1).filter_map(|v| v.parse().ok()).collect();
-                    if vals.len() < 4 { return None; }
+                    let vals: Vec<u64> = line
+                        .split_whitespace()
+                        .skip(1)
+                        .filter_map(|v| v.parse().ok())
+                        .collect();
+                    if vals.len() < 4 {
+                        return None;
+                    }
                     let idle = vals[3];
                     let total: u64 = vals.iter().sum();
                     Some((idle, total))
@@ -182,7 +197,11 @@ async fn main() -> anyhow::Result<()> {
                     (Some((idle1, total1)), Some((idle2, total2))) => {
                         let di = idle2.saturating_sub(idle1) as f64;
                         let dt = total2.saturating_sub(total1) as f64;
-                        if dt > 0.0 { ((1.0 - di / dt) * 1000.0).round() / 10.0 } else { 0.0 }
+                        if dt > 0.0 {
+                            ((1.0 - di / dt) * 1000.0).round() / 10.0
+                        } else {
+                            0.0
+                        }
                     }
                     _ => 0.0,
                 };
@@ -190,7 +209,8 @@ async fn main() -> anyhow::Result<()> {
                 let mem = (|| -> Option<(u64, u64)> {
                     let info = std::fs::read_to_string("/proc/meminfo").ok()?;
                     let parse_kb = |key: &str| -> Option<u64> {
-                        info.lines().find(|l| l.starts_with(key))
+                        info.lines()
+                            .find(|l| l.starts_with(key))
                             .and_then(|l| l.split_whitespace().nth(1))
                             .and_then(|v| v.parse::<u64>().ok())
                     };
@@ -199,12 +219,14 @@ async fn main() -> anyhow::Result<()> {
                     Some(((total_kb - avail_kb) * 1024, total_kb * 1024))
                 })();
                 let (mem_used, mem_total) = mem.unwrap_or((0, 0));
-                let _ = events.host_metrics.send(hr_common::events::HostMetricsEvent {
-                    host_id: "local".to_string(),
-                    cpu_percent: cpu_percent as f32,
-                    memory_used_bytes: mem_used,
-                    memory_total_bytes: mem_total,
-                });
+                let _ = events
+                    .host_metrics
+                    .send(hr_common::events::HostMetricsEvent {
+                        host_id: "local".to_string(),
+                        cpu_percent: cpu_percent as f32,
+                        memory_used_bytes: mem_used,
+                        memory_total_bytes: mem_total,
+                    });
             }
         });
     }
@@ -226,16 +248,20 @@ async fn main() -> anyhow::Result<()> {
                     if let Some(data) = resp.data {
                         if let Some(arr) = data.as_array() {
                             for item in arr {
-                                if let (Some(app_id), Some(obj)) = (item.get(0).and_then(|v| v.as_str()), item.get(1)) {
+                                if let (Some(app_id), Some(obj)) =
+                                    (item.get(0).and_then(|v| v.as_str()), item.get(1))
+                                {
                                     if let (Some(mem), Some(cpu)) = (
                                         obj.get("memory_bytes").and_then(|v| v.as_u64()),
                                         obj.get("cpu_percent").and_then(|v| v.as_f64()),
                                     ) {
-                                        let _ = events.agent_metrics.send(hr_common::events::AgentMetricsEvent {
-                                            app_id: app_id.to_string(),
-                                            memory_bytes: mem,
-                                            cpu_percent: cpu as f32,
-                                        });
+                                        let _ = events.agent_metrics.send(
+                                            hr_common::events::AgentMetricsEvent {
+                                                app_id: app_id.to_string(),
+                                                memory_bytes: mem,
+                                                cpu_percent: cpu as f32,
+                                            },
+                                        );
                                     }
                                 }
                             }
@@ -271,14 +297,32 @@ async fn main() -> anyhow::Result<()> {
                     _ => continue,
                 };
 
-                let status = resp.get("status").cloned().unwrap_or_else(|| serde_json::json!({}));
-                let progress = resp.get("progress").cloned().unwrap_or_else(|| serde_json::json!({"running": false}));
-                let repos_val = resp.get("repos").cloned().unwrap_or_else(|| serde_json::json!([]));
-                let jobs_val = resp.get("jobs").cloned().unwrap_or_else(|| serde_json::json!([]));
+                let status = resp
+                    .get("status")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let progress = resp
+                    .get("progress")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({"running": false}));
+                let repos_val = resp
+                    .get("repos")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([]));
+                let jobs_val = resp
+                    .get("jobs")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([]));
 
                 // Track running state for adaptive polling
-                was_running = status.get("running").and_then(|v| v.as_bool()).unwrap_or(false)
-                    || progress.get("running").and_then(|v| v.as_bool()).unwrap_or(false);
+                was_running = status
+                    .get("running")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                    || progress
+                        .get("running")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
 
                 let repos = repos_val.as_array().cloned().unwrap_or_default();
                 let latest_job = jobs_val.as_array().and_then(|jobs| jobs.first().cloned());
@@ -322,7 +366,8 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 interval.tick().await;
                 info!("Hourly update scan starting...");
-                hr_api::routes::updates::run_background_scan(events.clone(), orchestrator.clone()).await;
+                hr_api::routes::updates::run_background_scan(events.clone(), orchestrator.clone())
+                    .await;
             }
         });
     }
@@ -339,71 +384,28 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Environment status poller → websocket (every 3s, only emits on change)
+    // Log flush (every 5s — ring buffer → SQLite)
     {
-        let events = events.clone();
-        let orchestrator = orchestrator.clone();
+        let flush_store = log_store.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
-            let mut last_snapshot: Option<String> = None;
             loop {
-                interval.tick().await;
-
-                let resp = orchestrator
-                    .request(&hr_ipc::orchestrator::OrchestratorRequest::ListEnvironments)
-                    .await;
-
-                let envs: Vec<serde_json::Value> = match resp {
-                    Ok(r) if r.ok => {
-                        r.data
-                            .and_then(|d| d.get("environments").cloned())
-                            .and_then(|v| serde_json::from_value(v).ok())
-                            .unwrap_or_default()
-                    }
-                    _ => continue,
-                };
-
-                let snapshots: Vec<hr_common::events::EnvStatusSnapshot> = envs
-                    .iter()
-                    .filter_map(|env| {
-                        let slug = env.get("slug")?.as_str()?.to_string();
-                        let status = env.get("status")?.as_str()?.to_string();
-                        let agent_connected = env.get("agent_connected")?.as_bool()?;
-                        let agent_version = env.get("agent_version").and_then(|v| v.as_str()).map(|s| s.to_string());
-                        let apps: Vec<hr_common::events::EnvAppSnapshot> = env
-                            .get("apps")
-                            .and_then(|a| a.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|a| {
-                                        Some(hr_common::events::EnvAppSnapshot {
-                                            slug: a.get("slug")?.as_str()?.to_string(),
-                                            running: a.get("running").and_then(|v| v.as_bool()).unwrap_or(false),
-                                        })
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        Some(hr_common::events::EnvStatusSnapshot {
-                            slug,
-                            status,
-                            agent_connected,
-                            agent_version,
-                            apps,
-                        })
-                    })
-                    .collect();
-
-                // Only emit if something changed
-                let serialized = serde_json::to_string(&snapshots).unwrap_or_default();
-                if last_snapshot.as_deref() == Some(&serialized) {
-                    continue;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                if let Err(e) = flush_store.flush_to_db().await {
+                    eprintln!("Log flush error: {e}");
                 }
-                last_snapshot = Some(serialized);
+            }
+        });
+    }
 
-                let _ = events.env_status.send(hr_common::events::EnvStatusEvent {
-                    environments: snapshots,
-                });
+    // Log compaction (every hour — retention rules)
+    {
+        let compact_store = log_store.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                if let Err(e) = compact_store.compact().await {
+                    eprintln!("Log compaction error: {e}");
+                }
             }
         });
     }

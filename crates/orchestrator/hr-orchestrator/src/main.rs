@@ -1,22 +1,24 @@
 #![recursion_limit = "512"]
-mod env_manager;
-mod hooks;
+mod apps_handler;
+mod backup_pipeline;
 mod ipc_handler;
 mod mcp;
-mod backup_pipeline;
 mod ws_routes;
-mod container_watcher;
 
 use hr_acme::{AcmeConfig, AcmeManager};
+use hr_apps::{AppRegistry, AppSupervisor, ContextGenerator, DbManager, PortRegistry};
 use hr_common::config::EnvConfig;
 use hr_common::events::EventBus;
-use hr_ipc::{EdgeClient, NetcoreClient};
+use hr_ipc::EdgeClient;
 use hr_registry::AgentRegistry;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::services::ServeDir;
 use tracing::{info, warn};
+use tracing_subscriber::Layer as _;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use ipc_handler::OrchestratorHandler;
 
@@ -25,27 +27,57 @@ const ORCHESTRATOR_WS_PORT: u16 = 4001;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Install rustls crypto provider (ring)
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,hr_orchestrator=debug".parse().unwrap()),
+    let log_store = std::sync::Arc::new(
+        hr_common::logging::LogStore::new(std::path::Path::new("/opt/homeroute/data/logs.db"))
+            .expect("Failed to init log store"),
+    );
+
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer().with_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "info,hr_orchestrator=debug".parse().unwrap()),
+            ),
         )
+        .with(hr_common::logging::LoggingLayer::new(
+            log_store.clone(),
+            hr_common::logging::LogService::Orchestrator,
+        ))
         .init();
 
     info!("hr-orchestrator starting...");
 
-    // Load environment config
+    {
+        let flush_store = log_store.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if let Err(e) = flush_store.flush_to_db().await {
+                    eprintln!("Log flush error: {e}");
+                }
+            }
+        });
+    }
+    {
+        let compact_store = log_store.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                if let Err(e) = compact_store.compact().await {
+                    eprintln!("Log compaction error: {e}");
+                }
+            }
+        });
+    }
+
     let env = EnvConfig::load(None);
     info!("Base domain: {}", env.base_domain);
 
-    // Initialize event bus (local to hr-orchestrator)
     let events = Arc::new(EventBus::new());
 
-    // ── ACME (read-only, for checking existing certificates) ────────
+    // ── ACME ────────────────────────────────────────────────────────
 
     let acme_config = AcmeConfig {
         storage_path: env.acme_storage_path.to_string_lossy().to_string(),
@@ -65,22 +97,11 @@ async fn main() -> anyhow::Result<()> {
     };
     let acme = Arc::new(AcmeManager::new(acme_config));
     acme.init().await?;
-    info!(
-        "ACME manager initialized ({})",
-        if acme.is_initialized() {
-            "account loaded"
-        } else {
-            "new account created"
-        }
-    );
+    info!("ACME manager initialized");
 
-    // ── IPC client for hr-edge ──────────────────────────────────────
+    // ── IPC clients ──────────────────────────────────────────────────
 
     let edge = Arc::new(EdgeClient::new("/run/hr-edge.sock"));
-    info!(
-        "Edge IPC client configured (socket: {})",
-        edge.socket_path().display()
-    );
 
     // ── Agent Registry ──────────────────────────────────────────────
 
@@ -90,11 +111,8 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(env.clone()),
         events.clone(),
     ));
-
-    // Provide ACME manager to registry for per-app certificate management
     registry.set_acme(acme.clone()).await;
 
-        // Heartbeat monitor
     {
         let reg = registry.clone();
         tokio::spawn(async move {
@@ -102,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Populate app routes for all applications with IPv4 addresses via edge IPC
+    // Populate app routes at startup
     {
         let apps = registry.list_applications().await;
         let base_domain = &env.base_domain;
@@ -122,11 +140,7 @@ async fn main() -> anyhow::Result<()> {
                         )
                         .await
                     {
-                        warn!(
-                            domain = route.domain,
-                            error = %e,
-                            "Failed to set app route via edge IPC at startup"
-                        );
+                        warn!(domain = route.domain, error = %e, "Failed to set app route at startup");
                     }
                 }
             }
@@ -146,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
     }
     info!("Git service initialized");
 
-    // ── CertReady listener — notify agents of certificate renewals ───
+    // ── CertReady listener ──────────────────────────────────────────
 
     {
         let registry_cert = registry.clone();
@@ -154,50 +168,31 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             while let Ok(event) = cert_rx.recv().await {
                 if event.slug.is_empty() {
-                    // Global cert — notify ALL connected agents
                     let apps = registry_cert.list_applications().await;
                     for app in &apps {
                         if registry_cert.is_agent_connected(&app.id).await {
-                            if let Err(e) = registry_cert
+                            let _ = registry_cert
                                 .send_to_agent(
                                     &app.id,
                                     hr_registry::RegistryMessage::CertRenewal {
                                         slug: String::new(),
                                     },
                                 )
-                                .await
-                            {
-                                warn!(
-                                    app = %app.slug,
-                                    error = %e,
-                                    "Failed to send CertRenewal to agent"
-                                );
-                            }
+                                .await;
                         }
                     }
-                    info!("Sent global CertRenewal notification to all connected agents");
                 } else {
-                    // Per-app cert — notify only the matching agent
                     let apps = registry_cert.list_applications().await;
                     if let Some(app) = apps.iter().find(|a| a.slug == event.slug) {
                         if registry_cert.is_agent_connected(&app.id).await {
-                            if let Err(e) = registry_cert
+                            let _ = registry_cert
                                 .send_to_agent(
                                     &app.id,
                                     hr_registry::RegistryMessage::CertRenewal {
                                         slug: event.slug.clone(),
                                     },
                                 )
-                                .await
-                            {
-                                warn!(
-                                    slug = %event.slug,
-                                    error = %e,
-                                    "Failed to send CertRenewal to agent"
-                                );
-                            } else {
-                                info!(slug = %event.slug, "Sent CertRenewal notification to agent");
-                            }
+                                .await;
                         }
                     }
                 }
@@ -205,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // ── Periodic cleanup of stale signals ────────────────────────────
+    // ── Periodic cleanup ────────────────────────────────────────────
 
     {
         let reg = registry.clone();
@@ -217,7 +212,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Clean up stale migration transfer files from /tmp
+    // Clean up stale migration files
     tokio::spawn(async {
         if let Ok(mut entries) = tokio::fs::read_dir("/tmp").await {
             while let Ok(Some(entry)) = entries.next_entry().await {
@@ -234,47 +229,64 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // ── IPC server (Unix socket) ─────────────────────────────────────
+    // ── Backup pipeline ──────────────────────────────────────────────
 
-    // ── Backup pipeline ──────────────────────────────────────────────────
     let backup_pipeline = Arc::new(backup_pipeline::BackupPipeline::new(events.clone()));
     backup_pipeline::spawn_daily_scheduler(backup_pipeline.clone());
-    info!("Backup pipeline initialized (daily at 20:00 UTC / 22h Brussels)");
+    info!("Backup pipeline initialized");
 
-    // ── Container health watcher ──────────────────────────────────────────
-    container_watcher::ContainerWatcher::spawn(registry.clone(), events.clone());
-    info!("Container health watcher spawned (60s interval, auto-recovery)");
+    // ── hr-apps ──────────────────────────────────────────────────────
 
-    // ── Environment Manager ───────────────────────────────────────
-    let env_state_path = PathBuf::from("/var/lib/server-dashboard/environments.json");
-    let env_manager = Arc::new(env_manager::EnvironmentManager::new(env_state_path));
+    let app_registry = AppRegistry::load()
+        .await
+        .expect("Failed to load app registry");
+    let port_registry = PortRegistry::load()
+        .await
+        .expect("Failed to load port registry");
+    let supervisor = AppSupervisor::new(
+        app_registry.clone(),
+        port_registry.clone(),
+        events.app_state.clone(),
+    );
+    let db_manager = DbManager::new("/opt/homeroute/apps");
+    let mcp_endpoint_url = std::env::var("HR_APPS_MCP_ENDPOINT")
+        .unwrap_or_else(|_| "http://127.0.0.1:4001/mcp".to_string());
+    let context_generator = Arc::new(ContextGenerator::new(
+        "/opt/homeroute/apps",
+        env.base_domain.clone(),
+        mcp_endpoint_url,
+    ));
     info!(
-        "Environment manager initialized ({} environments)",
-        env_manager.list_environments().await.len()
+        "hr-apps initialized ({} apps)",
+        app_registry.list().await.len()
     );
 
-    // Heartbeat monitor for env-agents
+    if let Err(e) = supervisor.start_all_running().await {
+        warn!(error = %e, "start_all_running failed at boot");
+    }
+
     {
-        let em = env_manager.clone();
+        let sup = supervisor.clone();
         tokio::spawn(async move {
-            em.run_heartbeat_monitor().await;
+            let _ = tokio::signal::ctrl_c().await;
+            if let Err(e) = sup.shutdown_all().await {
+                warn!(error = %e, "AppSupervisor shutdown_all failed");
+            }
         });
     }
 
-    // ── Pipeline Engine + Store ────────────────────────────────────
-    let pipeline_engine = Arc::new(hr_pipeline::PipelineEngine::new());
-    let pipeline_store = Arc::new(hr_pipeline::PipelineStore::new(
-        PathBuf::from("/var/lib/server-dashboard/pipelines.json"),
-    ));
-    info!("Pipeline engine initialized");
+    // ── IPC server ──────────────────────────────────────────────────
 
     let handler = Arc::new(OrchestratorHandler {
         registry: registry.clone(),
         git: git_service.clone(),
         backup: backup_pipeline.clone(),
-        env_manager: env_manager.clone(),
         edge: edge.clone(),
         base_domain: env.base_domain.clone(),
+        app_supervisor: supervisor.clone(),
+        db_manager: db_manager.clone(),
+        context_generator: context_generator.clone(),
+        log_store: log_store.clone(),
     });
 
     let ipc_handle = tokio::spawn({
@@ -286,34 +298,47 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
+    info!("IPC server listening on {}", ORCHESTRATOR_SOCKET);
 
-    info!(
-        "IPC server listening on {}",
-        ORCHESTRATOR_SOCKET
-    );
+    // ── Event stream (push events to homeroute) ─────────────────────
+    {
+        let app_state_tx = events.app_state.clone();
+        let log_tx = events.log_entry.clone();
+        tokio::spawn(async move {
+            let socket_path = std::path::Path::new(hr_ipc::event_stream::EVENT_STREAM_SOCKET);
+            if let Err(e) = hr_ipc::event_stream::serve_event_stream(socket_path, app_state_tx, log_tx).await {
+                tracing::error!("Event stream server error: {e:#}");
+            }
+        });
+        info!("Event stream server listening on {}", hr_ipc::event_stream::EVENT_STREAM_SOCKET);
+    }
 
-    // ── IPC client for hr-netcore (needed by WS routes for DNS records) ──
+    // ── MCP endpoint ────────────────────────────────────────────────
 
-    let netcore = Arc::new(NetcoreClient::new("/run/hr-netcore.sock"));
-
-    // ── MCP endpoint (optional, requires MCP_TOKEN env var) ─────────
-
-    let mcp_state = mcp::McpState::from_env(registry.clone(), git_service.clone(), edge.clone(), env_manager.clone(), pipeline_engine.clone(), pipeline_store.clone());
+    let mcp_state = {
+        let mut st = mcp::McpState::from_env(registry.clone(), git_service.clone(), edge.clone());
+        if let Some(ref mut s) = st {
+            s.apps_ctx = Some(apps_handler::AppsContext {
+                supervisor: supervisor.clone(),
+                db_manager: db_manager.clone(),
+                context_generator: context_generator.clone(),
+                edge: edge.clone(),
+                git: git_service.clone(),
+                base_domain: env.base_domain.clone(),
+                log_store: log_store.clone(),
+            });
+        }
+        st
+    };
     if mcp_state.is_some() {
         info!("MCP endpoint enabled (POST /mcp)");
     }
 
-    // ── Axum server (port 4001) — WebSocket + health endpoints ────
+    // ── Axum server (port 4001) ─────────────────────────────────────
 
     let ws_state = ws_routes::WsState {
         registry: registry.clone(),
-        env_manager: env_manager.clone(),
-        env: Arc::new(env.clone()),
         events: events.clone(),
-        edge: edge.clone(),
-        netcore,
-        pipeline_engine: pipeline_engine.clone(),
-        git: git_service.clone(),
     };
 
     let ws_router = axum::Router::new()
@@ -323,16 +348,17 @@ async fn main() -> anyhow::Result<()> {
                 axum::Json(serde_json::json!({"status": "ok", "service": "hr-orchestrator"}))
             }),
         )
-        .route("/agents/ws", axum::routing::get(ws_routes::agent_ws))
-        .route("/envs/ws", axum::routing::get(ws_routes::env_agent_ws))
-        .route("/host-agents/ws", axum::routing::get(ws_routes::host_agent_ws))
-        // Alias: host agents connect via legacy path /api/hosts/agent/ws
-        .route("/api/hosts/agent/ws", axum::routing::get(ws_routes::host_agent_ws))
-        // Serve build artifacts for env-agents to download
+        .route(
+            "/host-agents/ws",
+            axum::routing::get(ws_routes::host_agent_ws),
+        )
+        .route(
+            "/api/hosts/agent/ws",
+            axum::routing::get(ws_routes::host_agent_ws),
+        )
         .nest_service("/artifacts", ServeDir::new("/opt/homeroute/data/artifacts"))
         .with_state(ws_state);
 
-    // Merge MCP route (has its own state, only if MCP_TOKEN is set)
     let ws_router = if let Some(mcp_st) = mcp_state {
         let mcp_router = axum::Router::new()
             .route("/mcp", axum::routing::post(mcp::mcp_handler))
@@ -341,16 +367,6 @@ async fn main() -> anyhow::Result<()> {
     } else {
         ws_router
     };
-
-    // Merge git push hook route
-    let hook_state = hooks::HookState {
-        pipeline_engine: pipeline_engine.clone(),
-        pipeline_store: pipeline_store.clone(),
-    };
-    let hook_router = axum::Router::new()
-        .route("/hooks/git-push", axum::routing::post(hooks::handle_git_push_hook))
-        .with_state(hook_state);
-    let ws_router = ws_router.merge(hook_router);
 
     let ws_handle = tokio::spawn(async move {
         let addr: SocketAddr = format!("[::]:{}", ORCHESTRATOR_WS_PORT)
@@ -368,16 +384,15 @@ async fn main() -> anyhow::Result<()> {
     // ── Ready ────────────────────────────────────────────────────────
 
     info!("hr-orchestrator started successfully");
-    info!("  Registry: {} applications", registry.list_applications().await.len());
-    info!("  Containers: restored");
-    info!("  Git: initialized");
+    info!(
+        "  Registry: {} applications",
+        registry.list_applications().await.len()
+    );
     info!("  IPC: {}", ORCHESTRATOR_SOCKET);
     info!("  WS: port {}", ORCHESTRATOR_WS_PORT);
-    info!("  MCP: {}", if std::env::var("MCP_TOKEN").is_ok() { "enabled" } else { "disabled (set MCP_TOKEN)" });
 
-    // Wait for shutdown signal (SIGINT or SIGTERM)
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut sigterm = signal(SignalKind::terminate())?;
         let mut sigint = signal(SignalKind::interrupt())?;
         tokio::select! {
@@ -386,7 +401,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Abort background tasks
     ipc_handle.abort();
     ws_handle.abort();
 

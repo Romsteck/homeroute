@@ -6,10 +6,10 @@ HomeRoute utilise **4 binaires** communiquant via IPC Unix sockets :
 
 ```
 hr-edge (443, 80)                hr-orchestrator (4001)
-  ├─ hr-proxy (reverse proxy)      ├─ hr-registry (agents)
-  ├─ hr-acme (Let's Encrypt)       ├─ hr-container (nspawn)
-  ├─ hr-auth (sessions)            ├─ hr-git (bare repos)
-  └─ hr-tunnel (QUIC client)       └─ WebSocket agents/hosts
+  ├─ hr-proxy (reverse proxy)      ├─ hr-apps (supervisor Tokio)
+  ├─ hr-acme (Let's Encrypt)       ├─ hr-git (bare repos)
+  ├─ hr-auth (sessions)            └─ hr-db (SQLite shared lib)
+  └─ hr-tunnel (QUIC client)
          │                                │
          └──────── IPC ───────────────────┘
                      │
@@ -22,7 +22,7 @@ hr-edge (443, 80)                hr-orchestrator (4001)
 
 - **`hr-netcore`** : DNS, DHCP, Adblock, IPv6 — ne redémarre quasi jamais
 - **`hr-edge`** : Reverse proxy HTTPS, TLS/ACME, Auth — restart rare
-- **`hr-orchestrator`** : Containers nspawn, Agent registry, Git, WebSocket agents/hosts — restart modéré
+- **`hr-orchestrator`** : Supervisor Tokio des apps locales (`hr-apps`), Git, DB SQLite — restart modéré
 - **`homeroute`** : API REST thin shell, WebSocket events frontend, SPA — restart fréquent (zéro impact proxy)
 - **Communication** : IPC Unix sockets (`/run/hr-{service}.sock`, JSON-line)
 - **Frontend** : React/Vite dans `web/` — fichiers statiques servis par Rust
@@ -49,37 +49,22 @@ crates/
 │   └── hr-ipv6/               #   RA + DHCPv6 stateless
 ├── orchestrator/              # Service hr-orchestrator (4001)
 │   ├── hr-orchestrator/       #   binaire
-│   ├── hr-registry/           #   applications, agents WebSocket
-│   ├── hr-container/          #   systemd-nspawn lifecycle
+│   ├── hr-apps/               #   supervisor Tokio des apps locales (lifecycle, ports, logs)
 │   ├── hr-git/                #   bare repos, Smart HTTP
-│   ├── hr-db/                 #   Dataverse engine (SQLite, shared lib)
-│   ├── hr-environment/        #   types, protocole, config des environnements
-│   └── hr-pipeline/           #   pipelines déploiement (store, runner, migration)
-├── api/                       # Service homeroute (4000)
-│   ├── homeroute/             #   binaire (thin shell)
-│   └── hr-api/                #   routes axum, WebSocket events
-└── agents/                    # Binaires autonomes
-    ├── hr-agent/              #   agent dans containers nspawn (legacy)
-    ├── hr-host-agent/         #   agent hôte distant
-    └── env-agent/             #   agent environnement (multi-app, DB, studio)
+│   └── hr-db/                 #   Dataverse engine (SQLite, shared lib)
+└── api/                       # Service homeroute (4000)
+    ├── homeroute/             #   binaire (thin shell)
+    └── hr-api/                #   routes axum, WebSocket events
 ```
 
-### Environnements (nouveau)
+### Apps locales
 
-HomeRoute gère des **environnements** inspirés de Microsoft Power Platform :
+HomeRoute exécute les apps directement sur l'hôte sous le contrôle d'un **supervisor Tokio** intégré à `hr-orchestrator` (`hr-apps`). Pas de container par app, pas d'environnements.
 
-- 1 container nspawn = 1 environnement (dev/acc/prod)
-- N apps comme processus dans chaque env
-- `env-agent` pilote chaque env (DB, apps, MCP, studio)
-- Pipelines pour promouvoir entre envs (build → test → migrate DB → deploy → health)
-
-```
-make.mynetwk.biz                →  Maker portal (apps, envs, pipelines)
-studio.dev.mynetwk.biz          →  Studio env DEV (code-server + Claude Code)
-{app}.{env}.mynetwk.biz         →  App dans un env
-```
-
-Voir `PLAN-ENVIRONMENTS.md` pour le plan complet.
+- 1 app = 1 dossier `/opt/homeroute/apps/{slug}/` + 1 processus supervisé
+- URL publique : `{slug}.mynetwk.biz` (route ajoutée à hr-edge)
+- Visibility : `public` (anon) ou `private` (auth via hr-auth)
+- Code-server global sur `studio.mynetwk.biz` → `127.0.0.1:8443`, workspace `/opt/homeroute/apps/`
 
 ### IPC Sockets
 
@@ -98,10 +83,11 @@ Voir `PLAN-ENVIRONMENTS.md` pour le plan complet.
 | Hosts JSON | `/data/hosts.json` |
 | Config proxy/DNS/DHCP | `/var/lib/server-dashboard/*.json` |
 | Certificats ACME | `/var/lib/server-dashboard/acme/` |
-| Agent registry (legacy) | `/var/lib/server-dashboard/agent-registry.json` |
-| Environments | `/var/lib/server-dashboard/environments.json` |
-| Pipelines | `/var/lib/server-dashboard/pipelines.json` |
-| Env config | `/opt/homeroute/.env` |
+| Apps registry | `/opt/homeroute/data/apps.json` |
+| Port registry | `/opt/homeroute/data/port-registry.json` |
+| Sources des apps | `/opt/homeroute/apps/{slug}/` |
+| Code-server config | `/opt/homeroute/data/code-server/` |
+| Env config homeroute | `/opt/homeroute/.env` |
 
 ## Ports
 
@@ -110,7 +96,8 @@ Voir `PLAN-ENVIRONMENTS.md` pour le plan complet.
 | 443 | HTTPS reverse proxy | hr-edge |
 | 80 | HTTP→HTTPS redirect | hr-edge |
 | 4000 | API management REST | homeroute |
-| 4001 | Orchestrator (WebSocket agents/hosts) | hr-orchestrator |
+| 4001 | Orchestrator IPC/HTTP | hr-orchestrator |
+| 8443 | code-server local (studio.mynetwk.biz) | code-server |
 | 53 | DNS | hr-netcore |
 | 67 | DHCP | hr-netcore |
 
@@ -136,9 +123,6 @@ make edge            # cargo build --release -p hr-edge
 make orchestrator    # cargo build --release -p hr-orchestrator
 make netcore         # cargo build --release -p hr-netcore
 make web             # npm run build (web/) seulement
-make studio-env      # build web-studio-env (studio environnements)
-make agent           # build hr-agent (auto-incrémente version)
-make env-agent       # build env-agent
 make test            # cargo test
 
 # Déploiement vers la production (depuis dev)
@@ -146,8 +130,6 @@ make deploy-prod         # build all + rsync + restart homeroute + health check
 make deploy-edge         # build + rsync + restart hr-edge seul
 make deploy-orchestrator # build + rsync + restart hr-orchestrator seul
 make deploy-netcore      # build + rsync + restart hr-netcore (rare)
-make deploy-env-agent    # build + deploy env-agent vers TOUS les containers d'env + studio-env frontend
-make deploy-studio-env   # build + deploy studio-env frontend seul
 
 # Déploiement local (UNIQUEMENT sur le serveur de prod lui-même)
 make deploy          # build all + systemctl restart (bloqué sur dev)
@@ -160,58 +142,6 @@ ssh root@10.0.0.254 'systemctl reload hr-edge'      # hot-reload proxy config (S
 ssh root@10.0.0.254 'systemctl reload hr-netcore'    # hot-reload DNS/DHCP/Adblock (SIGHUP)
 ```
 
-## Pipelines standardisés
-
-Les apps dans les environnements sont déployées via des **pipelines standardisés** par stack. Le build se fait automatiquement sur Medion (l'orchestrator), pas besoin de builder manuellement.
-
-### Stacks supportés
-
-| Stack | Template steps |
-|-------|---------------|
-| `AxumVite` | Build → Test → BackupDb → MigrateDb → Deploy → HealthCheck |
-| `NextJs` | Build → Test → BackupDb → MigrateDb → Deploy → HealthCheck |
-| `Axum` | Build → Test → Deploy → HealthCheck |
-
-Les steps Test, BackupDb, MigrateDb sont optionnels (configurables via `PipelineConfig.skip_steps`).
-
-### MCP Pipeline tools
-
-| Tool | Usage |
-|------|-------|
-| `pipeline.promote` | Déclencher une promotion (utilise les templates + config) |
-| `pipeline.status` | Voir l'état d'un run (steps, logs, durée) |
-| `pipeline.history` | Historique des runs (filtrable par app_slug) |
-| `pipeline.logs` | Logs détaillés d'un step spécifique (pour diagnostic) |
-| `pipeline.get_config` | Lire la config pipeline d'une app |
-| `pipeline.save_config` | Sauvegarder la config (chaîne d'envs, gates, etc.) |
-| `pipeline.approve_gate` | Approuver une gate manuelle |
-| `pipeline.reject_gate` | Rejeter une gate |
-| `pipeline.pending_gates` | Lister les gates en attente |
-| `pipeline.cancel` | Annuler un pipeline en cours |
-
-### Workflow de promotion
-
-1. `pipeline.promote(app_slug, version, source_env, target_env)` → déclenche build + deploy
-2. Le build produit un artifact dans `/opt/homeroute/data/artifacts/{slug}/`
-3. L'artifact est servi en HTTP sur `http://10.0.0.254:4001/artifacts/`
-4. L'env-agent cible télécharge, vérifie le SHA256, extrait et redémarre l'app
-5. Si échec → rollback automatique vers la version précédente
-
-### Confiance et sécurité
-
-- Chaque transition doit suivre la **chaîne d'envs** définie (pas de saut dev→prod si acc est dans la chaîne)
-- **Un seul pipeline** peut tourner par app à la fois (verrou de concurrence)
-- L'env-agent **rejette** les déploiements pour des apps non déclarées dans sa config
-- L'artifact est identifié par `{app_slug}-{commit_sha}` — immuable, réutilisé dans la chaîne
-
-### hr-git auto-trigger
-
-Un `git push` vers un repo hr-git peut déclencher automatiquement un pipeline si `auto_promote` est configuré. Le hook post-receive envoie un HTTP POST à l'orchestrator.
-
-### Note importante
-
-Les pipelines gèrent le déploiement des **apps dans les envs** (trader, wallet, etc.). Les binaires HomeRoute eux-mêmes (hr-edge, hr-orchestrator, etc.) sont toujours déployés via `make deploy-*`.
-
 ## Règles obligatoires
 
 - **JAMAIS** `cargo run` directement — utiliser `make deploy-prod` depuis dev
@@ -219,13 +149,9 @@ Les pipelines gèrent le déploiement des **apps dans les envs** (trader, wallet
 - **JAMAIS** `systemctl start/restart homeroute` sur le serveur de dev
 - **TOUJOURS** `make deploy-prod` après modification du backend Rust (depuis dev)
 - **TOUJOURS** `make deploy-edge` si modification de hr-proxy, hr-acme, hr-auth, hr-tunnel, hr-edge
-- **TOUJOURS** `make deploy-orchestrator` si modification de hr-registry, hr-container, hr-git, hr-orchestrator
+- **TOUJOURS** `make deploy-orchestrator` si modification de hr-apps, hr-git, hr-db, hr-orchestrator
 - **TOUJOURS** `make deploy-netcore` si modification de hr-dns, hr-dhcp, hr-ipv6, hr-adblock, hr-netcore
-- **TOUJOURS** `make agent` après modification du crate `hr-agent` (legacy, calendar uniquement)
-- **TOUJOURS** `make deploy-env-agent` après modification du crate `env-agent` (build + deploy vers tous les containers d'env)
-- **TOUJOURS** `make deploy-orchestrator` si modification de hr-environment, hr-pipeline, hr-db
-- Exécuter les commandes dans les containers via **`POST /api/applications/{id}/exec`** (pas machinectl)
-- Passer les commandes comme un seul string bash : `command: ["cmd"]`
+- Exécuter une commande dans le contexte d'une app via l'API `POST /api/apps/{slug}/exec`
 
 ## Équipes d'agents (OBLIGATOIRE)
 
@@ -236,8 +162,7 @@ Les pipelines gèrent le déploiement des **apps dans les envs** (trader, wallet
 | Tâche | subagent_type |
 |-------|---------------|
 | Backend Rust, crates/, API | `backend-rust` |
-| Frontend React/Vite (web/ ou web-studio/) | `frontend-react` |
-| Mise à jour binaire hr-agent dans les containers | `agent-updater` |
+| Frontend React/Vite (web/) | `frontend-react` |
 | Autre (investigations, scripts) | `general-purpose` |
 
 ### Répartitions types
@@ -252,39 +177,26 @@ Les agents peuvent parfois ne pas marquer leurs tâches comme complètes. Pour c
 
 1. **Inclure dans chaque prompt de spawn** : _"Quand tu as terminé : appelle TaskUpdate pour marquer la tâche completed, puis envoie-moi un SendMessage résumant ce que tu as fait."_
 2. **Si un agent semble bloqué** : lui envoyer un SendMessage — _"Où en es-tu ? Si terminé, marque la tâche et résume."_
-3. Les subagents `backend-rust`, `frontend-react` et `agent-updater` incluent déjà ces instructions dans leur system prompt.
+3. Les subagents `backend-rust` et `frontend-react` incluent déjà ces instructions dans leur system prompt.
 
 ## Applications HomeRoute
 
-Les applications sont gérées via des **environnements** (env-dev, env-prod). Chaque environnement est un container nspawn piloté par un env-agent. Les anciens containers per-app (hr-v2-*) ont été supprimés.
+Les applications sont gérées **directement sur l'hôte** par le supervisor `hr-apps` intégré à `hr-orchestrator`. Pas de containers, pas d'environnements, pas de pipelines.
 
-### Environnements actifs
+### Modèle
 
-| Env | Container | IP | Apps | Studio |
-|-----|-----------|-----|------|--------|
-| dev | env-dev | 10.0.0.200 | 10 apps | studio.dev.mynetwk.biz |
-| acc | env-acc | 10.0.0.201 | 1 app | studio.acc.mynetwk.biz |
-| prod | env-prod | 10.0.0.202 | 1 app | studio.prod.mynetwk.biz |
+- 1 app = 1 dossier `/opt/homeroute/apps/{slug}/` + 1 processus supervisé Tokio
+- Registre : `/opt/homeroute/data/apps.json`
+- Allocation de port automatique : `/opt/homeroute/data/port-registry.json`
+- URL : `{slug}.mynetwk.biz` — route ajoutée automatiquement à hr-edge
+- Visibility : `public` (accès anonyme) ou `private` (auth via hr-auth)
+- Logs : capturés par le supervisor (stdout/stderr) → exposés via l'API logs
 
-### Développement (sources sur CloudMaster)
+### Studio (code-server global)
 
-- Sources : `/ssd_pool/apps/<name>/`
-- Les sources sont copiées dans env-dev : `/apps/<name>/`
-- DBs dans env-dev : `/opt/env-agent/data/db/<name>.db`
-
-### Déploiement apps dans les envs
-
-- Build sur CloudMaster, deploy via pipeline ou manuellement dans l'env
-- `make deploy-env-agent` pour mettre à jour l'env-agent dans tous les containers
-
-### Portails
-
-| URL | Rôle |
-|-----|------|
-| `hub.mynetwk.biz` | Admin center (infra, DNS, proxy, envs) |
-| `make.mynetwk.biz` | Maker portal (apps, pipelines, env switcher) |
-| `studio.<env>.mynetwk.biz` | Studio (code-server, board, docs, DB, logs) |
-| `<app>.<env>.mynetwk.biz` | App dans un env |
+- URL : `studio.mynetwk.biz` → `127.0.0.1:8443`
+- Workspace : `/opt/homeroute/apps/`
+- Setup : `scripts/setup-studio.sh` (installe code-server local sur le routeur)
 
 ### Store Flutter (app mobile HomeRoute)
 
@@ -294,8 +206,7 @@ Les applications sont gérées via des **environnements** (env-dev, env-prod). C
 
 ### Règles générales apps
 
-- **JAMAIS** build sur les conteneurs — toujours sur CloudMaster
-- **JAMAIS** build sur le routeur (10.0.0.254)
+- **JAMAIS** build sur le routeur (10.0.0.254) — toujours sur CloudMaster
 - PATH Flutter : `export PATH=/ssd_pool/flutter/bin:$PATH`
 
 ## MCP Self-Improvement
@@ -306,27 +217,21 @@ Le serveur MCP HomeRoute est implémenté dans ce même repo. Claude Code peut d
 
 | Serveur MCP | Fichier source |
 |-------------|---------------|
-| **Orchestrator MCP** (HTTP, tools infra + envs) | `crates/orchestrator/hr-orchestrator/src/mcp.rs` |
-| **Agent MCP** (stdio, Store + Studio + Docs) | `crates/agents/hr-agent/src/mcp.rs` |
-| **Env-Agent MCP** (stdio + HTTP, db.* + app.* + env.*) | `crates/agents/env-agent/src/mcp.rs` |
+| **Orchestrator MCP** (HTTP, tools infra + `app.*` + `db.*`) | `crates/orchestrator/hr-orchestrator/src/mcp.rs` |
 
-Fichiers connexes :
-- `crates/agents/hr-agent/src/mcp_instructions.txt` — instructions incluses dans le MCP agent
+Tools exposés : `app.*` (lifecycle des apps locales via `hr-apps`), `db.*` (Dataverse SQLite via `hr-db`), plus les tools infra (DNS, proxy, ACME, etc.).
 
 ### Ce que Claude Code peut faire
 
 - **Ajouter de nouveaux tools** : créer le handler dans le code MCP, l'enregistrer dans la liste des tools, et ajouter le nom dans `generate_mcp_json()` pour l'auto-approve
 - **Fixer des bugs** : les tools MCP existants peuvent avoir des bugs — Claude Code peut les diagnostiquer et corriger
 - **Adapter le protocole** : si le protocole MCP évolue, Claude Code peut mettre à jour l'implémentation
-- **Mettre à jour les instructions** : modifier `mcp_instructions.txt` pour améliorer le contexte fourni aux tools
 
 C'est du self-improvement : Claude Code améliore les outils qu'il utilise lui-même via MCP.
 
 ### Workflow après modification MCP
 
 - Si modification de `crates/orchestrator/hr-orchestrator/src/mcp.rs` → `make deploy-orchestrator`
-- Si modification de `crates/agents/hr-agent/src/mcp.rs` → `make agent && make agent-prod`
-- Si modification de `crates/agents/env-agent/src/mcp.rs` → `make env-agent` (puis déployer dans les envs)
 
 ## Documentation des Apps
 

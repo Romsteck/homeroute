@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tracing::{error, info, warn};
@@ -21,10 +21,7 @@ where
 
 /// Start a generic IPC Unix socket server.
 /// Removes stale socket at startup.
-pub async fn run_ipc_server<Req, Resp, H>(
-    socket_path: &Path,
-    handler: Arc<H>,
-) -> Result<()>
+pub async fn run_ipc_server<Req, Resp, H>(socket_path: &Path, handler: Arc<H>) -> Result<()>
 where
     Req: DeserializeOwned + Send + 'static,
     Resp: Serialize + Send + 'static,

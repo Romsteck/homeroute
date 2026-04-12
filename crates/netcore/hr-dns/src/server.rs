@@ -1,8 +1,8 @@
+use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use anyhow::Result;
-use tokio::net::{TcpListener, UdpSocket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, UdpSocket};
 use tracing::{debug, info, warn};
 
 use crate::SharedDnsState;
@@ -30,7 +30,8 @@ pub async fn run_udp_server(addr: SocketAddr, state: SharedDnsState) -> Result<(
         let state = state.clone();
 
         tokio::spawn(async move {
-            let (mut response, edns_udp_size) = handle_dns_query_with_edns(&packet, &state, src).await;
+            let (mut response, edns_udp_size) =
+                handle_dns_query_with_edns(&packet, &state, src).await;
             // Silently drop responses for malformed packets (empty = nothing parseable)
             if response.is_empty() {
                 return;
@@ -124,7 +125,11 @@ async fn handle_tcp_connection(
 }
 
 /// Handle a DNS query and return (response, client_edns_udp_size).
-async fn handle_dns_query_with_edns(query_bytes: &[u8], state: &SharedDnsState, src: SocketAddr) -> (Vec<u8>, u16) {
+async fn handle_dns_query_with_edns(
+    query_bytes: &[u8],
+    state: &SharedDnsState,
+    src: SocketAddr,
+) -> (Vec<u8>, u16) {
     let edns_size = packet::peek_edns_udp_size(query_bytes);
     let response = handle_dns_query(query_bytes, state, src).await;
     (response, edns_size)

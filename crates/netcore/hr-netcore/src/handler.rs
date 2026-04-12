@@ -185,16 +185,15 @@ impl NetcoreHandler {
         let sources = self.read_adblock_sources().await;
 
         // Check cache file mtime for lastUpdate
-        let last_update =
-            tokio::fs::metadata("/var/lib/server-dashboard/adblock/domains.json")
-                .await
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64
-                });
+        let last_update = tokio::fs::metadata("/var/lib/server-dashboard/adblock/domains.json")
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64
+            });
 
         IpcResponse::ok_data(AdblockStatsData {
             domain_count: engine.domain_count(),
@@ -280,12 +279,8 @@ impl NetcoreHandler {
         let config_path = &self.dns_dhcp_config_path;
         if let Ok(content) = tokio::fs::read_to_string(config_path).await {
             if let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(adblock) =
-                    config.get_mut("adblock").and_then(|a| a.as_object_mut())
-                {
-                    if let Some(wl) =
-                        adblock.get_mut("whitelist").and_then(|w| w.as_array_mut())
-                    {
+                if let Some(adblock) = config.get_mut("adblock").and_then(|a| a.as_object_mut()) {
+                    if let Some(wl) = adblock.get_mut("whitelist").and_then(|w| w.as_array_mut()) {
                         wl.retain(|d| d.as_str() != Some(&domain));
                     }
                 }
@@ -336,13 +331,11 @@ impl NetcoreHandler {
         };
 
         // Download and update
-        let (domains, results) =
-            hr_adblock::sources::download_all(&adblock_config.sources).await;
+        let (domains, results) = hr_adblock::sources::download_all(&adblock_config.sources).await;
         let count = domains.len();
 
         // Save cache
-        let cache_path =
-            std::path::PathBuf::from(&adblock_config.data_dir).join("domains.json");
+        let cache_path = std::path::PathBuf::from(&adblock_config.data_dir).join("domains.json");
         let _ = hr_adblock::sources::save_cache(&domains, &cache_path);
 
         // Apply to engine
@@ -368,11 +361,7 @@ impl NetcoreHandler {
 
     // ── AdblockSearch ───────────────────────────────────────────────────
 
-    async fn handle_adblock_search(
-        &self,
-        query: String,
-        limit: Option<usize>,
-    ) -> IpcResponse {
+    async fn handle_adblock_search(&self, query: String, limit: Option<usize>) -> IpcResponse {
         if query.is_empty() {
             return IpcResponse::ok_data(AdblockSearchResult {
                 query: String::new(),

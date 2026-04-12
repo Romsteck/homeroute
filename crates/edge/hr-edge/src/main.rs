@@ -5,7 +5,7 @@ use hr_auth::AuthService;
 use hr_common::config::EnvConfig;
 use hr_common::events::{CertReadyEvent, EventBus};
 use hr_common::service_registry::new_service_registry;
-use hr_common::supervisor::{spawn_supervised, ServicePriority};
+use hr_common::supervisor::{ServicePriority, spawn_supervised};
 use hr_proxy::{ProxyConfig, ProxyState, TlsManager};
 use signal_hook::consts::SIGHUP;
 use signal_hook_tokio::Signals;
@@ -14,18 +14,58 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
+use tracing_subscriber::Layer as _;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,hr_edge=debug".parse().unwrap()),
+    // Initialize centralized log store
+    let log_store = std::sync::Arc::new(
+        hr_common::logging::LogStore::new(std::path::Path::new("/opt/homeroute/data/logs.db"))
+            .expect("Failed to init log store"),
+    );
+
+    // Initialize logging with custom layer
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer().with_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "info,hr_edge=debug".parse().unwrap()),
+            ),
         )
+        .with(hr_common::logging::LoggingLayer::new(
+            log_store.clone(),
+            hr_common::logging::LogService::Edge,
+        ))
         .init();
 
     info!("hr-edge starting...");
+
+    // Spawn log flush task
+    {
+        let flush_store = log_store.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if let Err(e) = flush_store.flush_to_db().await {
+                    eprintln!("Log flush error: {e}");
+                }
+            }
+        });
+    }
+    // Spawn log compaction task
+    {
+        let compact_store = log_store.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                if let Err(e) = compact_store.compact().await {
+                    eprintln!("Log compaction error: {e}");
+                }
+            }
+        });
+    }
 
     // Install rustls crypto provider
     rustls::crypto::ring::default_provider()
@@ -111,10 +151,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Set global wildcard as fallback for unknown SNI domains
     if let Ok(cert_info) = acme.get_certificate(WildcardType::Global) {
-        if let Err(e) = tls_manager.set_fallback_certificate_from_pem(
-            &cert_info.cert_path,
-            &cert_info.key_path,
-        ) {
+        if let Err(e) =
+            tls_manager.set_fallback_certificate_from_pem(&cert_info.cert_path, &cert_info.key_path)
+        {
             warn!("Failed to set fallback certificate: {}", e);
         }
     }
@@ -137,12 +176,10 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let orchestrator_port = env.orchestrator_port;
-    let env_route_cache = Arc::new(hr_proxy::EnvRouteCache::new());
     let proxy_state = Arc::new(
         ProxyState::new(proxy_config.clone(), env.api_port, orchestrator_port)
             .with_auth(auth.clone())
-            .with_app_routes_path(env.data_dir.join("app-routes.json"))
-            .with_env_route_cache(env_route_cache.clone()),
+            .with_app_routes_path(env.data_dir.join("app-routes.json")),
     );
 
     let https_port = proxy_config.https_port;
@@ -154,40 +191,7 @@ async fn main() -> anyhow::Result<()> {
         proxy_config.active_routes().len()
     );
 
-    // ── Env route cache refresh + app route sync (every 30s from orchestrator) ─
-    {
-        let cache = env_route_cache.clone();
-        tokio::spawn(async move {
-            let client = hr_ipc::orchestrator::OrchestratorClient::new("/run/hr-orchestrator.sock");
-            // Wait 10s for orchestrator to start
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            loop {
-                match client.request(&hr_ipc::orchestrator::OrchestratorRequest::ListEnvironments).await {
-                    Ok(resp) if resp.ok => {
-                        if let Some(data) = resp.data {
-                            match serde_json::from_value::<Vec<hr_proxy::env_routes::EnvRouteSummary>>(data.clone()) {
-                                Ok(envs) => {
-                                    info!("Env route cache: {} environments loaded", envs.len());
-                                    cache.update(envs);
-                                }
-                                Err(e) => {
-                                    warn!("Failed to parse env routes: {}", e);
-                                    debug!("Raw data: {}", serde_json::to_string(&data).unwrap_or_default());
-                                }
-                            }
-                        }
-                    }
-                    Ok(resp) => {
-                        warn!("ListEnvironments IPC error: {:?}", resp.error);
-                    }
-                    Err(e) => {
-                        warn!("Env route cache refresh failed: {}", e);
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            }
-        });
-    }
+    // Env route cache kept but no longer polled (environments removed)
 
     // ── Store shared refs for SIGHUP reload ──────────────────────────
     let proxy_state_reload = proxy_state.clone();
@@ -263,9 +267,8 @@ async fn main() -> anyhow::Result<()> {
                                 .await
                             {
                                 Ok(new_cert) => {
-                                    let domain = new_cert
-                                        .wildcard_type
-                                        .domain_pattern(&base_domain_renewal);
+                                    let domain =
+                                        new_cert.wildcard_type.domain_pattern(&base_domain_renewal);
                                     let _ = events_renewal.cert_ready.send(CertReadyEvent {
                                         slug: String::new(),
                                         wildcard_domain: domain,
@@ -300,21 +303,23 @@ async fn main() -> anyhow::Result<()> {
         });
 
         let ipc_reg = service_registry.clone();
-        spawn_supervised("ipc-server", ServicePriority::Critical, ipc_reg, move || {
-            let handler = handler.clone();
-            async move {
-                hr_ipc::server::run_ipc_server(
-                    std::path::Path::new("/run/hr-edge.sock"),
-                    handler,
-                )
-                .await
-            }
-        });
+        spawn_supervised(
+            "ipc-server",
+            ServicePriority::Critical,
+            ipc_reg,
+            move || {
+                let handler = handler.clone();
+                async move {
+                    hr_ipc::server::run_ipc_server(
+                        std::path::Path::new("/run/hr-edge.sock"),
+                        handler,
+                    )
+                    .await
+                }
+            },
+        );
     }
 
-    // NOTE: Environment routing is handled by the EnvRouteCache (wildcard *.{env}.{domain}).
-    // The cache is refreshed every 30s by the task spawned at line ~159.
-    // No per-app routes needed — the env-agent internal proxy (port 80) dispatches to apps.
 
     // ── SIGHUP handler ───────────────────────────────────────────────
     let acme_sighup = acme.clone();
@@ -365,7 +370,10 @@ fn build_metrics_response(
     let mut out = String::with_capacity(2048);
 
     // Global counters
-    let _ = writeln!(out, "# HELP hr_proxy_requests_total Total proxied requests.");
+    let _ = writeln!(
+        out,
+        "# HELP hr_proxy_requests_total Total proxied requests."
+    );
     let _ = writeln!(out, "# TYPE hr_proxy_requests_total counter");
     let _ = writeln!(out, "hr_proxy_requests_total {}", global.total_requests);
 
@@ -381,29 +389,56 @@ fn build_metrics_response(
     let _ = writeln!(out, "# TYPE hr_proxy_errors_5xx_total counter");
     let _ = writeln!(out, "hr_proxy_errors_5xx_total {}", global.status_5xx);
 
-    let _ = writeln!(out, "# HELP hr_proxy_uptime_seconds Proxy uptime in seconds.");
+    let _ = writeln!(
+        out,
+        "# HELP hr_proxy_uptime_seconds Proxy uptime in seconds."
+    );
     let _ = writeln!(out, "# TYPE hr_proxy_uptime_seconds gauge");
     let _ = writeln!(out, "hr_proxy_uptime_seconds {}", global.uptime_secs);
 
-    let _ = writeln!(out, "# HELP hr_proxy_requests_per_second Average requests per second since start.");
+    let _ = writeln!(
+        out,
+        "# HELP hr_proxy_requests_per_second Average requests per second since start."
+    );
     let _ = writeln!(out, "# TYPE hr_proxy_requests_per_second gauge");
-    let _ = writeln!(out, "hr_proxy_requests_per_second {:.2}", global.requests_per_second);
+    let _ = writeln!(
+        out,
+        "hr_proxy_requests_per_second {:.2}",
+        global.requests_per_second
+    );
 
     // Per-domain counters
-    let _ = writeln!(out, "# HELP hr_proxy_domain_requests_total Requests per domain.");
+    let _ = writeln!(
+        out,
+        "# HELP hr_proxy_domain_requests_total Requests per domain."
+    );
     let _ = writeln!(out, "# TYPE hr_proxy_domain_requests_total counter");
     for d in &domains {
-        let _ = writeln!(out, "hr_proxy_domain_requests_total{{domain=\"{}\"}} {}", d.domain, d.total_requests);
+        let _ = writeln!(
+            out,
+            "hr_proxy_domain_requests_total{{domain=\"{}\"}} {}",
+            d.domain, d.total_requests
+        );
     }
 
-    let _ = writeln!(out, "# HELP hr_proxy_domain_errors_5xx_total 5xx errors per domain.");
+    let _ = writeln!(
+        out,
+        "# HELP hr_proxy_domain_errors_5xx_total 5xx errors per domain."
+    );
     let _ = writeln!(out, "# TYPE hr_proxy_domain_errors_5xx_total counter");
     for d in &domains {
-        let _ = writeln!(out, "hr_proxy_domain_errors_5xx_total{{domain=\"{}\"}} {}", d.domain, d.errors_5xx);
+        let _ = writeln!(
+            out,
+            "hr_proxy_domain_errors_5xx_total{{domain=\"{}\"}} {}",
+            d.domain, d.errors_5xx
+        );
     }
 
     // Certificate expiry
-    let _ = writeln!(out, "# HELP hr_tls_cert_expiry_days Days until TLS certificate expires.");
+    let _ = writeln!(
+        out,
+        "# HELP hr_tls_cert_expiry_days Days until TLS certificate expires."
+    );
     let _ = writeln!(out, "# TYPE hr_tls_cert_expiry_days gauge");
     for c in &certs {
         let _ = writeln!(
@@ -413,13 +448,18 @@ fn build_metrics_response(
         );
     }
 
-    let _ = writeln!(out, "# HELP hr_tls_cert_needs_renewal Whether certificate needs renewal (1=yes).");
+    let _ = writeln!(
+        out,
+        "# HELP hr_tls_cert_needs_renewal Whether certificate needs renewal (1=yes)."
+    );
     let _ = writeln!(out, "# TYPE hr_tls_cert_needs_renewal gauge");
     for c in &certs {
         let _ = writeln!(
             out,
             "hr_tls_cert_needs_renewal{{domain=\"{}\",type=\"{}\"}} {}",
-            c.domain, c.wildcard_type, if c.needs_renewal { 1 } else { 0 }
+            c.domain,
+            c.wildcard_type,
+            if c.needs_renewal { 1 } else { 0 }
         );
     }
 
@@ -479,9 +519,9 @@ async fn run_https_server(
                 async move {
                     // Internal /metrics endpoint — localhost only
                     if req.uri().path() == "/metrics" && client_ip.is_loopback() {
-                        return Ok::<_, std::convert::Infallible>(
-                            build_metrics_response(&state, &acme),
-                        );
+                        return Ok::<_, std::convert::Infallible>(build_metrics_response(
+                            &state, &acme,
+                        ));
                     }
 
                     let (parts, body) = req.into_parts();
@@ -608,11 +648,7 @@ async fn handle_sighup(
 /// Re-load all ACME wildcard certificates into the TLS manager.
 /// Called after `reload_certificates` which does `replace_all` and would
 /// otherwise wipe ACME certs that were loaded at startup.
-fn reload_acme_certs(
-    tls_manager: &TlsManager,
-    acme: &hr_acme::AcmeManager,
-    base_domain: &str,
-) {
+fn reload_acme_certs(tls_manager: &TlsManager, acme: &hr_acme::AcmeManager, base_domain: &str) {
     let certs = acme.list_certificates().unwrap_or_default();
     let mut loaded = 0;
     for cert_info in &certs {
@@ -633,10 +669,9 @@ fn reload_acme_certs(
     }
     // Re-set fallback cert
     if let Ok(cert_info) = acme.get_certificate(hr_acme::WildcardType::Global) {
-        if let Err(e) = tls_manager.set_fallback_certificate_from_pem(
-            &cert_info.cert_path,
-            &cert_info.key_path,
-        ) {
+        if let Err(e) =
+            tls_manager.set_fallback_certificate_from_pem(&cert_info.cert_path, &cert_info.key_path)
+        {
             warn!("Failed to re-set fallback certificate: {}", e);
         }
     }

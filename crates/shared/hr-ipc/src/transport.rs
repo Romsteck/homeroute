@@ -1,11 +1,10 @@
 /// Generic JSON-line transport over Unix socket.
 /// Pattern: one connection per request (UI-frequency calls, no pool needed).
-
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tracing::warn;
@@ -50,7 +49,10 @@ where
     buf_reader.read_line(&mut response_line).await?;
 
     if response_line.is_empty() {
-        anyhow::bail!("IPC returned empty response (socket: {})", socket_path.display());
+        anyhow::bail!(
+            "IPC returned empty response (socket: {})",
+            socket_path.display()
+        );
     }
 
     let resp: Resp = serde_json::from_str(response_line.trim())?;

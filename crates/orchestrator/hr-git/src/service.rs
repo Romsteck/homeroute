@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use chrono::DateTime;
 use tokio::process::Command;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use crate::github::GitHubClient;
 use crate::types::{
@@ -241,10 +241,14 @@ impl GitService {
         // Generate ED25519 key
         let output = Command::new("ssh-keygen")
             .args([
-                "-t", "ed25519",
-                "-f", SSH_KEY_PATH,
-                "-N", "",
-                "-C", "homeroute-git",
+                "-t",
+                "ed25519",
+                "-f",
+                SSH_KEY_PATH,
+                "-N",
+                "",
+                "-C",
+                "homeroute-git",
             ])
             .output()
             .await
@@ -311,8 +315,8 @@ impl GitService {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let json = serde_json::to_string_pretty(config)
-            .context("Failed to serialize git config")?;
+        let json =
+            serde_json::to_string_pretty(config).context("Failed to serialize git config")?;
 
         // Atomic write: write to tmp then rename
         let tmp_path = PathBuf::from(format!("{CONFIG_PATH}.tmp"));
@@ -617,15 +621,12 @@ done
                 .output()
                 .await;
 
-            output
-                .ok()
-                .filter(|o| o.status.success())
-                .and_then(|o| {
-                    let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                    DateTime::parse_from_rfc3339(&s)
-                        .map(|d| d.with_timezone(&chrono::Utc))
-                        .ok()
-                })
+            output.ok().filter(|o| o.status.success()).and_then(|o| {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                DateTime::parse_from_rfc3339(&s)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .ok()
+            })
         } else {
             None
         };
@@ -666,11 +667,7 @@ done
 
 /// Recursively compute directory size in bytes.
 async fn dir_size(path: &Path) -> anyhow::Result<u64> {
-    let output = Command::new("du")
-        .args(["-sb"])
-        .arg(path)
-        .output()
-        .await?;
+    let output = Command::new("du").args(["-sb"]).arg(path).output().await?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);

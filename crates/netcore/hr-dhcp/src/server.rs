@@ -1,6 +1,6 @@
-use std::net::{Ipv4Addr, SocketAddr};
 use anyhow::Result;
 use socket2::{Domain, Protocol, Socket, Type};
+use std::net::{Ipv4Addr, SocketAddr};
 use tracing::{debug, info, warn};
 
 use crate::SharedDhcpState;

@@ -45,14 +45,10 @@ pub enum AgentMessage {
     Metrics(AgentMetrics),
     /// Agent publishes its routes for reverse proxy registration.
     #[serde(rename = "publish_routes")]
-    PublishRoutes {
-        routes: Vec<AgentRoute>,
-    },
+    PublishRoutes { routes: Vec<AgentRoute> },
     /// Agent reports a new/changed IPv4 address (e.g. after container restart).
     #[serde(rename = "ip_update")]
-    IpUpdate {
-        ipv4_address: String,
-    },
+    IpUpdate { ipv4_address: String },
     /// Agent reports update scan results.
     #[serde(rename = "update_scan_result")]
     UpdateScanResult {

@@ -1,5 +1,5 @@
-use std::time::{Duration, Instant};
 use rustc_hash::FxHashMap;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 use crate::records::{DnsRecord, RecordType};
@@ -77,7 +77,11 @@ impl DnsCache {
 
         let min_ttl = records.iter().map(|r| r.ttl).min().unwrap_or(60);
         // RFC 2181 §8: TTL with sign bit set must be treated as 0
-        let min_ttl = if min_ttl & 0x80000000 != 0 { 0 } else { min_ttl };
+        let min_ttl = if min_ttl & 0x80000000 != 0 {
+            0
+        } else {
+            min_ttl
+        };
         // Cap TTL to 1 day (86400s) to prevent absurdly long caching
         let min_ttl = min_ttl.min(86400);
         // Don't cache records with TTL 0
@@ -154,7 +158,11 @@ impl DnsCache {
 
     /// Lookup cached records. Returns Some(vec) for positive cache (may be empty for negative),
     /// None if not found or expired.
-    pub async fn get_with_negative(&self, name: &str, qtype: RecordType) -> Option<(Vec<DnsRecord>, bool)> {
+    pub async fn get_with_negative(
+        &self,
+        name: &str,
+        qtype: RecordType,
+    ) -> Option<(Vec<DnsRecord>, bool)> {
         let key = CacheKey {
             name: name.to_lowercase(),
             qtype: qtype.to_u16(),

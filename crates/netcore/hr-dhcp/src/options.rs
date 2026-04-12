@@ -87,7 +87,12 @@ impl DhcpOption {
     /// Extract IPv4 address from option data
     pub fn as_ipv4(&self) -> Option<Ipv4Addr> {
         if self.data.len() == 4 {
-            Some(Ipv4Addr::new(self.data[0], self.data[1], self.data[2], self.data[3]))
+            Some(Ipv4Addr::new(
+                self.data[0],
+                self.data[1],
+                self.data[2],
+                self.data[3],
+            ))
         } else {
             None
         }
@@ -96,7 +101,12 @@ impl DhcpOption {
     /// Extract u32 from option data
     pub fn as_u32(&self) -> Option<u32> {
         if self.data.len() == 4 {
-            Some(u32::from_be_bytes([self.data[0], self.data[1], self.data[2], self.data[3]]))
+            Some(u32::from_be_bytes([
+                self.data[0],
+                self.data[1],
+                self.data[2],
+                self.data[3],
+            ]))
         } else {
             None
         }

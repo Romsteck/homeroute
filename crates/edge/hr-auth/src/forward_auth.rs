@@ -1,17 +1,13 @@
-use crate::users::UserInfo;
 use crate::AuthService;
+use crate::users::UserInfo;
 use std::sync::Arc;
 
 /// Résultat d'une vérification forward-auth
 pub enum ForwardAuthResult {
     /// Authentification réussie
-    Success {
-        user: UserInfo,
-    },
+    Success { user: UserInfo },
     /// Non authentifié — rediriger vers login
-    Unauthorized {
-        login_url: String,
-    },
+    Unauthorized { login_url: String },
 }
 
 /// Headers à injecter dans la réponse en cas de succès

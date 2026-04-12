@@ -1,13 +1,13 @@
 use axum::{
+    Json, Router,
     extract::{Path, State},
     response::IntoResponse,
     routing::{get, post, put},
-    Json, Router,
 };
-use serde::Deserialize;
-use serde_json::{json, Value};
 use hr_ipc::edge::EdgeRequest;
 use hr_ipc::orchestrator::OrchestratorRequest;
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 use crate::state::ApiState;
 
@@ -117,10 +117,16 @@ async fn sync_and_reload(state: &ApiState) -> Result<(), String> {
         .map_err(|e| format!("Rename: {}", e))?;
 
     // Tell hr-edge to reload config (it will reload TLS certs + proxy config internally)
-    let resp = state.edge.request(&EdgeRequest::ReloadConfig).await
+    let resp = state
+        .edge
+        .request(&EdgeRequest::ReloadConfig)
+        .await
         .map_err(|e| format!("Edge IPC error: {}", e))?;
     if !resp.ok {
-        return Err(format!("Edge reload failed: {}", resp.error.unwrap_or_default()));
+        return Err(format!(
+            "Edge reload failed: {}",
+            resp.error.unwrap_or_default()
+        ));
     }
 
     Ok(())
@@ -160,7 +166,6 @@ async fn update_domain(
     Json(json!({"success": true}))
 }
 
-
 async fn list_hosts(State(state): State<ApiState>) -> Json<Value> {
     match load_rp_config(&state).await {
         Ok(config) => {
@@ -185,9 +190,7 @@ async fn add_host(State(state): State<ApiState>, Json(body): Json<Value>) -> Jso
         host["enabled"] = json!(true);
     }
 
-    let hosts = config
-        .get_mut("hosts")
-        .and_then(|h| h.as_array_mut());
+    let hosts = config.get_mut("hosts").and_then(|h| h.as_array_mut());
     match hosts {
         Some(arr) => arr.push(host.clone()),
         None => config["hosts"] = json!([host]),
@@ -215,7 +218,10 @@ async fn update_host(
 
     let hosts = config.get_mut("hosts").and_then(|h| h.as_array_mut());
     if let Some(hosts) = hosts {
-        if let Some(host) = hosts.iter_mut().find(|h| h.get("id").and_then(|i| i.as_str()) == Some(&id)) {
+        if let Some(host) = hosts
+            .iter_mut()
+            .find(|h| h.get("id").and_then(|i| i.as_str()) == Some(&id))
+        {
             if let Some(obj) = updates.as_object() {
                 for (k, v) in obj {
                     host[k] = v.clone();
@@ -264,8 +270,14 @@ async fn toggle_host(State(state): State<ApiState>, Path(id): Path<String>) -> J
     };
 
     if let Some(hosts) = config.get_mut("hosts").and_then(|h| h.as_array_mut()) {
-        if let Some(host) = hosts.iter_mut().find(|h| h.get("id").and_then(|i| i.as_str()) == Some(&id)) {
-            let current = host.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true);
+        if let Some(host) = hosts
+            .iter_mut()
+            .find(|h| h.get("id").and_then(|i| i.as_str()) == Some(&id))
+        {
+            let current = host
+                .get("enabled")
+                .and_then(|e| e.as_bool())
+                .unwrap_or(true);
             host["enabled"] = json!(!current);
         }
     }
@@ -293,7 +305,11 @@ async fn proxy_status(State(state): State<ApiState>) -> Json<Value> {
     let routes = config.get("routes").and_then(|r| r.as_array());
     let route_count = routes.map(|r| r.len()).unwrap_or(0);
     let active_count = routes
-        .map(|r| r.iter().filter(|r| r.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true)).count())
+        .map(|r| {
+            r.iter()
+                .filter(|r| r.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true))
+                .count()
+        })
         .unwrap_or(0);
 
     Json(json!({
@@ -359,54 +375,57 @@ async fn renew_certificates(State(state): State<ApiState>) -> Json<Value> {
 }
 
 /// GET /api/reverseproxy/system-routes
-/// Returns auto-managed routes derived from running environments and their apps.
+/// Returns auto-managed app routes, live from the app registry via IPC.
 async fn system_routes(State(state): State<ApiState>) -> impl IntoResponse {
-    let base_domain = &state.env.base_domain;
-
-    let resp = match state.orchestrator.request(&OrchestratorRequest::ListEnvironments).await {
-        Ok(r) => r,
-        Err(e) => {
-            return Json(json!({"success": false, "error": format!("Orchestrator unavailable: {e}")}));
+    // Fetch live app list from orchestrator
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::AppList)
+        .await
+    {
+        Ok(resp) if resp.ok => {
+            let apps = resp
+                .data
+                .and_then(|d| d.get("apps").cloned())
+                .and_then(|a| a.as_array().cloned())
+                .unwrap_or_default();
+            let mut routes: Vec<Value> = apps
+                .into_iter()
+                .map(|app| {
+                    let domain = app.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+                    let port = app.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let vis = app.get("visibility").and_then(|v| v.as_str()).unwrap_or("private");
+                    json!({
+                        "domain": domain,
+                        "target": format!("127.0.0.1:{}", port),
+                        "auth_required": vis == "private",
+                    })
+                })
+                .collect();
+            // Add infra routes (codeserver, hub, code)
+            let path = std::path::Path::new("/opt/homeroute/data/app-routes.json");
+            if let Ok(content) = tokio::fs::read_to_string(path).await {
+                let map: serde_json::Map<String, Value> =
+                    serde_json::from_str(&content).unwrap_or_default();
+                for (domain, cfg) in &map {
+                    // Skip app domains (already from registry)
+                    if routes.iter().any(|r| r.get("domain").and_then(|v| v.as_str()) == Some(domain)) {
+                        continue;
+                    }
+                    routes.push(json!({
+                        "domain": domain,
+                        "target": format!("{}:{}", cfg.get("target_ip").and_then(|v| v.as_str()).unwrap_or("?"), cfg.get("target_port").and_then(|v| v.as_u64()).unwrap_or(0)),
+                        "auth_required": cfg.get("auth_required").and_then(|v| v.as_bool()).unwrap_or(false),
+                    }));
+                }
+            }
+            routes.sort_by(|a, b| {
+                let da = a.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+                let db = b.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+                da.cmp(db)
+            });
+            Json(json!({"success": true, "routes": routes}))
         }
-    };
-
-    if !resp.ok {
-        return Json(json!({"success": false, "error": resp.error.unwrap_or_default()}));
+        _ => Json(json!({"success": true, "routes": []})),
     }
-
-    let envs: Vec<Value> = resp
-        .data
-        .and_then(|d| serde_json::from_value(d).ok())
-        .unwrap_or_default();
-
-    let mut routes = Vec::new();
-
-    for env in &envs {
-        let slug = env.get("slug").and_then(|s| s.as_str()).unwrap_or_default();
-        let status = env.get("status").and_then(|s| s.as_str()).unwrap_or("stopped");
-        let connected = env.get("agent_connected").and_then(|a| a.as_bool()).unwrap_or(false);
-        let ip = match env.get("ipv4_address").and_then(|a| a.as_str()) {
-            Some(ip) => ip,
-            None => continue,
-        };
-
-        let apps_count = env.get("apps").and_then(|a| a.as_array()).map(|a| a.len()).unwrap_or(0);
-        let apps_running = env.get("apps").and_then(|a| a.as_array())
-            .map(|apps| apps.iter().filter(|a| a.get("running").and_then(|r| r.as_bool()).unwrap_or(false)).count())
-            .unwrap_or(0);
-        let env_status = if connected && status == "running" { "running" } else { "stopped" };
-
-        // One wildcard route per environment
-        routes.push(json!({
-            "domain": format!("*.{slug}.{base_domain}"),
-            "target": format!("{ip}:80"),
-            "environment": slug,
-            "status": env_status,
-            "type": "wildcard",
-            "apps_count": apps_count,
-            "apps_running": apps_running,
-        }));
-    }
-
-    Json(json!({"success": true, "routes": routes}))
 }

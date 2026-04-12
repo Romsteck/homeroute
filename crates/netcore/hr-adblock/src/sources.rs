@@ -19,9 +19,7 @@ pub async fn download_all(sources: &[AdblockSource]) -> (FxHashSet<String>, Vec<
     let mut handles = Vec::new();
     for source in sources {
         let source = source.clone();
-        handles.push(tokio::spawn(async move {
-            download_source(&source).await
-        }));
+        handles.push(tokio::spawn(async move { download_source(&source).await }));
     }
 
     for (i, handle) in handles.into_iter().enumerate() {
@@ -71,7 +69,10 @@ async fn download_source(source: &AdblockSource) -> Result<Vec<String>> {
         "domain_list" => parse_domain_list(&body),
         "dnsmasq" => parse_dnsmasq_format(&body),
         _ => {
-            warn!("Unknown format '{}' for source '{}', trying hosts", source.format, source.name);
+            warn!(
+                "Unknown format '{}' for source '{}', trying hosts",
+                source.format, source.name
+            );
             parse_hosts_file(&body)
         }
     };
@@ -151,14 +152,7 @@ fn is_valid_domain(domain: &str) -> bool {
     }
 
     // Filter out localhost, IPs, and invalid entries
-    let blocked_prefixes = [
-        "localhost",
-        "broadcasthost",
-        "local",
-        "ip6-",
-        "0.",
-        "127.",
-    ];
+    let blocked_prefixes = ["localhost", "broadcasthost", "local", "ip6-", "0.", "127."];
     for prefix in &blocked_prefixes {
         if domain.starts_with(prefix) {
             return false;
@@ -171,10 +165,7 @@ fn is_valid_domain(domain: &str) -> bool {
     }
 
     // Must start with alphanumeric
-    domain
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_alphanumeric())
+    domain.chars().next().is_some_and(|c| c.is_alphanumeric())
 }
 
 /// Save domains to a binary cache file for fast startup.

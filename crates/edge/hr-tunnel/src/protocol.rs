@@ -50,7 +50,10 @@ impl StreamHeader {
         };
         anyhow::ensure!(buf.remaining() >= 8, "Incomplete timestamp");
         let timestamp = buf.get_u64();
-        Ok(Self { client_ip, timestamp })
+        Ok(Self {
+            client_ip,
+            timestamp,
+        })
     }
 }
 
@@ -58,12 +61,25 @@ impl StreamHeader {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlMessage {
-    Ping { ts: u64 },
-    Pong { ts: u64, latency_us: u64 },
-    RelayStats { active_streams: u32, total_bytes: u64 },
-    Shutdown { reason: String },
+    Ping {
+        ts: u64,
+    },
+    Pong {
+        ts: u64,
+        latency_us: u64,
+    },
+    RelayStats {
+        active_streams: u32,
+        total_bytes: u64,
+    },
+    Shutdown {
+        reason: String,
+    },
     /// Binary update: sent on a uni stream, followed by `size` raw bytes of the new binary.
-    BinaryUpdate { size: u64, sha256: String },
+    BinaryUpdate {
+        size: u64,
+        sha256: String,
+    },
 }
 
 impl ControlMessage {
@@ -78,7 +94,10 @@ impl ControlMessage {
 
     /// Decode a control message from length-prefixed JSON.
     pub fn decode(buf: &mut impl Buf) -> anyhow::Result<Self> {
-        anyhow::ensure!(buf.remaining() >= 4, "ControlMessage: missing length prefix");
+        anyhow::ensure!(
+            buf.remaining() >= 4,
+            "ControlMessage: missing length prefix"
+        );
         let len = buf.get_u32() as usize;
         anyhow::ensure!(
             buf.remaining() >= len,

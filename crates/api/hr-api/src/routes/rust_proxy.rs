@@ -1,11 +1,11 @@
 use axum::{
+    Json, Router,
     extract::State,
     http::StatusCode,
     routing::{get, post},
-    Json, Router,
 };
-use serde_json::{json, Value};
 use hr_ipc::edge::EdgeRequest;
+use serde_json::{Value, json};
 
 use crate::state::ApiState;
 
@@ -16,13 +16,17 @@ pub fn router() -> Router<ApiState> {
         .route("/reload", post(reload))
 }
 
-async fn status(
-    State(state): State<ApiState>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let resp = state.edge.request(&EdgeRequest::GetProxyConfig).await
+async fn status(State(state): State<ApiState>) -> Result<Json<Value>, (StatusCode, String)> {
+    let resp = state
+        .edge
+        .request(&EdgeRequest::GetProxyConfig)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if !resp.ok {
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, resp.error.unwrap_or_default()));
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            resp.error.unwrap_or_default(),
+        ));
     }
     let config: Value = resp.data.unwrap_or_default();
 
@@ -40,13 +44,17 @@ async fn status(
     })))
 }
 
-async fn routes(
-    State(state): State<ApiState>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let resp = state.edge.request(&EdgeRequest::GetProxyConfig).await
+async fn routes(State(state): State<ApiState>) -> Result<Json<Value>, (StatusCode, String)> {
+    let resp = state
+        .edge
+        .request(&EdgeRequest::GetProxyConfig)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if !resp.ok {
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, resp.error.unwrap_or_default()));
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            resp.error.unwrap_or_default(),
+        ));
     }
     let config: Value = resp.data.unwrap_or_default();
     let routes = config.get("routes").cloned().unwrap_or(json!([]));
@@ -54,13 +62,17 @@ async fn routes(
     Ok(Json(json!({"success": true, "routes": routes})))
 }
 
-async fn reload(
-    State(state): State<ApiState>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let resp = state.edge.request(&EdgeRequest::ReloadConfig).await
+async fn reload(State(state): State<ApiState>) -> Result<Json<Value>, (StatusCode, String)> {
+    let resp = state
+        .edge
+        .request(&EdgeRequest::ReloadConfig)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if !resp.ok {
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, resp.error.unwrap_or_default()));
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            resp.error.unwrap_or_default(),
+        ));
     }
     Ok(Json(json!({"success": true})))
 }

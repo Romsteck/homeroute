@@ -1,5 +1,5 @@
-use crate::users::UserInfo;
 use crate::AuthService;
+use crate::users::UserInfo;
 use axum::{
     extract::{FromRequestParts, Request},
     http::{StatusCode, request::Parts},
@@ -26,9 +26,7 @@ where
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         // Extraire le cookie de session
         let jar = CookieJar::from_headers(&parts.headers);
-        let session_id = jar
-            .get("auth_session")
-            .map(|c| c.value().to_string());
+        let session_id = jar.get("auth_session").map(|c| c.value().to_string());
 
         let Some(session_id) = session_id else {
             return Err((
@@ -38,14 +36,10 @@ where
         };
 
         // Récupérer AuthService depuis les extensions
-        let auth = parts
-            .extensions
-            .get::<Arc<AuthService>>()
-            .cloned()
-            .ok_or((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "success": false, "error": "Auth service unavailable" })),
-            ))?;
+        let auth = parts.extensions.get::<Arc<AuthService>>().cloned().ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "success": false, "error": "Auth service unavailable" })),
+        ))?;
 
         // Valider la session
         let session = auth
@@ -73,9 +67,6 @@ where
 }
 
 /// Middleware axum : injecte AuthService dans les extensions de la requête
-pub async fn inject_auth_service(
-    request: Request,
-    next: Next,
-) -> Response {
+pub async fn inject_auth_service(request: Request, next: Next) -> Response {
     next.run(request).await
 }

@@ -567,7 +567,7 @@ Verification rapide (sans les details utilisateur).
             <div className="text-center py-8 text-gray-500">
               <Server className="w-12 h-12 mx-auto mb-2 opacity-50" />
               <p>Aucune route systeme</p>
-              <p className="text-xs mt-2">Les routes apparaissent automatiquement pour les environnements actifs</p>
+              <p className="text-xs mt-2">Les routes apparaissent automatiquement pour chaque application enregistree</p>
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -575,10 +575,8 @@ Verification rapide (sans les details utilisateur).
                 <thead>
                   <tr className="text-left text-gray-400 border-b border-gray-700">
                     <th className="pb-2">Domaine</th>
-                    <th className="pb-2">Cible</th>
-                    <th className="pb-2">Environnement</th>
-                    <th className="pb-2">App</th>
-                    <th className="pb-2">Status</th>
+                    <th className="pb-2">Port</th>
+                    <th className="pb-2">Auth</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -598,23 +596,14 @@ Verification rapide (sans les details utilisateur).
                         </div>
                       </td>
                       <td className="py-3 font-mono text-sm text-gray-300">
-                        {route.target}
+                        :{(route.target || '').split(':').pop()}
                       </td>
                       <td className="py-3">
-                        <span className="text-xs bg-gray-700 px-2 py-0.5">{route.environment}</span>
-                      </td>
-                      <td className="py-3">
-                        <span className={`text-xs px-2 py-0.5 ${route.type === 'studio' ? 'bg-purple-900/30 text-purple-400' : 'bg-blue-900/30 text-blue-400'}`}>
-                          {route.app}
-                        </span>
-                      </td>
-                      <td className="py-3">
-                        <div className="flex items-center gap-2">
-                          <div className={`w-2.5 h-2.5 rounded-full ${route.status === 'running' ? 'bg-green-400' : 'bg-gray-500'}`} />
-                          <span className={route.status === 'running' ? 'text-green-400' : 'text-gray-500'}>
-                            {route.status === 'running' ? 'Running' : 'Stopped'}
-                          </span>
-                        </div>
+                        {route.auth_required ? (
+                          <span className="text-xs bg-yellow-900/30 text-yellow-400 px-2 py-0.5 rounded">Auth</span>
+                        ) : (
+                          <span className="text-xs bg-green-900/30 text-green-400 px-2 py-0.5 rounded">Public</span>
+                        )}
                       </td>
                     </tr>
                   ))}

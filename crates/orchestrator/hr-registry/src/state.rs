@@ -7,17 +7,23 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tracing::{info, warn};
 
+use crate::protocol::{
+    AgentMetrics, ContainerInfo, HostMetrics, HostRegistryMessage, HostRole, NetworkInterfaceInfo,
+    RegistryMessage,
+};
+use crate::types::{
+    AgentNotifyResult, AgentSkipResult, AgentStatus, AgentUpdateStatusInfo, AppStack, Application,
+    CreateApplicationRequest, Environment, FrontendEndpoint, RegistryState,
+    UpdateApplicationRequest, UpdateBatchResult, UpdateStatusResult,
+};
 use hr_acme::AcmeManager;
 use hr_common::config::EnvConfig;
-use hr_common::events::{AgentMetricsEvent, AgentStatusEvent, AgentUpdateEvent, AgentUpdateStatus, EventBus, HostPowerEvent, HostPowerState, PowerAction, UpdateTarget, WakeResult};
-use crate::protocol::{AgentMetrics, ContainerInfo, HostMetrics, HostRegistryMessage, HostRole, NetworkInterfaceInfo, RegistryMessage};
-use crate::types::{
-    AgentNotifyResult, AgentSkipResult, AgentStatus, AgentUpdateStatusInfo,
-    AppStack, Application, CreateApplicationRequest, Environment, FrontendEndpoint,
-    RegistryState, UpdateApplicationRequest, UpdateBatchResult, UpdateStatusResult,
+use hr_common::events::{
+    AgentMetricsEvent, AgentStatusEvent, AgentUpdateEvent, AgentUpdateStatus, EventBus,
+    HostPowerEvent, HostPowerState, PowerAction, UpdateTarget, WakeResult,
 };
 
 /// Tracks all active WebSocket connections for a single app_id.
@@ -72,7 +78,8 @@ pub struct AgentRegistry {
     env: Arc<EnvConfig>,
     events: Arc<EventBus>,
     migration_signals: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<MigrationResult>>>>,
-    exec_signals: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<(bool, String, String)>>>>,
+    exec_signals:
+        Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<(bool, String, String)>>>>,
     /// Maps transfer_id → container_name for in-flight migrations (set when StartExport is sent)
     pub transfer_container_names: Arc<RwLock<HashMap<String, String>>>,
     /// Maps transfer_id → (target_host_id, container_name) for remote→remote relay migrations
@@ -100,18 +107,12 @@ pub struct LatestVersionsCache {
 
 impl AgentRegistry {
     /// Load or create the registry state from disk.
-    pub fn new(
-        state_path: PathBuf,
-        env: Arc<EnvConfig>,
-        events: Arc<EventBus>,
-    ) -> Self {
+    pub fn new(state_path: PathBuf, env: Arc<EnvConfig>, events: Arc<EventBus>) -> Self {
         let state = match std::fs::read_to_string(&state_path) {
-            Ok(content) => {
-                serde_json::from_str(&content).unwrap_or_else(|e| {
-                    warn!("Failed to parse registry state, starting fresh: {e}");
-                    RegistryState::default()
-                })
-            }
+            Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
+                warn!("Failed to parse registry state, starting fresh: {e}");
+                RegistryState::default()
+            }),
             Err(_) => RegistryState::default(),
         };
 
@@ -143,7 +144,16 @@ impl AgentRegistry {
     /// Reads agent tokens from /var/lib/machines/{container}/etc/hr-agent.toml.
     pub async fn recover_from_containers(
         &self,
-        containers: &[(String, String, String, String, String, Environment, AppStack, DateTime<Utc>)],
+        containers: &[(
+            String,
+            String,
+            String,
+            String,
+            String,
+            Environment,
+            AppStack,
+            DateTime<Utc>,
+        )],
     ) -> Result<usize> {
         let state = self.state.read().await;
         if !state.applications.is_empty() {
@@ -163,9 +173,9 @@ impl AgentRegistry {
         let mut recovered = 0;
         let mut state = self.state.write().await;
 
-        for (id, name, slug, container_name, host_id, environment, stack, created_at) in containers {
-            let config_path =
-                format!("/var/lib/machines/{}/etc/hr-agent.toml", container_name);
+        for (id, name, slug, container_name, host_id, environment, stack, created_at) in containers
+        {
+            let config_path = format!("/var/lib/machines/{}/etc/hr-agent.toml", container_name);
             let config_content = match tokio::fs::read_to_string(&config_path).await {
                 Ok(c) => c,
                 Err(e) => {
@@ -246,7 +256,6 @@ impl AgentRegistry {
         info!("ACME manager registered with agent registry");
     }
 
-
     // ── Application CRUD ────────────────────────────────────────
 
     /// Create an application record without spawning background deployment.
@@ -288,13 +297,21 @@ impl AgentRegistry {
         }
         self.persist().await?;
 
-        info!(app = app.slug, container = container_name, "Application created (headless)");
+        info!(
+            app = app.slug,
+            container = container_name,
+            "Application created (headless)"
+        );
 
         Ok((app, token_clear))
     }
 
     /// Update application endpoints/auth. Pushes new config to connected agent.
-    pub async fn update_application(&self, id: &str, req: UpdateApplicationRequest) -> Result<Option<Application>> {
+    pub async fn update_application(
+        &self,
+        id: &str,
+        req: UpdateApplicationRequest,
+    ) -> Result<Option<Application>> {
         let mut state = self.state.write().await;
         let Some(app) = state.applications.iter_mut().find(|a| a.id == id) else {
             return Ok(None);
@@ -348,7 +365,6 @@ impl AgentRegistry {
             }
         }
 
-
         // Delete per-app wildcard DNS record if Cloudflare credentials available
         if let (Some(token), Some(zone_id)) = (&self.env.cf_api_token, &self.env.cf_zone_id) {
             if let Err(e) = crate::cloudflare::delete_app_wildcard_dns(
@@ -356,7 +372,9 @@ impl AgentRegistry {
                 zone_id,
                 &app.slug,
                 &self.env.base_domain,
-            ).await {
+            )
+            .await
+            {
                 warn!(slug = app.slug, error = %e, "Failed to delete app wildcard DNS");
             }
         }
@@ -367,7 +385,12 @@ impl AgentRegistry {
     }
 
     /// Rename an application's slug and container_name. Persists to disk.
-    pub async fn rename_application(&self, id: &str, new_slug: &str, new_container_name: &str) -> Result<Option<Application>> {
+    pub async fn rename_application(
+        &self,
+        id: &str,
+        new_slug: &str,
+        new_container_name: &str,
+    ) -> Result<Option<Application>> {
         let mut state = self.state.write().await;
         let Some(app) = state.applications.iter_mut().find(|a| a.id == id) else {
             return Ok(None);
@@ -474,8 +497,12 @@ impl AgentRegistry {
                 if reported_ipv4.is_some() {
                     existing.tx = tx.clone();
                 }
-                info!(app_id, count = existing.active_count, has_ipv4 = reported_ipv4.is_some(),
-                    "Additional agent connection registered");
+                info!(
+                    app_id,
+                    count = existing.active_count,
+                    has_ipv4 = reported_ipv4.is_some(),
+                    "Additional agent connection registered"
+                );
             } else {
                 conns.insert(
                     app_id.to_string(),
@@ -500,7 +527,11 @@ impl AgentRegistry {
                 if let Some(ref ipv4_str) = reported_ipv4 {
                     if let Ok(addr) = ipv4_str.parse() {
                         app.ipv4_address = Some(addr);
-                        info!(app_id, ipv4 = ipv4_str, "Updated app IPv4 from agent report");
+                        info!(
+                            app_id,
+                            ipv4 = ipv4_str,
+                            "Updated app IPv4 from agent report"
+                        );
                     }
                 }
 
@@ -559,8 +590,11 @@ impl AgentRegistry {
                     conns.remove(app_id);
                     true
                 } else {
-                    info!(app_id, remaining = existing.active_count,
-                        "Agent connection closed, others still active (routes preserved)");
+                    info!(
+                        app_id,
+                        remaining = existing.active_count,
+                        "Agent connection closed, others still active (routes preserved)"
+                    );
                     false
                 }
             } else {
@@ -594,7 +628,10 @@ impl AgentRegistry {
         }
 
         let _ = self.persist().await;
-        info!(app_id, "Agent disconnected (last connection, routes will be removed)");
+        info!(
+            app_id,
+            "Agent disconnected (last connection, routes will be removed)"
+        );
         true
     }
 
@@ -727,7 +764,8 @@ impl AgentRegistry {
         drop(conns);
 
         // Update power state machine → Online
-        self.transition_power_state(&host_id, HostPowerState::Online, "Hote connecte").await;
+        self.transition_power_state(&host_id, HostPowerState::Online, "Hote connecte")
+            .await;
 
         info!("Host agent connected: {} ({})", host_name, host_id);
     }
@@ -780,13 +818,20 @@ impl AgentRegistry {
     }
 
     /// Internal: transition power state and emit event.
-    async fn transition_power_state(&self, host_id: &str, new_state: HostPowerState, message: &str) {
+    async fn transition_power_state(
+        &self,
+        host_id: &str,
+        new_state: HostPowerState,
+        message: &str,
+    ) {
         let mut states = self.host_power_states.write().await;
-        let entry = states.entry(host_id.to_string()).or_insert_with(|| HostPowerInfo {
-            state: HostPowerState::Offline,
-            since: Utc::now(),
-            mac_address: None,
-        });
+        let entry = states
+            .entry(host_id.to_string())
+            .or_insert_with(|| HostPowerInfo {
+                state: HostPowerState::Offline,
+                since: Utc::now(),
+                mac_address: None,
+            });
 
         let old_state = entry.state;
         if old_state == new_state {
@@ -823,7 +868,9 @@ impl AgentRegistry {
         match current_state {
             HostPowerState::Online => return Ok(WakeResult::AlreadyOnline),
             HostPowerState::ShuttingDown => return Err("L'hote est en cours d'arret".to_string()),
-            HostPowerState::Rebooting => return Err("L'hote est en cours de redemarrage".to_string()),
+            HostPowerState::Rebooting => {
+                return Err("L'hote est en cours de redemarrage".to_string());
+            }
             HostPowerState::WakingUp => {
                 // Dedup: if waking up for less than 30s, skip
                 let states = self.host_power_states.read().await;
@@ -843,7 +890,8 @@ impl AgentRegistry {
         let mac = match cached_mac {
             Some(m) => m,
             None => {
-                let m = Self::lookup_host_mac(host_id).await
+                let m = Self::lookup_host_mac(host_id)
+                    .await
                     .ok_or_else(|| "Adresse MAC non trouvee".to_string())?;
                 // Cache it
                 let mut states = self.host_power_states.write().await;
@@ -860,11 +908,13 @@ impl AgentRegistry {
         // Update state
         {
             let mut states = self.host_power_states.write().await;
-            let entry = states.entry(host_id.to_string()).or_insert_with(|| HostPowerInfo {
-                state: HostPowerState::Offline,
-                since: Utc::now(),
-                mac_address: Some(mac),
-            });
+            let entry = states
+                .entry(host_id.to_string())
+                .or_insert_with(|| HostPowerInfo {
+                    state: HostPowerState::Offline,
+                    since: Utc::now(),
+                    mac_address: Some(mac),
+                });
 
             if entry.state != HostPowerState::WakingUp {
                 entry.state = HostPowerState::WakingUp;
@@ -884,7 +934,11 @@ impl AgentRegistry {
     }
 
     /// Request a power action (shutdown/reboot). Validates state conflicts.
-    pub async fn request_power_action(&self, host_id: &str, action: PowerAction) -> Result<(), String> {
+    pub async fn request_power_action(
+        &self,
+        host_id: &str,
+        action: PowerAction,
+    ) -> Result<(), String> {
         let current_state = self.get_host_power_state(host_id).await;
 
         // Check for conflicts
@@ -909,7 +963,8 @@ impl AgentRegistry {
             PowerAction::Reboot => (HostPowerState::Rebooting, "Redemarrage en cours"),
         };
 
-        self.transition_power_state(host_id, new_state, message).await;
+        self.transition_power_state(host_id, new_state, message)
+            .await;
         Ok(())
     }
 
@@ -950,7 +1005,8 @@ impl AgentRegistry {
                 _ => continue,
             };
             warn!(host_id = %host_id, state = %timed_out_state, "Power state timeout");
-            self.transition_power_state(&host_id, HostPowerState::Offline, msg).await;
+            self.transition_power_state(&host_id, HostPowerState::Offline, msg)
+                .await;
         }
     }
 
@@ -988,9 +1044,9 @@ impl AgentRegistry {
         let content = tokio::fs::read_to_string("/data/hosts.json").await.ok()?;
         let data: serde_json::Value = serde_json::from_str(&content).ok()?;
         let hosts = data.get("hosts")?.as_array()?;
-        let host = hosts.iter().find(|h| {
-            h.get("id").and_then(|i| i.as_str()) == Some(host_id)
-        })?;
+        let host = hosts
+            .iter()
+            .find(|h| h.get("id").and_then(|i| i.as_str()) == Some(host_id))?;
         // Prefer wol_mac, fall back to mac
         host.get("wol_mac")
             .and_then(|m| m.as_str())
@@ -1016,7 +1072,11 @@ impl AgentRegistry {
         }
     }
 
-    pub async fn update_host_interfaces(&self, host_id: &str, interfaces: Vec<NetworkInterfaceInfo>) {
+    pub async fn update_host_interfaces(
+        &self,
+        host_id: &str,
+        interfaces: Vec<NetworkInterfaceInfo>,
+    ) {
         if let Some(conn) = self.host_connections.write().await.get_mut(host_id) {
             conn.interfaces = interfaces;
         }
@@ -1047,19 +1107,20 @@ impl AgentRegistry {
         match tokio::time::timeout(
             std::time::Duration::from_secs(30),
             tx.send(OutgoingHostMessage::Text(msg)),
-        ).await {
+        )
+        .await
+        {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(format!("Failed to send to host {}: {}", host_id, e)),
-            Err(_) => Err(format!("Timeout sending to host {} (channel full for 30s)", host_id)),
+            Err(_) => Err(format!(
+                "Timeout sending to host {} (channel full for 30s)",
+                host_id
+            )),
         }
     }
 
     /// Send raw binary data to a host-agent (for migration chunk relay).
-    pub async fn send_host_binary(
-        &self,
-        host_id: &str,
-        data: Vec<u8>,
-    ) -> Result<(), String> {
+    pub async fn send_host_binary(&self, host_id: &str, data: Vec<u8>) -> Result<(), String> {
         let tx = {
             let conns = self.host_connections.read().await;
             // Resolve "local" to the first (and typically only) connected host
@@ -1077,33 +1138,55 @@ impl AgentRegistry {
         match tokio::time::timeout(
             std::time::Duration::from_secs(30),
             tx.send(OutgoingHostMessage::Binary(data)),
-        ).await {
+        )
+        .await
+        {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(format!("Failed to send binary to host {}: {}", host_id, e)),
-            Err(_) => Err(format!("Timeout sending binary to host {} (channel full for 30s)", host_id)),
+            Err(_) => Err(format!(
+                "Timeout sending binary to host {} (channel full for 30s)",
+                host_id
+            )),
         }
     }
 
     // ── Migration & exec signal handling ──────────────────────
 
-    pub async fn register_migration_signal(&self, transfer_id: &str) -> tokio::sync::oneshot::Receiver<MigrationResult> {
+    pub async fn register_migration_signal(
+        &self,
+        transfer_id: &str,
+    ) -> tokio::sync::oneshot::Receiver<MigrationResult> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.migration_signals.write().await.insert(transfer_id.to_string(), tx);
+        self.migration_signals
+            .write()
+            .await
+            .insert(transfer_id.to_string(), tx);
         rx
     }
 
     /// Store the container_name for a given transfer_id (called when StartExport is sent).
     pub async fn set_transfer_container_name(&self, transfer_id: &str, container_name: &str) {
-        self.transfer_container_names.write().await.insert(transfer_id.to_string(), container_name.to_string());
+        self.transfer_container_names
+            .write()
+            .await
+            .insert(transfer_id.to_string(), container_name.to_string());
     }
 
     /// Retrieve and remove the container_name for a given transfer_id.
     pub async fn take_transfer_container_name(&self, transfer_id: &str) -> Option<String> {
-        self.transfer_container_names.write().await.remove(transfer_id)
+        self.transfer_container_names
+            .write()
+            .await
+            .remove(transfer_id)
     }
 
     /// Store relay target for remote→remote migration (transfer_id → (target_host_id, container_name)).
-    pub async fn set_transfer_relay_target(&self, transfer_id: &str, target_host_id: &str, container_name: &str) {
+    pub async fn set_transfer_relay_target(
+        &self,
+        transfer_id: &str,
+        target_host_id: &str,
+        container_name: &str,
+    ) {
         self.transfer_relay_targets.write().await.insert(
             transfer_id.to_string(),
             (target_host_id.to_string(), container_name.to_string()),
@@ -1112,33 +1195,58 @@ impl AgentRegistry {
 
     /// Get relay target for a transfer (non-destructive read).
     pub async fn get_transfer_relay_target(&self, transfer_id: &str) -> Option<(String, String)> {
-        self.transfer_relay_targets.read().await.get(transfer_id).cloned()
+        self.transfer_relay_targets
+            .read()
+            .await
+            .get(transfer_id)
+            .cloned()
     }
 
     /// Remove relay target for a completed/failed transfer.
     pub async fn take_transfer_relay_target(&self, transfer_id: &str) -> Option<(String, String)> {
-        self.transfer_relay_targets.write().await.remove(transfer_id)
+        self.transfer_relay_targets
+            .write()
+            .await
+            .remove(transfer_id)
     }
 
-    pub async fn on_host_import_complete(&self, _host_id: &str, transfer_id: &str, container_name: &str) {
+    pub async fn on_host_import_complete(
+        &self,
+        _host_id: &str,
+        transfer_id: &str,
+        container_name: &str,
+    ) {
         if let Some(tx) = self.migration_signals.write().await.remove(transfer_id) {
-            let _ = tx.send(MigrationResult::ImportComplete { container_name: container_name.to_string() });
+            let _ = tx.send(MigrationResult::ImportComplete {
+                container_name: container_name.to_string(),
+            });
         }
     }
 
     pub async fn on_host_import_failed(&self, _host_id: &str, transfer_id: &str, error: &str) {
         if let Some(tx) = self.migration_signals.write().await.remove(transfer_id) {
-            let _ = tx.send(MigrationResult::ImportFailed { error: error.to_string() });
+            let _ = tx.send(MigrationResult::ImportFailed {
+                error: error.to_string(),
+            });
         }
     }
 
     pub async fn on_host_export_failed(&self, _host_id: &str, transfer_id: &str, error: &str) {
         if let Some(tx) = self.migration_signals.write().await.remove(transfer_id) {
-            let _ = tx.send(MigrationResult::ExportFailed { error: error.to_string() });
+            let _ = tx.send(MigrationResult::ExportFailed {
+                error: error.to_string(),
+            });
         }
     }
 
-    pub async fn on_host_exec_result(&self, _host_id: &str, request_id: &str, success: bool, stdout: &str, stderr: &str) {
+    pub async fn on_host_exec_result(
+        &self,
+        _host_id: &str,
+        request_id: &str,
+        success: bool,
+        stdout: &str,
+        stderr: &str,
+    ) {
         if let Some(tx) = self.exec_signals.write().await.remove(request_id) {
             let _ = tx.send((success, stdout.to_string(), stderr.to_string()));
         }
@@ -1146,7 +1254,12 @@ impl AgentRegistry {
 
     // ── Backup signal handling ───────────────────────────────
 
-    pub async fn exec_in_remote_container(&self, host_id: &str, container_name: &str, command: Vec<String>) -> Result<(bool, String, String)> {
+    pub async fn exec_in_remote_container(
+        &self,
+        host_id: &str,
+        container_name: &str,
+        command: Vec<String>,
+    ) -> Result<(bool, String, String)> {
         // Local host: execute directly via machinectl (no host-agent needed)
         if host_id == "local" {
             let full_cmd = command.join(" && ");
@@ -1164,13 +1277,21 @@ impl AgentRegistry {
 
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.exec_signals.write().await.insert(request_id.clone(), tx);
+        self.exec_signals
+            .write()
+            .await
+            .insert(request_id.clone(), tx);
 
-        self.send_host_command(host_id, crate::protocol::HostRegistryMessage::ExecInContainer {
-            request_id: request_id.clone(),
-            container_name: container_name.to_string(),
-            command,
-        }).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        self.send_host_command(
+            host_id,
+            crate::protocol::HostRegistryMessage::ExecInContainer {
+                request_id: request_id.clone(),
+                container_name: container_name.to_string(),
+                command,
+            },
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
             Ok(Ok(result)) => Ok(result),
@@ -1185,7 +1306,13 @@ impl AgentRegistry {
     }
 
     /// Execute a command in a remote container with configurable timeout.
-    pub async fn exec_in_remote_container_with_timeout(&self, host_id: &str, container_name: &str, command: Vec<String>, timeout_secs: u64) -> Result<(bool, String, String)> {
+    pub async fn exec_in_remote_container_with_timeout(
+        &self,
+        host_id: &str,
+        container_name: &str,
+        command: Vec<String>,
+        timeout_secs: u64,
+    ) -> Result<(bool, String, String)> {
         // Local host: execute directly via machinectl (no host-agent needed)
         if host_id == "local" {
             let full_cmd = command.join(" && ");
@@ -1203,13 +1330,21 @@ impl AgentRegistry {
 
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.exec_signals.write().await.insert(request_id.clone(), tx);
+        self.exec_signals
+            .write()
+            .await
+            .insert(request_id.clone(), tx);
 
-        self.send_host_command(host_id, crate::protocol::HostRegistryMessage::ExecInContainer {
-            request_id: request_id.clone(),
-            container_name: container_name.to_string(),
-            command,
-        }).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        self.send_host_command(
+            host_id,
+            crate::protocol::HostRegistryMessage::ExecInContainer {
+                request_id: request_id.clone(),
+                container_name: container_name.to_string(),
+                command,
+            },
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await {
             Ok(Ok(result)) => Ok(result),
@@ -1231,12 +1366,19 @@ impl AgentRegistry {
     ) -> Result<(bool, String, String), String> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.exec_signals.write().await.insert(request_id.clone(), tx);
+        self.exec_signals
+            .write()
+            .await
+            .insert(request_id.clone(), tx);
 
-        self.send_host_command(host_id, crate::protocol::HostRegistryMessage::ExecOnHost {
-            request_id: request_id.clone(),
-            command,
-        }).await?;
+        self.send_host_command(
+            host_id,
+            crate::protocol::HostRegistryMessage::ExecOnHost {
+                request_id: request_id.clone(),
+                command,
+            },
+        )
+        .await?;
 
         match tokio::time::timeout(std::time::Duration::from_secs(120), rx).await {
             Ok(Ok((success, stdout, stderr))) => Ok((success, stdout, stderr)),
@@ -1295,10 +1437,22 @@ impl AgentRegistry {
 
         let rules = vec![
             ("homeroute-deploy.md".to_string(), render(deploy_rules)),
-            ("homeroute-db.md".to_string(), render(include_str!("rules/homeroute-db.md"))),
-            ("homeroute-store.md".to_string(), render(include_str!("rules/homeroute-store.md"))),
-            ("homeroute-studio-todos.md".to_string(), render(include_str!("rules/homeroute-studio-todos.md"))),
-            ("homeroute-docs.md".to_string(), render(include_str!("rules/homeroute-docs.md"))),
+            (
+                "homeroute-db.md".to_string(),
+                render(include_str!("rules/homeroute-db.md")),
+            ),
+            (
+                "homeroute-store.md".to_string(),
+                render(include_str!("rules/homeroute-store.md")),
+            ),
+            (
+                "homeroute-studio-todos.md".to_string(),
+                render(include_str!("rules/homeroute-studio-todos.md")),
+            ),
+            (
+                "homeroute-docs.md".to_string(),
+                render(include_str!("rules/homeroute-docs.md")),
+            ),
         ];
 
         let _ = conn.tx.send(RegistryMessage::UpdateRules { rules }).await;
@@ -1309,10 +1463,10 @@ impl AgentRegistry {
     /// Return all current agent metrics (app_id + metrics) for IPC polling.
     pub async fn get_all_metrics(&self) -> Vec<(String, AgentMetrics)> {
         let state = self.state.read().await;
-        state.applications.iter()
-            .filter_map(|app| {
-                app.metrics.as_ref().map(|m| (app.id.clone(), m.clone()))
-            })
+        state
+            .applications
+            .iter()
+            .filter_map(|app| app.metrics.as_ref().map(|m| (app.id.clone(), m.clone())))
             .collect()
     }
 
@@ -1364,9 +1518,13 @@ impl AgentRegistry {
     /// Send a RegistryMessage to a connected agent by app_id.
     pub async fn send_to_agent(&self, app_id: &str, msg: RegistryMessage) -> Result<()> {
         let connections = self.connections.read().await;
-        let conn = connections.get(app_id)
+        let conn = connections
+            .get(app_id)
             .ok_or_else(|| anyhow::anyhow!("Agent not connected for app {}", app_id))?;
-        conn.tx.send(msg).await.map_err(|_| anyhow::anyhow!("Failed to send to agent"))?;
+        conn.tx
+            .send(msg)
+            .await
+            .map_err(|_| anyhow::anyhow!("Failed to send to agent"))?;
         Ok(())
     }
 
@@ -1460,7 +1618,11 @@ impl AgentRegistry {
                         error: None,
                     });
 
-                    info!(app = app.slug, version = version, "Update notification sent");
+                    info!(
+                        app = app.slug,
+                        version = version,
+                        "Update notification sent"
+                    );
                 } else {
                     skipped.push(AgentSkipResult {
                         id: app.id.clone(),
@@ -1581,7 +1743,11 @@ impl AgentRegistry {
 
         let api_port = self.env.api_port;
 
-        info!(container = container, slug = slug, "Fixing agent via machinectl exec");
+        info!(
+            container = container,
+            slug = slug,
+            "Fixing agent via machinectl exec"
+        );
 
         // Download new binary directly in the container and restart
         let download_cmd = format!(
@@ -1640,23 +1806,41 @@ impl AgentRegistry {
             }
         }
         {
-            let signal_keys: std::collections::HashSet<String> = self.migration_signals.read().await.keys().cloned().collect();
+            let signal_keys: std::collections::HashSet<String> = self
+                .migration_signals
+                .read()
+                .await
+                .keys()
+                .cloned()
+                .collect();
             let mut names = self.transfer_container_names.write().await;
             let before = names.len();
             names.retain(|tid, _| signal_keys.contains(tid));
             let removed = before - names.len();
             if removed > 0 {
-                tracing::info!("Cleaned up {} stale transfer container name mappings", removed);
+                tracing::info!(
+                    "Cleaned up {} stale transfer container name mappings",
+                    removed
+                );
             }
         }
         {
-            let signal_keys: std::collections::HashSet<String> = self.migration_signals.read().await.keys().cloned().collect();
+            let signal_keys: std::collections::HashSet<String> = self
+                .migration_signals
+                .read()
+                .await
+                .keys()
+                .cloned()
+                .collect();
             let mut relays = self.transfer_relay_targets.write().await;
             let before = relays.len();
             relays.retain(|tid, _| signal_keys.contains(tid));
             let removed = before - relays.len();
             if removed > 0 {
-                tracing::info!("Cleaned up {} stale transfer relay target mappings", removed);
+                tracing::info!(
+                    "Cleaned up {} stale transfer relay target mappings",
+                    removed
+                );
             }
         }
     }
@@ -1665,7 +1849,10 @@ impl AgentRegistry {
 
     /// Register a terminal session so data from a host-agent can be routed to the API WS handler.
     pub async fn register_terminal_session(&self, session_id: &str, tx: mpsc::Sender<Vec<u8>>) {
-        self.terminal_sessions.write().await.insert(session_id.to_string(), tx);
+        self.terminal_sessions
+            .write()
+            .await
+            .insert(session_id.to_string(), tx);
     }
 
     /// Unregister a terminal session.
@@ -1716,7 +1903,12 @@ impl AgentRegistry {
 
         let host_conns = self.host_connections.read().await;
         for (_host_id, conn) in host_conns.iter() {
-            let _ = conn.tx.send(OutgoingHostMessage::Text(HostRegistryMessage::RunUpdateScan)).await;
+            let _ = conn
+                .tx
+                .send(OutgoingHostMessage::Text(
+                    HostRegistryMessage::RunUpdateScan,
+                ))
+                .await;
             count += 1;
         }
 
@@ -1736,29 +1928,44 @@ impl AgentRegistry {
             let resp = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(std::time::Duration::from_secs(10))
-                .build().ok()?
+                .build()
+                .ok()?
                 .get("https://github.com/coder/code-server/releases/latest")
                 .header("User-Agent", "hr-orchestrator")
-                .send().await.ok()?;
+                .send()
+                .await
+                .ok()?;
             let loc = resp.headers().get("location")?.to_str().ok()?;
             let tag = loc.rsplit('/').next()?;
             Some(tag.strip_prefix('v').unwrap_or(tag).to_string())
         };
-        let ext_fut = fetch_latest_version(&client, "https://open-vsx.org/api/Anthropic/claude-code/latest", |j| {
-            j.get("version")?.as_str().map(|s| s.to_string())
-        });
+        let ext_fut = fetch_latest_version(
+            &client,
+            "https://open-vsx.org/api/Anthropic/claude-code/latest",
+            |j| j.get("version")?.as_str().map(|s| s.to_string()),
+        );
         let cli_fut = async {
             let resp = client.get("https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest")
                 .send().await.ok()?;
             let t = resp.text().await.ok()?.trim().to_string();
-            if t.is_empty() || t.len() > 20 { None } else { Some(t) }
+            if t.is_empty() || t.len() > 20 {
+                None
+            } else {
+                Some(t)
+            }
         };
         let (cs, ext, cli) = tokio::join!(cs_fut, ext_fut, cli_fut);
 
         let mut cache = self.latest_versions.write().await;
-        if cs.is_some() { cache.code_server = cs; }
-        if cli.is_some() { cache.claude_cli = cli; }
-        if ext.is_some() { cache.claude_ext = ext; }
+        if cs.is_some() {
+            cache.code_server = cs;
+        }
+        if cli.is_some() {
+            cache.claude_cli = cli;
+        }
+        if ext.is_some() {
+            cache.claude_ext = ext;
+        }
         cache.fetched_at = Some(std::time::Instant::now());
         info!(
             code_server = ?cache.code_server,
@@ -1788,7 +1995,8 @@ async fn fetch_latest_version(
     url: &str,
     extract: impl FnOnce(&serde_json::Value) -> Option<String>,
 ) -> Option<String> {
-    let resp = client.get(url)
+    let resp = client
+        .get(url)
         .header("User-Agent", "hr-orchestrator")
         .send()
         .await
@@ -1807,8 +2015,8 @@ fn generate_token() -> String {
 }
 
 fn hash_token(token: &str) -> Result<String> {
-    use argon2::{Argon2, PasswordHasher};
     use argon2::password_hash::SaltString;
+    use argon2::{Argon2, PasswordHasher};
     use rand_core::OsRng;
 
     let salt = SaltString::generate(&mut OsRng);
@@ -1820,8 +2028,8 @@ fn hash_token(token: &str) -> Result<String> {
 }
 
 fn verify_token(token: &str, hash: &str) -> bool {
-    use argon2::{Argon2, PasswordVerifier};
     use argon2::password_hash::PasswordHash;
+    use argon2::{Argon2, PasswordVerifier};
 
     let Ok(parsed) = PasswordHash::new(hash) else {
         return false;

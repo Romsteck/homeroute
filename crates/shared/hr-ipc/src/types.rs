@@ -48,7 +48,11 @@ pub struct IpcResponse {
 
 impl IpcResponse {
     pub fn ok_empty() -> Self {
-        Self { ok: true, error: None, data: None }
+        Self {
+            ok: true,
+            error: None,
+            data: None,
+        }
     }
 
     pub fn ok_data(data: impl Serialize) -> Self {
@@ -60,7 +64,11 @@ impl IpcResponse {
     }
 
     pub fn err(msg: impl Into<String>) -> Self {
-        Self { ok: false, error: Some(msg.into()), data: None }
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+            data: None,
+        }
     }
 }
 
@@ -146,4 +154,105 @@ pub struct ServiceStatusEntry {
     pub restart_count: u32,
     pub last_state_change: u64,
     pub error: Option<String>,
+}
+
+// ── App* DTOs (parallel to hr-apps types, no crate dep) ────────
+
+/// Application summary returned by app_list / app_get IPC calls.
+/// This mirrors `hr_apps::types::Application` to avoid a dependency cycle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplicationDto {
+    pub slug: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub stack: String,
+    #[serde(default)]
+    pub has_db: bool,
+    #[serde(default)]
+    pub visibility: String,
+    pub domain: String,
+    pub port: u16,
+    pub run_command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_command: Option<String>,
+    pub health_path: String,
+    #[serde(default)]
+    pub env_vars: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub state: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppListData {
+    pub apps: Vec<ApplicationDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppStatusData {
+    pub slug: String,
+    pub pid: Option<u32>,
+    pub state: String,
+    pub port: u16,
+    pub uptime_secs: u64,
+    pub restart_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppLogEntry {
+    pub timestamp: String,
+    pub level: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppLogsData {
+    pub slug: String,
+    pub logs: Vec<AppLogEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppExecResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppDbTableColumn {
+    pub name: String,
+    pub field_type: String,
+    pub required: bool,
+    pub unique: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppDbTableSchema {
+    pub name: String,
+    pub columns: Vec<AppDbTableColumn>,
+    pub row_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppDbTablesData {
+    pub tables: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppDbQueryResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<serde_json::Value>,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppDbSnapshotData {
+    pub slug: String,
+    pub path: String,
+    pub size_bytes: u64,
 }

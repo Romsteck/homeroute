@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::sync::watch;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use crate::config::Ipv6Config;
 use crate::pd_client::PrefixInfo;
@@ -77,11 +77,11 @@ fn build_ra_packet(config: &Ipv6Config, prefixes: &[PrefixOption]) -> Vec<u8> {
 
     // ICMPv6 header
     buf.push(134); // Type: Router Advertisement
-    buf.push(0);   // Code
+    buf.push(0); // Code
     buf.extend_from_slice(&[0, 0]); // Checksum (kernel computes for us)
 
     // RA fields
-    buf.push(64);  // Cur Hop Limit
+    buf.push(64); // Cur Hop Limit
     // M=0 (no DHCPv6 for addresses, use SLAAC), O=1 (use DHCPv6 for DNS options)
     let flags: u8 = 0x40; // M=0, O=1
     buf.push(flags);
@@ -91,8 +91,8 @@ fn build_ra_packet(config: &Ipv6Config, prefixes: &[PrefixOption]) -> Vec<u8> {
 
     // Prefix Information Options
     for pfx in prefixes {
-        buf.push(3);   // Type: Prefix Information
-        buf.push(4);   // Length: 4 (in units of 8 bytes = 32 bytes)
+        buf.push(3); // Type: Prefix Information
+        buf.push(4); // Length: 4 (in units of 8 bytes = 32 bytes)
         buf.push(pfx.len);
         buf.push(0xC0); // Flags: L=1 (on-link), A=1 (autonomous/SLAAC)
         buf.extend_from_slice(&pfx.valid_lifetime.to_be_bytes());
@@ -104,8 +104,8 @@ fn build_ra_packet(config: &Ipv6Config, prefixes: &[PrefixOption]) -> Vec<u8> {
     // RDNSS Option (type=25) — Recursive DNS Server
     for dns_str in &config.dns_servers {
         if let Ok(dns_ip) = dns_str.parse::<Ipv6Addr>() {
-            buf.push(25);  // Type: RDNSS
-            buf.push(3);   // Length: 3 (= 24 bytes: 8 header + 16 address)
+            buf.push(25); // Type: RDNSS
+            buf.push(3); // Length: 3 (= 24 bytes: 8 header + 16 address)
             buf.extend_from_slice(&[0, 0]); // Reserved
             buf.extend_from_slice(&config.ra_lifetime_secs.to_be_bytes()); // Lifetime
             buf.extend_from_slice(&dns_ip.octets());
@@ -114,7 +114,6 @@ fn build_ra_packet(config: &Ipv6Config, prefixes: &[PrefixOption]) -> Vec<u8> {
 
     buf
 }
-
 
 /// Collect the list of prefixes to advertise.
 /// Only the GUA prefix from Starlink PD is advertised (no ULA).
@@ -193,12 +192,20 @@ pub async fn run_ra_sender(
         let prefixes = collect_prefixes(&config, &current_gua);
         let ra_packet = build_ra_packet(&config, &prefixes);
 
-        match socket.send_to(&ra_packet, std::net::SocketAddr::V6(dest)).await {
+        match socket
+            .send_to(&ra_packet, std::net::SocketAddr::V6(dest))
+            .await
+        {
             Ok(_) => {
-                let prefix_names: Vec<String> = prefixes.iter()
+                let prefix_names: Vec<String> = prefixes
+                    .iter()
                     .map(|p| format!("{}/{}", p.addr, p.len))
                     .collect();
-                info!("Sent RA ({} bytes, prefixes: {:?})", ra_packet.len(), prefix_names);
+                info!(
+                    "Sent RA ({} bytes, prefixes: {:?})",
+                    ra_packet.len(),
+                    prefix_names
+                );
             }
             Err(e) => {
                 warn!("Failed to send RA: {}", e);

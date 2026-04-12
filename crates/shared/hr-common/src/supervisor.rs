@@ -5,7 +5,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::service_registry::{
-    now_millis, ServicePriorityLevel, ServiceState, ServiceStatus, SharedServiceRegistry,
+    ServicePriorityLevel, ServiceState, ServiceStatus, SharedServiceRegistry, now_millis,
 };
 
 /// Priorite d'un service, determine le comportement de restart
@@ -129,9 +129,7 @@ where
             retries = retries.saturating_add(1);
 
             if retries > max_retries {
-                error!(
-                    "[supervisor] {name} exceeded max retries ({max_retries}), giving up"
-                );
+                error!("[supervisor] {name} exceeded max retries ({max_retries}), giving up");
                 let mut reg = registry.write().await;
                 if let Some(entry) = reg.get_mut(&name) {
                     entry.state = ServiceState::Stopped;

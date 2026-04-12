@@ -3,9 +3,9 @@ mod handler;
 use hr_adblock::AdblockEngine;
 use hr_common::config::EnvConfig;
 use hr_common::service_registry::{
-    new_service_registry, now_millis, ServicePriorityLevel, ServiceState, ServiceStatus,
+    ServicePriorityLevel, ServiceState, ServiceStatus, new_service_registry, now_millis,
 };
-use hr_common::supervisor::{spawn_supervised, ServicePriority};
+use hr_common::supervisor::{ServicePriority, spawn_supervised};
 use hr_dns::DnsState;
 use signal_hook::consts::{SIGHUP, SIGTERM};
 use signal_hook_tokio::Signals;
@@ -15,6 +15,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
 use tracing::{error, info, warn};
+use tracing_subscriber::Layer as _;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// Combined config from dns-dhcp-config.json (matches the original file layout)
 #[derive(serde::Deserialize, Default)]
@@ -43,15 +46,52 @@ impl DnsDhcpConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,hr_netcore=debug".parse().unwrap()),
+    // Initialize centralized log store
+    let log_store = std::sync::Arc::new(
+        hr_common::logging::LogStore::new(std::path::Path::new("/opt/homeroute/data/logs.db"))
+            .expect("Failed to init log store"),
+    );
+
+    // Initialize logging with custom layer
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer().with_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "info,hr_netcore=debug".parse().unwrap()),
+            ),
         )
+        .with(hr_common::logging::LoggingLayer::new(
+            log_store.clone(),
+            hr_common::logging::LogService::Netcore,
+        ))
         .init();
 
     info!("hr-netcore starting...");
+
+    // Spawn log flush task
+    {
+        let flush_store = log_store.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if let Err(e) = flush_store.flush_to_db().await {
+                    eprintln!("Log flush error: {e}");
+                }
+            }
+        });
+    }
+    // Spawn log compaction task
+    {
+        let compact_store = log_store.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                if let Err(e) = compact_store.compact().await {
+                    eprintln!("Log compaction error: {e}");
+                }
+            }
+        });
+    }
 
     // Load environment config
     let env = EnvConfig::load(None);
@@ -67,9 +107,21 @@ async fn main() -> anyhow::Result<()> {
     info!(
         "Config loaded: DNS port {}, DHCP {}, Adblock {}, IPv6 {}",
         dns_dhcp_config.dns.port,
-        if dns_dhcp_config.dhcp.enabled { "enabled" } else { "disabled" },
-        if dns_dhcp_config.adblock.enabled { "enabled" } else { "disabled" },
-        if dns_dhcp_config.ipv6.enabled { "enabled" } else { "disabled" },
+        if dns_dhcp_config.dhcp.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        if dns_dhcp_config.adblock.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        if dns_dhcp_config.ipv6.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
     );
 
     // ── Initialize adblock engine ──────────────────────────────────────
@@ -176,7 +228,10 @@ async fn main() -> anyhow::Result<()> {
         match tokio::net::UdpSocket::bind(addr).await {
             Ok(_sock) => { /* address is available, drop test socket */ }
             Err(e) if e.raw_os_error() == Some(99) => {
-                warn!("Skipping DNS listen address {} (not available on this host)", addr_str);
+                warn!(
+                    "Skipping DNS listen address {} (not available on this host)",
+                    addr_str
+                );
                 continue;
             }
             Err(_) => { /* other errors (e.g. port in use) — let supervisor handle */ }
@@ -229,8 +284,7 @@ async fn main() -> anyhow::Result<()> {
     // ── IPv6 Prefix Delegation + RA ─────────────────────────────────
 
     // Watch channel: PD client -> RA sender
-    let (prefix_tx, prefix_rx) =
-        tokio::sync::watch::channel::<Option<hr_ipv6::PrefixInfo>>(None);
+    let (prefix_tx, prefix_rx) = tokio::sync::watch::channel::<Option<hr_ipv6::PrefixInfo>>(None);
 
     // 1) DHCPv6-PD client (obtains /56 from upstream, publishes /64 on channel)
     if dns_dhcp_config.ipv6.enabled && dns_dhcp_config.ipv6.pd_enabled {
@@ -382,12 +436,7 @@ async fn main() -> anyhow::Result<()> {
     let dns_dhcp_config_path = env.dns_dhcp_config_path.clone();
 
     tokio::spawn(async move {
-        if let Err(e) = handle_sighup(
-            dns_dhcp_config_path,
-            dns_state_reload,
-            adblock_reload,
-        )
-        .await
+        if let Err(e) = handle_sighup(dns_dhcp_config_path, dns_state_reload, adblock_reload).await
         {
             error!("SIGHUP handler error: {}", e);
         }
@@ -414,10 +463,7 @@ async fn main() -> anyhow::Result<()> {
     // ── Ready ──────────────────────────────────────────────────────────
 
     info!("hr-netcore started successfully");
-    info!(
-        "  DNS: listening on port {}",
-        dns_dhcp_config.dns.port
-    );
+    info!("  DNS: listening on port {}", dns_dhcp_config.dns.port);
     info!(
         "  DHCP: {}",
         if dns_dhcp_config.dhcp.enabled {

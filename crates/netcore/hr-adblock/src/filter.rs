@@ -24,10 +24,7 @@ impl AdblockEngine {
 
     /// Replace the whitelist
     pub fn set_whitelist(&mut self, domains: Vec<String>) {
-        self.whitelist = domains
-            .into_iter()
-            .map(|d| d.to_lowercase())
-            .collect();
+        self.whitelist = domains.into_iter().map(|d| d.to_lowercase()).collect();
     }
 
     /// Check if a domain is blocked (hierarchical matching with whitelist priority).

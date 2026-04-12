@@ -1,17 +1,17 @@
 //! MCP (Model Context Protocol) HTTP endpoint for hr-orchestrator.
 //!
 //! Implements JSON-RPC 2.0 over HTTP POST, with Bearer token authentication.
-//! Tools: hosts.*, deploy.*, apps.*, monitoring.*, git.*, envs.*, pipeline.*, store.*, reverseproxy.*
+//! Tools: hosts.*, deploy.*, apps.*, monitoring.*, git.*, store.*, reverseproxy.*, app.*, db.*
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::Json;
 use hr_common::events::{PowerAction, WakeResult};
-use hr_registry::protocol::HostRegistryMessage;
 use hr_registry::AgentRegistry;
+use hr_registry::protocol::HostRegistryMessage;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -40,9 +40,7 @@ pub struct McpState {
     pub registry: Arc<AgentRegistry>,
     pub git: Arc<hr_git::GitService>,
     pub edge: Arc<hr_ipc::EdgeClient>,
-    pub env_manager: Arc<crate::env_manager::EnvironmentManager>,
-    pub pipeline_engine: Arc<hr_pipeline::PipelineEngine>,
-    pub pipeline_store: Arc<hr_pipeline::PipelineStore>,
+    pub apps_ctx: Option<crate::apps_handler::AppsContext>,
 }
 
 impl McpState {
@@ -50,9 +48,6 @@ impl McpState {
         registry: Arc<AgentRegistry>,
         git: Arc<hr_git::GitService>,
         edge: Arc<hr_ipc::EdgeClient>,
-        env_manager: Arc<crate::env_manager::EnvironmentManager>,
-        pipeline_engine: Arc<hr_pipeline::PipelineEngine>,
-        pipeline_store: Arc<hr_pipeline::PipelineStore>,
     ) -> Option<Self> {
         let token = std::env::var("MCP_TOKEN").ok()?;
         if token.is_empty() {
@@ -63,9 +58,7 @@ impl McpState {
             registry,
             git,
             edge,
-            env_manager,
-            pipeline_engine,
-            pipeline_store,
+            apps_ctx: None,
         })
     }
 }
@@ -74,9 +67,11 @@ impl McpState {
 
 pub async fn mcp_handler(
     State(state): State<McpState>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
+    let project_slug = query.get("project").cloned();
     // ── Auth ──
     let authorized = headers
         .get("authorization")
@@ -88,7 +83,9 @@ pub async fn mcp_handler(
     if !authorized {
         return (
             StatusCode::UNAUTHORIZED,
-            Json(json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32000, "message": "Unauthorized"}})),
+            Json(
+                json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32000, "message": "Unauthorized"}}),
+            ),
         );
     }
 
@@ -98,7 +95,11 @@ pub async fn mcp_handler(
         Err(e) => {
             return (
                 StatusCode::OK,
-                Json(error_response(Value::Null, PARSE_ERROR, format!("Parse error: {e}"))),
+                Json(error_response(
+                    Value::Null,
+                    PARSE_ERROR,
+                    format!("Parse error: {e}"),
+                )),
             );
         }
     };
@@ -108,7 +109,11 @@ pub async fn mcp_handler(
     if request.jsonrpc != "2.0" {
         return (
             StatusCode::OK,
-            Json(error_response(id, INVALID_REQUEST, "Invalid JSON-RPC version".into())),
+            Json(error_response(
+                id,
+                INVALID_REQUEST,
+                "Invalid JSON-RPC version".into(),
+            )),
         );
     }
 
@@ -117,9 +122,13 @@ pub async fn mcp_handler(
     // ── Route method ──
     let response = match request.method.as_str() {
         "initialize" => handle_initialize(id),
-        "tools/list" => handle_tools_list(id),
-        "tools/call" => handle_tools_call(id, request.params, &state).await,
-        _ => error_response(id, METHOD_NOT_FOUND, format!("Method not found: {}", request.method)),
+        "tools/list" => handle_tools_list(id, &project_slug),
+        "tools/call" => handle_tools_call(id, request.params, &state, project_slug).await,
+        _ => error_response(
+            id,
+            METHOD_NOT_FOUND,
+            format!("Method not found: {}", request.method),
+        ),
     };
 
     (StatusCode::OK, Json(response))
@@ -129,8 +138,17 @@ pub async fn mcp_handler(
 
 fn tool_definitions() -> Value {
     let mut tools = tool_definitions_core();
-    tools.as_array_mut().unwrap().extend(tool_definitions_extended().as_array().unwrap().iter().cloned());
-    tools.as_array_mut().unwrap().extend(tool_definitions_env().as_array().unwrap().iter().cloned());
+    tools.as_array_mut().unwrap().extend(
+        tool_definitions_extended()
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned(),
+    );
+    tools
+        .as_array_mut()
+        .unwrap()
+        .extend(tool_definitions_apps().as_array().unwrap().iter().cloned());
     tools
 }
 
@@ -216,67 +234,6 @@ fn tool_definitions_core() -> Value {
                 "required": ["host_id", "mac"]
             }
         },
-        // ── Deploy ──
-        {
-            "name": "deploy.status",
-            "description": "Get the systemd service status (app.service) of a production container. Returns active state, PID, start time, and binary info.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "app_id": { "type": "string", "description": "Application ID" } },
-                "required": ["app_id"]
-            }
-        },
-        {
-            "name": "deploy.logs",
-            "description": "Get the last N lines of journalctl logs for app.service in a production container.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_id": { "type": "string", "description": "Application ID" },
-                    "lines": { "type": "integer", "description": "Number of log lines (default 50)", "default": 50 }
-                },
-                "required": ["app_id"]
-            }
-        },
-        // ── Apps ──
-        {
-            "name": "apps.list",
-            "description": "List all registered applications with status and container name.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "apps.get",
-            "description": "Get detailed information about a specific application.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "app_id": { "type": "string", "description": "Application ID" } },
-                "required": ["app_id"]
-            }
-        },
-        {
-            "name": "apps.exec",
-            "description": "Execute a shell command inside an application's container.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_id": { "type": "string", "description": "Application ID" },
-                    "command": { "type": "string", "description": "Shell command to execute" }
-                },
-                "required": ["app_id", "command"]
-            }
-        },
-        {
-            "name": "apps.prod_exec",
-            "description": "Execute a shell command inside the production container of an application.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_id": { "type": "string", "description": "Application ID" },
-                    "command": { "type": "string", "description": "Shell command to execute" }
-                },
-                "required": ["app_id", "command"]
-            }
-        },
         // ── Monitoring ──
         {
             "name": "monitoring.system_status",
@@ -309,11 +266,6 @@ fn tool_definitions_core() -> Value {
         {
             "name": "monitoring.alerts",
             "description": "Active alerts based on system thresholds: disk >80%, RAM >90%, CPU >80% for 5+ min, TLS cert expiring <30 days, host offline (no heartbeat >2min), container down.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "monitoring.envs",
-            "description": "Cross-environment monitoring summary: each environment with status, agent health, running/total apps, host, and uptime.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         // ── Git ──
@@ -505,15 +457,68 @@ fn handle_initialize(id: Value) -> Value {
     )
 }
 
-fn handle_tools_list(id: Value) -> Value {
-    success_response(id, json!({ "tools": tool_definitions() }))
+fn handle_tools_list(id: Value, project_slug: &Option<String>) -> Value {
+    if project_slug.is_some() {
+        // Project-scoped: only app/db/docs/studio/git tools
+        success_response(id, json!({ "tools": tool_definitions_project() }))
+    } else {
+        // Global: all tools (infra + apps)
+        success_response(id, json!({ "tools": tool_definitions() }))
+    }
 }
 
-async fn handle_tools_call(id: Value, params: Value, state: &McpState) -> Value {
-    let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+fn tool_definitions_project() -> Value {
+    json!([
+        // ── Process control ──
+        { "name": "status", "description": "Get the current process state (running/stopped/crashed, PID, port, uptime, restart count).", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "start", "description": "Start the application process.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "stop", "description": "Stop the application process.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "restart", "description": "Restart the application process (stop + start).", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "exec", "description": "Execute a shell command in the project directory (e.g. pnpm build, cargo build --release).", "inputSchema": { "type": "object", "properties": { "command": { "type": "string", "description": "Shell command to execute" }, "timeout_secs": { "type": "integer", "default": 60 } }, "required": ["command"] } },
+        { "name": "logs", "description": "Get recent application logs.", "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer", "default": 100 }, "level": { "type": "string", "description": "Filter by level (info, warn, error)" } } } },
+        // ── Database ──
+        { "name": "db_tables", "description": "List all tables in the application's SQLite database.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "db_schema", "description": "Describe a table's schema (columns, types, row count).", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" } }, "required": ["table"] } },
+        { "name": "db_query", "description": "Run a SELECT query against the database.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
+        { "name": "db_exec", "description": "Execute a mutation (INSERT, UPDATE, DELETE) against the database.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
+        { "name": "db_snapshot", "description": "Take a timestamped backup of the database before risky changes.", "inputSchema": { "type": "object", "properties": {} } },
+        // ── Documentation ──
+        { "name": "docs_read", "description": "Read the project documentation (all sections or a specific one).", "inputSchema": { "type": "object", "properties": { "section": { "type": "string", "enum": ["meta", "structure", "features", "backend", "notes"] } } } },
+        { "name": "docs_write", "description": "Update a documentation section.", "inputSchema": { "type": "object", "properties": { "section": { "type": "string", "enum": ["meta", "structure", "features", "backend", "notes"] }, "content": { "type": "string" } }, "required": ["section", "content"] } },
+        // ── Git ──
+        { "name": "git_log", "description": "Get recent git commit history.", "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer", "default": 20 } } } },
+        { "name": "git_branches", "description": "List git branches.", "inputSchema": { "type": "object", "properties": {} } }
+    ])
+}
 
-    info!(tool = tool_name, "MCP tools/call");
+async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_slug: Option<String>) -> Value {
+    let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let mut arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+
+    // Pre-contextualize: inject project slug into tools that need it
+    if let Some(ref slug) = project_slug {
+        let needs_slug = tool_name.starts_with("db.") || tool_name.starts_with("docs.") || matches!(
+            tool_name,
+            "app.status" | "app.control" | "app.logs" | "app.exec" | "app.get" |
+            "app.health" | "app.regenerate_context" | "app.delete" |
+            "git.log" | "git.branches" |
+            "studio.refresh_context" |
+            "secrets.list" | "secrets.get" | "secrets.set" | "secrets.delete"
+        );
+        if needs_slug {
+            if arguments.get("slug").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+                arguments["slug"] = json!(slug);
+            }
+            if arguments.get("app_id").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+                arguments["app_id"] = json!(slug);
+            }
+            if arguments.get("repo").and_then(|v| v.as_str()).unwrap_or("").is_empty() && tool_name.starts_with("git.") {
+                arguments["repo"] = json!(slug);
+            }
+        }
+    }
+
+    info!(tool = tool_name, project = ?project_slug, "MCP tools/call");
 
     match tool_name {
         // ── Hosts ──
@@ -525,21 +530,12 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState) -> Value 
         "hosts.create" => tool_hosts_create(id, &arguments).await,
         "hosts.delete" => tool_hosts_delete(id, &arguments).await,
         "hosts.set_wol_mac" => tool_hosts_set_wol_mac(id, &arguments).await,
-        // ── Deploy ──
-        "deploy.status" => tool_deploy_status(id, &arguments, state).await,
-        "deploy.logs" => tool_deploy_logs(id, &arguments, state).await,
-        // ── Apps ──
-        "apps.list" => tool_apps_list(id, state).await,
-        "apps.get" => tool_apps_get(id, &arguments, state).await,
-        "apps.exec" => tool_apps_exec(id, &arguments).await,
-        "apps.prod_exec" => tool_apps_prod_exec(id, &arguments).await,
         // ── Monitoring ──
         "monitoring.system_status" => tool_monitoring_system_status(id, state).await,
         "monitoring.host_metrics" => tool_monitoring_host_metrics(id, &arguments, state).await,
         "monitoring.app_health" => tool_monitoring_app_health(id, &arguments, state).await,
         "monitoring.edge_stats" => tool_monitoring_edge_stats(id, state).await,
         "monitoring.alerts" => tool_monitoring_alerts(id, state).await,
-        "monitoring.envs" => tool_monitoring_envs(id, state).await,
         // ── Git ──
         "git.repos" => tool_git_repos(id, state).await,
         "git.log" => tool_git_log(id, &arguments, state).await,
@@ -562,25 +558,55 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState) -> Value 
         "docs.search" => tool_docs_search(id, &arguments).await,
         "docs.completeness" => tool_docs_completeness(id, &arguments).await,
         // ── Database ──
-        // ── Environments ──
-        "envs.list" => tool_envs_list(id, state).await,
-        "envs.get" => tool_envs_get(id, &arguments, state).await,
-        "envs.create" => tool_envs_create(id, &arguments, state).await,
-        "envs.start" => tool_envs_action(id, &arguments, state, "start").await,
-        "envs.stop" => tool_envs_action(id, &arguments, state, "stop").await,
-        "envs.destroy" => tool_envs_destroy(id, &arguments, state).await,
-        // ── Pipelines ──
-        "pipeline.promote" => tool_pipeline_promote(id, &arguments, state).await,
-        "pipeline.status" => tool_pipeline_status(id, &arguments, state).await,
-        "pipeline.history" => tool_pipeline_history(id, &arguments, state).await,
-        "pipeline.cancel" => tool_pipeline_cancel(id, &arguments, state).await,
-        "pipeline.definitions" => tool_pipeline_definitions(id, &arguments, state).await,
-        "pipeline.get_config" => tool_pipeline_get_config(id, &arguments, state).await,
-        "pipeline.save_config" => tool_pipeline_save_config(id, &arguments, state).await,
-        "pipeline.logs" => tool_pipeline_logs(id, &arguments, state).await,
-        "pipeline.approve_gate" => tool_pipeline_approve_gate(id, &arguments, state).await,
-        "pipeline.reject_gate" => tool_pipeline_reject_gate(id, &arguments, state).await,
-        "pipeline.pending_gates" => tool_pipeline_pending_gates(id, &arguments, state).await,
+        // ── App* (V3 — hr-apps direct supervision) ──
+        "app.list" => tool_app_list(id, state).await,
+        "app.get" => tool_app_get(id, &arguments, state).await,
+        "app.control" => tool_app_control(id, &arguments, state).await,
+        "app.status" => tool_app_status(id, &arguments, state).await,
+        "app.exec" => tool_app_exec(id, &arguments, state).await,
+        "app.logs" => tool_app_logs(id, &arguments, state).await,
+        "app.create" => tool_app_create(id, &arguments, state).await,
+        "app.delete" => tool_app_delete(id, &arguments, state).await,
+        "app.regenerate_context" => tool_app_regenerate_context(id, &arguments, state).await,
+        // ── Studio ──
+        "studio.refresh_context" => tool_studio_refresh_context(id, &arguments, state).await,
+        "studio.refresh_all" => tool_studio_refresh_all(id, state).await,
+        // ── DB* (V3 — per-app SQLite) ──
+        "db.tables" | "db.list_tables" => tool_db_tables(id, &arguments, state).await,
+        "db.describe" | "db.describe_table" => tool_db_describe(id, &arguments, state).await,
+        "db.query" | "db.query_data" => tool_db_query(id, &arguments, state).await,
+        "db.execute" | "db.insert_data" | "db.update_data" | "db.delete_data" => tool_db_execute(id, &arguments, state).await,
+        "db.snapshot" => tool_db_snapshot(id, &arguments, state).await,
+        "db.overview" => tool_db_overview(id, &arguments, state).await,
+        "db.count_rows" => tool_db_count_rows(id, &arguments, state).await,
+        // ── Project-scoped simplified names (used when ?project=slug) ──
+        "status" => tool_app_status(id, &arguments, state).await,
+        "start" => {
+            let mut a = arguments.clone();
+            a["action"] = json!("start");
+            tool_app_control(id, &a, state).await
+        }
+        "stop" => {
+            let mut a = arguments.clone();
+            a["action"] = json!("stop");
+            tool_app_control(id, &a, state).await
+        }
+        "restart" => {
+            let mut a = arguments.clone();
+            a["action"] = json!("restart");
+            tool_app_control(id, &a, state).await
+        }
+        "exec" => tool_app_exec(id, &arguments, state).await,
+        "logs" => tool_app_logs(id, &arguments, state).await,
+        "db_tables" => tool_db_tables(id, &arguments, state).await,
+        "db_schema" => tool_db_describe(id, &arguments, state).await,
+        "db_query" => tool_db_query(id, &arguments, state).await,
+        "db_exec" => tool_db_execute(id, &arguments, state).await,
+        "db_snapshot" => tool_db_snapshot(id, &arguments, state).await,
+        "docs_read" => tool_docs_get(id, &arguments).await,
+        "docs_write" => tool_docs_update(id, &arguments).await,
+        "git_log" => tool_git_log(id, &arguments, state).await,
+        "git_branches" => tool_git_branches(id, &arguments).await,
         _ => {
             warn!(tool = tool_name, "Unknown tool");
             error_response(id, METHOD_NOT_FOUND, format!("Tool not found: {tool_name}"))
@@ -667,99 +693,6 @@ async fn tool_hosts_power(id: Value, args: &Value, state: &McpState, action: Pow
 // ── Deploy tools ────────────────────────────────────────────────────
 
 /// Resolve an app_id to its container info for deploy status/logs.
-async fn resolve_prod_app(state: &McpState, app_id: &str) -> Result<(String, String, String), String> {
-    let app = state.registry.get_application(app_id).await
-        .ok_or_else(|| format!("Application not found: {app_id}"))?;
-
-    Ok((app.id, app.container_name, app.host_id))
-}
-
-async fn tool_deploy_status(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
-    };
-
-    let (_prod_id, container_name, host_id) = match resolve_prod_app(state, app_id).await {
-        Ok(v) => v,
-        Err(e) => return tool_error(id, &e),
-    };
-
-    let cmd = concat!(
-        "echo -n \"SERVICE_ACTIVE=\"; systemctl is-active app.service 2>/dev/null || true; ",
-        "echo -n \"SERVICE_STATUS=\"; systemctl show app.service ",
-        "--property=ActiveState,SubState,MainPID,ExecMainStartTimestamp --no-pager 2>/dev/null || true; ",
-        "echo -n \"BINARY_INFO=\"; stat --printf='%s %Y' /opt/app/app 2>/dev/null || echo \"not_found\""
-    );
-
-    match state.registry.exec_in_remote_container(&host_id, &container_name, vec![cmd.to_string()]).await {
-        Ok((success, stdout, stderr)) => {
-            tool_success(id, json!({
-                "success": success,
-                "container": container_name,
-                "host_id": host_id,
-                "raw": stdout,
-                "stderr": stderr,
-            }))
-        }
-        Err(e) => tool_error(id, &format!("Exec failed: {e}")),
-    }
-}
-
-async fn tool_deploy_logs(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
-    };
-
-    let lines = args.get("lines").and_then(|v| v.as_u64()).unwrap_or(50).min(500);
-
-    let (_prod_id, container_name, host_id) = match resolve_prod_app(state, app_id).await {
-        Ok(v) => v,
-        Err(e) => return tool_error(id, &e),
-    };
-
-    let cmd = format!("journalctl -u app.service -n {lines} --no-pager 2>&1");
-
-    match state.registry.exec_in_remote_container(&host_id, &container_name, vec![cmd]).await {
-        Ok((success, stdout, _stderr)) => {
-            tool_success(id, json!({
-                "success": success,
-                "container": container_name,
-                "lines": lines,
-                "logs": stdout,
-            }))
-        }
-        Err(e) => tool_error(id, &format!("Exec failed: {e}")),
-    }
-}
-
-// ── Apps tools ──────────────────────────────────────────────────────
-
-async fn tool_apps_list(id: Value, state: &McpState) -> Value {
-    let apps = state.registry.list_applications().await;
-
-    let result: Vec<Value> = apps
-        .iter()
-        .map(|app| {
-            json!({
-                "id": app.id,
-                "name": app.name,
-                "slug": app.slug,
-                "host_id": app.host_id,
-                "environment": app.environment,
-                "enabled": app.enabled,
-                "container_name": app.container_name,
-                "status": app.status,
-                "ipv4_address": app.ipv4_address.map(|ip| ip.to_string()),
-                "agent_version": app.agent_version,
-                "last_heartbeat": app.last_heartbeat,
-                "stack": app.stack,
-            })
-        })
-        .collect();
-
-    tool_success(id, json!(result))
-}
-
 // ── Monitoring tools ────────────────────────────────────────────────
 
 async fn tool_monitoring_system_status(id: Value, state: &McpState) -> Value {
@@ -801,12 +734,15 @@ async fn tool_monitoring_system_status(id: Value, state: &McpState) -> Value {
         })
         .collect();
 
-    tool_success(id, json!({
-        "hosts": hosts,
-        "apps": app_statuses,
-        "total_hosts": hosts.len(),
-        "total_apps": apps.len(),
-    }))
+    tool_success(
+        id,
+        json!({
+            "hosts": hosts,
+            "apps": app_statuses,
+            "total_hosts": hosts.len(),
+            "total_apps": apps.len(),
+        }),
+    )
 }
 
 async fn tool_monitoring_host_metrics(id: Value, args: &Value, state: &McpState) -> Value {
@@ -863,27 +799,38 @@ async fn tool_monitoring_app_health(id: Value, args: &Value, state: &McpState) -
         port = port
     );
 
-    match state.registry.exec_in_remote_container(&app.host_id, &app.container_name, vec![cmd]).await {
+    match state
+        .registry
+        .exec_in_remote_container(&app.host_id, &app.container_name, vec![cmd])
+        .await
+    {
         Ok((_, stdout, _)) => {
             let parts: Vec<&str> = stdout.splitn(3, "---\n").collect();
             let status_code = parts.first().unwrap_or(&"000").trim();
             let body = parts.get(1).unwrap_or(&"").trim();
 
-            tool_success(id, json!({
-                "app_id": app_id,
-                "container": app.container_name,
-                "port": port,
-                "status_code": status_code,
-                "body": body,
-                "healthy": status_code.starts_with('2'),
-            }))
+            tool_success(
+                id,
+                json!({
+                    "app_id": app_id,
+                    "container": app.container_name,
+                    "port": port,
+                    "status_code": status_code,
+                    "body": body,
+                    "healthy": status_code.starts_with('2'),
+                }),
+            )
         }
         Err(e) => tool_error(id, &format!("Health check failed: {e}")),
     }
 }
 
 async fn tool_monitoring_edge_stats(id: Value, state: &McpState) -> Value {
-    match state.edge.request(&hr_ipc::edge::EdgeRequest::GetStats).await {
+    match state
+        .edge
+        .request(&hr_ipc::edge::EdgeRequest::GetStats)
+        .await
+    {
         Ok(resp) => {
             if resp.ok {
                 tool_success(id, resp.data.unwrap_or(json!({})))
@@ -918,7 +865,11 @@ async fn tool_monitoring_alerts(id: Value, state: &McpState) -> Value {
             if m.disk_total_bytes > 0 {
                 let disk_pct = m.disk_used_bytes as f64 / m.disk_total_bytes as f64 * 100.0;
                 if disk_pct > 80.0 {
-                    let severity = if disk_pct > 95.0 { "critical" } else { "warning" };
+                    let severity = if disk_pct > 95.0 {
+                        "critical"
+                    } else {
+                        "warning"
+                    };
                     alerts.push(json!({
                         "severity": severity,
                         "source": format!("host:{}", host_id),
@@ -931,7 +882,11 @@ async fn tool_monitoring_alerts(id: Value, state: &McpState) -> Value {
             if m.memory_total_bytes > 0 {
                 let ram_pct = m.memory_used_bytes as f64 / m.memory_total_bytes as f64 * 100.0;
                 if ram_pct > 90.0 {
-                    let severity = if ram_pct > 95.0 { "critical" } else { "warning" };
+                    let severity = if ram_pct > 95.0 {
+                        "critical"
+                    } else {
+                        "warning"
+                    };
                     alerts.push(json!({
                         "severity": severity,
                         "source": format!("host:{}", host_id),
@@ -942,7 +897,11 @@ async fn tool_monitoring_alerts(id: Value, state: &McpState) -> Value {
 
             // CPU > 80% (instant value, noted in message)
             if m.cpu_percent > 80.0 {
-                let severity = if m.cpu_percent > 95.0 { "critical" } else { "warning" };
+                let severity = if m.cpu_percent > 95.0 {
+                    "critical"
+                } else {
+                    "warning"
+                };
                 alerts.push(json!({
                     "severity": severity,
                     "source": format!("host:{}", host_id),
@@ -969,17 +928,26 @@ async fn tool_monitoring_alerts(id: Value, state: &McpState) -> Value {
     }
 
     // ── TLS certificate alerts (via edge GetStats) ──
-    match state.edge.request(&hr_ipc::edge::EdgeRequest::GetStats).await {
+    match state
+        .edge
+        .request(&hr_ipc::edge::EdgeRequest::GetStats)
+        .await
+    {
         Ok(resp) if resp.ok => {
             if let Some(data) = &resp.data {
                 if let Some(domains) = data.get("domains").and_then(|v| v.as_array()) {
                     for domain in domains {
-                        if let Some(expires) = domain.get("cert_expires_at").and_then(|v| v.as_str()) {
+                        if let Some(expires) =
+                            domain.get("cert_expires_at").and_then(|v| v.as_str())
+                        {
                             if let Ok(exp) = chrono::DateTime::parse_from_rfc3339(expires) {
                                 let days = (exp.with_timezone(&chrono::Utc) - now).num_days();
                                 if days < 30 {
                                     let severity = if days < 7 { "critical" } else { "warning" };
-                                    let domain_name = domain.get("domain").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                    let domain_name = domain
+                                        .get("domain")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
                                     alerts.push(json!({
                                         "severity": severity,
                                         "source": format!("cert:{}", domain_name),
@@ -996,7 +964,11 @@ async fn tool_monitoring_alerts(id: Value, state: &McpState) -> Value {
     }
 
     // ── TLS certificate alerts (via AcmeListCertificates) ──
-    match state.edge.request(&hr_ipc::edge::EdgeRequest::AcmeListCertificates).await {
+    match state
+        .edge
+        .request(&hr_ipc::edge::EdgeRequest::AcmeListCertificates)
+        .await
+    {
         Ok(resp) if resp.ok => {
             if let Some(data) = &resp.data {
                 if let Some(certs) = data.get("certificates").and_then(|v| v.as_array()) {
@@ -1006,14 +978,17 @@ async fn tool_monitoring_alerts(id: Value, state: &McpState) -> Value {
                                 let days = (exp.with_timezone(&chrono::Utc) - now).num_days();
                                 if days < 30 {
                                     let severity = if days < 7 { "critical" } else { "warning" };
-                                    let domain_name = cert.get("domains")
+                                    let domain_name = cert
+                                        .get("domains")
                                         .and_then(|v| v.as_array())
                                         .and_then(|a| a.first())
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("unknown");
                                     // Avoid duplicates from edge stats
                                     let source = format!("cert:{}", domain_name);
-                                    if !alerts.iter().any(|a| a.get("source").and_then(|s| s.as_str()) == Some(&source)) {
+                                    if !alerts.iter().any(|a| {
+                                        a.get("source").and_then(|s| s.as_str()) == Some(&source)
+                                    }) {
                                         alerts.push(json!({
                                             "severity": severity,
                                             "source": source,
@@ -1038,46 +1013,13 @@ async fn tool_monitoring_alerts(id: Value, state: &McpState) -> Value {
     });
 
     let total = alerts.len();
-    tool_success(id, json!({
-        "alerts": alerts,
-        "total": total,
-    }))
-}
-
-async fn tool_monitoring_envs(id: Value, state: &McpState) -> Value {
-    let envs = state.env_manager.list_environments().await;
-    let now = chrono::Utc::now();
-
-    let result: Vec<Value> = envs.iter().map(|env| {
-        let running_apps = env.apps.iter().filter(|a| a.running).count();
-        let uptime_secs = env.last_heartbeat.map(|_| {
-            let elapsed = (now - env.created_at).num_seconds();
-            if elapsed < 0 { 0 } else { elapsed }
-        });
+    tool_success(
+        id,
         json!({
-            "slug": env.slug,
-            "name": env.name,
-            "env_type": env.env_type,
-            "host_id": env.host_id,
-            "status": env.status,
-            "agent_connected": env.agent_connected,
-            "agent_version": env.agent_version,
-            "apps_running": running_apps,
-            "apps_total": env.apps.len(),
-            "last_heartbeat": env.last_heartbeat.map(|hb| hb.to_rfc3339()),
-            "uptime_secs": uptime_secs,
-            "healthy": env.agent_connected && running_apps == env.apps.len(),
-        })
-    }).collect();
-
-    let total = result.len();
-    let healthy = result.iter().filter(|e| e.get("healthy").and_then(|v| v.as_bool()).unwrap_or(false)).count();
-    tool_success(id, json!({
-        "environments": result,
-        "total": total,
-        "healthy": healthy,
-        "unhealthy": total - healthy,
-    }))
+            "alerts": alerts,
+            "total": total,
+        }),
+    )
 }
 
 // ── New host tools (via internal API) ────────────────────────────────
@@ -1089,7 +1031,12 @@ async fn tool_hosts_exec(id: Value, args: &Value) -> Value {
     let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing command".into());
     };
-    match internal_api_post(&format!("/hosts/{host_id}/exec"), json!({"command": command})).await {
+    match internal_api_post(
+        &format!("/hosts/{host_id}/exec"),
+        json!({"command": command}),
+    )
+    .await
+    {
         Ok(data) => tool_success(id, data),
         Err(e) => tool_error(id, &e),
     }
@@ -1140,57 +1087,6 @@ async fn tool_hosts_set_wol_mac(id: Value, args: &Value) -> Value {
 
 // ── New apps tools ───────────────────────────────────────────────────
 
-async fn tool_apps_get(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
-    };
-    match state.registry.get_application(app_id).await {
-        Some(app) => tool_success(id, json!({
-            "id": app.id,
-            "name": app.name,
-            "slug": app.slug,
-            "host_id": app.host_id,
-            "environment": app.environment,
-            "enabled": app.enabled,
-            "container_name": app.container_name,
-            "status": app.status,
-            "ipv4_address": app.ipv4_address.map(|ip| ip.to_string()),
-            "agent_version": app.agent_version,
-            "last_heartbeat": app.last_heartbeat,
-            "stack": app.stack,
-            "target_port": app.frontend.target_port,
-            "metrics": app.metrics,
-        })),
-        None => tool_error(id, &format!("Application not found: {app_id}")),
-    }
-}
-
-async fn tool_apps_exec(id: Value, args: &Value) -> Value {
-    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
-    };
-    let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing command".into());
-    };
-    match internal_api_post(&format!("/applications/{app_id}/exec"), json!({"command": [command]})).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
-async fn tool_apps_prod_exec(id: Value, args: &Value) -> Value {
-    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
-    };
-    let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing command".into());
-    };
-    match internal_api_post(&format!("/applications/{app_id}/exec"), json!({"command": command})).await {
-        Ok(data) => tool_success(id, data),
-        Err(e) => tool_error(id, &e),
-    }
-}
-
 // ── Git tools ───────────────────────────────────────────────────────
 
 async fn tool_git_repos(id: Value, state: &McpState) -> Value {
@@ -1198,14 +1094,16 @@ async fn tool_git_repos(id: Value, state: &McpState) -> Value {
         Ok(repos) => {
             let result: Vec<Value> = repos
                 .iter()
-                .map(|r| json!({
-                    "slug": r.slug,
-                    "size_bytes": r.size_bytes,
-                    "head_ref": r.head_ref,
-                    "commit_count": r.commit_count,
-                    "last_commit": r.last_commit,
-                    "branches": r.branches,
-                }))
+                .map(|r| {
+                    json!({
+                        "slug": r.slug,
+                        "size_bytes": r.size_bytes,
+                        "head_ref": r.head_ref,
+                        "commit_count": r.commit_count,
+                        "last_commit": r.last_commit,
+                        "branches": r.branches,
+                    })
+                })
                 .collect();
             tool_success(id, json!(result))
         }
@@ -1218,25 +1116,34 @@ async fn tool_git_log(id: Value, args: &Value, state: &McpState) -> Value {
         return error_response(id, INVALID_PARAMS, "Missing repo".into());
     };
 
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20).min(100) as usize;
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(20)
+        .min(100) as usize;
 
     match state.git.get_commits(repo, limit).await {
         Ok(commits) => {
             let result: Vec<Value> = commits
                 .iter()
-                .map(|c| json!({
-                    "hash": c.hash,
-                    "author_name": c.author_name,
-                    "author_email": c.author_email,
-                    "date": c.date,
-                    "message": c.message,
-                }))
+                .map(|c| {
+                    json!({
+                        "hash": c.hash,
+                        "author_name": c.author_name,
+                        "author_email": c.author_email,
+                        "date": c.date,
+                        "message": c.message,
+                    })
+                })
                 .collect();
-            tool_success(id, json!({
-                "repo": repo,
-                "commits": result,
-                "count": result.len(),
-            }))
+            tool_success(
+                id,
+                json!({
+                    "repo": repo,
+                    "commits": result,
+                    "count": result.len(),
+                }),
+            )
         }
         Err(e) => tool_error(id, &format!("Failed to get commits: {e}")),
     }
@@ -1297,9 +1204,7 @@ const INTERNAL_TOKEN_HEADER: &str = "X-Internal-Token";
 
 fn internal_token() -> &'static str {
     static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    TOKEN.get_or_init(|| {
-        std::env::var("MCP_TOKEN").expect("MCP_TOKEN env var must be set")
-    })
+    TOKEN.get_or_init(|| std::env::var("MCP_TOKEN").expect("MCP_TOKEN env var must be set"))
 }
 
 fn internal_client() -> reqwest::Client {
@@ -1319,7 +1224,9 @@ async fn internal_api_get(path: &str) -> Result<Value, String> {
         .map_err(|e| format!("Request failed: {e}"))?;
     let status = resp.status();
     if status.is_success() {
-        resp.json::<Value>().await.map_err(|e| format!("Parse error: {e}"))
+        resp.json::<Value>()
+            .await
+            .map_err(|e| format!("Parse error: {e}"))
     } else {
         let body = resp.text().await.unwrap_or_default();
         Err(format!("API returned {status}: {body}"))
@@ -1337,7 +1244,9 @@ async fn internal_api_post(path: &str, body: Value) -> Result<Value, String> {
         .map_err(|e| format!("Request failed: {e}"))?;
     let status = resp.status();
     if status.is_success() {
-        resp.json::<Value>().await.or_else(|_| Ok(json!({"status": "ok"})))
+        resp.json::<Value>()
+            .await
+            .or_else(|_| Ok(json!({"status": "ok"})))
     } else {
         let body = resp.text().await.unwrap_or_default();
         Err(format!("API returned {status}: {body}"))
@@ -1354,7 +1263,9 @@ async fn internal_api_delete(path: &str) -> Result<Value, String> {
         .map_err(|e| format!("Request failed: {e}"))?;
     let status = resp.status();
     if status.is_success() {
-        resp.json::<Value>().await.or_else(|_| Ok(json!({"status": "deleted"})))
+        resp.json::<Value>()
+            .await
+            .or_else(|_| Ok(json!({"status": "deleted"})))
     } else {
         let body = resp.text().await.unwrap_or_default();
         Err(format!("API returned {status}: {body}"))
@@ -1428,7 +1339,9 @@ fn docs_validate_id(app_id: &str) -> bool {
     !app_id.is_empty()
         && !app_id.contains('/')
         && !app_id.contains("..")
-        && app_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        && app_id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
 }
 
 fn docs_validate_section(section: &str) -> bool {
@@ -1463,13 +1376,17 @@ async fn tool_docs_list(id: Value) -> Value {
         let total = 5u32;
         if app_dir.join("meta.json").exists() {
             let content = std::fs::read_to_string(app_dir.join("meta.json")).unwrap_or_default();
-            if content.trim().len() > 2 { filled += 1; }
+            if content.trim().len() > 2 {
+                filled += 1;
+            }
         }
         for section in DOCS_SECTIONS {
             let path = app_dir.join(format!("{section}.md"));
             if path.exists() {
                 let content = std::fs::read_to_string(&path).unwrap_or_default();
-                if !content.trim().is_empty() { filled += 1; }
+                if !content.trim().is_empty() {
+                    filled += 1;
+                }
             }
         }
 
@@ -1481,7 +1398,9 @@ async fn tool_docs_list(id: Value) -> Value {
         }));
     }
     apps.sort_by(|a, b| {
-        a.get("app_id").and_then(|v| v.as_str()).unwrap_or("")
+        a.get("app_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
             .cmp(b.get("app_id").and_then(|v| v.as_str()).unwrap_or(""))
     });
     tool_success(id, json!({ "apps": apps }))
@@ -1502,11 +1421,21 @@ async fn tool_docs_get(id: Value, args: &Value) -> Value {
     let section = args.get("section").and_then(|v| v.as_str());
     if let Some(s) = section {
         if !docs_validate_section(s) {
-            return tool_error(id, &format!("Invalid section '{s}'. Valid: meta, structure, features, backend, notes"));
+            return tool_error(
+                id,
+                &format!("Invalid section '{s}'. Valid: meta, structure, features, backend, notes"),
+            );
         }
-        let filename = if s == "meta" { "meta.json".to_string() } else { format!("{s}.md") };
+        let filename = if s == "meta" {
+            "meta.json".to_string()
+        } else {
+            format!("{s}.md")
+        };
         let content = std::fs::read_to_string(app_dir.join(&filename)).unwrap_or_default();
-        return tool_success(id, json!({ "app_id": app_id, "section": s, "content": content }));
+        return tool_success(
+            id,
+            json!({ "app_id": app_id, "section": s, "content": content }),
+        );
     }
 
     // Return all sections
@@ -1535,13 +1464,19 @@ async fn tool_docs_create(id: Value, args: &Value) -> Value {
     }
     // Create empty meta.json
     let meta = json!({ "name": app_id, "stack": "", "description": "", "logo": "" });
-    let _ = std::fs::write(app_dir.join("meta.json"), serde_json::to_string_pretty(&meta).unwrap_or_default());
+    let _ = std::fs::write(
+        app_dir.join("meta.json"),
+        serde_json::to_string_pretty(&meta).unwrap_or_default(),
+    );
     // Create empty markdown files
     for s in DOCS_SECTIONS {
         let _ = std::fs::write(app_dir.join(format!("{s}.md")), "");
     }
     info!(app_id, "Created docs");
-    tool_success(id, json!({ "created": app_id, "sections": ["meta", "structure", "features", "backend", "notes"] }))
+    tool_success(
+        id,
+        json!({ "created": app_id, "sections": ["meta", "structure", "features", "backend", "notes"] }),
+    )
 }
 
 async fn tool_docs_update(id: Value, args: &Value) -> Value {
@@ -1567,13 +1502,20 @@ async fn tool_docs_update(id: Value, args: &Value) -> Value {
             return tool_error(id, &format!("Failed to create directory: {e}"));
         }
     }
-    let filename = if section == "meta" { "meta.json".to_string() } else { format!("{section}.md") };
+    let filename = if section == "meta" {
+        "meta.json".to_string()
+    } else {
+        format!("{section}.md")
+    };
     let path = app_dir.join(&filename);
     if let Err(e) = std::fs::write(&path, content) {
         return tool_error(id, &format!("Failed to write: {e}"));
     }
     info!(app_id, section, "Updated docs section");
-    tool_success(id, json!({ "app_id": app_id, "section": section, "updated": true }))
+    tool_success(
+        id,
+        json!({ "app_id": app_id, "section": section, "updated": true }),
+    )
 }
 
 async fn tool_docs_search(id: Value, args: &Value) -> Value {
@@ -1611,7 +1553,10 @@ async fn tool_docs_search(id: Value, args: &Value) -> Value {
             }
         }
     }
-    tool_success(id, json!({ "query": query, "results": results, "count": results.len() }))
+    tool_success(
+        id,
+        json!({ "query": query, "results": results, "count": results.len() }),
+    )
 }
 
 fn docs_snippet(content: &str, query_lower: &str) -> String {
@@ -1623,9 +1568,13 @@ fn docs_snippet(content: &str, query_lower: &str) -> String {
         let start = content.floor_char_boundary(start);
         let end = content.ceil_char_boundary(end);
         let mut snippet = String::new();
-        if start > 0 { snippet.push_str("..."); }
+        if start > 0 {
+            snippet.push_str("...");
+        }
         snippet.push_str(&content[start..end]);
-        if end < content.len() { snippet.push_str("..."); }
+        if end < content.len() {
+            snippet.push_str("...");
+        }
         snippet
     } else {
         content.chars().take(80).collect()
@@ -1656,19 +1605,24 @@ async fn tool_docs_completeness(id: Value, args: &Value) -> Value {
             .unwrap_or(false);
         sections.push(json!({ "section": s, "filled": filled }));
     }
-    let filled_count = sections.iter().filter(|s| s["filled"].as_bool().unwrap_or(false)).count();
-    tool_success(id, json!({
-        "app_id": app_id,
-        "sections": sections,
-        "filled": filled_count,
-        "total": 5,
-        "complete": filled_count == 5,
-    }))
+    let filled_count = sections
+        .iter()
+        .filter(|s| s["filled"].as_bool().unwrap_or(false))
+        .count();
+    tool_success(
+        id,
+        json!({
+            "app_id": app_id,
+            "sections": sections,
+            "filled": filled_count,
+            "total": 5,
+            "complete": filled_count == 5,
+        }),
+    )
 }
 
 // (db tools removed -- now managed per-environment by env-agent)
 // (db tools removed -- now managed per-environment by env-agent)
-
 
 fn success_response(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
@@ -1679,578 +1633,554 @@ fn error_response(id: Value, code: i32, message: String) -> Value {
 }
 
 fn tool_success(id: Value, data: Value) -> Value {
-    success_response(id, json!({
-        "content": [{ "type": "text", "text": data.to_string() }]
-    }))
+    success_response(
+        id,
+        json!({
+            "content": [{ "type": "text", "text": data.to_string() }]
+        }),
+    )
 }
 
 fn tool_error(id: Value, message: &str) -> Value {
-    success_response(id, json!({
-        "content": [{ "type": "text", "text": message }],
-        "isError": true
-    }))
+    success_response(
+        id,
+        json!({
+            "content": [{ "type": "text", "text": message }],
+            "isError": true
+        }),
+    )
 }
 
-// ── Environment & Pipeline tool definitions ──────────────────────────
+// ── App* / DB* tool definitions (V3 — hr-apps) ──────────────────────
 
-fn tool_definitions_env() -> Value {
+fn tool_definitions_apps() -> Value {
     json!([
-        // ── Environments ──
         {
-            "name": "envs.list",
-            "description": "List all environments with status, connected agents, and app counts.",
+            "name": "app.list",
+            "description": "List all HomeRoute applications managed by the AppSupervisor.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
-            "name": "envs.get",
-            "description": "Get detailed info about an environment, including its apps and status.",
+            "name": "app.get",
+            "description": "Get details for a single application by slug.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "slug": { "type": "string", "description": "Environment slug (dev, prod, acc)" } },
+                "properties": { "slug": { "type": "string" } },
                 "required": ["slug"]
             }
         },
         {
-            "name": "envs.create",
-            "description": "Create a new environment (container + env-agent).",
+            "name": "app.create",
+            "description": "Create a new application (assigns port, git repo, edge route).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "Display name (e.g. 'Development')" },
-                    "slug": { "type": "string", "description": "URL-safe slug (e.g. 'dev')" },
-                    "env_type": { "type": "string", "description": "Type: development, acceptance, production" },
-                    "host_id": { "type": "string", "description": "Host to create on (default: medion)" }
+                    "slug": { "type": "string" },
+                    "name": { "type": "string" },
+                    "stack": { "type": "string", "enum": ["next-js", "axum-vite", "axum", "leptos", "static"] },
+                    "has_db": { "type": "boolean", "default": false },
+                    "visibility": { "type": "string", "enum": ["public", "private"], "default": "private" },
+                    "run_command": { "type": "string" },
+                    "build_command": { "type": "string" },
+                    "health_path": { "type": "string" }
                 },
-                "required": ["name", "slug", "env_type"]
+                "required": ["slug", "name", "stack"]
             }
         },
         {
-            "name": "envs.start",
-            "description": "Start a stopped environment container.",
+            "name": "app.control",
+            "description": "Control an application process: start, stop, restart, or rebuild.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "slug": { "type": "string", "description": "Environment slug" } },
+                "properties": {
+                    "slug": { "type": "string" },
+                    "action": { "type": "string", "enum": ["start", "stop", "restart", "rebuild"] }
+                },
+                "required": ["slug", "action"]
+            }
+        },
+        {
+            "name": "app.status",
+            "description": "Get runtime status of an application (pid, state, port, uptime).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "slug": { "type": "string" } },
                 "required": ["slug"]
             }
         },
         {
-            "name": "envs.stop",
-            "description": "Stop an environment container (graceful shutdown).",
+            "name": "app.exec",
+            "description": "Execute a shell command in the context of an application.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "slug": { "type": "string", "description": "Environment slug" } },
+                "properties": {
+                    "slug": { "type": "string" },
+                    "command": { "type": "string" },
+                    "timeout_secs": { "type": "integer", "default": 60 }
+                },
+                "required": ["slug", "command"]
+            }
+        },
+        {
+            "name": "app.logs",
+            "description": "Get recent logs for an application.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "limit": { "type": "integer", "default": 100 },
+                    "level": { "type": "string" }
+                },
                 "required": ["slug"]
             }
         },
         {
-            "name": "envs.destroy",
-            "description": "Destroy an environment and its container. Irreversible.",
+            "name": "app.delete",
+            "description": "Delete an application. Set keep_data=true to preserve source and DB.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "slug": { "type": "string", "description": "Environment slug" } },
+                "properties": {
+                    "slug": { "type": "string" },
+                    "keep_data": { "type": "boolean", "default": false }
+                },
                 "required": ["slug"]
             }
         },
-        // ── Pipelines ──
         {
-            "name": "pipeline.promote",
-            "description": "Promote an app from one environment to another (build → test → migrate DB → deploy → health check).",
+            "name": "app.regenerate_context",
+            "description": "Regenerate Claude context files (CLAUDE.md, .claude/) for an app.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "slug": { "type": "string" } },
+                "required": ["slug"]
+            }
+        },
+        {
+            "name": "db.tables",
+            "description": "List user-defined tables in an app's SQLite database.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "slug": { "type": "string" } },
+                "required": ["slug"]
+            }
+        },
+        {
+            "name": "db.describe",
+            "description": "Describe a table's schema (columns, types, row count).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "app_slug": { "type": "string", "description": "App to promote (e.g. 'trader')" },
-                    "version": { "type": "string", "description": "Version tag (e.g. '2.3.1')" },
-                    "source_env": { "type": "string", "description": "Source environment slug (e.g. 'dev')" },
-                    "target_env": { "type": "string", "description": "Target environment slug (e.g. 'prod')" }
+                    "slug": { "type": "string" },
+                    "table": { "type": "string" }
                 },
-                "required": ["app_slug", "version", "source_env", "target_env"]
+                "required": ["slug", "table"]
             }
         },
         {
-            "name": "pipeline.status",
-            "description": "Get the status of a pipeline run.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "id": { "type": "string", "description": "Pipeline run ID" } },
-                "required": ["id"]
-            }
-        },
-        {
-            "name": "pipeline.history",
-            "description": "List recent pipeline runs, optionally filtered by app.",
+            "name": "db.query",
+            "description": "Run a SELECT query against an app's SQLite database.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "app_slug": { "type": "string", "description": "Filter by app slug (optional)" },
-                    "limit": { "type": "integer", "description": "Max results (default 20)", "default": 20 }
-                }
-            }
-        },
-        {
-            "name": "pipeline.cancel",
-            "description": "Cancel a running pipeline.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "id": { "type": "string", "description": "Pipeline run ID" } },
-                "required": ["id"]
-            }
-        },
-        {
-            "name": "pipeline.definitions",
-            "description": "List all pipeline definitions (templates with steps per app).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {}
-            }
-        },
-        {
-            "name": "pipeline.get_config",
-            "description": "Get the pipeline configuration for an app (env chain, skip steps, auto-promote, gates).",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "app_slug": { "type": "string", "description": "App slug" } },
-                "required": ["app_slug"]
-            }
-        },
-        {
-            "name": "pipeline.save_config",
-            "description": "Save pipeline configuration for an app.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_slug": { "type": "string", "description": "App slug" },
-                    "env_chain": { "type": "array", "items": { "type": "string" }, "description": "Ordered env chain (e.g. ['dev', 'acc', 'prod'])" },
-                    "skip_steps": { "type": "array", "items": { "type": "string" }, "description": "Step names to skip (e.g. ['test'])" },
-                    "auto_promote": { "type": "array", "items": { "type": "string" }, "description": "Envs where auto-promote is enabled after deploy" },
-                    "gates": { "type": "array", "items": { "type": "object", "properties": { "from_env": { "type": "string" }, "to_env": { "type": "string" } } }, "description": "Gate definitions requiring approval" }
+                    "slug": { "type": "string" },
+                    "sql": { "type": "string" },
+                    "params": { "type": "array", "items": {}, "default": [] }
                 },
-                "required": ["app_slug"]
+                "required": ["slug", "sql"]
             }
         },
         {
-            "name": "pipeline.logs",
-            "description": "Get the logs/output for a specific step in a pipeline run.",
+            "name": "db.snapshot",
+            "description": "Take a timestamped backup of an app's SQLite database.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "slug": { "type": "string" } },
+                "required": ["slug"]
+            }
+        },
+        {
+            "name": "db.execute",
+            "description": "Execute a mutation (INSERT, UPDATE, DELETE) against an app's SQLite database.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "run_id": { "type": "string", "description": "Pipeline run ID" },
-                    "step_name": { "type": "string", "description": "Step name (e.g. 'build', 'deploy', 'health-check')" }
+                    "slug": { "type": "string" },
+                    "sql": { "type": "string" },
+                    "params": { "type": "array", "items": {}, "default": [] }
                 },
-                "required": ["run_id", "step_name"]
+                "required": ["slug", "sql"]
             }
         },
         {
-            "name": "pipeline.approve_gate",
-            "description": "Approve a pending gate to continue chain promotion.",
+            "name": "db.overview",
+            "description": "Get an overview of an app's database (table count and list).",
             "inputSchema": {
                 "type": "object",
-                "properties": { "gate_id": { "type": "string", "description": "Gate approval ID" } },
-                "required": ["gate_id"]
+                "properties": { "slug": { "type": "string" } },
+                "required": ["slug"]
             }
         },
         {
-            "name": "pipeline.reject_gate",
-            "description": "Reject a pending gate to stop chain promotion.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "gate_id": { "type": "string", "description": "Gate approval ID" } },
-                "required": ["gate_id"]
-            }
-        },
-        {
-            "name": "pipeline.pending_gates",
-            "description": "List all pending gate approvals, optionally filtered by app.",
+            "name": "db.count_rows",
+            "description": "Count rows in a specific table of an app's database.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "app_slug": { "type": "string", "description": "Filter by app slug (optional)" }
-                }
+                    "slug": { "type": "string" },
+                    "table": { "type": "string" }
+                },
+                "required": ["slug", "table"]
             }
+        },
+        {
+            "name": "studio.refresh_context",
+            "description": "Regenerate Claude Code context files (CLAUDE.md, .claude/) for a specific app.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "slug": { "type": "string" } },
+                "required": ["slug"]
+            }
+        },
+        {
+            "name": "studio.refresh_all",
+            "description": "Regenerate Claude Code context files for all apps.",
+            "inputSchema": { "type": "object", "properties": {} }
         }
     ])
 }
 
-// ── Environment tool handlers ────────────────────────────────────────
+// ── App* tool handlers ──────────────────────────────────────────────
 
-async fn tool_envs_list(id: Value, state: &McpState) -> Value {
-    let envs = state.env_manager.list_environments().await;
-    let result: Vec<Value> = envs.iter().map(|e| {
-        json!({
-            "id": e.id,
-            "name": e.name,
-            "slug": e.slug,
-            "env_type": e.env_type,
-            "host_id": e.host_id,
-            "container_name": e.container_name,
-            "ipv4_address": e.ipv4_address.map(|ip| ip.to_string()),
-            "status": e.status,
-            "agent_connected": e.agent_connected,
-            "agent_version": e.agent_version,
-            "apps_count": e.apps.len(),
-            "apps_running": e.apps.iter().filter(|a| a.running).count(),
-            "created_at": e.created_at.to_rfc3339(),
-        })
-    }).collect();
-    tool_success(id, json!(result))
+fn require_apps_ctx<'a>(
+    id: &Value,
+    state: &'a McpState,
+) -> Result<&'a crate::apps_handler::AppsContext, Value> {
+    state
+        .apps_ctx
+        .as_ref()
+        .ok_or_else(|| tool_error(id.clone(), "hr-apps not initialized"))
 }
 
-async fn tool_envs_get(id: Value, args: &Value, state: &McpState) -> Value {
+async fn tool_app_list(id: Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let resp = ctx.list().await;
+    ipc_resp_to_mcp(id, resp)
+}
+
+async fn tool_app_get(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
     let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing slug".into());
     };
-    match state.env_manager.get_environment(slug).await {
-        Some(env) => tool_success(id, serde_json::to_value(&env).unwrap_or(json!(null))),
-        None => tool_error(id, &format!("Environment '{}' not found", slug)),
-    }
+    ipc_resp_to_mcp(id, ctx.get(slug).await)
 }
 
-async fn tool_envs_create(id: Value, args: &Value, state: &McpState) -> Value {
+async fn tool_app_create(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
     let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing name".into());
     };
+    let Some(stack) = args.get("stack").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing stack".into());
+    };
+    let has_db = args
+        .get("has_db")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let visibility = args
+        .get("visibility")
+        .and_then(|v| v.as_str())
+        .unwrap_or("private");
+    let run_command = args
+        .get("run_command")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let build_command = args
+        .get("build_command")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let health_path = args
+        .get("health_path")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    ipc_resp_to_mcp(
+        id,
+        ctx.create(
+            slug.to_string(),
+            name.to_string(),
+            stack.to_string(),
+            has_db,
+            visibility.to_string(),
+            run_command,
+            build_command,
+            health_path,
+        )
+        .await,
+    )
+}
+
+async fn tool_app_control(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
     let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing slug".into());
     };
-    let Some(env_type_str) = args.get("env_type").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing env_type".into());
+    let Some(action) = args.get("action").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing action".into());
     };
-    let env_type = match env_type_str {
-        "development" | "dev" => hr_environment::EnvType::Development,
-        "acceptance" | "acc" => hr_environment::EnvType::Acceptance,
-        "production" | "prod" => hr_environment::EnvType::Production,
-        _ => return error_response(id, INVALID_PARAMS, format!("Invalid env_type: {env_type_str}")),
-    };
-    let host_id = args.get("host_id").and_then(|v| v.as_str()).unwrap_or("medion");
+    ipc_resp_to_mcp(id, ctx.control(slug.to_string(), action.to_string()).await)
+}
 
-    let (env, token) = match state.env_manager.create_environment(name.into(), slug.into(), env_type, host_id.into()).await {
-        Ok(r) => r,
-        Err(e) => return tool_error(id, &format!("Failed to create environment: {e}")),
+async fn tool_app_status(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
     };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    ipc_resp_to_mcp(id, ctx.status(slug).await)
+}
 
-    // Provision the container with the allocated static IP
-    let container_name = &env.container_name;
-    let storage_path = std::path::Path::new("/var/lib/machines");
-    if storage_path.join(container_name).exists() {
-        // Container rootfs already exists — just write the network config
-        if let Err(e) = hr_container::NspawnClient::write_network_config(container_name, storage_path, env.ipv4_address).await {
-            tracing::warn!(container = container_name, %e, "Failed to write network config for existing container");
-        }
+async fn tool_app_exec(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing command".into());
+    };
+    let timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64());
+    ipc_resp_to_mcp(
+        id,
+        ctx.exec(slug.to_string(), command.to_string(), timeout_secs)
+            .await,
+    )
+}
+
+async fn tool_app_logs(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let level = args.get("level").and_then(|v| v.as_str()).map(String::from);
+    ipc_resp_to_mcp(id, ctx.logs(slug.to_string(), limit, level).await)
+}
+
+async fn tool_app_delete(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let keep_data = args
+        .get("keep_data")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    ipc_resp_to_mcp(id, ctx.delete(slug.to_string(), keep_data).await)
+}
+
+async fn tool_app_regenerate_context(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    ipc_resp_to_mcp(id, ctx.regenerate_context(slug.to_string()).await)
+}
+
+// ── DB tool handlers ────────────────────────────────────────────────
+
+async fn tool_db_tables(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    ipc_resp_to_mcp(id, ctx.db_list_tables(slug.to_string()).await)
+}
+
+async fn tool_db_describe(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing table".into());
+    };
+    ipc_resp_to_mcp(
+        id,
+        ctx.db_describe_table(slug.to_string(), table.to_string())
+            .await,
+    )
+}
+
+async fn tool_db_query(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(sql) = args.get("sql").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing sql".into());
+    };
+    let params: Vec<Value> = args
+        .get("params")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    ipc_resp_to_mcp(
+        id,
+        ctx.db_query(slug.to_string(), sql.to_string(), params)
+            .await,
+    )
+}
+
+async fn tool_db_snapshot(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    ipc_resp_to_mcp(id, ctx.db_snapshot(slug.to_string()).await)
+}
+
+/// Convert an `IpcResponse` into a JSON-RPC response Value.
+fn ipc_resp_to_mcp(id: Value, resp: hr_ipc::types::IpcResponse) -> Value {
+    if resp.ok {
+        tool_success(id, resp.data.unwrap_or(json!({"ok": true})))
     } else {
-        // Bootstrap a new container with the static IP
-        if let Err(e) = hr_container::NspawnClient::create_container(container_name, storage_path, "bridge:br0", true, env.ipv4_address).await {
-            tracing::error!(container = container_name, %e, "Failed to provision container");
-            return tool_error(id, &format!("Environment created but container provisioning failed: {e}"));
-        }
+        tool_error(id, resp.error.as_deref().unwrap_or("unknown error"))
     }
+}
 
+// ── db.execute (mutations: INSERT/UPDATE/DELETE) ──────────────────
+
+async fn tool_db_execute(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(sql) = args.get("sql").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing sql".into());
+    };
+    let params: Vec<Value> = args
+        .get("params")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    ipc_resp_to_mcp(id, ctx.db_execute(slug.to_string(), sql.to_string(), params).await)
+}
+
+// ── db.overview ──────────────────────────────────────────────────────
+
+async fn tool_db_overview(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    // List tables then describe each
+    let tables_resp = ctx.db_list_tables(slug.to_string()).await;
+    if !tables_resp.ok {
+        return ipc_resp_to_mcp(id, tables_resp);
+    }
+    let tables = tables_resp
+        .data
+        .and_then(|d| d.get("tables").cloned())
+        .and_then(|t| t.as_array().cloned())
+        .unwrap_or_default();
     tool_success(id, json!({
-        "environment": serde_json::to_value(&env).unwrap_or(json!(null)),
-        "token": token,
-        "ipv4_address": env.ipv4_address.map(|ip| ip.to_string()),
+        "slug": slug,
+        "tables_count": tables.len(),
+        "tables": tables,
     }))
 }
 
-async fn tool_envs_action(id: Value, args: &Value, state: &McpState, action: &str) -> Value {
+// ── db.count_rows ────────────────────────────────────────────────────
+
+async fn tool_db_count_rows(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
     let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing slug".into());
     };
-    let container_name = crate::env_manager::EnvironmentManager::container_name_for_env(slug);
-
-    match action {
-        "start" => {
-            state.env_manager.update_environment_status(slug, hr_environment::EnvStatus::Provisioning).await;
-            match hr_container::NspawnClient::start_container(&container_name).await {
-                Ok(_) => tool_success(id, json!({"action": action, "slug": slug, "status": "ok"})),
-                Err(e) => tool_error(id, &format!("Failed to start environment '{}': {}", slug, e)),
-            }
-        }
-        "stop" => {
-            let _ = state.env_manager.send_to_env(slug, hr_environment::EnvOrchestratorMessage::Shutdown).await;
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            state.env_manager.update_environment_status(slug, hr_environment::EnvStatus::Stopped).await;
-            match hr_container::NspawnClient::stop_container(&container_name).await {
-                Ok(_) => tool_success(id, json!({"action": action, "slug": slug, "status": "ok"})),
-                Err(e) => tool_error(id, &format!("Failed to stop environment '{}': {}", slug, e)),
-            }
-        }
-        _ => tool_error(id, &format!("Unknown action: {action}")),
-    }
+    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing table".into());
+    };
+    let sql = format!("SELECT COUNT(*) as count FROM \"{}\"", table.replace('"', ""));
+    ipc_resp_to_mcp(id, ctx.db_query(slug.to_string(), sql, vec![]).await)
 }
 
-async fn tool_envs_destroy(id: Value, args: &Value, state: &McpState) -> Value {
+// ── studio.refresh_context ───────────────────────────────────────────
+
+async fn tool_studio_refresh_context(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
     let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing slug".into());
     };
-
-    // Disconnect env-agent if connected
-    if state.env_manager.is_env_connected(slug).await {
-        let _ = state.env_manager.send_to_env(slug, hr_environment::EnvOrchestratorMessage::Shutdown).await;
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    }
-
-    // Delete the environment record
-    if let Err(e) = state.env_manager.delete_environment_by_slug(slug).await {
-        return tool_error(id, &format!("Failed to delete environment: {e}"));
-    }
-
-    tool_success(id, json!({"destroyed": slug}))
+    ipc_resp_to_mcp(id, ctx.regenerate_context(slug.to_string()).await)
 }
 
-// ── Pipeline tool handlers ───────────────────────────────────────────
+// ── studio.refresh_all ───────────────────────────────────────────────
 
-async fn tool_pipeline_promote(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(app_slug) = args.get("app_slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_slug".into());
+async fn tool_studio_refresh_all(id: Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
     };
-    let Some(version) = args.get("version").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing version".into());
-    };
-    let Some(source_env) = args.get("source_env").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing source_env".into());
-    };
-    let Some(target_env) = args.get("target_env").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing target_env".into());
-    };
-
-    // Get pipeline config (or default)
-    let config = state.pipeline_store.get_config(app_slug).await
-        .unwrap_or_else(|| hr_pipeline::default_config(app_slug));
-
-    // Validate the transition against the env chain
-    if let Err(e) = hr_pipeline::validate_transition(&config, source_env, target_env) {
-        return tool_error(id, &format!("Invalid transition: {e}"));
+    let apps = ctx.supervisor.registry.list().await;
+    let mut refreshed = 0u32;
+    for app in &apps {
+        let _ = ctx.regenerate_context(app.slug.clone()).await;
+        refreshed += 1;
     }
-
-    // Get app info from the source environment to determine stack and has_db
-    let (stack, has_db) = match get_app_info(state, source_env, app_slug).await {
-        Some(info) => info,
-        None => {
-            return tool_error(id, &format!(
-                "App '{}' not found in environment '{}'", app_slug, source_env
-            ));
-        }
-    };
-
-    // Resolve steps from template based on stack + config
-    let mut steps = hr_pipeline::steps_for_stack(stack, &config, has_db);
-
-    // Inject build context into the Build step
-    let repo_path = state.git.repo_path(app_slug);
-    let build_command = stack.default_build_command().to_string();
-    for step in &mut steps {
-        if step.step_type == hr_pipeline::PipelineStepType::Build {
-            step.config = serde_json::json!({
-                "stack": stack,
-                "build_command": build_command,
-                "repo_path": repo_path.to_string_lossy(),
-            });
-        }
-    }
-
-    // Create a transport adapter that delegates to the env_manager
-    let transport = Arc::new(EnvManagerTransport { env_manager: state.env_manager.clone() });
-
-    match state.pipeline_engine.promote(
-        &transport,
-        app_slug.into(),
-        version.into(),
-        source_env.into(),
-        target_env.into(),
-        "mcp".into(),
-        Some(steps),
-    ).await {
-        Ok(run) => tool_success(id, serde_json::to_value(&run).unwrap_or(json!(null))),
-        Err(e) => tool_error(id, &format!("Failed to start pipeline: {e}")),
-    }
-}
-
-async fn tool_pipeline_status(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(run_id) = args.get("id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing id".into());
-    };
-    match state.pipeline_engine.get_run(run_id).await {
-        Some(run) => tool_success(id, serde_json::to_value(&run).unwrap_or(json!(null))),
-        None => tool_error(id, &format!("Pipeline run '{}' not found", run_id)),
-    }
-}
-
-async fn tool_pipeline_history(id: Value, args: &Value, state: &McpState) -> Value {
-    let app_slug = args.get("app_slug").and_then(|v| v.as_str());
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
-
-    // Use the store for persistent history, falling back to engine's in-memory runs
-    let runs = state.pipeline_store.list_runs(app_slug, limit).await;
-    if !runs.is_empty() {
-        return tool_success(id, serde_json::to_value(&runs).unwrap_or(json!([])));
-    }
-
-    // Fallback: engine in-memory runs (filtered manually)
-    let mut engine_runs = state.pipeline_engine.get_runs().await;
-    if let Some(slug) = app_slug {
-        engine_runs.retain(|r| r.app_slug == slug);
-    }
-    engine_runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-    engine_runs.truncate(limit);
-    tool_success(id, serde_json::to_value(&engine_runs).unwrap_or(json!([])))
-}
-
-async fn tool_pipeline_cancel(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(run_id) = args.get("id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing id".into());
-    };
-    match state.pipeline_engine.cancel(run_id).await {
-        Ok(()) => tool_success(id, json!({"cancelled": run_id})),
-        Err(e) => tool_error(id, &format!("Failed to cancel pipeline: {e}")),
-    }
-}
-
-async fn tool_pipeline_definitions(id: Value, _args: &Value, state: &McpState) -> Value {
-    let defs = state.pipeline_store.list_definitions().await;
-    tool_success(id, serde_json::to_value(&defs).unwrap_or(json!([])))
-}
-
-async fn tool_pipeline_get_config(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(app_slug) = args.get("app_slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_slug".into());
-    };
-    match state.pipeline_store.get_config(app_slug).await {
-        Some(config) => tool_success(id, serde_json::to_value(&config).unwrap_or(json!(null))),
-        None => tool_error(id, &format!("No pipeline config for app '{}'", app_slug)),
-    }
-}
-
-async fn tool_pipeline_save_config(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(app_slug) = args.get("app_slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_slug".into());
-    };
-
-    let env_chain: Vec<String> = args.get("env_chain")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-
-    let skip_steps: std::collections::HashSet<String> = args.get("skip_steps")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-
-    let auto_promote: std::collections::HashSet<String> = args.get("auto_promote")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-
-    let gates: Vec<hr_pipeline::GateDef> = args.get("gates")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-
-    let config = hr_pipeline::PipelineConfig {
-        app_slug: app_slug.to_string(),
-        env_chain,
-        skip_steps,
-        auto_promote,
-        gates,
-    };
-
-    state.pipeline_store.save_config(config).await;
-    tool_success(id, json!({"saved": app_slug}))
-}
-
-async fn tool_pipeline_logs(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(run_id) = args.get("run_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing run_id".into());
-    };
-    let Some(step_name) = args.get("step_name").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing step_name".into());
-    };
-
-    // Try engine first (in-memory active runs), then store (persisted)
-    let run = state.pipeline_engine.get_run(run_id).await
-        .or_else(|| {
-            // Synchronous fallback not possible here; we'll try store below
-            None
-        });
-
-    // If not found in engine, try the store asynchronously
-    let run = match run {
-        Some(r) => r,
-        None => match state.pipeline_store.get_run(run_id).await {
-            Some(r) => r,
-            None => return tool_error(id, &format!("Pipeline run '{}' not found", run_id)),
-        },
-    };
-
-    match run.steps.iter().find(|s| s.name == step_name) {
-        Some(step) => tool_success(id, json!({
-            "step": step_name,
-            "status": step.status,
-            "output": step.output,
-            "started_at": step.started_at,
-            "finished_at": step.finished_at,
-        })),
-        None => tool_error(id, &format!("Step '{}' not found in run '{}'", step_name, run_id)),
-    }
-}
-
-async fn tool_pipeline_approve_gate(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(gate_id) = args.get("gate_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing gate_id".into());
-    };
-
-    match state.pipeline_store.approve_gate(gate_id, "mcp").await {
-        Some(gate) => tool_success(id, serde_json::to_value(&gate).unwrap_or(json!(null))),
-        None => tool_error(id, &format!("Gate '{}' not found or already resolved", gate_id)),
-    }
-}
-
-async fn tool_pipeline_reject_gate(id: Value, args: &Value, state: &McpState) -> Value {
-    let Some(gate_id) = args.get("gate_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing gate_id".into());
-    };
-
-    match state.pipeline_store.reject_gate(gate_id, "mcp").await {
-        Some(gate) => tool_success(id, serde_json::to_value(&gate).unwrap_or(json!(null))),
-        None => tool_error(id, &format!("Gate '{}' not found or already resolved", gate_id)),
-    }
-}
-
-async fn tool_pipeline_pending_gates(id: Value, args: &Value, state: &McpState) -> Value {
-    let app_slug = args.get("app_slug").and_then(|v| v.as_str());
-    let gates = state.pipeline_store.list_pending_gates(app_slug).await;
-    tool_success(id, serde_json::to_value(&gates).unwrap_or(json!([])))
-}
-
-/// Helper: get app info (stack, has_db) from an environment.
-async fn get_app_info(
-    state: &McpState,
-    env_slug: &str,
-    app_slug: &str,
-) -> Option<(hr_environment::AppStackType, bool)> {
-    let env = state.env_manager.get_by_slug(env_slug).await?;
-    let app = env.apps.iter().find(|a| a.slug == app_slug)?;
-    Some((app.stack, app.has_db))
-}
-
-// ── PipelineTransport adapter ────────────────────────────────────────
-
-struct EnvManagerTransport {
-    env_manager: Arc<crate::env_manager::EnvironmentManager>,
-}
-
-impl hr_pipeline::PipelineTransport for EnvManagerTransport {
-    async fn send_to_env(
-        &self,
-        env_slug: &str,
-        msg: hr_environment::EnvOrchestratorMessage,
-    ) -> anyhow::Result<()> {
-        self.env_manager.send_to_env(env_slug, msg).await
-    }
-
-    async fn is_env_connected(&self, env_slug: &str) -> bool {
-        self.env_manager.is_env_connected(env_slug).await
-    }
-
-    async fn get_app_version(
-        &self,
-        env_slug: &str,
-        app_slug: &str,
-    ) -> Option<String> {
-        self.env_manager.get_app_version(env_slug, app_slug).await
-    }
+    tool_success(id, json!({ "refreshed": refreshed, "total": apps.len() }))
 }

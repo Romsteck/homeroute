@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::types::IpcResponse;
+use serde::{Deserialize, Serialize};
 
 // ── EdgeRequest (client -> hr-edge) ───────────────────────
 #[derive(Debug, Serialize, Deserialize)]
@@ -16,39 +16,65 @@ pub enum EdgeRequest {
         allowed_groups: Vec<String>,
         local_only: bool,
     },
-    RemoveAppRoute { domain: String },
+    RemoveAppRoute {
+        domain: String,
+    },
     ListAppRoutes,
 
     // Proxy config
     ReloadConfig,
     GetProxyConfig,
-    SaveProxyConfig { config: serde_json::Value },
+    SaveProxyConfig {
+        config: serde_json::Value,
+    },
 
     // ACME
     AcmeStatus,
     AcmeListCertificates,
-    AcmeRequestAppWildcard { slug: String },
-    AcmeRequestEnvWildcard { env_slug: String },
+    AcmeRequestAppWildcard {
+        slug: String,
+    },
+    AcmeRequestEnvWildcard {
+        env_slug: String,
+    },
     AcmeRenewAll,
 
     // Auth
-    AuthLogin { username: String, password: String, client_ip: String },
-    AuthLogout { session_token: String },
-    AuthValidateSession { session_token: String },
+    AuthLogin {
+        username: String,
+        password: String,
+        client_ip: String,
+    },
+    AuthLogout {
+        session_token: String,
+    },
+    AuthValidateSession {
+        session_token: String,
+    },
     AuthListSessions,
     AuthListUsers,
-    AuthCreateUser { username: String, password: String, groups: Vec<String> },
-    AuthDeleteUser { username: String },
-    AuthChangePassword { username: String, old_password: String, new_password: String },
+    AuthCreateUser {
+        username: String,
+        password: String,
+        groups: Vec<String>,
+    },
+    AuthDeleteUser {
+        username: String,
+    },
+    AuthChangePassword {
+        username: String,
+        old_password: String,
+        new_password: String,
+    },
 
     // Stats / metrics
     GetStats,
 }
 
 // ── EdgeClient ───────────────────────────────────────────
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use anyhow::Result;
 
 /// Client IPC pour communiquer avec hr-edge.
 #[derive(Clone)]
@@ -58,7 +84,9 @@ pub struct EdgeClient {
 
 impl EdgeClient {
     pub fn new(socket_path: impl Into<PathBuf>) -> Self {
-        Self { socket_path: socket_path.into() }
+        Self {
+            socket_path: socket_path.into(),
+        }
     }
 
     pub fn socket_path(&self) -> &Path {
@@ -69,7 +97,11 @@ impl EdgeClient {
         crate::transport::request(&self.socket_path, req, Duration::from_secs(5)).await
     }
 
-    pub async fn request_with_timeout(&self, req: &EdgeRequest, timeout: Duration) -> Result<IpcResponse> {
+    pub async fn request_with_timeout(
+        &self,
+        req: &EdgeRequest,
+        timeout: Duration,
+    ) -> Result<IpcResponse> {
         crate::transport::request(&self.socket_path, req, timeout).await
     }
 
@@ -87,13 +119,23 @@ impl EdgeClient {
         local_only: bool,
     ) -> Result<IpcResponse> {
         self.request(&EdgeRequest::SetAppRoute {
-            domain, app_id, host_id, target_ip, target_port,
-            auth_required, allowed_groups, local_only,
-        }).await
+            domain,
+            app_id,
+            host_id,
+            target_ip,
+            target_port,
+            auth_required,
+            allowed_groups,
+            local_only,
+        })
+        .await
     }
 
     pub async fn remove_app_route(&self, domain: &str) -> Result<IpcResponse> {
-        self.request(&EdgeRequest::RemoveAppRoute { domain: domain.to_string() }).await
+        self.request(&EdgeRequest::RemoveAppRoute {
+            domain: domain.to_string(),
+        })
+        .await
     }
 
     /// Request a wildcard TLS certificate for an environment (e.g., *.dev.mynetwk.biz).
@@ -101,8 +143,11 @@ impl EdgeClient {
     /// (may take 30-60s) so it uses a longer timeout.
     pub async fn request_env_wildcard_cert(&self, env_slug: &str) -> Result<IpcResponse> {
         self.request_with_timeout(
-            &EdgeRequest::AcmeRequestEnvWildcard { env_slug: env_slug.to_string() },
+            &EdgeRequest::AcmeRequestEnvWildcard {
+                env_slug: env_slug.to_string(),
+            },
             Duration::from_secs(120),
-        ).await
+        )
+        .await
     }
 }

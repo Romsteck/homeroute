@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use rcgen::{
-    CertificateParams, DnType, ExtendedKeyUsagePurpose, Issuer, IsCa, KeyPair, KeyUsagePurpose,
-    SanType, PKCS_ECDSA_P256_SHA256,
+    CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+    PKCS_ECDSA_P256_SHA256, SanType,
 };
 use std::net::IpAddr;
 use std::time::Duration;
@@ -25,12 +25,12 @@ pub fn generate_tunnel_certs(vps_host: &str) -> Result<TunnelCerts> {
     let validity = Duration::from_secs(10 * 365 * 24 * 3600);
 
     // ── CA ────────────────────────────────────────────────────────────
-    let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
-        .context("Failed to generate CA key pair")?;
+    let ca_key =
+        KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).context("Failed to generate CA key pair")?;
     let ca_key_pem = ca_key.serialize_pem();
 
-    let mut ca_params = CertificateParams::new(Vec::<String>::new())
-        .context("Failed to create CA params")?;
+    let mut ca_params =
+        CertificateParams::new(Vec::<String>::new()).context("Failed to create CA params")?;
     ca_params
         .distinguished_name
         .push(DnType::CommonName, "HomeRoute Tunnel CA");
@@ -43,16 +43,16 @@ pub fn generate_tunnel_certs(vps_host: &str) -> Result<TunnelCerts> {
         .self_signed(&ca_key)
         .context("Failed to self-sign CA cert")?;
 
-    let ca_issuer = Issuer::from_ca_cert_der(ca_cert.der(), ca_key)
-        .context("Failed to create CA issuer")?;
+    let ca_issuer =
+        Issuer::from_ca_cert_der(ca_cert.der(), ca_key).context("Failed to create CA issuer")?;
 
     // ── Server cert ──────────────────────────────────────────────────
     let server_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
         .context("Failed to generate server key pair")?;
 
     let server_sans = build_sans(vps_host);
-    let mut server_params = CertificateParams::new(Vec::<String>::new())
-        .context("Failed to create server params")?;
+    let mut server_params =
+        CertificateParams::new(Vec::<String>::new()).context("Failed to create server params")?;
     server_params
         .distinguished_name
         .push(DnType::CommonName, vps_host);
@@ -69,8 +69,8 @@ pub fn generate_tunnel_certs(vps_host: &str) -> Result<TunnelCerts> {
     let client_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
         .context("Failed to generate client key pair")?;
 
-    let mut client_params = CertificateParams::new(Vec::<String>::new())
-        .context("Failed to create client params")?;
+    let mut client_params =
+        CertificateParams::new(Vec::<String>::new()).context("Failed to create client params")?;
     client_params
         .distinguished_name
         .push(DnType::CommonName, "homeroute-onprem");

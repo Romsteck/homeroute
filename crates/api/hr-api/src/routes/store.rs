@@ -1,7 +1,7 @@
 //! App store: catalog management, APK upload/download, update checks.
 
 use axum::extract::{DefaultBodyLimit, Path, Query};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -66,7 +66,8 @@ fn save_catalog(catalog: &StoreCatalog) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create store dir: {e}"))?;
     }
     let tmp = path.with_extension("json.tmp");
-    let data = serde_json::to_string_pretty(catalog).map_err(|e| format!("Serialize error: {e}"))?;
+    let data =
+        serde_json::to_string_pretty(catalog).map_err(|e| format!("Serialize error: {e}"))?;
     std::fs::write(&tmp, data).map_err(|e| format!("Write error: {e}"))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("Rename error: {e}"))?;
     Ok(())
@@ -81,14 +82,7 @@ fn extract_apk_icon(apk_path: &str, slug: &str) -> Option<()> {
     let mut archive = zip::ZipArchive::new(file).ok()?;
 
     // Priority order: xxxhdpi > xxhdpi > xhdpi > hdpi > mdpi > any mipmap
-    let priority_patterns = [
-        "xxxhdpi",
-        "xxhdpi",
-        "xhdpi",
-        "hdpi",
-        "mdpi",
-        "mipmap",
-    ];
+    let priority_patterns = ["xxxhdpi", "xxhdpi", "xhdpi", "hdpi", "mdpi", "mipmap"];
 
     let mut best_entry: Option<String> = None;
     let mut best_priority = usize::MAX;
@@ -102,7 +96,8 @@ fn extract_apk_icon(apk_path: &str, slug: &str) -> Option<()> {
             continue;
         }
         let lower = name.to_lowercase();
-        if !lower.contains("ic_launcher") || lower.contains("round") || lower.contains("foreground") {
+        if !lower.contains("ic_launcher") || lower.contains("round") || lower.contains("foreground")
+        {
             continue;
         }
         if !lower.contains("mipmap") && !lower.contains("drawable") {
@@ -153,7 +148,9 @@ fn extract_apk_icon(apk_path: &str, slug: &str) -> Option<()> {
 /// Returns true if `a` is newer than `b`.
 fn version_newer(a: &str, b: &str) -> bool {
     let parse = |s: &str| -> Vec<u64> {
-        s.split('.').filter_map(|seg| seg.parse::<u64>().ok()).collect()
+        s.split('.')
+            .filter_map(|seg| seg.parse::<u64>().ok())
+            .collect()
     };
     let va = parse(a);
     let vb = parse(b);
@@ -274,19 +271,27 @@ async fn delete_app(Path(slug): Path<String>) -> impl IntoResponse {
         )
             .into_response();
     }
-    let releases_dir = std::path::PathBuf::from(STORE_DIR).join("releases").join(&slug);
+    let releases_dir = std::path::PathBuf::from(STORE_DIR)
+        .join("releases")
+        .join(&slug);
     if releases_dir.exists() {
         if let Err(e) = std::fs::remove_dir_all(&releases_dir) {
             error!(slug, "Failed to delete releases dir: {e}");
         }
     }
     // Also remove icon if present
-    let icon_path = std::path::PathBuf::from(STORE_DIR).join("icons").join(format!("{}.png", slug));
+    let icon_path = std::path::PathBuf::from(STORE_DIR)
+        .join("icons")
+        .join(format!("{}.png", slug));
     if icon_path.exists() {
         let _ = std::fs::remove_file(&icon_path);
     }
     info!(slug, "Deleted app and releases");
-    (StatusCode::OK, Json(serde_json::json!({"success":true,"slug":slug}))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"success":true,"slug":slug})),
+    )
+        .into_response()
 }
 
 /// POST /api/store/apps/{slug}/releases — upload an APK release.
@@ -320,7 +325,10 @@ async fn publish_release(
             .into_response();
     }
 
-    if !slug.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !slug
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"success": false, "error": "Invalid slug"})),
@@ -554,7 +562,9 @@ async fn download_release(Path((slug, version)): Path<(String, String)>) -> impl
             );
             headers.insert(
                 header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{}\"", filename).parse().unwrap(),
+                format!("attachment; filename=\"{}\"", filename)
+                    .parse()
+                    .unwrap(),
             );
             headers.insert("X-Sha256", sha256.parse().unwrap());
 
@@ -670,7 +680,10 @@ async fn download_client_apk() -> impl IntoResponse {
     match tokio::fs::read(path).await {
         Ok(data) => {
             let headers = [
-                (header::CONTENT_TYPE, "application/vnd.android.package-archive"),
+                (
+                    header::CONTENT_TYPE,
+                    "application/vnd.android.package-archive",
+                ),
                 (
                     header::CONTENT_DISPOSITION,
                     "attachment; filename=\"homeroute-store.apk\"",
@@ -702,7 +715,11 @@ async fn client_version() -> impl IntoResponse {
         }
         Err(e) => {
             error!("Failed to read client version.json: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read version info").into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to read version info",
+            )
+                .into_response()
         }
     }
 }

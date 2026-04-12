@@ -1,6 +1,6 @@
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{Json, Router, extract::State, routing::get};
 use hr_common::service_registry::{ServicePriorityLevel, ServiceState, ServiceStatus};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::state::ApiState;
 
@@ -40,9 +40,7 @@ async fn status(State(state): State<ApiState>) -> Json<Value> {
         }
     }
 
-    services.sort_by(|a, b| {
-        a.priority.cmp(&b.priority).then(a.name.cmp(&b.name))
-    });
+    services.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.name.cmp(&b.name)));
 
     Json(json!({
         "success": true,

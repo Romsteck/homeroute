@@ -1,5 +1,6 @@
+use crate::types::*;
 use serde::{Deserialize, Serialize};
-use crate::types::IpcResponse;
+use std::collections::BTreeMap;
 
 // ── OrchestratorRequest (client -> hr-orchestrator) ──────────
 
@@ -8,48 +9,102 @@ use crate::types::IpcResponse;
 pub enum OrchestratorRequest {
     // ── Applications ─────────────────────────────────────────
     ListApplications,
-    GetApplication { id: String },
-    IsAgentConnected { app_id: String },
+    GetApplication {
+        id: String,
+    },
+    IsAgentConnected {
+        app_id: String,
+    },
 
     // ── Applications extended ─────────────────────────────────
-    UpdateApplication { id: String, request: serde_json::Value },
-    DeleteApplication { id: String },
-    ExecInContainer { app_id: String, commands: Vec<String> },
-    ExecRemoteContainer { host_id: String, container_name: String, commands: Vec<String> },
-    SendToAgent { app_id: String, message: serde_json::Value },
-    TriggerAgentUpdate { agent_ids: Option<Vec<String>> },
+    UpdateApplication {
+        id: String,
+        request: serde_json::Value,
+    },
+    DeleteApplication {
+        id: String,
+    },
+    ExecInContainer {
+        app_id: String,
+        commands: Vec<String>,
+    },
+    ExecRemoteContainer {
+        host_id: String,
+        container_name: String,
+        commands: Vec<String>,
+    },
+    SendToAgent {
+        app_id: String,
+        message: serde_json::Value,
+    },
+    TriggerAgentUpdate {
+        agent_ids: Option<Vec<String>>,
+    },
     GetAgentUpdateStatus,
-    FixAgentUpdate { app_id: String },
-    UpdateAgentRules { app_ids: Option<Vec<String>> },
+    FixAgentUpdate {
+        app_id: String,
+    },
+    UpdateAgentRules {
+        app_ids: Option<Vec<String>>,
+    },
 
     // ── Git ──────────────────────────────────────────────────
     ListRepos,
-    GetRepo { slug: String },
-    CreateRepo { slug: String },
-    DeleteRepo { slug: String },
+    GetRepo {
+        slug: String,
+    },
+    CreateRepo {
+        slug: String,
+    },
+    DeleteRepo {
+        slug: String,
+    },
 
     // ── Git extended ──────────────────────────────────────────
-    GetCommits { slug: String, limit: usize },
-    GetBranches { slug: String },
-    TriggerSync { slug: String },
+    GetCommits {
+        slug: String,
+        limit: usize,
+    },
+    GetBranches {
+        slug: String,
+    },
+    TriggerSync {
+        slug: String,
+    },
     SyncAll,
     GetSshKey,
     GenerateSshKey,
     GetGitConfig,
-    UpdateGitConfig { config: serde_json::Value },
+    UpdateGitConfig {
+        config: serde_json::Value,
+    },
 
     // ── Host operations ──────────────────────────────────────
     ListHostConnections,
-    IsHostConnected { host_id: String },
-    GetHostPowerState { host_id: String },
-    SendHostCommand { host_id: String, command: serde_json::Value },
-    WakeHost { host_id: String },
-    HostPowerAction { host_id: String, action: String },
+    IsHostConnected {
+        host_id: String,
+    },
+    GetHostPowerState {
+        host_id: String,
+    },
+    SendHostCommand {
+        host_id: String,
+        command: serde_json::Value,
+    },
+    WakeHost {
+        host_id: String,
+    },
+    HostPowerAction {
+        host_id: String,
+        action: String,
+    },
 
     // ── Updates scan ─────────────────────────────────────────
     ScanUpdates,
     GetScanResults,
-    StoreScanResult { target: serde_json::Value },
+    StoreScanResult {
+        target: serde_json::Value,
+    },
 
     // ── Backup pipeline ─────────────────────────────────────
     /// Trigger the incremental SSH backup pipeline (4 repos: homeroute, pixel, containers, git).
@@ -74,51 +129,102 @@ pub enum OrchestratorRequest {
     // ── Agent auth (for hr-api cert distribution) ────────────
     /// Authenticate an agent by its bearer token.
     /// Returns {app_id, slug} on success.
-    AuthenticateAgentToken { token: String },
+    AuthenticateAgentToken {
+        token: String,
+    },
 
-    // ── Environments ─────────────────────────────────────────
-    ListEnvironments,
-    GetEnvironment { id: String },
-    CreateEnvironment { request: serde_json::Value },
-    UpdateEnvironment { id: String, request: serde_json::Value },
-    DeleteEnvironment { id: String },
-    StartEnvironment { id: String },
-    StopEnvironment { id: String },
+    // ── Apps (V3 — direct app supervision via hr-apps) ────
+    /// List all applications managed by the AppSupervisor.
+    AppList,
+    /// Get a single application by slug.
+    AppGet {
+        slug: String,
+    },
+    /// Create a new application.
+    AppCreate {
+        slug: String,
+        name: String,
+        stack: String,
+        has_db: bool,
+        visibility: String,
+        run_command: Option<String>,
+        build_command: Option<String>,
+        health_path: Option<String>,
+    },
+    /// Update an existing application's metadata.
+    AppUpdate {
+        slug: String,
+        name: Option<String>,
+        visibility: Option<String>,
+        run_command: Option<String>,
+        build_command: Option<String>,
+        health_path: Option<String>,
+        env_vars: Option<BTreeMap<String, String>>,
+    },
+    /// Delete an application. If `keep_data` is true, the DB and source dirs are preserved.
+    AppDelete {
+        slug: String,
+        keep_data: bool,
+    },
+    /// Control an app process: "start" | "stop" | "restart" | "rebuild".
+    AppControl {
+        slug: String,
+        action: String,
+    },
+    /// Get runtime status (pid, state, port, uptime).
+    AppStatus {
+        slug: String,
+    },
+    /// Get recent logs for an app.
+    AppLogs {
+        slug: String,
+        limit: Option<usize>,
+        level: Option<String>,
+    },
+    /// Execute a shell command in the context of an app.
+    AppExec {
+        slug: String,
+        command: String,
+        timeout_secs: Option<u64>,
+    },
+    /// Regenerate the Claude context file for an app.
+    AppRegenerateContext {
+        slug: String,
+    },
 
-    // ── Environment sub-resources ──────────────────────────
-    /// List apps deployed in an environment.
-    GetEnvironmentApps { env_slug: String },
-    /// Get monitoring data for an environment (CPU, memory, disk, app health).
-    GetEnvironmentMonitoring { env_slug: String },
-    /// Control an app inside an environment (start, stop, restart).
-    ControlEnvironmentApp { env_slug: String, app_slug: String, action: String },
-    /// Get recent logs for an app in an environment.
-    GetEnvironmentAppLogs { env_slug: String, app_slug: String, lines: Option<u64> },
-    /// List database tables in an environment.
-    GetEnvironmentDbTables { env_slug: String },
-    /// Query data from an environment database.
-    QueryEnvironmentDb { env_slug: String, query: serde_json::Value },
-    /// Get a summary of all environments' monitoring data.
-    GetEnvironmentsMonitoringSummary,
-    /// Toggle the public/auth flag for an app in a production environment.
-    SetAppPublic { env_slug: String, app_slug: String, public: bool },
-
-    // ── Env-agent messaging ────────────────────────────────
-    /// Send a message to an env-agent via its WebSocket channel.
-    SendToEnv { env_slug: String, message: serde_json::Value },
-
-    // ── Multi-host environments (7.6) ─────────────────────
-    /// List environments running on a specific host.
-    ListEnvironmentsByHost { host_id: String },
-    /// Get capacity info for a host (env count, running count, etc.).
-    GetHostCapacity { host_id: String },
+    // ── App-managed DB (per-app SQLite via DbManager) ─────
+    /// List user-defined tables in the app database.
+    AppDbListTables {
+        slug: String,
+    },
+    /// Describe a single table (columns, row count).
+    AppDbDescribeTable {
+        slug: String,
+        table: String,
+    },
+    /// Run a SQL query against the app database.
+    AppDbQuery {
+        slug: String,
+        sql: String,
+        params: Vec<serde_json::Value>,
+    },
+    /// Execute a mutation (INSERT/UPDATE/DELETE) against the app database.
+    AppDbExecute {
+        slug: String,
+        sql: String,
+        params: Vec<serde_json::Value>,
+    },
+    /// Take a SQLite snapshot of the app database.
+    AppDbSnapshot {
+        slug: String,
+    },
 }
 
 // ── OrchestratorClient ───────────────────────────────────────
 
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use anyhow::Result;
 
 /// IPC client for communicating with hr-orchestrator via Unix socket.
 #[derive(Clone)]
@@ -155,4 +261,199 @@ impl OrchestratorClient {
     ) -> Result<IpcResponse> {
         crate::transport::request(&self.socket_path, req, timeout).await
     }
+
+    // ── App* typed helpers ────────────────────────────────────
+
+    pub async fn app_list(&self) -> Result<AppListData> {
+        let resp = self.request(&OrchestratorRequest::AppList).await?;
+        extract_data(resp)
+    }
+
+    pub async fn app_get(&self, slug: &str) -> Result<ApplicationDto> {
+        let resp = self
+            .request(&OrchestratorRequest::AppGet {
+                slug: slug.to_string(),
+            })
+            .await?;
+        extract_data(resp)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn app_create(
+        &self,
+        slug: String,
+        name: String,
+        stack: String,
+        has_db: bool,
+        visibility: String,
+        run_command: Option<String>,
+        build_command: Option<String>,
+        health_path: Option<String>,
+    ) -> Result<ApplicationDto> {
+        let resp = self
+            .request_long(&OrchestratorRequest::AppCreate {
+                slug,
+                name,
+                stack,
+                has_db,
+                visibility,
+                run_command,
+                build_command,
+                health_path,
+            })
+            .await?;
+        extract_data(resp)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn app_update(
+        &self,
+        slug: String,
+        name: Option<String>,
+        visibility: Option<String>,
+        run_command: Option<String>,
+        build_command: Option<String>,
+        health_path: Option<String>,
+        env_vars: Option<BTreeMap<String, String>>,
+    ) -> Result<ApplicationDto> {
+        let resp = self
+            .request(&OrchestratorRequest::AppUpdate {
+                slug,
+                name,
+                visibility,
+                run_command,
+                build_command,
+                health_path,
+                env_vars,
+            })
+            .await?;
+        extract_data(resp)
+    }
+
+    pub async fn app_delete(&self, slug: &str, keep_data: bool) -> Result<IpcResponse> {
+        self.request(&OrchestratorRequest::AppDelete {
+            slug: slug.to_string(),
+            keep_data,
+        })
+        .await
+    }
+
+    pub async fn app_control(&self, slug: &str, action: &str) -> Result<IpcResponse> {
+        self.request_long(&OrchestratorRequest::AppControl {
+            slug: slug.to_string(),
+            action: action.to_string(),
+        })
+        .await
+    }
+
+    pub async fn app_status(&self, slug: &str) -> Result<AppStatusData> {
+        let resp = self
+            .request(&OrchestratorRequest::AppStatus {
+                slug: slug.to_string(),
+            })
+            .await?;
+        extract_data(resp)
+    }
+
+    pub async fn app_logs(
+        &self,
+        slug: &str,
+        limit: Option<usize>,
+        level: Option<String>,
+    ) -> Result<AppLogsData> {
+        let resp = self
+            .request(&OrchestratorRequest::AppLogs {
+                slug: slug.to_string(),
+                limit,
+                level,
+            })
+            .await?;
+        extract_data(resp)
+    }
+
+    pub async fn app_exec(
+        &self,
+        slug: &str,
+        command: String,
+        timeout_secs: Option<u64>,
+    ) -> Result<AppExecResult> {
+        let timeout = Duration::from_secs(timeout_secs.unwrap_or(60).max(1) + 5);
+        let resp = self
+            .request_with_timeout(
+                &OrchestratorRequest::AppExec {
+                    slug: slug.to_string(),
+                    command,
+                    timeout_secs,
+                },
+                timeout,
+            )
+            .await?;
+        extract_data(resp)
+    }
+
+    pub async fn app_regenerate_context(&self, slug: &str) -> Result<IpcResponse> {
+        self.request(&OrchestratorRequest::AppRegenerateContext {
+            slug: slug.to_string(),
+        })
+        .await
+    }
+
+    // ── App DB helpers ────────────────────────────────────────
+
+    pub async fn app_db_list_tables(&self, slug: &str) -> Result<AppDbTablesData> {
+        let resp = self
+            .request(&OrchestratorRequest::AppDbListTables {
+                slug: slug.to_string(),
+            })
+            .await?;
+        extract_data(resp)
+    }
+
+    pub async fn app_db_describe_table(&self, slug: &str, table: &str) -> Result<AppDbTableSchema> {
+        let resp = self
+            .request(&OrchestratorRequest::AppDbDescribeTable {
+                slug: slug.to_string(),
+                table: table.to_string(),
+            })
+            .await?;
+        extract_data(resp)
+    }
+
+    pub async fn app_db_query(
+        &self,
+        slug: &str,
+        sql: String,
+        params: Vec<serde_json::Value>,
+    ) -> Result<AppDbQueryResult> {
+        let resp = self
+            .request(&OrchestratorRequest::AppDbQuery {
+                slug: slug.to_string(),
+                sql,
+                params,
+            })
+            .await?;
+        extract_data(resp)
+    }
+
+    pub async fn app_db_snapshot(&self, slug: &str) -> Result<AppDbSnapshotData> {
+        let resp = self
+            .request_long(&OrchestratorRequest::AppDbSnapshot {
+                slug: slug.to_string(),
+            })
+            .await?;
+        extract_data(resp)
+    }
+}
+
+/// Extract typed data from IpcResponse, returning an error if the response indicates failure.
+fn extract_data<T: serde::de::DeserializeOwned>(resp: IpcResponse) -> Result<T> {
+    use anyhow::Context;
+    if !resp.ok {
+        anyhow::bail!(
+            "hr-orchestrator error: {}",
+            resp.error.unwrap_or_else(|| "unknown error".into())
+        );
+    }
+    let data = resp.data.context("hr-orchestrator returned no data")?;
+    Ok(serde_json::from_value(data)?)
 }
