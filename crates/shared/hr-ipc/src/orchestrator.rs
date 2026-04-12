@@ -160,6 +160,8 @@ pub enum OrchestratorRequest {
         build_command: Option<String>,
         health_path: Option<String>,
         env_vars: Option<BTreeMap<String, String>>,
+        #[serde(default)]
+        has_db: Option<bool>,
     },
     /// Delete an application. If `keep_data` is true, the DB and source dirs are preserved.
     AppDelete {
@@ -367,6 +369,7 @@ impl OrchestratorClient {
         build_command: Option<String>,
         health_path: Option<String>,
         env_vars: Option<BTreeMap<String, String>>,
+        has_db: Option<bool>,
     ) -> Result<ApplicationDto> {
         let resp = self
             .request(&OrchestratorRequest::AppUpdate {
@@ -377,6 +380,7 @@ impl OrchestratorClient {
                 build_command,
                 health_path,
                 env_vars,
+                has_db,
             })
             .await?;
         extract_data(resp)

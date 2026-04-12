@@ -169,13 +169,18 @@ pub fn validate_relation(
         .find(|t| t.name == rel.to_table)
         .ok_or_else(|| ValidationError::RelationTableNotFound(rel.to_table.clone()))?;
 
-    if !from_table.columns.iter().any(|c| c.name == rel.from_column) {
+    // `id` is the implicit primary key for every Dataverse-managed table, so it is
+    // always a valid target even though it is not stored in `_dv_columns`.
+    let from_ok =
+        rel.from_column == "id" || from_table.columns.iter().any(|c| c.name == rel.from_column);
+    if !from_ok {
         return Err(ValidationError::RelationColumnNotFound(
             rel.from_column.clone(),
             rel.from_table.clone(),
         ));
     }
-    if !to_table.columns.iter().any(|c| c.name == rel.to_column) {
+    let to_ok = rel.to_column == "id" || to_table.columns.iter().any(|c| c.name == rel.to_column);
+    if !to_ok {
         return Err(ValidationError::RelationColumnNotFound(
             rel.to_column.clone(),
             rel.to_table.clone(),

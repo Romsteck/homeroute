@@ -178,6 +178,7 @@ impl AppsContext {
         build_command: Option<String>,
         health_path: Option<String>,
         env_vars: Option<BTreeMap<String, String>>,
+        has_db: Option<bool>,
     ) -> IpcResponse {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
@@ -207,6 +208,21 @@ impl AppsContext {
         }
         if let Some(ev) = env_vars {
             app.env_vars = ev;
+        }
+        if let Some(new_has_db) = has_db {
+            if new_has_db && !app.has_db {
+                // Enable: create the DB file if missing so the engine can initialize metadata.
+                if !app.db_path().exists() {
+                    if let Err(e) = tokio::fs::File::create(app.db_path()).await {
+                        return IpcResponse::err(format!("failed to create db file: {e}"));
+                    }
+                }
+                info!(slug = %slug, "has_db enabled");
+            } else if !new_has_db && app.has_db {
+                // Disable: keep the DB file on disk; only flip the flag.
+                info!(slug = %slug, "has_db disabled (db file preserved on disk)");
+            }
+            app.has_db = new_has_db;
         }
 
         if let Err(e) = self.supervisor.registry.upsert(app.clone()).await {
@@ -670,7 +686,22 @@ impl AppsContext {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
-        let def: hr_apps::TableDefinition = match serde_json::from_value(definition) {
+        // Fill in defaults so callers only need to supply `name` and `columns`.
+        // `slug` defaults to `name`, and timestamps to `now` — all easily overridable.
+        let mut def_value = definition;
+        if let serde_json::Value::Object(ref mut map) = def_value {
+            let now = chrono::Utc::now().to_rfc3339();
+            if !map.contains_key("slug") {
+                if let Some(name) = map.get("name").and_then(|v| v.as_str()) {
+                    map.insert("slug".to_string(), serde_json::Value::String(name.to_string()));
+                }
+            }
+            map.entry("created_at".to_string())
+                .or_insert_with(|| serde_json::Value::String(now.clone()));
+            map.entry("updated_at".to_string())
+                .or_insert_with(|| serde_json::Value::String(now));
+        }
+        let def: hr_apps::TableDefinition = match serde_json::from_value(def_value) {
             Ok(d) => d,
             Err(e) => return IpcResponse::err(format!("invalid table definition: {e}")),
         };

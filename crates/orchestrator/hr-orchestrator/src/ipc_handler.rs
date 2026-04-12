@@ -513,6 +513,7 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 build_command,
                 health_path,
                 env_vars,
+                has_db,
             } => {
                 self.apps_ctx()
                     .update(
@@ -523,6 +524,7 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                         build_command,
                         health_path,
                         env_vars,
+                        has_db,
                     )
                     .await
             }

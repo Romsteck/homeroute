@@ -202,6 +202,8 @@ struct UpdateAppRequest {
     health_path: Option<String>,
     #[serde(default)]
     env_vars: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    has_db: Option<bool>,
 }
 
 #[tracing::instrument(skip(state, body))]
@@ -223,6 +225,7 @@ async fn update_app(
         build_command: body.build_command,
         health_path: body.health_path,
         env_vars: body.env_vars,
+        has_db: body.has_db,
     };
     match state.orchestrator.request(&req).await {
         Ok(resp) => {
@@ -480,6 +483,7 @@ async fn update_app_env(
         build_command: None,
         health_path: None,
         env_vars: Some(body),
+        has_db: None,
     };
     match state.orchestrator.request(&req).await {
         Ok(resp) => {

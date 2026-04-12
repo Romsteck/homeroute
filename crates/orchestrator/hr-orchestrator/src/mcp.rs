@@ -583,6 +583,13 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "db.snapshot" => tool_db_snapshot(id, &arguments, state).await,
         "db.overview" => tool_db_overview(id, &arguments, state).await,
         "db.count_rows" => tool_db_count_rows(id, &arguments, state).await,
+        "db.get_schema" => tool_db_get_schema(id, &arguments, state).await,
+        "db.sync_schema" => tool_db_sync_schema(id, &arguments, state).await,
+        "db.create_table" => tool_db_create_table(id, &arguments, state).await,
+        "db.drop_table" => tool_db_drop_table(id, &arguments, state).await,
+        "db.add_column" => tool_db_add_column(id, &arguments, state).await,
+        "db.remove_column" => tool_db_remove_column(id, &arguments, state).await,
+        "db.create_relation" => tool_db_create_relation(id, &arguments, state).await,
         // ── Project-scoped simplified names (used when ?project=slug) ──
         "status" => tool_app_status(id, &arguments, state).await,
         "start" => {
@@ -607,6 +614,13 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "db_query" => tool_db_query(id, &arguments, state).await,
         "db_exec" => tool_db_execute(id, &arguments, state).await,
         "db_snapshot" => tool_db_snapshot(id, &arguments, state).await,
+        "db_get_schema" => tool_db_get_schema(id, &arguments, state).await,
+        "db_sync_schema" => tool_db_sync_schema(id, &arguments, state).await,
+        "db_create_table" => tool_db_create_table(id, &arguments, state).await,
+        "db_drop_table" => tool_db_drop_table(id, &arguments, state).await,
+        "db_add_column" => tool_db_add_column(id, &arguments, state).await,
+        "db_remove_column" => tool_db_remove_column(id, &arguments, state).await,
+        "db_create_relation" => tool_db_create_relation(id, &arguments, state).await,
         "docs_read" => tool_docs_get(id, &arguments).await,
         "docs_write" => tool_docs_update(id, &arguments).await,
         "git_log" => tool_git_log(id, &arguments, state).await,
@@ -1837,6 +1851,95 @@ fn tool_definitions_apps() -> Value {
             }
         },
         {
+            "name": "db.get_schema",
+            "description": "Get the full database schema (all tables, columns, and relations).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "slug": { "type": "string" } },
+                "required": ["slug"]
+            }
+        },
+        {
+            "name": "db.sync_schema",
+            "description": "Sync existing SQLite tables into Dataverse metadata. Use after manual DDL changes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "slug": { "type": "string" } },
+                "required": ["slug"]
+            }
+        },
+        {
+            "name": "db.create_table",
+            "description": "Create a new table. Columns id, created_at, updated_at are added automatically.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "definition": {
+                        "type": "object",
+                        "description": "Table definition with name (string) and columns (array of {name, field_type, required?, unique?, default_value?, description?})"
+                    }
+                },
+                "required": ["slug", "definition"]
+            }
+        },
+        {
+            "name": "db.drop_table",
+            "description": "Drop a table from the database.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "table": { "type": "string" }
+                },
+                "required": ["slug", "table"]
+            }
+        },
+        {
+            "name": "db.add_column",
+            "description": "Add a column to an existing table.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "table": { "type": "string" },
+                    "column": {
+                        "type": "object",
+                        "description": "Column definition with name, field_type, required?, unique?, default_value?, description?"
+                    }
+                },
+                "required": ["slug", "table", "column"]
+            }
+        },
+        {
+            "name": "db.remove_column",
+            "description": "Remove a column from a table.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "table": { "type": "string" },
+                    "column": { "type": "string", "description": "Column name to remove" }
+                },
+                "required": ["slug", "table", "column"]
+            }
+        },
+        {
+            "name": "db.create_relation",
+            "description": "Create a foreign key relation between two tables.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "relation": {
+                        "type": "object",
+                        "description": "Relation with from_table, from_column, to_table, to_column, relation_type (one_to_many|many_to_many|self_referential), cascade? ({on_delete, on_update}: cascade|set_null|restrict)"
+                    }
+                },
+                "required": ["slug", "relation"]
+            }
+        },
+        {
             "name": "studio.refresh_context",
             "description": "Regenerate Claude Code context files (CLAUDE.md, .claude/) for a specific app.",
             "inputSchema": {
@@ -2158,6 +2261,129 @@ async fn tool_db_count_rows(id: Value, args: &Value, state: &McpState) -> Value 
     };
     let sql = format!("SELECT COUNT(*) as count FROM \"{}\"", table.replace('"', ""));
     ipc_resp_to_mcp(id, ctx.db_query(slug.to_string(), sql, vec![]).await)
+}
+
+// ── db.get_schema / db.sync_schema ───────────────────────────────────
+
+async fn tool_db_get_schema(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    ipc_resp_to_mcp(id, ctx.db_get_schema(slug.to_string()).await)
+}
+
+async fn tool_db_sync_schema(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    ipc_resp_to_mcp(id, ctx.db_sync_schema(slug.to_string()).await)
+}
+
+// ── db.create_table / db.drop_table ──────────────────────────────────
+
+async fn tool_db_create_table(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(definition) = args.get("definition").cloned() else {
+        return error_response(id, INVALID_PARAMS, "Missing definition".into());
+    };
+    ipc_resp_to_mcp(
+        id,
+        ctx.db_create_table(slug.to_string(), definition).await,
+    )
+}
+
+async fn tool_db_drop_table(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing table".into());
+    };
+    ipc_resp_to_mcp(
+        id,
+        ctx.db_drop_table(slug.to_string(), table.to_string()).await,
+    )
+}
+
+// ── db.add_column / db.remove_column ─────────────────────────────────
+
+async fn tool_db_add_column(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing table".into());
+    };
+    let Some(column) = args.get("column").cloned() else {
+        return error_response(id, INVALID_PARAMS, "Missing column".into());
+    };
+    ipc_resp_to_mcp(
+        id,
+        ctx.db_add_column(slug.to_string(), table.to_string(), column)
+            .await,
+    )
+}
+
+async fn tool_db_remove_column(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing table".into());
+    };
+    let Some(column) = args.get("column").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing column".into());
+    };
+    ipc_resp_to_mcp(
+        id,
+        ctx.db_remove_column(slug.to_string(), table.to_string(), column.to_string())
+            .await,
+    )
+}
+
+// ── db.create_relation ───────────────────────────────────────────────
+
+async fn tool_db_create_relation(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(relation) = args.get("relation").cloned() else {
+        return error_response(id, INVALID_PARAMS, "Missing relation".into());
+    };
+    ipc_resp_to_mcp(
+        id,
+        ctx.db_create_relation(slug.to_string(), relation).await,
+    )
 }
 
 // ── studio.refresh_context ───────────────────────────────────────────

@@ -161,7 +161,7 @@ impl ContextGenerator {
 
         let db_section = match (app.has_db, db_tables) {
             (true, Some(tables)) if !tables.is_empty() => {
-                let mut s = String::from("Managed SQLite database.\n\n**Tables :**\n");
+                let mut s = String::from("Managed SQLite database (Dataverse).\n\n**Tables :**\n");
                 for t in tables {
                     s.push_str(&format!("- `{}`\n", t));
                 }
@@ -169,13 +169,17 @@ impl ContextGenerator {
                 s.push_str(&app.db_path().display().to_string());
                 s.push_str("`\n");
                 s.push_str(
-                    "- Use the MCP tools `db.*` (db_tables, db_schema, db_query, db_snapshot) — \
-                     never open the .db file directly.\n",
+                    "- Use the MCP tools `db.*` — never open the .db file directly.\n\
+                     - Read: `db_tables`, `db_schema`, `db_get_schema`, `db_overview`, `db_count_rows`, `db_query`\n\
+                     - Mutate data: `db_exec` (INSERT/UPDATE/DELETE)\n\
+                     - Mutate schema: `db_create_table`, `db_drop_table`, `db_add_column`, `db_remove_column`, `db_create_relation`, `db_sync_schema`\n\
+                     - Maintenance: `db_snapshot` (timestamped backup)\n\
+                     - Always declare FK relations via `db_create_relation` to enable automatic JOIN expansion.\n",
                 );
                 s
             }
             (true, _) => format!(
-                "Managed SQLite database (tables not yet inspected).\n\n\
+                "Managed SQLite database (Dataverse, tables not yet inspected).\n\n\
                  - Path: `{}`\n\
                  - Use the MCP tools `db.*` — never open the .db file directly.\n",
                 app.db_path().display(),
@@ -495,6 +499,10 @@ fn render_settings_json_with_auth(mcp_endpoint: &str, token: Option<&str>) -> St
                 "mcp__homeroute__db_schema",
                 "mcp__homeroute__db_query",
                 "mcp__homeroute__db_snapshot",
+                "mcp__homeroute__db_get_schema",
+                "mcp__homeroute__db_sync_schema",
+                "mcp__homeroute__db_overview",
+                "mcp__homeroute__db_count_rows",
                 "mcp__homeroute__docs_get",
                 "mcp__homeroute__docs_list",
                 "mcp__homeroute__docs_search",
