@@ -73,7 +73,6 @@ function CreateAppModal({ onClose, onCreated }) {
   const [slug, setSlug] = useState('');
   const [slugManual, setSlugManual] = useState(false);
   const [stack, setStack] = useState('axum-vite');
-  const [hasDb, setHasDb] = useState(false);
   const [visibility, setVisibility] = useState('private');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
@@ -105,7 +104,6 @@ function CreateAppModal({ onClose, onCreated }) {
         name: name.trim(),
         slug,
         stack,
-        has_db: hasDb,
         visibility,
       });
       onCreated();
@@ -170,18 +168,6 @@ function CreateAppModal({ onClose, onCreated }) {
                 <option key={s.value} value={s.value}>{s.label}</option>
               ))}
             </select>
-          </div>
-
-          <div>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={hasDb}
-                onChange={(e) => setHasDb(e.target.checked)}
-                className="w-4 h-4 rounded border-gray-600 bg-gray-900 text-blue-500 focus:ring-blue-500"
-              />
-              <span className="text-sm text-gray-300">Base de données SQLite</span>
-            </label>
           </div>
 
           <div>

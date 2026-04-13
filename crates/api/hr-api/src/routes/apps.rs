@@ -130,8 +130,6 @@ struct CreateAppRequest {
     slug: String,
     name: String,
     stack: String,
-    #[serde(default)]
-    has_db: bool,
     #[serde(default = "default_visibility")]
     visibility: String,
     #[serde(default)]
@@ -157,12 +155,12 @@ async fn create_app(
         return r;
     }
     let started = Instant::now();
-    info!(slug = %body.slug, stack = %body.stack, has_db = body.has_db, "Creating application");
+    info!(slug = %body.slug, stack = %body.stack, "Creating application");
     let req = OrchestratorRequest::AppCreate {
         slug: body.slug.clone(),
         name: body.name,
         stack: body.stack,
-        has_db: body.has_db,
+        has_db: true,
         visibility: body.visibility,
         run_command: body.run_command,
         build_command: body.build_command,

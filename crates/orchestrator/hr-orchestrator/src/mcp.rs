@@ -1694,7 +1694,6 @@ fn tool_definitions_apps() -> Value {
                     "slug": { "type": "string" },
                     "name": { "type": "string" },
                     "stack": { "type": "string", "enum": ["next-js", "axum-vite", "axum"] },
-                    "has_db": { "type": "boolean", "default": false },
                     "visibility": { "type": "string", "enum": ["public", "private"], "default": "private" },
                     "run_command": { "type": "string" },
                     "build_command": { "type": "string" },
@@ -2004,10 +2003,6 @@ async fn tool_app_create(id: Value, args: &Value, state: &McpState) -> Value {
     let Some(stack) = args.get("stack").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing stack".into());
     };
-    let has_db = args
-        .get("has_db")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
     let visibility = args
         .get("visibility")
         .and_then(|v| v.as_str())
@@ -2034,7 +2029,7 @@ async fn tool_app_create(id: Value, args: &Value, state: &McpState) -> Value {
             slug.to_string(),
             name.to_string(),
             stack.to_string(),
-            has_db,
+            true,
             visibility.to_string(),
             run_command,
             build_command,
