@@ -1,14 +1,18 @@
+import { createPortal } from 'react-dom';
+import { usePageHeaderSlot } from '../context/PageHeaderSlot';
+
 function PageHeader({ title, icon: Icon, children }) {
-  return (
-    <div className="bg-gray-800 border-b border-gray-700 px-4 py-3 sm:px-6 sm:py-4">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <h1 className="text-lg sm:text-xl font-semibold flex items-center gap-2 sm:gap-3">
-          {Icon && <Icon className="w-5 h-5 text-blue-400" />}
-          {title}
-        </h1>
-        {children && <div className="flex items-center gap-2 flex-wrap">{children}</div>}
-      </div>
-    </div>
+  const slot = usePageHeaderSlot();
+  if (!slot) return null;
+  return createPortal(
+    <div className="flex items-center justify-between gap-3 flex-1 min-w-0">
+      <h1 className="text-base font-semibold flex items-center gap-2 truncate">
+        {Icon && <Icon className="w-4 h-4 text-blue-400 shrink-0" />}
+        <span className="truncate">{title}</span>
+      </h1>
+      {children && <div className="flex items-center gap-2 flex-wrap shrink-0">{children}</div>}
+    </div>,
+    slot,
   );
 }
 

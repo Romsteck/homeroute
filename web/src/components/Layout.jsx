@@ -6,6 +6,7 @@ import TaskBell from "./tasks/TaskBell";
 import TaskDropdown from "./tasks/TaskDropdown";
 import Studio, { CODESERVER_BASE, statusDot } from "../pages/Studio";
 import { useStudio } from "../context/StudioContext";
+import { PageHeaderSlotProvider, usePageHeaderSlotRegister } from "../context/PageHeaderSlot";
 
 function StudioHeaderInfo() {
   const { currentApp, status, selectedSlug, activeTab, busy, onControl } = useStudio();
@@ -87,10 +88,11 @@ function StudioHeaderInfo() {
   );
 }
 
-function Layout({ children }) {
+function LayoutInner({ children }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const location = useLocation();
   const isStudio = location.pathname === '/studio';
+  const registerSlot = usePageHeaderSlotRegister();
 
   return (
     <div className="flex h-screen">
@@ -119,7 +121,11 @@ function Layout({ children }) {
               <Menu className="w-6 h-6" />
             </button>
             <h1 className="lg:hidden text-lg font-bold shrink-0">HomeRoute</h1>
-            <StudioHeaderInfo />
+            {isStudio ? (
+              <StudioHeaderInfo />
+            ) : (
+              <div ref={registerSlot} className="flex-1 flex items-center min-w-0" />
+            )}
           </div>
           <div className="relative shrink-0">
             <TaskBell />
@@ -139,6 +145,14 @@ function Layout({ children }) {
         </main>
       </div>
     </div>
+  );
+}
+
+function Layout({ children }) {
+  return (
+    <PageHeaderSlotProvider>
+      <LayoutInner>{children}</LayoutInner>
+    </PageHeaderSlotProvider>
   );
 }
 
