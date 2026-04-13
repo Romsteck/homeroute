@@ -46,13 +46,17 @@ export function statusDot(state) {
 function AppSidebar({ apps, selectedSlug, onSelect, onAdd, busy, onControl }) {
   return (
     <aside className="w-[220px] min-w-[220px] h-full bg-gray-800/50 border-r border-gray-700 flex flex-col">
-      <div className="flex items-center justify-between px-3 pt-3 pb-2">
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">Applications</span>
-        <button onClick={onAdd} className="p-1 text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded" title="Nouvelle app">
-          <Plus className="w-3.5 h-3.5" />
+      <div className="px-3 pt-3 pb-2 space-y-2">
+        <span className="block text-[10px] font-semibold uppercase tracking-wider text-gray-500">Applications</span>
+        <button
+          onClick={onAdd}
+          className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-blue-500 hover:bg-blue-600 active:bg-blue-700 rounded-md shadow-sm shadow-blue-500/20 transition-colors"
+        >
+          <Plus className="w-4 h-4" />
+          Nouvelle application
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto px-2 pb-2">
+      <div className="flex-1 overflow-y-auto pb-2">
         {apps.map(app => {
           const sel = app.slug === selectedSlug;
           const state = (app.state || '').toLowerCase();
@@ -60,8 +64,10 @@ function AppSidebar({ apps, selectedSlug, onSelect, onAdd, busy, onControl }) {
           return (
             <div
               key={app.slug}
-              className={`flex items-center gap-2 w-full px-2.5 py-2 mb-0.5 rounded-lg text-[13px] cursor-pointer transition-colors group ${
-                sel ? 'bg-gray-700 text-white' : 'text-gray-300 hover:bg-gray-700/50'
+              className={`flex items-center gap-3 px-4 py-2 text-[13px] cursor-pointer transition-[background-color,color] duration-300 ease-out hover:duration-0 group ${
+                sel
+                  ? 'border-l-3 border-blue-400 bg-gray-700/50 text-white'
+                  : 'border-l-3 border-transparent text-gray-300 hover:bg-gray-700/30'
               }`}
               onClick={() => onSelect(app.slug)}
             >
@@ -345,7 +351,6 @@ function CreateAppModal({ onClose, onCreated }) {
   const [slug, setSlug] = useState('');
   const [slugManual, setSlugManual] = useState(false);
   const [stack, setStack] = useState('axum-vite');
-  const [hasDb, setHasDb] = useState(false);
   const [visibility, setVisibility] = useState('private');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
@@ -355,7 +360,7 @@ function CreateAppModal({ onClose, onCreated }) {
     if (!name.trim()) { setError('Nom requis'); return; }
     if (!SLUG_RE.test(slug)) { setError('Slug invalide'); return; }
     setSubmitting(true); setError(null);
-    try { await createApp({ name: name.trim(), slug, stack, has_db: hasDb, visibility }); onCreated(); }
+    try { await createApp({ name: name.trim(), slug, stack, visibility }); onCreated(); }
     catch (err) { setError(err.response?.data?.error || err.message); }
     finally { setSubmitting(false); }
   }
@@ -372,7 +377,6 @@ function CreateAppModal({ onClose, onCreated }) {
           <div><label className="block text-xs text-gray-400 mb-1">Nom</label><input type="text" value={name} onChange={e => { setName(e.target.value); if (!slugManual) setSlug(slugify(e.target.value)); }} autoFocus className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-white rounded outline-none" /></div>
           <div><label className="block text-xs text-gray-400 mb-1">Slug</label><input type="text" value={slug} onChange={e => { setSlugManual(true); setSlug(slugify(e.target.value)); }} className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-white font-mono rounded outline-none" /></div>
           <div><label className="block text-xs text-gray-400 mb-1">Stack</label><select value={stack} onChange={e => setStack(e.target.value)} className="w-full px-3 py-2 text-sm bg-gray-900 border border-gray-700 text-white rounded outline-none">{STACKS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}</select></div>
-          <label className="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked={hasDb} onChange={e => setHasDb(e.target.checked)} className="w-4 h-4" /><span className="text-sm text-gray-300">Base de donnees SQLite</span></label>
           <div className="flex justify-end gap-2 pt-3 border-t border-gray-700">
             <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-gray-300 bg-gray-700 rounded">Annuler</button>
             <button type="submit" disabled={submitting} className="px-4 py-2 text-sm text-white bg-blue-500 rounded disabled:opacity-50 flex items-center gap-2">{submitting && <Loader2 className="w-4 h-4 animate-spin" />}Creer</button>

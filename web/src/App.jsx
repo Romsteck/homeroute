@@ -21,7 +21,6 @@ import Profile from './pages/Profile';
 import Backup from './pages/Backup';
 import Energy from './pages/Energy';
 import Docs from './pages/Docs';
-import Apps from './pages/Apps';
 import AppDetail from './pages/AppDetail';
 import DbExplorer from './pages/DbExplorer';
 import SchemaPage from './pages/SchemaPage';
