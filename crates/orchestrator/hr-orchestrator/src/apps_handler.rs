@@ -853,7 +853,12 @@ impl AppsContext {
             Ok(g) => g,
             Err(_) => {
                 warn!(slug = %slug, "build: already in progress");
-                return IpcResponse::err(format!("build already in progress for {slug}"));
+                return IpcResponse::err(format!(
+                    "BUILD_BUSY: another build for '{slug}' is already running. \
+                     STOP and WAIT — do not retry automatically. \
+                     Pause your work, inform the user that a concurrent build is in progress, \
+                     and wait for the user to explicitly tell you to rebuild before calling app.build again."
+                ));
             }
         };
 

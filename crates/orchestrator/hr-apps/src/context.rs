@@ -476,6 +476,18 @@ fn render_app_build_md(app: &Application) -> String {
     let header = "# Build (managed by HomeRoute)\n\n\
                   > Generated automatically — do not edit. \
                   Update the app's `build_command` / `build_artefact` fields instead.\n\n";
+    let concurrency_rule = "\n## Règle concurrence (OBLIGATOIRE)\n\n\
+                  Si `app.build` retourne une erreur `BUILD_BUSY` \
+                  (« another build is already running »), tu DOIS :\n\n\
+                  1. **Arrêter immédiatement** — ne relance pas le build automatiquement.\n\
+                  2. **Informer l'utilisateur** qu'un autre build de cette app est en cours \
+                  (probablement une autre discussion / un autre code-server).\n\
+                  3. **Attendre que l'utilisateur te donne explicitement l'ordre** de rebuilder \
+                  avant de rappeler `app.build` sur ce slug.\n\n\
+                  Pourquoi : deux builds simultanés sur le même slug corrompraient le source \
+                  côté CloudMaster (rsync concurrent). Le lock per-slug l'empêche déjà \
+                  techniquement, mais il faut aussi éviter le spam de retries qui bloquerait \
+                  l'autre conversation.\n";
 
     match app.stack {
         AppStack::Axum => {
@@ -494,9 +506,11 @@ fn render_app_build_md(app: &Application) -> String {
                  \n\
                  - Effective build command: `{cmd}`\n\
                  - Artefact rapatrié : `target/release/{slug}` (ou `build_artefact` si défini)\n\
-                 - After a successful build, restart with `app.control` (`action: \"restart\"`).\n",
+                 - After a successful build, restart with `app.control` (`action: \"restart\"`).\n\
+                 {concurrency_rule}",
                 cmd = cmd,
                 slug = app.slug,
+                concurrency_rule = concurrency_rule,
             )
         }
         AppStack::AxumVite => {
@@ -515,9 +529,11 @@ fn render_app_build_md(app: &Application) -> String {
                  - Effective build command: `{cmd}`\n\
                  - Artefacts rapatriés : `target/release/{slug}` + `web/dist/` \
                  (ou `build_artefact` si défini)\n\
-                 - After a successful build, restart with `app.control` (`action: \"restart\"`).\n",
+                 - After a successful build, restart with `app.control` (`action: \"restart\"`).\n\
+                 {concurrency_rule}",
                 cmd = cmd,
                 slug = app.slug,
+                concurrency_rule = concurrency_rule,
             )
         }
         AppStack::NextJs => {
@@ -536,8 +552,10 @@ fn render_app_build_md(app: &Application) -> String {
                  - Effective build command: `{cmd}`\n\
                  - Artefacts rapatriés : `.next/`, `public/`, `package.json`, \
                  `package-lock.json`, `node_modules/` (ou `build_artefact` si défini)\n\
-                 - After a successful build, restart with `app.control` (`action: \"restart\"`).\n",
+                 - After a successful build, restart with `app.control` (`action: \"restart\"`).\n\
+                 {concurrency_rule}",
                 cmd = cmd,
+                concurrency_rule = concurrency_rule,
             )
         }
     }
