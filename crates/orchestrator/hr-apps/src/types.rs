@@ -10,26 +10,19 @@ pub enum AppStack {
     NextJs,
     AxumVite,
     Axum,
-    Leptos,
-    Static,
 }
 
 impl AppStack {
     pub fn display_name(&self) -> &'static str {
         match self {
             Self::NextJs => "Next.js",
-            Self::AxumVite => "Axum + Vite/React",
-            Self::Axum => "Axum",
-            Self::Leptos => "Leptos",
-            Self::Static => "Static",
+            Self::AxumVite => "Vite+Rust",
+            Self::Axum => "Rust Only",
         }
     }
 
     pub fn default_health_path(&self) -> &'static str {
-        match self {
-            Self::Static => "/",
-            _ => "/health",
-        }
+        "/health"
     }
 }
 

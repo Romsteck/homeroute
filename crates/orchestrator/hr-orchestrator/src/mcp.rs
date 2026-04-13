@@ -1692,7 +1692,7 @@ fn tool_definitions_apps() -> Value {
                 "properties": {
                     "slug": { "type": "string" },
                     "name": { "type": "string" },
-                    "stack": { "type": "string", "enum": ["next-js", "axum-vite", "axum", "leptos", "static"] },
+                    "stack": { "type": "string", "enum": ["next-js", "axum-vite", "axum"] },
                     "has_db": { "type": "boolean", "default": false },
                     "visibility": { "type": "string", "enum": ["public", "private"], "default": "private" },
                     "run_command": { "type": "string" },

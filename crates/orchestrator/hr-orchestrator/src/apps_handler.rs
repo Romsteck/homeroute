@@ -773,8 +773,6 @@ fn parse_stack(s: &str) -> Option<AppStack> {
         "next-js" | "nextjs" => Some(AppStack::NextJs),
         "axum-vite" => Some(AppStack::AxumVite),
         "axum" => Some(AppStack::Axum),
-        "leptos" => Some(AppStack::Leptos),
-        "static" => Some(AppStack::Static),
         _ => None,
     }
 }
@@ -792,8 +790,6 @@ fn stack_to_str(stack: &AppStack) -> &'static str {
         AppStack::NextJs => "next-js",
         AppStack::AxumVite => "axum-vite",
         AppStack::Axum => "axum",
-        AppStack::Leptos => "leptos",
-        AppStack::Static => "static",
     }
 }
 

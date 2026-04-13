@@ -17,10 +17,8 @@ export const CODESERVER_BASE = 'https://codeserver.mynetwk.biz';
 
 const STACKS = [
   { value: 'next-js', label: 'Next.js' },
-  { value: 'axum-vite', label: 'Axum + Vite' },
-  { value: 'axum', label: 'Axum (API)' },
-  { value: 'leptos', label: 'Leptos' },
-  { value: 'static', label: 'Static' },
+  { value: 'axum-vite', label: 'Vite+Rust' },
+  { value: 'axum', label: 'Rust Only' },
 ];
 
 const TABS = [

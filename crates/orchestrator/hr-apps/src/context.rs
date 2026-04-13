@@ -588,7 +588,6 @@ fn render_skills(app: &Application) -> Vec<(&'static str, String)> {
                 "Build the Rust API.\n\nExecute via `exec`:\n```\n{build_cmd}\n```\nReport the result."
             )));
         }
-        _ => {}
     }
 
     skills
