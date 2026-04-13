@@ -18,7 +18,7 @@ store_flutter/.dart_tool/
 
 # IDE
 .vscode/
-.claude/
+.claude/settings.local.json
 
 # Data & config
 data/
