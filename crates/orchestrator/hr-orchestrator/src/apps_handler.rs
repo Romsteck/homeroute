@@ -877,7 +877,8 @@ impl AppsContext {
         let ctl_path_opt = format!("ControlPath={ctl_socket}");
         let ssh_e_arg = format!(
             "ssh -i {key} -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-             -o ControlMaster=auto -o {ctl_path_opt} -o ControlPersist=30"
+             -o ControlMaster=auto -o {ctl_path_opt} -o ControlPersist=30 \
+             -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
         );
 
         info!(slug = %slug, host = %host, build_command = %build_command, timeout_secs = timeout.as_secs(), "build: start");
@@ -896,7 +897,7 @@ impl AppsContext {
                     "-o", "StrictHostKeyChecking=accept-new",
                     "-o", "ControlMaster=auto",
                     "-o", &ctl_path_opt,
-                    "-o", "ControlPersist=30",
+                    "-o", "ControlPersist=30", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
                     &host,
                     "true",
                 ],
@@ -921,7 +922,7 @@ impl AppsContext {
                     "-o", "StrictHostKeyChecking=accept-new",
                     "-o", "ControlMaster=auto",
                     "-o", &ctl_path_opt,
-                    "-o", "ControlPersist=30",
+                    "-o", "ControlPersist=30", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
                     &host,
                     &format!("mkdir -p {}", shell_quote(&remote_src)),
                 ],
@@ -976,7 +977,7 @@ impl AppsContext {
                     "-o", "StrictHostKeyChecking=accept-new",
                     "-o", "ControlMaster=auto",
                     "-o", &ctl_path_opt,
-                    "-o", "ControlPersist=30",
+                    "-o", "ControlPersist=30", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
                     &host,
                     &remote_cmd,
                 ],
@@ -1006,7 +1007,7 @@ impl AppsContext {
                         "-o", "StrictHostKeyChecking=accept-new",
                         "-o", "ControlMaster=auto",
                         "-o", &ctl_path_opt,
-                        "-o", "ControlPersist=30",
+                        "-o", "ControlPersist=30", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
                         &host,
                         &format!("test -e {}", shell_quote(&remote_path)),
                     ],
