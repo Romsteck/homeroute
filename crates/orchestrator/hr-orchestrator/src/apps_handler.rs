@@ -869,7 +869,16 @@ impl AppsContext {
         let remote_src = format!("/opt/homeroute/apps/{}/src", slug);
         let local_src = app.src_dir();
         let local_src_str = format!("{}/", local_src.display());
-        let ssh_e_arg = format!("ssh -i {} -o BatchMode=yes -o StrictHostKeyChecking=accept-new", key);
+
+        // SSH ControlMaster : multiplex all ssh/rsync calls of this build over a
+        // single TCP connection to save ~200-300ms per call. Socket lives in
+        // /tmp with slug + pid to avoid collisions between concurrent builds.
+        let ctl_socket = format!("/tmp/hr-build-ssh-{}-{}.sock", slug, std::process::id());
+        let ctl_path_opt = format!("ControlPath={ctl_socket}");
+        let ssh_e_arg = format!(
+            "ssh -i {key} -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+             -o ControlMaster=auto -o {ctl_path_opt} -o ControlPersist=30"
+        );
 
         info!(slug = %slug, host = %host, build_command = %build_command, timeout_secs = timeout.as_secs(), "build: start");
 
@@ -885,6 +894,9 @@ impl AppsContext {
                     "-o", "BatchMode=yes",
                     "-o", "ConnectTimeout=5",
                     "-o", "StrictHostKeyChecking=accept-new",
+                    "-o", "ControlMaster=auto",
+                    "-o", &ctl_path_opt,
+                    "-o", "ControlPersist=30",
                     &host,
                     "true",
                 ],
@@ -907,6 +919,9 @@ impl AppsContext {
                     "-i", &key,
                     "-o", "BatchMode=yes",
                     "-o", "StrictHostKeyChecking=accept-new",
+                    "-o", "ControlMaster=auto",
+                    "-o", &ctl_path_opt,
+                    "-o", "ControlPersist=30",
                     &host,
                     &format!("mkdir -p {}", shell_quote(&remote_src)),
                 ],
@@ -921,10 +936,12 @@ impl AppsContext {
             // 3) rsync up
             info!(slug = %slug, "build: rsync up");
             let dest = format!("{}:{}/", host, remote_src);
+            // LAN 10GbE: -W (whole-file) skips delta-xfer which is only useful on
+            // slow networks; drop -z compression which caps throughput on CPU.
             let up = run_capture(
                 "rsync",
                 &[
-                    "-az", "--delete",
+                    "-a", "-W", "--delete",
                     "--exclude", "target/",
                     "--exclude", "node_modules/",
                     "--exclude", ".next/",
@@ -957,6 +974,9 @@ impl AppsContext {
                     "-i", &key,
                     "-o", "BatchMode=yes",
                     "-o", "StrictHostKeyChecking=accept-new",
+                    "-o", "ControlMaster=auto",
+                    "-o", &ctl_path_opt,
+                    "-o", "ControlPersist=30",
                     &host,
                     &remote_cmd,
                 ],
@@ -984,6 +1004,9 @@ impl AppsContext {
                         "-i", &key,
                         "-o", "BatchMode=yes",
                         "-o", "StrictHostKeyChecking=accept-new",
+                        "-o", "ControlMaster=auto",
+                        "-o", &ctl_path_opt,
+                        "-o", "ControlPersist=30",
                         &host,
                         &format!("test -e {}", shell_quote(&remote_path)),
                     ],
@@ -1001,7 +1024,7 @@ impl AppsContext {
                 let dst_arg = local_path.display().to_string();
                 let down = run_capture(
                     "rsync",
-                    &["-az", "-e", &ssh_e_arg, &src_arg, &dst_arg],
+                    &["-a", "-W", "-e", &ssh_e_arg, &src_arg, &dst_arg],
                     None,
                 )
                 .await;
