@@ -329,6 +329,24 @@ fn tool_definitions_extended() -> Value {
                 "required": ["slug"]
             }
         },
+        {
+            "name": "store.upload",
+            "description": "Publish a new APK release for a HomeRoute store app. Pass the APK binary as base64 in apk_base64.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug":             { "type": "string", "description": "App slug (alphanumeric, -, _)" },
+                    "version":          { "type": "string", "description": "Release version (e.g. 1.2.3)" },
+                    "apk_base64":       { "type": "string", "description": "APK binary, base64-encoded" },
+                    "app_name":         { "type": "string", "description": "App display name (required on first publish)" },
+                    "description":      { "type": "string", "description": "App description" },
+                    "category":         { "type": "string", "description": "Category (default: other)" },
+                    "changelog":        { "type": "string", "description": "Release changelog" },
+                    "publisher_app_id": { "type": "string", "description": "Publisher app id" }
+                },
+                "required": ["slug", "version", "apk_base64"]
+            }
+        },
         // ── Docs ──
         {
             "name": "docs.list",
@@ -480,6 +498,7 @@ fn tool_definitions_project() -> Value {
         { "name": "db_tables", "description": "List all tables in the application's SQLite database.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "db_schema", "description": "Describe a table's schema (columns, types, row count).", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" } }, "required": ["table"] } },
         { "name": "db_query", "description": "Run a SELECT query against the database.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
+        { "name": "db_find", "description": "Query table rows with structured filters, sort, pagination and relation expand. No SQL required.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "filters": { "type": "array", "description": "List of {column, op, value?}. op: eq|ne|gt|lt|gte|lte|like|in|is_null|is_not_null" }, "limit": { "type": "integer", "default": 100 }, "offset": { "type": "integer", "default": 0 }, "order_by": { "type": "string" }, "order_desc": { "type": "boolean", "default": false }, "expand": { "type": "array", "items": { "type": "string" }, "description": "Foreign-key relations to hydrate" } }, "required": ["table"] } },
         { "name": "db_exec", "description": "Execute a mutation (INSERT, UPDATE, DELETE) against the database.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
         // ── Documentation ──
         { "name": "docs_read", "description": "Read the project documentation (all sections or a specific one).", "inputSchema": { "type": "object", "properties": { "section": { "type": "string", "enum": ["meta", "structure", "features", "backend", "notes"] } } } },
@@ -505,7 +524,7 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
             "secrets.list" | "secrets.get" | "secrets.set" | "secrets.delete" |
             // Project-scoped simplified names
             "status" | "start" | "stop" | "restart" | "exec" | "logs" |
-            "db_tables" | "db_schema" | "db_query" | "db_exec" |
+            "db_tables" | "db_schema" | "db_query" | "db_find" | "db_exec" |
             "docs_read" | "docs_write" | "git_log" | "git_branches"
         );
         if needs_slug {
@@ -548,6 +567,7 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         // ── Store ──
         "store.list" => tool_store_list(id).await,
         "store.get" => tool_store_get(id, &arguments).await,
+        "store.upload" => tool_store_upload(id, &arguments).await,
         // ── Reverse Proxy ──
         "reverseproxy.list" => tool_reverseproxy_list(id).await,
         "reverseproxy.add" => tool_reverseproxy_add(id, &arguments).await,
@@ -579,6 +599,7 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "db.tables" | "db.list_tables" => tool_db_tables(id, &arguments, state).await,
         "db.describe" | "db.describe_table" => tool_db_describe(id, &arguments, state).await,
         "db.query" | "db.query_data" => tool_db_query(id, &arguments, state).await,
+        "db.find" => tool_db_find(id, &arguments, state).await,
         "db.execute" | "db.insert_data" | "db.update_data" | "db.delete_data" => tool_db_execute(id, &arguments, state).await,
         "db.overview" => tool_db_overview(id, &arguments, state).await,
         "db.count_rows" => tool_db_count_rows(id, &arguments, state).await,
@@ -611,6 +632,7 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "db_tables" => tool_db_tables(id, &arguments, state).await,
         "db_schema" => tool_db_describe(id, &arguments, state).await,
         "db_query" => tool_db_query(id, &arguments, state).await,
+        "db_find" => tool_db_find(id, &arguments, state).await,
         "db_exec" => tool_db_execute(id, &arguments, state).await,
         "db_get_schema" => tool_db_get_schema(id, &arguments, state).await,
         "db_sync_schema" => tool_db_sync_schema(id, &arguments, state).await,
@@ -1213,6 +1235,65 @@ async fn tool_store_get(id: Value, args: &Value) -> Value {
     }
 }
 
+async fn tool_store_upload(id: Value, args: &Value) -> Value {
+    use base64::Engine;
+
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(version) = args.get("version").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing version".into());
+    };
+    let Some(apk_b64) = args.get("apk_base64").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing apk_base64".into());
+    };
+
+    let apk_bytes = match base64::engine::general_purpose::STANDARD.decode(apk_b64.trim()) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(slug, "store.upload: invalid base64: {e}");
+            return error_response(id, INVALID_PARAMS, format!("Invalid base64: {e}"));
+        }
+    };
+
+    if apk_bytes.is_empty() {
+        return error_response(id, INVALID_PARAMS, "Empty APK payload".into());
+    }
+
+    info!(
+        slug = slug,
+        version = version,
+        size = apk_bytes.len(),
+        "store.upload received"
+    );
+
+    let mut headers: Vec<(String, String)> = vec![("X-Version".into(), version.to_string())];
+    for (arg_key, header_key) in [
+        ("app_name", "X-App-Name"),
+        ("description", "X-App-Description"),
+        ("category", "X-App-Category"),
+        ("changelog", "X-Changelog"),
+        ("publisher_app_id", "X-Publisher-App-Id"),
+    ] {
+        if let Some(v) = args.get(arg_key).and_then(|v| v.as_str()) {
+            if !v.is_empty() {
+                headers.push((header_key.into(), v.to_string()));
+            }
+        }
+    }
+
+    match internal_api_post_binary(
+        &format!("/store/apps/{slug}/releases"),
+        apk_bytes,
+        headers,
+    )
+    .await
+    {
+        Ok(data) => tool_success(id, data),
+        Err(e) => tool_error(id, &e),
+    }
+}
+
 // ── Internal API helpers ─────────────────────────────────────────────
 
 const INTERNAL_API_BASE: &str = "http://127.0.0.1:4000/api";
@@ -1255,6 +1336,38 @@ async fn internal_api_post(path: &str, body: Value) -> Result<Value, String> {
         .post(format!("{INTERNAL_API_BASE}{path}"))
         .header(INTERNAL_TOKEN_HEADER, internal_token())
         .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+    let status = resp.status();
+    if status.is_success() {
+        resp.json::<Value>()
+            .await
+            .or_else(|_| Ok(json!({"status": "ok"})))
+    } else {
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("API returned {status}: {body}"))
+    }
+}
+
+async fn internal_api_post_binary(
+    path: &str,
+    bytes: Vec<u8>,
+    headers: Vec<(String, String)>,
+) -> Result<Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| format!("Client build failed: {e}"))?;
+    let mut req = client
+        .post(format!("{INTERNAL_API_BASE}{path}"))
+        .header(INTERNAL_TOKEN_HEADER, internal_token())
+        .header("Content-Type", "application/octet-stream");
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
+    let resp = req
+        .body(bytes)
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
@@ -1818,6 +1931,31 @@ fn tool_definitions_apps() -> Value {
             }
         },
         {
+            "name": "db.find",
+            "description": "Query rows of a table with structured filters, sort, pagination and relation expand. No SQL required.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "table": { "type": "string" },
+                    "filters": {
+                        "type": "array",
+                        "description": "List of {column, op, value?}. op ∈ eq|ne|gt|lt|gte|lte|like|in|is_null|is_not_null"
+                    },
+                    "limit": { "type": "integer", "default": 100, "description": "Capped at 1000" },
+                    "offset": { "type": "integer", "default": 0 },
+                    "order_by": { "type": "string" },
+                    "order_desc": { "type": "boolean", "default": false },
+                    "expand": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Foreign-key relations to hydrate inline"
+                    }
+                },
+                "required": ["slug", "table"]
+            }
+        },
+        {
             "name": "db.execute",
             "description": "Execute a mutation (INSERT, UPDATE, DELETE) against an app's SQLite database.",
             "inputSchema": {
@@ -2189,6 +2327,57 @@ async fn tool_db_query(id: Value, args: &Value, state: &McpState) -> Value {
         id,
         ctx.db_query(slug.to_string(), sql.to_string(), params)
             .await,
+    )
+}
+
+// ── db.find (structured query: filters, sort, pagination, expand) ─
+
+#[tracing::instrument(skip(state, args))]
+async fn tool_db_find(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(table) = args.get("table").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing table".into());
+    };
+    let filters: Vec<Value> = args
+        .get("filters")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let limit = args.get("limit").and_then(|v| v.as_u64());
+    let offset = args.get("offset").and_then(|v| v.as_u64());
+    let order_by = args
+        .get("order_by")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let order_desc = args.get("order_desc").and_then(|v| v.as_bool());
+    let expand: Vec<String> = args
+        .get("expand")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    ipc_resp_to_mcp(
+        id,
+        ctx.db_query_rows(
+            slug.to_string(),
+            table.to_string(),
+            filters,
+            limit,
+            offset,
+            order_by,
+            order_desc,
+            expand,
+        )
+        .await,
     )
 }
 

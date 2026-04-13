@@ -6,6 +6,7 @@
 //!   - {apps_path}/{slug}/.claude/settings.json      — MCP server + auto-approve permissions
 //!   - {apps_path}/{slug}/.claude/rules/mcp-tools.md — MCP tools documentation
 //!   - {apps_path}/{slug}/.claude/rules/workflow.md  — development workflow
+//!   - {apps_path}/{slug}/.claude/rules/docs.md      — docs.* MCP usage (obligatoire)
 //!   - {apps_path}/{slug}/.mcp.json                  — MCP server config (CLI compat)
 //!
 //! Also generates global workspace files at the apps root:
@@ -19,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
 
-use crate::types::{Application, Visibility};
+use crate::types::{AppStack, Application, Visibility};
 
 /// Generates Claude Code context files for HomeRoute apps.
 pub struct ContextGenerator {
@@ -91,6 +92,19 @@ impl ContextGenerator {
 
         let app_build = render_app_build_md(app);
         log_write(&app.slug, &rules_dir.join("app-build.md"), &app_build)?;
+
+        let docs = render_docs_md(app);
+        log_write(&app.slug, &rules_dir.join("docs.md"), &docs)?;
+
+        if matches!(app.stack, AppStack::Flutter) {
+            let store_pub = render_store_publishing_md(app);
+            log_write(&app.slug, &rules_dir.join("store-publishing.md"), &store_pub)?;
+        } else {
+            let legacy = rules_dir.join("store-publishing.md");
+            if legacy.exists() {
+                let _ = fs::remove_file(&legacy);
+            }
+        }
 
         // Clean up legacy rule files from the env-agent era.
         for legacy in &[
@@ -385,7 +399,26 @@ impl ContextGenerator {
              - **Health:** `{health_path}`\n\
              - **Public URL:** {url}\n\
              - Managed by HomeRoute as a host-level process. Use MCP `app.*` tools to \
-             control it — never invoke `systemctl` or `kill` directly.\n\
+             control it — **never** lancer le binaire à la main (`nohup`, `tmux`, \
+             `./bin/xxx &`, `cargo run`, `systemctl`, `kill`).\n\
+             \n\
+             ## Interdits (et pourquoi)\n\
+             - **Lancer le binaire à la main** : le superviseur vérifie que le port \
+             `{port}` est libre avant de spawner. Un process manuel sur ce port bloque \
+             `app.control start` avec `port not free` — l'app semble morte pour \
+             l'orchestrateur alors qu'elle tourne. Pour tester un binaire : \
+             `app.control restart` + `app.logs`, jamais `nohup`.\n\
+             - **`kill -9` du process supervisé** : le superviseur le relance avec \
+             backoff. Utilise `app.control stop`.\n\
+             - **Binder un autre service sur `{port}`** : même symptôme que le nohup.\n\
+             \n\
+             ## Debug d'un démarrage qui échoue\n\
+             1. `app.status` → state (`crashed`, `stopped`, `running`) + restart_count.\n\
+             2. `app.logs` → lignes orchestrateur : `port not free`, `spawn failed`, \
+             `process exited code=...`.\n\
+             3. Vérifier que `{run_command}` existe et est exécutable dans `{src_dir}`.\n\
+             4. Si tout semble OK mais rien ne démarre → `ss -lntp | grep {port}` via \
+             `app.exec` pour voir qui squatte le port.\n\
              \n\
              ## Edit → build → restart → verify\n\
              1. Edit sources in `{src_dir}`.\n\
@@ -428,6 +461,7 @@ impl ContextGenerator {
             url = url,
             src_dir = app.src_dir().display(),
             slug = app.slug,
+            port = app.port,
         )
     }
 }
@@ -466,6 +500,74 @@ fn render_mcp_tools_md(app: &Application) -> String {
          - Tools for the HomeRoute mobile store (uploads, listings).\n\
          \n\
 ",
+        name = app.name,
+        slug = app.slug,
+    )
+}
+
+fn render_docs_md(app: &Application) -> String {
+    format!(
+        "# Documentation — {name} (OBLIGATOIRE)\n\
+         \n\
+         Chaque application HomeRoute possède une documentation centralisée accessible \
+         via les tools MCP `docs.*`. Tu **DOIS** la lire et la tenir à jour — c'est \
+         ce qui permet aux futures sessions (et aux autres agents) de comprendre l'app \
+         sans relire tout le code.\n\
+         \n\
+         ## Règles obligatoires\n\
+         \n\
+         ### Avant de modifier l'app\n\
+         - **TOUJOURS** appeler `docs.get` avec `app_id = \"{slug}\"` avant toute \
+         modification significative.\n\
+         - Lire au minimum les sections pertinentes (`structure`, `features`, `backend`) \
+         pour éviter les incohérences avec les décisions passées.\n\
+         \n\
+         ### Après modification de l'app\n\
+         - **TOUJOURS** mettre à jour la doc via `docs.update` quand :\n\
+         \n\
+         | Changement | Section à mettre à jour |\n\
+         |---|---|\n\
+         | Nouvelle feature utilisateur | `features` |\n\
+         | Structure / architecture modifiée | `structure` |\n\
+         | API, routes, logique backend | `backend` |\n\
+         | Nom, stack, description, logo | `meta` (JSON) |\n\
+         | Décision notable, TODO, remarque | `notes` |\n\
+         \n\
+         ### Vérification de complétude\n\
+         - Après mise à jour, appeler `docs.completeness` avec `app_id = \"{slug}\"` \
+         pour repérer les sections vides.\n\
+         - Si des sections sont vides **et** que l'information est disponible → les remplir.\n\
+         \n\
+         ## Style de documentation\n\
+         \n\
+         - Descriptions **orientées utilisateur**, pas techniques.\n\
+         - Les features décrivent **ce que l'utilisateur peut faire**, pas l'implémentation.\n\
+         \n\
+         ✅ Bon : « Page permettant aux utilisateurs de gérer leur profil et préférences »\n\
+         \n\
+         ❌ Mauvais : « Composant React avec useState qui fetch /api/users »\n\
+         \n\
+         ## Sections disponibles\n\
+         \n\
+         | Section | Format | Contenu |\n\
+         |---|---|---|\n\
+         | `meta` | JSON | `name`, `stack`, `description`, `logo` |\n\
+         | `structure` | Markdown | Architecture, organisation du code |\n\
+         | `features` | Markdown | Liste des fonctionnalités utilisateur |\n\
+         | `backend` | Markdown | API, routes, logique serveur |\n\
+         | `notes` | Markdown | Notes générales, décisions, TODOs |\n\
+         \n\
+         ## Tools MCP (rappel)\n\
+         \n\
+         | Tool | Usage |\n\
+         |---|---|\n\
+         | `docs.list` | Lister toutes les apps documentées avec statut de complétude |\n\
+         | `docs.get` | Lire la doc (toutes sections ou une seule) |\n\
+         | `docs.update` | Mettre à jour une section (mutation) |\n\
+         | `docs.search` | Recherche full-text dans toutes les docs |\n\
+         | `docs.completeness` | Vérifier sections remplies vs vides |\n\
+         \n\
+         Sur cette app, passe `app_id = \"{slug}\"` à chaque appel.\n",
         name = app.name,
         slug = app.slug,
     )
@@ -558,7 +660,67 @@ fn render_app_build_md(app: &Application) -> String {
                 concurrency_rule = concurrency_rule,
             )
         }
+        AppStack::Flutter => {
+            format!(
+                "{header}\
+                 ## Stack: Flutter (mobile Android)\n\
+                 \n\
+                 Cette app produit un APK publié dans le store mobile HomeRoute. \
+                 Build **toujours sur CloudMaster** : `export PATH=/ssd_pool/flutter/bin:$PATH && flutter build apk --release`. \
+                 Jamais sur le routeur.\n\
+                 \n\
+                 Publication : voir `.claude/rules/store-publishing.md`.\n"
+            )
+        }
     }
+}
+
+fn render_store_publishing_md(app: &Application) -> String {
+    format!(
+        "# Publication Store — Règles obligatoires\n\
+         \n\
+         Pour publier une nouvelle version de cette app Flutter dans le store mobile HomeRoute, \
+         **toujours** utiliser le tool MCP `store.upload`. Jamais un `curl` manuel vers \
+         `/api/store/apps/{slug}/releases`.\n\
+         \n\
+         ## Workflow\n\
+         \n\
+         1. Build APK sur CloudMaster :\n\
+         ```\n\
+         export PATH=/ssd_pool/flutter/bin:$PATH\n\
+         flutter build apk --release\n\
+         ```\n\
+         2. Encoder en base64 :\n\
+         ```\n\
+         base64 -w0 build/app/outputs/flutter-apk/app-release.apk > /tmp/app.b64\n\
+         ```\n\
+         3. Appeler `store.upload` (tool MCP) avec :\n\
+         - `slug` : `{slug}`\n\
+         - `version` : la version à publier (ex: `1.2.3`)\n\
+         - `apk_base64` : contenu du fichier `.b64`\n\
+         \n\
+         4. Vérifier via `store.get` (slug `{slug}`) que la nouvelle version apparaît avec \
+         `sha256` et `size_bytes` renseignés.\n\
+         \n\
+         ## Arguments optionnels (store.upload)\n\
+         \n\
+         | Argument | Header HTTP | Usage |\n\
+         |---|---|---|\n\
+         | `app_name` | `X-App-Name` | **Requis au premier upload** de ce slug |\n\
+         | `description` | `X-App-Description` | Description affichée dans le store |\n\
+         | `category` | `X-App-Category` | Défaut : `other` |\n\
+         | `changelog` | `X-Changelog` | Notes de version |\n\
+         | `publisher_app_id` | `X-Publisher-App-Id` | Lien vers une app publisher |\n\
+         \n\
+         Package Android, SHA256, taille et icône sont extraits automatiquement de l'APK côté API.\n\
+         \n\
+         ## Limites\n\
+         \n\
+         - Payload max : 500 MB.\n\
+         - Pas de streaming ni de upload par chunks.\n\
+         - Suppression de release : via API REST directement, pas via MCP.\n",
+        slug = app.slug,
+    )
 }
 
 fn mcp_server_entry(endpoint: &str, token: Option<&str>) -> serde_json::Value {
@@ -681,6 +843,18 @@ fn render_skills(app: &Application) -> Vec<(&'static str, String)> {
                 "Build the Rust API.\n\nExecute via `exec`:\n```\n{build_cmd}\n```\nReport the result."
             )));
         }
+        AppStack::Flutter => {
+            skills.push(("build-apk",
+                "Build the Flutter APK release on CloudMaster.\n\n\
+                 Execute via `exec`:\n```\nexport PATH=/ssd_pool/flutter/bin:$PATH && flutter build apk --release\n```\n\
+                 Report the output path and any errors.".to_string()));
+            skills.push(("publish-apk",
+                "Publish the latest APK release to the HomeRoute store.\n\n\
+                 1. Base64-encode `build/app/outputs/flutter-apk/app-release.apk`.\n\
+                 2. Call the MCP tool `store.upload` with the app slug, target version, and `apk_base64`.\n\
+                 3. Verify via `store.get` that the new version appears.\n\
+                 See `.claude/rules/store-publishing.md`.".to_string()));
+        }
     }
 
     skills
@@ -754,6 +928,7 @@ mod tests {
         assert!(tmp.join("trader/.claude/rules/mcp-tools.md").exists());
         assert!(tmp.join("trader/.claude/rules/workflow.md").exists());
         assert!(tmp.join("trader/.claude/rules/app-build.md").exists());
+        assert!(tmp.join("trader/.claude/rules/docs.md").exists());
 
         let _ = fs::remove_dir_all(&tmp);
     }

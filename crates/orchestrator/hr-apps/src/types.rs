@@ -10,6 +10,7 @@ pub enum AppStack {
     NextJs,
     AxumVite,
     Axum,
+    Flutter,
 }
 
 impl AppStack {
@@ -18,6 +19,7 @@ impl AppStack {
             Self::NextJs => "Next.js",
             Self::AxumVite => "Vite+Rust",
             Self::Axum => "Rust Only",
+            Self::Flutter => "Flutter",
         }
     }
 

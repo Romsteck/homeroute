@@ -1087,6 +1087,7 @@ fn build_defaults_for_stack(app: &Application) -> Option<(&'static str, Vec<Stri
                 "node_modules".to_string(),
             ],
         )),
+        AppStack::Flutter => None,
     }
 }
 
@@ -1234,6 +1235,7 @@ fn parse_stack(s: &str) -> Option<AppStack> {
         "next-js" | "nextjs" => Some(AppStack::NextJs),
         "axum-vite" => Some(AppStack::AxumVite),
         "axum" => Some(AppStack::Axum),
+        "flutter" => Some(AppStack::Flutter),
         _ => None,
     }
 }
@@ -1251,6 +1253,7 @@ fn stack_to_str(stack: &AppStack) -> &'static str {
         AppStack::NextJs => "next-js",
         AppStack::AxumVite => "axum-vite",
         AppStack::Axum => "axum",
+        AppStack::Flutter => "flutter",
     }
 }
 

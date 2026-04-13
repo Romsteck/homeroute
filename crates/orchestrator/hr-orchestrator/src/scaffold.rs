@@ -46,6 +46,9 @@ pub async fn scaffold_stack_template(app: &Application) -> anyhow::Result<()> {
             write_if_missing(&src.join("app/page.tsx"), &subst(T_NEXT_PAGE, &app.slug)).await?;
             write_if_missing(&src.join("app/layout.tsx"), &subst(T_NEXT_LAYOUT, &app.slug)).await?;
         }
+        AppStack::Flutter => {
+            // Flutter app scaffold not implemented — users bring their own project.
+        }
     }
 
     info!(slug = %app.slug, "scaffold template applied");
@@ -57,6 +60,7 @@ pub fn default_run_command(app: &Application) -> String {
     match app.stack {
         AppStack::Axum | AppStack::AxumVite => format!("./target/release/{}", app.slug),
         AppStack::NextJs => "npm run start -- -p $PORT".to_string(),
+        AppStack::Flutter => String::new(),
     }
 }
 

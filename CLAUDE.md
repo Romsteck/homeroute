@@ -221,6 +221,8 @@ Le serveur MCP HomeRoute est implémenté dans ce même repo. Claude Code peut d
 
 Tools exposés : `app.*` (lifecycle des apps locales via `hr-apps`), `db.*` (Dataverse SQLite via `hr-db`), plus les tools infra (DNS, proxy, ACME, etc.).
 
+Tools `db.*` disponibles : `db.tables`, `db.describe`, `db.query` (SQL brut SELECT), `db.find` (query déclarative : filtres, sort, pagination, expand relations — pas de SQL), `db.execute` (SQL brut mutations), `db.overview`, `db.count_rows`, `db.get_schema`, `db.sync_schema`, `db.create_table`, `db.drop_table`, `db.add_column`, `db.remove_column`, `db.create_relation`.
+
 ### Ce que Claude Code peut faire
 
 - **Ajouter de nouveaux tools** : créer le handler dans le code MCP, l'enregistrer dans la liste des tools, et ajouter le nom dans `generate_mcp_json()` pour l'auto-approve
