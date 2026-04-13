@@ -499,7 +499,7 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         let needs_slug = tool_name.starts_with("db.") || tool_name.starts_with("docs.") || matches!(
             tool_name,
             "app.status" | "app.control" | "app.logs" | "app.exec" | "app.get" |
-            "app.health" | "app.regenerate_context" | "app.delete" |
+            "app.health" | "app.regenerate_context" | "app.delete" | "app.build" |
             "git.log" | "git.branches" |
             "studio.refresh_context" |
             "secrets.list" | "secrets.get" | "secrets.set" | "secrets.delete" |
@@ -567,6 +567,7 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "app.control" => tool_app_control(id, &arguments, state).await,
         "app.status" => tool_app_status(id, &arguments, state).await,
         "app.exec" => tool_app_exec(id, &arguments, state).await,
+        "app.build" => tool_app_build(id, &arguments, state).await,
         "app.logs" => tool_app_logs(id, &arguments, state).await,
         "app.create" => tool_app_create(id, &arguments, state).await,
         "app.delete" => tool_app_delete(id, &arguments, state).await,
@@ -1697,7 +1698,8 @@ fn tool_definitions_apps() -> Value {
                     "visibility": { "type": "string", "enum": ["public", "private"], "default": "private" },
                     "run_command": { "type": "string" },
                     "build_command": { "type": "string" },
-                    "health_path": { "type": "string" }
+                    "health_path": { "type": "string" },
+                    "build_artefact": { "type": "string", "description": "Override artefact path(s) rsynced back after `app.build`. One per line, relative to src/." }
                 },
                 "required": ["slug", "name", "stack"]
             }
@@ -1734,6 +1736,18 @@ fn tool_definitions_apps() -> Value {
                     "timeout_secs": { "type": "integer", "default": 60 }
                 },
                 "required": ["slug", "command"]
+            }
+        },
+        {
+            "name": "app.build",
+            "description": "Build an app remotely on CloudMaster (rsync src up, build, rsync artefacts down). Synchronous; bounded by `timeout_secs` (default 1800 = 30 min). Stacks: axum, axum-vite, next-js. Returns AppExecResult (stdout/stderr/exit_code/duration_ms).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "timeout_secs": { "type": "integer", "default": 1800 }
+                },
+                "required": ["slug"]
             }
         },
         {
@@ -2010,6 +2024,10 @@ async fn tool_app_create(id: Value, args: &Value, state: &McpState) -> Value {
         .get("health_path")
         .and_then(|v| v.as_str())
         .map(String::from);
+    let build_artefact = args
+        .get("build_artefact")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     ipc_resp_to_mcp(
         id,
         ctx.create(
@@ -2021,9 +2039,22 @@ async fn tool_app_create(id: Value, args: &Value, state: &McpState) -> Value {
             run_command,
             build_command,
             health_path,
+            build_artefact,
         )
         .await,
     )
+}
+
+async fn tool_app_build(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64());
+    ipc_resp_to_mcp(id, ctx.build(slug.to_string(), timeout_secs).await)
 }
 
 async fn tool_app_control(id: Value, args: &Value, state: &McpState) -> Value {

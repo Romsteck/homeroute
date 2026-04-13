@@ -150,6 +150,8 @@ pub enum OrchestratorRequest {
         run_command: Option<String>,
         build_command: Option<String>,
         health_path: Option<String>,
+        #[serde(default)]
+        build_artefact: Option<String>,
     },
     /// Update an existing application's metadata.
     AppUpdate {
@@ -162,6 +164,8 @@ pub enum OrchestratorRequest {
         env_vars: Option<BTreeMap<String, String>>,
         #[serde(default)]
         has_db: Option<bool>,
+        #[serde(default)]
+        build_artefact: Option<String>,
     },
     /// Delete an application. If `keep_data` is true, the DB and source dirs are preserved.
     AppDelete {
@@ -339,6 +343,7 @@ impl OrchestratorClient {
         run_command: Option<String>,
         build_command: Option<String>,
         health_path: Option<String>,
+        build_artefact: Option<String>,
     ) -> Result<ApplicationDto> {
         let resp = self
             .request_long(&OrchestratorRequest::AppCreate {
@@ -350,6 +355,7 @@ impl OrchestratorClient {
                 run_command,
                 build_command,
                 health_path,
+                build_artefact,
             })
             .await?;
         extract_data(resp)
@@ -366,6 +372,7 @@ impl OrchestratorClient {
         health_path: Option<String>,
         env_vars: Option<BTreeMap<String, String>>,
         has_db: Option<bool>,
+        build_artefact: Option<String>,
     ) -> Result<ApplicationDto> {
         let resp = self
             .request(&OrchestratorRequest::AppUpdate {
@@ -377,6 +384,7 @@ impl OrchestratorClient {
                 health_path,
                 env_vars,
                 has_db,
+                build_artefact,
             })
             .await?;
         extract_data(resp)

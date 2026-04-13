@@ -89,6 +89,9 @@ impl ContextGenerator {
         let workflow = self.render_workflow_md(app);
         log_write(&app.slug, &rules_dir.join("workflow.md"), &workflow)?;
 
+        let app_build = render_app_build_md(app);
+        log_write(&app.slug, &rules_dir.join("app-build.md"), &app_build)?;
+
         // Clean up legacy rule files from the env-agent era.
         for legacy in &[
             "deploy.md",
@@ -468,6 +471,78 @@ fn render_mcp_tools_md(app: &Application) -> String {
     )
 }
 
+fn render_app_build_md(app: &Application) -> String {
+    use crate::types::AppStack;
+    let header = "# Build (managed by HomeRoute)\n\n\
+                  > Generated automatically — do not edit. \
+                  Update the app's `build_command` / `build_artefact` fields instead.\n\n";
+
+    match app.stack {
+        AppStack::Axum => {
+            let cmd = app
+                .build_command
+                .as_deref()
+                .unwrap_or("cargo build --release");
+            format!(
+                "{header}\
+                 ## Stack: Rust (Axum)\n\
+                 \n\
+                 **Build via the MCP tool `app.build` only.** Never run `cargo build` \
+                 manually inside the app studio — it is heavy and will starve Medion. \
+                 The build is executed remotely on CloudMaster (10.0.0.10) and the \
+                 artefacts are rsynced back to this app.\n\
+                 \n\
+                 - Effective build command: `{cmd}`\n\
+                 - Artefact rapatrié : `target/release/{slug}` (ou `build_artefact` si défini)\n\
+                 - After a successful build, restart with `app.control` (`action: \"restart\"`).\n",
+                cmd = cmd,
+                slug = app.slug,
+            )
+        }
+        AppStack::AxumVite => {
+            let cmd = app
+                .build_command
+                .as_deref()
+                .unwrap_or("cargo build --release && (cd web && npm ci && npm run build)");
+            format!(
+                "{header}\
+                 ## Stack: Rust (Axum) + Vite\n\
+                 \n\
+                 **Build via the MCP tool `app.build` only.** Don't run `cargo build` or \
+                 `npm run build` manually in the studio. The full build (server + client) \
+                 runs on CloudMaster and the artefacts are rsynced back here.\n\
+                 \n\
+                 - Effective build command: `{cmd}`\n\
+                 - Artefacts rapatriés : `target/release/{slug}` + `web/dist/` \
+                 (ou `build_artefact` si défini)\n\
+                 - After a successful build, restart with `app.control` (`action: \"restart\"`).\n",
+                cmd = cmd,
+                slug = app.slug,
+            )
+        }
+        AppStack::NextJs => {
+            let cmd = app
+                .build_command
+                .as_deref()
+                .unwrap_or("npm ci && npm run build");
+            format!(
+                "{header}\
+                 ## Stack: Next.js\n\
+                 \n\
+                 **Build via the MCP tool `app.build` only.** Don't run `npm run build` \
+                 manually here. The build runs on CloudMaster and the resulting artefacts \
+                 are rsynced back to this app.\n\
+                 \n\
+                 - Effective build command: `{cmd}`\n\
+                 - Artefacts rapatriés : `.next/`, `public/`, `package.json`, \
+                 `package-lock.json`, `node_modules/` (ou `build_artefact` si défini)\n\
+                 - After a successful build, restart with `app.control` (`action: \"restart\"`).\n",
+                cmd = cmd,
+            )
+        }
+    }
+}
+
 fn mcp_server_entry(endpoint: &str, token: Option<&str>) -> serde_json::Value {
     let mut entry = serde_json::json!({
         "type": "http",
@@ -635,7 +710,7 @@ mod tests {
         let claude_md = fs::read_to_string(tmp.join("trader/CLAUDE.md")).unwrap();
         assert!(claude_md.contains("# Trader"));
         assert!(claude_md.contains("`trader`"));
-        assert!(claude_md.contains("Axum + Vite/React"));
+        assert!(claude_md.contains("Vite+Rust"));
         assert!(claude_md.contains("`users`"));
         assert!(claude_md.contains("`trades`"));
         assert!(claude_md.contains("Wallet"));
@@ -645,7 +720,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&settings).unwrap();
         assert_eq!(
             parsed["mcpServers"]["homeroute"]["url"].as_str().unwrap(),
-            "http://127.0.0.1:4001/mcp"
+            "http://127.0.0.1:4001/mcp?project=trader"
         );
         assert!(
             parsed["permissions"]["allow"]
@@ -660,6 +735,7 @@ mod tests {
 
         assert!(tmp.join("trader/.claude/rules/mcp-tools.md").exists());
         assert!(tmp.join("trader/.claude/rules/workflow.md").exists());
+        assert!(tmp.join("trader/.claude/rules/app-build.md").exists());
 
         let _ = fs::remove_dir_all(&tmp);
     }

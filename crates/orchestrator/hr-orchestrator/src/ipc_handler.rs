@@ -30,6 +30,7 @@ pub struct OrchestratorHandler {
     pub db_manager: DbManager,
     pub context_generator: Arc<ContextGenerator>,
     pub log_store: Arc<hr_common::logging::LogStore>,
+    pub build_locks: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl OrchestratorHandler {
@@ -42,6 +43,7 @@ impl OrchestratorHandler {
             git: self.git.clone(),
             base_domain: self.base_domain.clone(),
             log_store: self.log_store.clone(),
+            build_locks: self.build_locks.clone(),
         }
     }
 }
@@ -491,6 +493,7 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 run_command,
                 build_command,
                 health_path,
+                build_artefact,
             } => {
                 self.apps_ctx()
                     .create(
@@ -502,6 +505,7 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                         run_command,
                         build_command,
                         health_path,
+                        build_artefact,
                     )
                     .await
             }
@@ -514,6 +518,7 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 health_path,
                 env_vars,
                 has_db,
+                build_artefact,
             } => {
                 self.apps_ctx()
                     .update(
@@ -525,6 +530,7 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                         health_path,
                         env_vars,
                         has_db,
+                        build_artefact,
                     )
                     .await
             }

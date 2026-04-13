@@ -176,6 +176,8 @@ pub struct ApplicationDto {
     pub run_command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_artefact: Option<String>,
     pub health_path: String,
     #[serde(default)]
     pub env_vars: std::collections::BTreeMap<String, String>,

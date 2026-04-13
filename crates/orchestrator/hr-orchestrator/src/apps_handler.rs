@@ -2,10 +2,12 @@
 //!
 //! Split out of `ipc_handler.rs` to keep that file manageable.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use crate::scaffold;
 
 use hr_apps::types::{AppStack, AppState, Application, Visibility, valid_slug};
 use hr_apps::{AppSupervisor, ContextGenerator, DbManager, ProcessStatus};
@@ -19,6 +21,13 @@ use hr_ipc::types::{
 };
 use tracing::{error, info, warn};
 
+/// Default remote build host (override via `HR_BUILD_HOST`).
+pub const BUILD_HOST: &str = "romain@10.0.0.10";
+/// Default SSH key path on Medion (override via `HR_BUILD_SSH_KEY`).
+pub const SSH_KEY: &str = "/opt/homeroute/data/build/ssh/id_ed25519";
+/// Cap stdout/stderr capture per pipeline stage to ~1 MB.
+const OUTPUT_CAP_BYTES: usize = 1024 * 1024;
+
 /// Context for App* handlers.
 #[derive(Clone)]
 pub struct AppsContext {
@@ -29,6 +38,9 @@ pub struct AppsContext {
     pub git: Arc<hr_git::GitService>,
     pub base_domain: String,
     pub log_store: Arc<LogStore>,
+    /// Per-slug locks to serialise concurrent `build()` invocations.
+    pub build_locks:
+        Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl AppsContext {
@@ -63,6 +75,7 @@ impl AppsContext {
         run_command: Option<String>,
         build_command: Option<String>,
         health_path: Option<String>,
+        build_artefact: Option<String>,
     ) -> IpcResponse {
         let start = Instant::now();
         if !valid_slug(&slug) {
@@ -99,6 +112,7 @@ impl AppsContext {
             app.run_command = cmd;
         }
         app.build_command = build_command;
+        app.build_artefact = build_artefact;
         if let Some(hp) = health_path {
             app.health_path = hp;
         }
@@ -111,6 +125,16 @@ impl AppsContext {
         }
         if let Err(e) = tokio::fs::create_dir_all(&app.src_dir()).await {
             warn!(slug = %slug, error = %e, "AppCreate: create src_dir failed");
+        }
+
+        // Scaffold a minimal source tree (idempotent — never overwrites).
+        if let Err(e) = scaffold::scaffold_stack_template(&app).await {
+            warn!(slug = %slug, error = %e, "AppCreate: scaffold template failed (non-fatal)");
+        }
+        // Apply a sensible default `run_command` if the caller did not provide one.
+        if app.run_command.trim().is_empty() {
+            app.run_command = scaffold::default_run_command(&app);
+            info!(slug = %slug, run_command = %app.run_command, "AppCreate: applied default run_command");
         }
         if has_db {
             // Touch the db file so it exists
@@ -169,6 +193,7 @@ impl AppsContext {
         IpcResponse::ok_data(app_to_dto(&app))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn update(
         &self,
         slug: String,
@@ -179,6 +204,7 @@ impl AppsContext {
         health_path: Option<String>,
         env_vars: Option<BTreeMap<String, String>>,
         has_db: Option<bool>,
+        build_artefact: Option<String>,
     ) -> IpcResponse {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
@@ -202,6 +228,9 @@ impl AppsContext {
         }
         if build_command.is_some() {
             app.build_command = build_command;
+        }
+        if build_artefact.is_some() {
+            app.build_artefact = build_artefact;
         }
         if let Some(hp) = health_path {
             app.health_path = hp;
@@ -766,6 +795,409 @@ impl AppsContext {
 
 }
 
+impl AppsContext {
+    /// Build an app remotely on the configured CloudMaster host.
+    ///
+    /// Steps :
+    /// 1. SSH probe (fast-fail with actionable error if not configured).
+    /// 2. `mkdir -p` the remote source dir.
+    /// 3. `rsync` source up (excludes target/, node_modules/, .next/, dist/, .git/).
+    /// 4. `ssh` the build command.
+    /// 5. `rsync` the configured artefacts back.
+    ///
+    /// A per-slug lock prevents concurrent builds for the same app.
+    /// The whole pipeline is bounded by `timeout_secs` (default 1800 = 30 min).
+    #[tracing::instrument(skip(self), fields(slug = %slug))]
+    pub async fn build(&self, slug: String, timeout_secs: Option<u64>) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        let app = match self.supervisor.registry.get(&slug).await {
+            Some(a) => a,
+            None => return IpcResponse::err(format!("app not found: {slug}")),
+        };
+
+        let (build_command, default_artefacts) = match build_defaults_for_stack(&app) {
+            Some(d) => d,
+            None => {
+                warn!(slug = %slug, stack = ?app.stack, "build: stack not supported");
+                return IpcResponse::err(
+                    "stack not supported by app.build; build manually".to_string(),
+                );
+            }
+        };
+        let build_command = app
+            .build_command
+            .clone()
+            .unwrap_or_else(|| build_command.to_string());
+        let artefacts: Vec<String> = match app.build_artefact.as_deref() {
+            Some(custom) => custom
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            None => default_artefacts,
+        };
+        if artefacts.is_empty() {
+            return IpcResponse::err("no artefacts to rsync back (empty build_artefact)");
+        }
+
+        // ── Per-slug lock ───────────────────────────────────────────
+        let lock = {
+            let mut map = self.build_locks.lock().await;
+            map.entry(slug.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = match lock.try_lock() {
+            Ok(g) => g,
+            Err(_) => {
+                warn!(slug = %slug, "build: already in progress");
+                return IpcResponse::err(format!("build already in progress for {slug}"));
+            }
+        };
+
+        let host = std::env::var("HR_BUILD_HOST").unwrap_or_else(|_| BUILD_HOST.to_string());
+        let key = std::env::var("HR_BUILD_SSH_KEY").unwrap_or_else(|_| SSH_KEY.to_string());
+        let timeout = Duration::from_secs(timeout_secs.unwrap_or(1800).max(1));
+        let started = Instant::now();
+        let remote_src = format!("/opt/homeroute/apps/{}/src", slug);
+        let local_src = app.src_dir();
+        let local_src_str = format!("{}/", local_src.display());
+        let ssh_e_arg = format!("ssh -i {} -o BatchMode=yes -o StrictHostKeyChecking=accept-new", key);
+
+        info!(slug = %slug, host = %host, build_command = %build_command, timeout_secs = timeout.as_secs(), "build: start");
+
+        let pipeline = async {
+            let mut acc = StageAccumulator::new();
+
+            // 1) SSH probe
+            info!(slug = %slug, host = %host, "build: ssh probe");
+            let probe = run_capture(
+                "ssh",
+                &[
+                    "-i", &key,
+                    "-o", "BatchMode=yes",
+                    "-o", "ConnectTimeout=5",
+                    "-o", "StrictHostKeyChecking=accept-new",
+                    &host,
+                    "true",
+                ],
+                None,
+            )
+            .await;
+            acc.push("ssh-probe", &probe);
+            if probe.exit_code != 0 {
+                error!(slug = %slug, exit_code = probe.exit_code, stderr = %truncate(&probe.stderr, 512), "build: ssh probe failed");
+                return acc.into_result(format!(
+                    "ssh probe failed (host {host}); ensure SSH key {key} can log into CloudMaster (BatchMode)"
+                ), started);
+            }
+
+            // 2) mkdir remote
+            info!(slug = %slug, remote_src = %remote_src, "build: mkdir remote");
+            let mkdir = run_capture(
+                "ssh",
+                &[
+                    "-i", &key,
+                    "-o", "BatchMode=yes",
+                    "-o", "StrictHostKeyChecking=accept-new",
+                    &host,
+                    &format!("mkdir -p {}", shell_quote(&remote_src)),
+                ],
+                None,
+            )
+            .await;
+            acc.push("mkdir", &mkdir);
+            if mkdir.exit_code != 0 {
+                return acc.into_result("remote mkdir failed".into(), started);
+            }
+
+            // 3) rsync up
+            info!(slug = %slug, "build: rsync up");
+            let dest = format!("{}:{}/", host, remote_src);
+            let up = run_capture(
+                "rsync",
+                &[
+                    "-az", "--delete",
+                    "--exclude", "target/",
+                    "--exclude", "node_modules/",
+                    "--exclude", ".next/",
+                    "--exclude", "dist/",
+                    "--exclude", ".git/",
+                    "-e", &ssh_e_arg,
+                    &local_src_str,
+                    &dest,
+                ],
+                None,
+            )
+            .await;
+            acc.push("rsync-up", &up);
+            if up.exit_code != 0 {
+                return acc.into_result("rsync up failed".into(), started);
+            }
+
+            // 4) build — wrap in `bash -lc` so the remote user's login shell
+            // sources .profile / .cargo/env (otherwise cargo/rustup aren't in PATH).
+            info!(slug = %slug, "build: compile");
+            let inner_cmd = format!(
+                "cd {} && {}",
+                shell_quote(&remote_src),
+                build_command
+            );
+            let remote_cmd = format!("bash -lc {}", shell_quote(&inner_cmd));
+            let compile = run_capture(
+                "ssh",
+                &[
+                    "-i", &key,
+                    "-o", "BatchMode=yes",
+                    "-o", "StrictHostKeyChecking=accept-new",
+                    &host,
+                    &remote_cmd,
+                ],
+                None,
+            )
+            .await;
+            acc.push("compile", &compile);
+            if compile.exit_code != 0 {
+                error!(slug = %slug, exit_code = compile.exit_code, "build: compile failed");
+                return acc.into_result("build command failed".into(), started);
+            }
+
+            // 5) rsync each artefact back
+            for art in &artefacts {
+                info!(slug = %slug, artefact = %art, "build: rsync down");
+                let remote_path = format!("{}/{}", remote_src, art);
+                let local_path = local_src.join(art);
+                if let Some(parent) = local_path.parent() {
+                    let _ = tokio::fs::create_dir_all(parent).await;
+                }
+                // Existence check first to give a useful error.
+                let exists = run_capture(
+                    "ssh",
+                    &[
+                        "-i", &key,
+                        "-o", "BatchMode=yes",
+                        "-o", "StrictHostKeyChecking=accept-new",
+                        &host,
+                        &format!("test -e {}", shell_quote(&remote_path)),
+                    ],
+                    None,
+                )
+                .await;
+                if exists.exit_code != 0 {
+                    acc.push(&format!("check-{art}"), &exists);
+                    return acc.into_result(
+                        format!("artefact missing on remote: {art}"),
+                        started,
+                    );
+                }
+                let src_arg = format!("{}:{}", host, remote_path);
+                let dst_arg = local_path.display().to_string();
+                let down = run_capture(
+                    "rsync",
+                    &["-az", "-e", &ssh_e_arg, &src_arg, &dst_arg],
+                    None,
+                )
+                .await;
+                acc.push(&format!("rsync-down:{art}"), &down);
+                if down.exit_code != 0 {
+                    return acc.into_result(
+                        format!("rsync down failed for {art}"),
+                        started,
+                    );
+                }
+            }
+
+            info!(slug = %slug, duration_ms = started.elapsed().as_millis() as u64, "build: ok");
+            acc.into_result_ok(started)
+        };
+
+        let resp = match tokio::time::timeout(timeout, pipeline).await {
+            Ok(r) => r,
+            Err(_) => {
+                error!(slug = %slug, timeout_secs = timeout.as_secs(), "build: timeout");
+                IpcResponse::err(format!("build timed out after {}s", timeout.as_secs()))
+            }
+        };
+
+        // Refresh the per-app context (build command may have changed).
+        let all = self.supervisor.registry.list().await;
+        let db_tables = if app.has_db {
+            self.db_manager.list_tables(&slug).await.ok()
+        } else {
+            None
+        };
+        if let Err(e) = self.context_generator.generate_for_app(&app, &all, db_tables) {
+            warn!(slug = %slug, error = %e, "build: context regen failed (non-fatal)");
+        }
+
+        resp
+    }
+}
+
+/// Returns `(default_build_command, default_artefact_paths)` for stacks that
+/// support remote build, or `None` for unsupported stacks.
+fn build_defaults_for_stack(app: &Application) -> Option<(&'static str, Vec<String>)> {
+    match app.stack {
+        AppStack::Axum => Some((
+            "cargo build --release",
+            vec![format!("target/release/{}", app.slug)],
+        )),
+        AppStack::AxumVite => Some((
+            "cargo build --release && (cd web && npm ci && npm run build)",
+            vec![format!("target/release/{}", app.slug), "web/dist".to_string()],
+        )),
+        AppStack::NextJs => Some((
+            "npm ci && npm run build",
+            vec![
+                ".next".to_string(),
+                "public".to_string(),
+                "package.json".to_string(),
+                "package-lock.json".to_string(),
+                "node_modules".to_string(),
+            ],
+        )),
+    }
+}
+
+struct StageOutput {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+    duration_ms: u64,
+}
+
+struct StageAccumulator {
+    stdout: String,
+    stderr: String,
+    last_exit: i32,
+    total_ms: u64,
+}
+
+impl StageAccumulator {
+    fn new() -> Self {
+        Self {
+            stdout: String::new(),
+            stderr: String::new(),
+            last_exit: 0,
+            total_ms: 0,
+        }
+    }
+
+    fn push(&mut self, stage: &str, out: &StageOutput) {
+        self.stdout.push_str(&format!("\n=== {stage} (exit={}, {}ms) ===\n", out.exit_code, out.duration_ms));
+        self.stdout.push_str(&out.stdout);
+        if !out.stderr.is_empty() {
+            self.stderr.push_str(&format!("\n=== {stage} ===\n"));
+            self.stderr.push_str(&out.stderr);
+        }
+        self.total_ms += out.duration_ms;
+        if out.exit_code != 0 && self.last_exit == 0 {
+            self.last_exit = out.exit_code;
+        }
+    }
+
+    fn into_result(mut self, message: String, started: Instant) -> IpcResponse {
+        if !self.stderr.is_empty() {
+            self.stderr.push('\n');
+        }
+        self.stderr.push_str(&message);
+        let exit = if self.last_exit == 0 { 1 } else { self.last_exit };
+        let result = AppExecResult {
+            stdout: cap_string(self.stdout),
+            stderr: cap_string(self.stderr),
+            exit_code: exit,
+            duration_ms: started.elapsed().as_millis() as u64,
+        };
+        IpcResponse::ok_data(result)
+    }
+
+    fn into_result_ok(self, started: Instant) -> IpcResponse {
+        let result = AppExecResult {
+            stdout: cap_string(self.stdout),
+            stderr: cap_string(self.stderr),
+            exit_code: 0,
+            duration_ms: started.elapsed().as_millis() as u64,
+        };
+        IpcResponse::ok_data(result)
+    }
+}
+
+fn cap_string(mut s: String) -> String {
+    if s.len() > OUTPUT_CAP_BYTES {
+        let cut = OUTPUT_CAP_BYTES;
+        // Snap to a char boundary
+        let mut idx = cut;
+        while idx > 0 && !s.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        s.truncate(idx);
+        s.push_str("\n[truncated]\n");
+    }
+    s
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        s.to_string()
+    } else {
+        let mut idx = n;
+        while idx > 0 && !s.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        format!("{}…", &s[..idx])
+    }
+}
+
+fn shell_quote(s: &str) -> String {
+    // Single-quote everything; embed any internal single quotes.
+    let escaped = s.replace('\'', "'\\''");
+    format!("'{escaped}'")
+}
+
+async fn run_capture(program: &str, args: &[&str], cwd: Option<&std::path::Path>) -> StageOutput {
+    let started = Instant::now();
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(d) = cwd {
+        cmd.current_dir(d);
+    }
+    let child = cmd.spawn();
+    let child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            return StageOutput {
+                stdout: String::new(),
+                stderr: format!("spawn {program}: {e}"),
+                exit_code: -1,
+                duration_ms: started.elapsed().as_millis() as u64,
+            };
+        }
+    };
+    let out = match child.wait_with_output().await {
+        Ok(o) => o,
+        Err(e) => {
+            return StageOutput {
+                stdout: String::new(),
+                stderr: format!("wait {program}: {e}"),
+                exit_code: -1,
+                duration_ms: started.elapsed().as_millis() as u64,
+            };
+        }
+    };
+    StageOutput {
+        stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+        exit_code: out.status.code().unwrap_or(-1),
+        duration_ms: started.elapsed().as_millis() as u64,
+    }
+}
+
 // ── Helpers ────────────────────────────────────────────────────
 
 fn parse_stack(s: &str) -> Option<AppStack> {
@@ -822,6 +1254,7 @@ pub fn app_to_dto(app: &Application) -> ApplicationDto {
         port: app.port,
         run_command: app.run_command.clone(),
         build_command: app.build_command.clone(),
+        build_artefact: app.build_artefact.clone(),
         health_path: app.health_path.clone(),
         env_vars: app
             .env_vars

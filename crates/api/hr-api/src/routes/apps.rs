@@ -140,6 +140,8 @@ struct CreateAppRequest {
     build_command: Option<String>,
     #[serde(default)]
     health_path: Option<String>,
+    #[serde(default)]
+    build_artefact: Option<String>,
 }
 
 fn default_visibility() -> String {
@@ -165,6 +167,7 @@ async fn create_app(
         run_command: body.run_command,
         build_command: body.build_command,
         health_path: body.health_path,
+        build_artefact: body.build_artefact,
     };
     match state.orchestrator.request_long(&req).await {
         Ok(resp) => {
@@ -204,6 +207,8 @@ struct UpdateAppRequest {
     env_vars: Option<BTreeMap<String, String>>,
     #[serde(default)]
     has_db: Option<bool>,
+    #[serde(default)]
+    build_artefact: Option<String>,
 }
 
 #[tracing::instrument(skip(state, body))]
@@ -226,6 +231,7 @@ async fn update_app(
         health_path: body.health_path,
         env_vars: body.env_vars,
         has_db: body.has_db,
+        build_artefact: body.build_artefact,
     };
     match state.orchestrator.request(&req).await {
         Ok(resp) => {
@@ -484,6 +490,7 @@ async fn update_app_env(
         health_path: None,
         env_vars: Some(body),
         has_db: None,
+        build_artefact: None,
     };
     match state.orchestrator.request(&req).await {
         Ok(resp) => {

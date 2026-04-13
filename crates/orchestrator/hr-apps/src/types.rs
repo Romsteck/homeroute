@@ -74,6 +74,11 @@ pub struct Application {
     pub run_command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_command: Option<String>,
+    /// Override the artefact path(s) to rsync back after a remote build.
+    /// If None, defaults are derived from the stack (see `app.build` docs).
+    /// Paths are relative to `src/`. Multiple paths separated by newline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_artefact: Option<String>,
     pub health_path: String,
     #[serde(default)]
     pub env_vars: BTreeMap<String, String>,
@@ -100,6 +105,7 @@ impl Application {
             port: 0,
             run_command: String::new(),
             build_command: None,
+            build_artefact: None,
             health_path,
             env_vars: BTreeMap::new(),
             state: AppState::Stopped,

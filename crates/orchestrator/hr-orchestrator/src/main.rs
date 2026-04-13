@@ -3,6 +3,7 @@ mod apps_handler;
 mod backup_pipeline;
 mod ipc_handler;
 mod mcp;
+mod scaffold;
 mod ws_routes;
 
 use hr_acme::{AcmeConfig, AcmeManager};
@@ -277,6 +278,10 @@ async fn main() -> anyhow::Result<()> {
 
     // ── IPC server ──────────────────────────────────────────────────
 
+    let build_locks: Arc<
+        tokio::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    > = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+
     let handler = Arc::new(OrchestratorHandler {
         registry: registry.clone(),
         git: git_service.clone(),
@@ -287,7 +292,29 @@ async fn main() -> anyhow::Result<()> {
         db_manager: db_manager.clone(),
         context_generator: context_generator.clone(),
         log_store: log_store.clone(),
+        build_locks: build_locks.clone(),
     });
+
+    // ── Refresh per-app context for every existing app at boot ──────
+    // Non-blocking: propagates new context files (e.g. app-build.md) to
+    // apps that existed before the orchestrator was upgraded.
+    {
+        let registry_for_ctx = app_registry.clone();
+        let ctx = context_generator.clone();
+        tokio::spawn(async move {
+            let apps = registry_for_ctx.list().await;
+            info!(count = apps.len(), "boot: regenerating per-app context");
+            for app in &apps {
+                if let Err(e) = ctx.generate_for_app(app, &apps, None) {
+                    warn!(slug = %app.slug, error = %e, "boot: context regen failed");
+                }
+            }
+            if let Err(e) = ctx.generate_root(&apps) {
+                warn!(error = %e, "boot: root context regen failed");
+            }
+            info!("boot: context regen done");
+        });
+    }
 
     let ipc_handle = tokio::spawn({
         let handler = handler.clone();
@@ -326,6 +353,7 @@ async fn main() -> anyhow::Result<()> {
                 git: git_service.clone(),
                 base_domain: env.base_domain.clone(),
                 log_store: log_store.clone(),
+                build_locks: build_locks.clone(),
             });
         }
         st

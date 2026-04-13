@@ -26,3 +26,7 @@ data/
 
 # Cargo lock (workspace)
 crates/Cargo.lock
+
+# App sources (rsync'd from Medion during app.build — not tracked)
+/apps/
+
