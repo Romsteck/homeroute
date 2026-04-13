@@ -593,7 +593,6 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
             OrchestratorRequest::AppDbCreateRelation { slug, relation } => {
                 self.apps_ctx().db_create_relation(slug, relation).await
             }
-            OrchestratorRequest::AppDbSnapshot { slug } => self.apps_ctx().db_snapshot(slug).await,
         }
     }
 }

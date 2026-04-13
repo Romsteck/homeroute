@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{Mutex, RwLock};
@@ -189,32 +188,6 @@ impl DbManager {
             .map_err(|e| anyhow!("execute: {e}"))?;
         info!(app_slug = slug, rows_affected, "DB execute ok");
         Ok(rows_affected)
-    }
-
-    /// Take a timestamped snapshot copy of the app DB.
-    /// Returns the backup file path.
-    pub async fn snapshot(&self, slug: &str) -> Result<PathBuf> {
-        let db_path = self.db_path(slug).await;
-        if !db_path.exists() {
-            return Err(anyhow!("no database for app '{slug}'"));
-        }
-
-        {
-            let engine = self.get_engine(slug).await?;
-            let engine = engine.lock().await;
-            engine
-                .connection()
-                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-                .map_err(|e| anyhow!("wal checkpoint: {e}"))?;
-        }
-
-        let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
-        let backup_path = db_path.with_file_name(format!("db.sqlite.bak.{timestamp}"));
-        tokio::fs::copy(&db_path, &backup_path)
-            .await
-            .with_context(|| format!("copy {} -> {}", db_path.display(), backup_path.display()))?;
-        info!(app_slug = slug, backup = %backup_path.display(), "snapshot created");
-        Ok(backup_path)
     }
 
     /// Convenience: list rows from a table with filters/pagination.
@@ -464,23 +437,6 @@ mod tests {
         let mgr = DbManager::new(dir.path().to_path_buf());
         let tables = mgr.list_tables("trader").await.unwrap();
         assert!(tables.is_empty());
-    }
-
-    #[tokio::test]
-    async fn snapshot_creates_backup() {
-        let dir = TempDir::new().unwrap();
-        let mgr = DbManager::new(dir.path().to_path_buf());
-        // open to create the file
-        mgr.list_tables("trader").await.unwrap();
-        let backup = mgr.snapshot("trader").await.unwrap();
-        assert!(backup.exists());
-        assert!(
-            backup
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .contains("db.sqlite.bak.")
-        );
     }
 
     #[tokio::test]

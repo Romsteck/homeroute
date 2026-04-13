@@ -6,14 +6,13 @@ import {
   getAppDbTable,
   queryAppDbRows,
   executeAppDb,
-  snapshotAppDb,
 } from '../api/client';
 import { TableSidebar } from '../components/db/TableSidebar';
 import { DataGrid } from '../components/db/DataGrid';
 import { Pagination } from '../components/db/Pagination';
 import { AddRowModal } from '../components/db/AddRowModal';
 import { DeleteConfirmModal } from '../components/db/DeleteConfirmModal';
-import { Download, Plus, Trash2, RefreshCw, Database, Camera, Loader2 } from 'lucide-react';
+import { Download, Plus, Trash2, RefreshCw, Database, Loader2 } from 'lucide-react';
 
 function unwrap(res) {
   const d = res.data;
@@ -311,18 +310,6 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
     URL.revokeObjectURL(url);
   }
 
-  // ── Snapshot ──
-  async function handleSnapshot() {
-    if (!selectedAppSlug) return;
-    try {
-      const res = await snapshotAppDb(selectedAppSlug);
-      const data = unwrap(res);
-      showToast(`Snapshot : ${data?.path || 'OK'}`);
-    } catch (e) {
-      setError(e.message);
-    }
-  }
-
   // ── Select table ──
   function handleSelectTable(appSlug, tableName) {
     setSearchParams({ app: appSlug, table: tableName });
@@ -340,15 +327,13 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
   return (
     <div className={`flex h-full overflow-hidden ${embedded ? '' : 'rounded border border-gray-700'}`}>
       {/* Sidebar */}
-      {!propAppSlug && (
-        <TableSidebar
-          appsWithTables={appsWithTables}
-          selectedAppSlug={selectedAppSlug}
-          selectedTable={selectedTable}
-          onSelectTable={handleSelectTable}
-          loading={sidebarLoading}
-        />
-      )}
+      <TableSidebar
+        appsWithTables={propAppSlug ? appsWithTables.filter(a => a.app.slug === propAppSlug) : appsWithTables}
+        selectedAppSlug={selectedAppSlug}
+        selectedTable={selectedTable}
+        onSelectTable={handleSelectTable}
+        loading={sidebarLoading}
+      />
 
       {/* Main */}
       <div className="flex flex-col flex-1 min-w-0">
@@ -388,9 +373,6 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
               )}
               <button onClick={handleExportCSV} disabled={!result?.rows?.length} className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded border-none bg-transparent cursor-pointer disabled:opacity-30" title="Exporter CSV">
                 <Download className="w-3.5 h-3.5" />
-              </button>
-              <button onClick={handleSnapshot} className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded border-none bg-transparent cursor-pointer" title="Snapshot">
-                <Camera className="w-3.5 h-3.5" />
               </button>
               <button onClick={loadTableData} className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded border-none bg-transparent cursor-pointer" title="Actualiser">
                 <RefreshCw className="w-3.5 h-3.5" />

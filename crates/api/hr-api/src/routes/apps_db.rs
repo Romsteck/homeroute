@@ -45,7 +45,6 @@ pub fn router() -> Router<ApiState> {
         .route("/apps/{slug}/db/relations", post(create_relation))
         .route("/apps/{slug}/db/query", post(query_db))
         .route("/apps/{slug}/db/execute", post(execute_db))
-        .route("/apps/{slug}/db/snapshot", post(snapshot_db))
 }
 
 fn validate_slug(slug: &str) -> Result<(), axum::response::Response> {
@@ -300,31 +299,6 @@ async fn execute_db(
     {
         Ok(resp) => {
             info!(slug, duration_ms = started.elapsed().as_millis() as u64, "execute_db done");
-            ipc_response(resp)
-        }
-        Err(e) => ipc_err_response(e),
-    }
-}
-
-#[tracing::instrument(skip(state))]
-async fn snapshot_db(State(state): State<ApiState>, Path(slug): Path<String>) -> impl IntoResponse {
-    if let Err(r) = validate_slug(&slug) {
-        return r;
-    }
-    let started = Instant::now();
-    info!(slug, "Snapshotting app DB");
-    match state
-        .orchestrator
-        .request_long(&OrchestratorRequest::AppDbSnapshot { slug: slug.clone() })
-        .await
-    {
-        Ok(resp) => {
-            info!(
-                slug,
-                duration_ms = started.elapsed().as_millis() as u64,
-                ok = resp.ok,
-                "snapshot_db done"
-            );
             ipc_response(resp)
         }
         Err(e) => ipc_err_response(e),

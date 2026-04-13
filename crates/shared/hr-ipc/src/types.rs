@@ -264,9 +264,3 @@ pub struct AppDbQueryResult {
     pub total: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppDbSnapshotData {
-    pub slug: String,
-    pub path: String,
-    pub size_bytes: u64,
-}

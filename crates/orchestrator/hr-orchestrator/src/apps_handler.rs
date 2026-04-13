@@ -12,7 +12,7 @@ use hr_apps::{AppSupervisor, ContextGenerator, DbManager, ProcessStatus};
 use hr_common::logging::{LogQuery, LogStore};
 use hr_ipc::EdgeClient;
 use hr_ipc::types::{
-    AppDbQueryResult, AppDbRelation, AppDbSnapshotData, AppDbTableColumn, AppDbTableSchema,
+    AppDbQueryResult, AppDbRelation, AppDbTableColumn, AppDbTableSchema,
     AppDbTablesData,
     AppExecResult, AppListData, AppLogEntry, AppLogsData, AppStatusData, ApplicationDto,
     IpcResponse,
@@ -764,25 +764,6 @@ impl AppsContext {
         }
     }
 
-    pub async fn db_snapshot(&self, slug: String) -> IpcResponse {
-        if !valid_slug(&slug) {
-            return IpcResponse::err("invalid slug");
-        }
-        match self.db_manager.snapshot(&slug).await {
-            Ok(path) => {
-                let size_bytes = tokio::fs::metadata(&path)
-                    .await
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                IpcResponse::ok_data(AppDbSnapshotData {
-                    slug,
-                    path: path.to_string_lossy().to_string(),
-                    size_bytes,
-                })
-            }
-            Err(e) => IpcResponse::err(format!("snapshot: {e}")),
-        }
-    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────

@@ -173,7 +173,6 @@ impl ContextGenerator {
                      - Read: `db_tables`, `db_schema`, `db_get_schema`, `db_overview`, `db_count_rows`, `db_query`\n\
                      - Mutate data: `db_exec` (INSERT/UPDATE/DELETE)\n\
                      - Mutate schema: `db_create_table`, `db_drop_table`, `db_add_column`, `db_remove_column`, `db_create_relation`, `db_sync_schema`\n\
-                     - Maintenance: `db_snapshot` (timestamped backup)\n\
                      - Always declare FK relations via `db_create_relation` to enable automatic JOIN expansion.\n",
                 );
                 s
@@ -268,7 +267,7 @@ impl ContextGenerator {
              `.mcp.json`. See `.claude/rules/mcp-tools.md` for the full tool list.\n\
              \n\
              Read-only tools (`app.list`, `app.status`, `app.logs`, `db.tables`, `db.schema`, \
-             `db.query`, `db.snapshot`, `docs.get`, `docs.list`, `docs.search`) are auto-approved. \
+             `db.query`, `docs.get`, `docs.list`, `docs.search`) are auto-approved. \
              Mutations (delete, schema writes, doc updates) require explicit confirmation.\n\
              \n\
              ## Logging\n\
@@ -355,7 +354,7 @@ impl ContextGenerator {
              ## MCP\n\
              A single MCP server `homeroute` is configured at `{mcp_endpoint}` via \
              `.claude/settings.json` and `.mcp.json`. Read-only tools (`app.list`, \
-             `app.status`, `app.logs`, `db.tables`, `db.schema`, `db.query`, `db.snapshot`, \
+             `app.status`, `app.logs`, `db.tables`, `db.schema`, `db.query`, \
              `docs.*`) are auto-approved.\n\
              \n\
              ## Rules\n\
@@ -407,7 +406,6 @@ impl ContextGenerator {
              ## Database\n\
              - Use the MCP `db.*` tools for every read/write — they target the managed DB \
              for this app automatically.\n\
-             - Take a snapshot with `db.snapshot` before any schema change.\n\
              - Never open the `.db` file by hand.\n\
              \n\
              ## Documentation\n\
@@ -454,7 +452,6 @@ fn render_mcp_tools_md(app: &Application) -> String {
          - `db.tables` — list tables for `{slug}` (or any app)\n\
          - `db.schema` — describe a table\n\
          - `db.query` — read or mutate via SQL (mutating SQL is not auto-approved)\n\
-         - `db.snapshot` — take a snapshot of the managed DB before risky changes\n\
          \n\
          ## Documentation (`docs.*`)\n\
          - `docs.list` — list documented apps and completeness\n\
@@ -498,7 +495,6 @@ fn render_settings_json_with_auth(mcp_endpoint: &str, token: Option<&str>) -> St
                 "mcp__homeroute__db_tables",
                 "mcp__homeroute__db_schema",
                 "mcp__homeroute__db_query",
-                "mcp__homeroute__db_snapshot",
                 "mcp__homeroute__db_get_schema",
                 "mcp__homeroute__db_sync_schema",
                 "mcp__homeroute__db_overview",

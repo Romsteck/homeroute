@@ -196,7 +196,6 @@ export const updateAppEnv = (slug, env) => api.put(`/apps/${slug}/env`, { env })
 export const getAppDbTables = (slug) => api.get(`/apps/${slug}/db/tables`);
 export const getAppDbTable = (slug, table) => api.get(`/apps/${slug}/db/tables/${table}`);
 export const queryAppDb = (slug, sql, params) => api.post(`/apps/${slug}/db/query`, { sql, params });
-export const snapshotAppDb = (slug) => api.post(`/apps/${slug}/db/snapshot`);
 export const executeAppDb = (slug, sql, params) => api.post(`/apps/${slug}/db/execute`, { sql, params });
 export const queryAppDbRows = (slug, table, body) => api.post(`/apps/${slug}/db/tables/${table}/rows`, body);
 export const getAppDbSchema = (slug) => api.get(`/apps/${slug}/db/schema`);

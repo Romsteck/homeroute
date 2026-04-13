@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import useWebSocket from '../hooks/useWebSocket';
+import { useStudio } from '../context/StudioContext';
 import DbExplorer from './DbExplorer';
 import {
-  Code2, BookOpen, Database, ScrollText, Activity, KeyRound, Settings as SettingsIcon,
-  ExternalLink, RefreshCw, Save, Loader2, Plus, Play, Square, Trash2, X, Globe, Lock,
+  Code2, BookOpen, Database, ScrollText, KeyRound, Settings as SettingsIcon,
+  ExternalLink, Save, Loader2, Plus, Play, Square, Trash2, X, Globe, Lock,
   Eye, EyeOff, ChevronDown,
 } from 'lucide-react';
 import {
@@ -12,7 +13,7 @@ import {
   getApp, getAppStatus, getAppLogs, getAppEnv, updateAppEnv,
 } from '../api/client';
 
-const CODESERVER_BASE = 'https://codeserver.mynetwk.biz';
+export const CODESERVER_BASE = 'https://codeserver.mynetwk.biz';
 
 const STACKS = [
   { value: 'next-js', label: 'Next.js' },
@@ -23,7 +24,6 @@ const STACKS = [
 ];
 
 const TABS = [
-  { id: 'overview', label: 'Overview', icon: Activity },
   { id: 'code', label: 'Code', icon: Code2 },
   { id: 'db', label: 'DB', icon: Database, requiresDb: true },
   { id: 'logs', label: 'Logs', icon: ScrollText },
@@ -35,25 +35,12 @@ const TABS = [
 const SLUG_RE = /^[a-z][a-z0-9-]*$/;
 function slugify(n) { return n.toLowerCase().replace(/\s+/g,'-').replace(/[^a-z0-9-]/g,'').replace(/-+/g,'-').replace(/^-|-$/g,''); }
 
-function statusDot(state) {
+export function statusDot(state) {
   const s = (state || '').toLowerCase();
   if (s === 'running') return 'bg-green-400';
   if (s === 'crashed' || s === 'failed') return 'bg-red-400';
   if (s === 'starting') return 'bg-yellow-400 animate-pulse';
   return 'bg-gray-500';
-}
-
-function statusBadge(state) {
-  const s = (state || '').toLowerCase();
-  const map = {
-    running: 'bg-green-500/15 text-green-400 border-green-500/20',
-    stopped: 'bg-gray-600/30 text-gray-300 border-gray-600',
-    crashed: 'bg-red-500/15 text-red-400 border-red-500/20',
-    starting: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/20',
-  };
-  const cls = map[s] || map.stopped;
-  const label = s === 'running' ? 'Running' : s === 'crashed' ? 'Crashed' : s === 'starting' ? 'Starting' : 'Stopped';
-  return <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${cls}`}>{label}</span>;
 }
 
 // ── Sidebar ──
@@ -103,49 +90,6 @@ function AppSidebar({ apps, selectedSlug, onSelect, onAdd, busy, onControl }) {
         )}
       </div>
     </aside>
-  );
-}
-
-// ── Overview Tab ──
-
-function OverviewTab({ app, status, busy, onControl }) {
-  const state = status?.state || app?.state || 'stopped';
-  const isRunning = state.toLowerCase() === 'running';
-  const domain = app?.domain || `${app?.slug}.mynetwk.biz`;
-  return (
-    <div className="p-6 space-y-6 overflow-y-auto h-full">
-      <div className="flex items-center gap-4">
-        {statusBadge(state)}
-        <a href={`https://${domain}`} target="_blank" rel="noopener noreferrer" className="text-sm text-blue-400 hover:text-blue-300 flex items-center gap-1">
-          {domain} <ExternalLink className="w-3.5 h-3.5" />
-        </a>
-      </div>
-      <div className="flex gap-2">
-        {!isRunning && <button onClick={() => onControl('start')} disabled={busy} className="px-3 py-1.5 text-sm bg-green-600 hover:bg-green-700 text-white rounded flex items-center gap-1.5 disabled:opacity-50"><Play className="w-4 h-4" /> Demarrer</button>}
-        {isRunning && <button onClick={() => onControl('stop')} disabled={busy} className="px-3 py-1.5 text-sm bg-yellow-600 hover:bg-yellow-700 text-white rounded flex items-center gap-1.5 disabled:opacity-50"><Square className="w-4 h-4" /> Arreter</button>}
-        <button onClick={() => onControl('restart')} disabled={busy} className="px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded flex items-center gap-1.5 disabled:opacity-50"><RefreshCw className="w-4 h-4" /> Restart</button>
-      </div>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-        {[
-          { label: 'PID', value: status?.pid || '-' },
-          { label: 'Port', value: app?.port || '-' },
-          { label: 'Uptime', value: status?.uptime_secs != null ? `${Math.floor(status.uptime_secs / 60)}m ${status.uptime_secs % 60}s` : '-' },
-          { label: 'Restarts', value: status?.restart_count ?? '-' },
-        ].map(({ label, value }) => (
-          <div key={label} className="bg-gray-800 rounded-lg p-3 border border-gray-700">
-            <div className="text-xs text-gray-400">{label}</div>
-            <div className="text-lg text-white font-mono mt-1">{value}</div>
-          </div>
-        ))}
-      </div>
-      <div className="text-xs text-gray-500 space-y-1">
-        <div>Stack: <span className="text-gray-300">{app?.stack}</span></div>
-        <div>Visibilite: <span className="text-gray-300">{app?.visibility === 'public' ? 'Public' : 'Prive'}</span></div>
-        <div>Run: <code className="text-gray-300">{app?.run_command}</code></div>
-        {app?.build_command && <div>Build: <code className="text-gray-300">{app?.build_command}</code></div>}
-        <div>Health: <code className="text-gray-300">{app?.health_path}</code></div>
-      </div>
-    </div>
   );
 }
 
@@ -449,7 +393,7 @@ export default function Studio() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [apps, setApps] = useState([]);
   const [selectedSlug, setSelectedSlug] = useState(() => searchParams.get('app') || localStorage.getItem('studio:selectedApp') || '');
-  const [activeTab, setActiveTab] = useState(() => searchParams.get('tab') || localStorage.getItem('studio:activeTab') || 'overview');
+  const [activeTab, setActiveTab] = useState(() => searchParams.get('tab') || localStorage.getItem('studio:activeTab') || 'code');
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -462,7 +406,7 @@ export default function Studio() {
   const [openedCode, setOpenedCode] = useState(() => {
     const init = new Set();
     const s = searchParams.get('app') || localStorage.getItem('studio:selectedApp');
-    if (s && (searchParams.get('tab') || localStorage.getItem('studio:activeTab') || 'overview') === 'code') init.add(s);
+    if (s && (searchParams.get('tab') || localStorage.getItem('studio:activeTab') || 'code') === 'code') init.add(s);
     return init;
   });
 
@@ -519,13 +463,13 @@ export default function Studio() {
     }
   }
 
-  async function handleControl(slugOrAction, actionOpt) {
+  const handleControl = useCallback(async (slugOrAction, actionOpt) => {
     const slug = actionOpt ? slugOrAction : selectedSlug;
     const action = actionOpt || slugOrAction;
     setBusy(true);
     try { await controlApp(slug, action); } catch {}
     finally { setBusy(false); }
-  }
+  }, [selectedSlug]);
 
   async function handleUpdate(data) {
     if (!selectedSlug) return;
@@ -546,6 +490,12 @@ export default function Studio() {
   const currentApp = app || apps.find(a => a.slug === selectedSlug);
   const visibleTabs = TABS.filter(t => !t.requiresDb || currentApp?.has_db);
 
+  // Publish studio state to global context so Layout's top bar can render it
+  const { setStudio } = useStudio();
+  useEffect(() => {
+    setStudio({ currentApp, status, selectedSlug, activeTab, busy, onControl: handleControl });
+  }, [currentApp, status, selectedSlug, activeTab, busy, handleControl, setStudio]);
+
   if (loading) return <div className="flex items-center justify-center h-full"><Loader2 className="w-8 h-8 animate-spin text-blue-400" /></div>;
 
   return (
@@ -560,26 +510,6 @@ export default function Studio() {
       />
 
       <div className="flex flex-col flex-1 min-w-0 h-full">
-        {/* Header */}
-        <header className="flex items-center justify-between h-[46px] shrink-0 px-5 bg-gray-800/50 border-b border-gray-700">
-          <div className="flex items-center gap-2.5">
-            <Code2 className="w-4 h-4 text-blue-400" />
-            <span className="text-[15px] font-semibold text-white">Studio</span>
-          </div>
-          {currentApp && (
-            <div className="flex items-center gap-2">
-              <span className={`w-2 h-2 rounded-full ${statusDot(currentApp.state)}`} />
-              <span className="text-[13px] font-medium text-white">{currentApp.name}</span>
-              <span className="px-2 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400">{currentApp.stack}</span>
-              {activeTab === 'code' && (
-                <a href={`${CODESERVER_BASE}/?folder=/opt/homeroute/apps/${selectedSlug}/src`} target="_blank" rel="noopener noreferrer" className="p-1 text-gray-400 hover:text-white rounded hover:bg-gray-700" title="Ouvrir dans un nouvel onglet">
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
-              )}
-            </div>
-          )}
-        </header>
-
         {/* Tabs */}
         <div className="flex items-center h-[38px] shrink-0 bg-gray-800/50 border-b border-gray-700 pl-4">
           {visibleTabs.map(tab => {
@@ -618,7 +548,6 @@ export default function Studio() {
               {/* Other tabs */}
               {activeTab !== 'code' && (
                 <div className="h-full">
-                  {activeTab === 'overview' && <OverviewTab app={currentApp} status={status} busy={busy} onControl={handleControl} />}
                   {activeTab === 'db' && currentApp?.has_db && <DbExplorer appSlug={selectedSlug} embedded />}
                   {activeTab === 'logs' && <LogsTab slug={selectedSlug} />}
                   {activeTab === 'docs' && <DocsTab slug={selectedSlug} />}

@@ -481,7 +481,6 @@ fn tool_definitions_project() -> Value {
         { "name": "db_schema", "description": "Describe a table's schema (columns, types, row count).", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" } }, "required": ["table"] } },
         { "name": "db_query", "description": "Run a SELECT query against the database.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
         { "name": "db_exec", "description": "Execute a mutation (INSERT, UPDATE, DELETE) against the database.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
-        { "name": "db_snapshot", "description": "Take a timestamped backup of the database before risky changes.", "inputSchema": { "type": "object", "properties": {} } },
         // ── Documentation ──
         { "name": "docs_read", "description": "Read the project documentation (all sections or a specific one).", "inputSchema": { "type": "object", "properties": { "section": { "type": "string", "enum": ["meta", "structure", "features", "backend", "notes"] } } } },
         { "name": "docs_write", "description": "Update a documentation section.", "inputSchema": { "type": "object", "properties": { "section": { "type": "string", "enum": ["meta", "structure", "features", "backend", "notes"] }, "content": { "type": "string" } }, "required": ["section", "content"] } },
@@ -506,7 +505,7 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
             "secrets.list" | "secrets.get" | "secrets.set" | "secrets.delete" |
             // Project-scoped simplified names
             "status" | "start" | "stop" | "restart" | "exec" | "logs" |
-            "db_tables" | "db_schema" | "db_query" | "db_exec" | "db_snapshot" |
+            "db_tables" | "db_schema" | "db_query" | "db_exec" |
             "docs_read" | "docs_write" | "git_log" | "git_branches"
         );
         if needs_slug {
@@ -580,7 +579,6 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "db.describe" | "db.describe_table" => tool_db_describe(id, &arguments, state).await,
         "db.query" | "db.query_data" => tool_db_query(id, &arguments, state).await,
         "db.execute" | "db.insert_data" | "db.update_data" | "db.delete_data" => tool_db_execute(id, &arguments, state).await,
-        "db.snapshot" => tool_db_snapshot(id, &arguments, state).await,
         "db.overview" => tool_db_overview(id, &arguments, state).await,
         "db.count_rows" => tool_db_count_rows(id, &arguments, state).await,
         "db.get_schema" => tool_db_get_schema(id, &arguments, state).await,
@@ -613,7 +611,6 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "db_schema" => tool_db_describe(id, &arguments, state).await,
         "db_query" => tool_db_query(id, &arguments, state).await,
         "db_exec" => tool_db_execute(id, &arguments, state).await,
-        "db_snapshot" => tool_db_snapshot(id, &arguments, state).await,
         "db_get_schema" => tool_db_get_schema(id, &arguments, state).await,
         "db_sync_schema" => tool_db_sync_schema(id, &arguments, state).await,
         "db_create_table" => tool_db_create_table(id, &arguments, state).await,
@@ -1808,15 +1805,6 @@ fn tool_definitions_apps() -> Value {
             }
         },
         {
-            "name": "db.snapshot",
-            "description": "Take a timestamped backup of an app's SQLite database.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "slug": { "type": "string" } },
-                "required": ["slug"]
-            }
-        },
-        {
             "name": "db.execute",
             "description": "Execute a mutation (INSERT, UPDATE, DELETE) against an app's SQLite database.",
             "inputSchema": {
@@ -2176,17 +2164,6 @@ async fn tool_db_query(id: Value, args: &Value, state: &McpState) -> Value {
         ctx.db_query(slug.to_string(), sql.to_string(), params)
             .await,
     )
-}
-
-async fn tool_db_snapshot(id: Value, args: &Value, state: &McpState) -> Value {
-    let ctx = match require_apps_ctx(&id, state) {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing slug".into());
-    };
-    ipc_resp_to_mcp(id, ctx.db_snapshot(slug.to_string()).await)
 }
 
 /// Convert an `IpcResponse` into a JSON-RPC response Value.

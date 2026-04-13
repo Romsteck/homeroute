@@ -31,9 +31,6 @@ Tous les outils necessitent le parametre `slug` (slug de l'app, ex: "{{slug}}").
 - `db.query` — Executer un SELECT avec params optionnels
 - `db.execute` — Mutations (INSERT, UPDATE, DELETE) avec params
 
-### Maintenance
-- `db.snapshot` — Creer un backup horodate de la DB
-
 ## Relations (foreign keys)
 
 Les relations lient deux tables via une FK. Une fois creees, les queries peuvent

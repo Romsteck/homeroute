@@ -268,10 +268,6 @@ pub enum OrchestratorRequest {
         slug: String,
         relation: serde_json::Value,
     },
-    /// Take a SQLite snapshot of the app database.
-    AppDbSnapshot {
-        slug: String,
-    },
 }
 
 // ── OrchestratorClient ───────────────────────────────────────
@@ -491,14 +487,6 @@ impl OrchestratorClient {
         extract_data(resp)
     }
 
-    pub async fn app_db_snapshot(&self, slug: &str) -> Result<AppDbSnapshotData> {
-        let resp = self
-            .request_long(&OrchestratorRequest::AppDbSnapshot {
-                slug: slug.to_string(),
-            })
-            .await?;
-        extract_data(resp)
-    }
 }
 
 /// Extract typed data from IpcResponse, returning an error if the response indicates failure.

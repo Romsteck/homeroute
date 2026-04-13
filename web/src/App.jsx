@@ -1,6 +1,7 @@
 import { Routes, Route, Navigate, useSearchParams } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { TaskProvider } from './context/TaskContext';
+import { StudioProvider } from './context/StudioContext';
 import Layout from './components/Layout';
 import Tasks from './pages/Tasks';
 import TaskDetail from './pages/TaskDetail';
@@ -22,7 +23,6 @@ import Energy from './pages/Energy';
 import Docs from './pages/Docs';
 import Apps from './pages/Apps';
 import AppDetail from './pages/AppDetail';
-import Studio from './pages/Studio';
 import DbExplorer from './pages/DbExplorer';
 import SchemaPage from './pages/SchemaPage';
 import Logs from './pages/Logs';
@@ -99,6 +99,7 @@ function AppRoutes() {
       <Route path="/*" element={
         <ProtectedRoute>
           <TaskProvider>
+          <StudioProvider>
           <Layout>
             <Routes>
               <Route path="/" element={<Dashboard />} />
@@ -117,7 +118,7 @@ function AppRoutes() {
               <Route path="/logs" element={<Logs />} />
               <Route path="/tasks" element={<Tasks />} />
               <Route path="/tasks/:id" element={<TaskDetail />} />
-              <Route path="/studio" element={<Studio />} />
+              <Route path="/studio" element={null} />
               <Route path="/apps" element={<Navigate to="/studio" replace />} />
               <Route path="/apps/:slug" element={<Navigate to="/studio" replace />} />
               <Route path="/database" element={<DbExplorer />} />
@@ -126,6 +127,7 @@ function AppRoutes() {
               <Route path="/docs/:appId" element={<Docs />} />
             </Routes>
           </Layout>
+          </StudioProvider>
           </TaskProvider>
         </ProtectedRoute>
       } />
