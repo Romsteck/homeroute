@@ -84,6 +84,8 @@ deploy-edge: check-prod edge
 deploy-orchestrator: check-prod orchestrator
 	@echo "Deploying hr-orchestrator to production..."
 	rsync -az --info=progress2 crates/target/release/hr-orchestrator $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-orchestrator
+	rsync -az systemd/hr-apps.slice $(PROD_HOST):$(PROD_DIR)/systemd/hr-apps.slice
+	ssh $(PROD_HOST) 'sudo cp $(PROD_DIR)/systemd/hr-apps.slice /etc/systemd/system/hr-apps.slice && sudo systemctl daemon-reload'
 	ssh $(PROD_HOST) 'sudo systemctl restart hr-orchestrator'
 	@sleep 2
 	@echo "✓ hr-orchestrator deployed"

@@ -1,0 +1,8 @@
+[Unit]
+Description=HomeRoute user applications slice
+Before=slices.target
+
+[Slice]
+MemoryAccounting=yes
+CPUAccounting=yes
+TasksAccounting=yes

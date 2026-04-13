@@ -5,11 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use nix::sys::signal::{Signal, kill};
-use nix::unistd::Pid;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -21,10 +18,16 @@ use crate::types::{AppState, Application};
 
 const HEALTH_INTERVAL: Duration = Duration::from_secs(10);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
-const STOP_GRACE: Duration = Duration::from_secs(10);
+const WATCH_INTERVAL: Duration = Duration::from_secs(2);
+const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 const RESTART_RESET_AFTER: Duration = Duration::from_secs(300);
 const MAX_RESTARTS_PER_MIN: u32 = 10;
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
+const SLICE: &str = "hr-apps.slice";
+
+fn unit_name(slug: &str) -> String {
+    format!("hr-app-{slug}.service")
+}
 
 /// Status snapshot of a supervised app process.
 #[derive(Debug, Clone)]
@@ -43,14 +46,11 @@ struct SupervisedProcess {
     state: AppState,
     started_at: Option<Instant>,
     restart_count: u32,
-    /// Timestamps of restarts within the current sliding window.
     restart_history: Vec<Instant>,
-    /// Backoff for the next respawn attempt.
     next_backoff: Duration,
-    /// Time of the last successful start (used to reset backoff).
     last_start: Option<Instant>,
-    /// Background task that owns the child + watches it.
-    runner: Option<JoinHandle<()>>,
+    /// Background task watching the systemd unit + driving respawn.
+    watcher: Option<JoinHandle<()>>,
     /// Background task running the health-check loop.
     health: Option<JoinHandle<()>>,
     /// Whether stop() was requested (suppresses respawn).
@@ -68,7 +68,7 @@ impl SupervisedProcess {
             restart_history: Vec::new(),
             next_backoff: Duration::from_secs(1),
             last_start: None,
-            runner: None,
+            watcher: None,
             health: None,
             stop_requested: false,
         }
@@ -88,7 +88,7 @@ impl SupervisedProcess {
 
 type ProcessMap = Arc<RwLock<HashMap<String, Arc<Mutex<SupervisedProcess>>>>>;
 
-/// Supervises HomeRoute application processes (Tokio-spawned, host-local).
+/// Supervises HomeRoute application processes via systemd transient units.
 #[derive(Clone)]
 pub struct AppSupervisor {
     pub registry: AppRegistry,
@@ -111,7 +111,7 @@ impl AppSupervisor {
         }
     }
 
-    /// Start an app: assign port, spawn process, attach health loop.
+    /// Start an app: assign port, launch systemd transient unit, attach watcher + health loop.
     pub async fn start(&self, slug: &str) -> Result<()> {
         let mut app = self
             .registry
@@ -131,23 +131,44 @@ impl AppSupervisor {
 
         let proc_arc = self.get_or_create_process(slug, app.port).await;
         {
-            let proc = proc_arc.lock().await;
+            let mut proc = proc_arc.lock().await;
             if matches!(proc.state, AppState::Running | AppState::Starting) {
                 info!(app_slug = slug, "start: already running");
                 return Ok(());
             }
+            proc.stop_requested = false;
+            proc.state = AppState::Starting;
         }
+        self.update_app_state(slug, AppState::Starting).await;
 
-        if !port_is_free(app.port).await {
-            warn!(app_slug = slug, port = app.port, "start: port not free");
+        // If a stale unit is lingering (e.g. after a crash while we were offline), reset it.
+        let _ = run_systemctl(&["reset-failed", &unit_name(slug)]).await;
+
+        if !port_is_free(app.port).await && !unit_is_active(slug).await {
+            warn!(app_slug = slug, port = app.port, "start: port not free (foreign process)");
+            {
+                let mut proc = proc_arc.lock().await;
+                proc.state = AppState::Crashed;
+            }
+            self.update_app_state(slug, AppState::Crashed).await;
             return Err(anyhow!("port {} is already in use", app.port));
         }
 
-        self.spawn_runner(app, proc_arc.clone()).await;
+        if let Err(e) = systemd_run_app(&app).await {
+            error!(app_slug = %slug, error = %e, "systemd-run failed");
+            {
+                let mut proc = proc_arc.lock().await;
+                proc.state = AppState::Crashed;
+            }
+            self.update_app_state(slug, AppState::Crashed).await;
+            return Err(e);
+        }
+
+        self.attach_watcher(app, proc_arc).await;
         Ok(())
     }
 
-    /// Stop an app: SIGTERM with grace period, then SIGKILL.
+    /// Stop an app: `systemctl stop` the transient unit.
     pub async fn stop(&self, slug: &str) -> Result<()> {
         let proc_arc = match self.processes.read().await.get(slug).cloned() {
             Some(p) => p,
@@ -157,36 +178,29 @@ impl AppSupervisor {
             }
         };
 
-        let (pid_opt, runner, health) = {
+        let (watcher, health) = {
             let mut proc = proc_arc.lock().await;
             proc.stop_requested = true;
-            (proc.pid, proc.runner.take(), proc.health.take())
+            (proc.watcher.take(), proc.health.take())
         };
 
         if let Some(h) = health {
             h.abort();
         }
-
-        if let Some(pid) = pid_opt {
-            info!(app_slug = slug, pid, "stop: sending SIGTERM");
-            send_signal(pid, Signal::SIGTERM);
-            let deadline = Instant::now() + STOP_GRACE;
-            while Instant::now() < deadline {
-                if !pid_alive(pid) {
-                    break;
-                }
-                sleep(Duration::from_millis(200)).await;
-            }
-            if pid_alive(pid) {
-                warn!(app_slug = slug, pid, "stop: SIGTERM grace expired, SIGKILL");
-                send_signal(pid, Signal::SIGKILL);
-            }
+        if let Some(w) = watcher {
+            w.abort();
         }
 
-        if let Some(r) = runner {
-            r.abort();
-            let _ = r.await;
+        info!(app_slug = slug, "stop: systemctl stop");
+        if let Err(e) = tokio::time::timeout(
+            STOP_TIMEOUT,
+            run_systemctl(&["stop", &unit_name(slug)]),
+        )
+        .await
+        {
+            warn!(app_slug = slug, error = %e, "stop: systemctl timed out");
         }
+        let _ = run_systemctl(&["reset-failed", &unit_name(slug)]).await;
 
         {
             let mut proc = proc_arc.lock().await;
@@ -194,7 +208,6 @@ impl AppSupervisor {
             proc.pid = None;
             proc.started_at = None;
         }
-
         self.update_app_state(slug, AppState::Stopped).await;
         Ok(())
     }
@@ -204,13 +217,6 @@ impl AppSupervisor {
         info!(app_slug = slug, "restart");
         self.stop(slug).await?;
         sleep(Duration::from_millis(200)).await;
-        {
-            let processes = self.processes.read().await;
-            if let Some(proc_arc) = processes.get(slug) {
-                let mut proc = proc_arc.lock().await;
-                proc.stop_requested = false;
-            }
-        }
         self.start(slug).await
     }
 
@@ -223,28 +229,55 @@ impl AppSupervisor {
         Some(proc.status())
     }
 
-    /// Start every app whose persisted state is `Running`.
+    /// For each app with persisted state `Running`, either adopt the existing systemd unit
+    /// (if still active) or start it fresh. Called once at orchestrator boot.
     pub async fn start_all_running(&self) -> Result<()> {
         let apps = self.registry.list().await;
         for app in apps {
-            if matches!(app.state, AppState::Running | AppState::Starting) {
-                if let Err(e) = self.start(&app.slug).await {
-                    error!(app_slug = %app.slug, error = %e, "start_all_running failed");
+            if !matches!(app.state, AppState::Running | AppState::Starting) {
+                continue;
+            }
+            if unit_is_active(&app.slug).await {
+                info!(app_slug = %app.slug, "adopt: unit still active, attaching watcher");
+                let proc_arc = self.get_or_create_process(&app.slug, app.port).await;
+                {
+                    let mut proc = proc_arc.lock().await;
+                    proc.state = AppState::Running;
+                    proc.started_at = Some(Instant::now());
+                    proc.last_start = Some(Instant::now());
+                    proc.pid = unit_main_pid(&app.slug).await;
                 }
+                self.update_app_state(&app.slug, AppState::Running).await;
+                let app_clone = app.clone();
+                self.attach_watcher(app_clone, proc_arc).await;
+            } else if let Err(e) = self.start(&app.slug).await {
+                error!(app_slug = %app.slug, error = %e, "start_all_running failed");
             }
         }
         Ok(())
     }
 
-    /// Stop every supervised app.
-    pub async fn shutdown_all(&self) -> Result<()> {
+    /// Detach from supervised apps without killing them. Called at orchestrator shutdown
+    /// so that a redeploy of hr-orchestrator does not interrupt running apps.
+    pub async fn detach_all(&self) {
         let slugs: Vec<String> = self.processes.read().await.keys().cloned().collect();
         for slug in slugs {
-            if let Err(e) = self.stop(&slug).await {
-                error!(app_slug = %slug, error = %e, "shutdown_all failed");
+            let proc_arc = match self.processes.read().await.get(&slug).cloned() {
+                Some(p) => p,
+                None => continue,
+            };
+            let (watcher, health) = {
+                let mut proc = proc_arc.lock().await;
+                (proc.watcher.take(), proc.health.take())
+            };
+            if let Some(h) = health {
+                h.abort();
             }
+            if let Some(w) = watcher {
+                w.abort();
+            }
+            info!(app_slug = %slug, "detach: leaving systemd unit running");
         }
-        Ok(())
     }
 
     async fn get_or_create_process(&self, slug: &str, port: u16) -> Arc<Mutex<SupervisedProcess>> {
@@ -268,13 +301,11 @@ impl AppSupervisor {
                 if let Err(e) = self.registry.upsert(app.clone()).await {
                     warn!(app_slug = slug, error = %e, "update_app_state persist failed");
                 }
-                // Emit real-time event
                 let proc_status = {
                     let procs = self.processes.read().await;
-                    procs.get(slug).map(|p| {
-                        let p = p.try_lock();
-                        p.ok().map(|p| p.status())
-                    }).flatten()
+                    procs
+                        .get(slug)
+                        .and_then(|p| p.try_lock().ok().map(|p| p.status()))
                 };
                 let event = hr_common::events::AppStateEvent {
                     slug: slug.to_string(),
@@ -289,123 +320,81 @@ impl AppSupervisor {
         }
     }
 
-    async fn spawn_runner(&self, app: Application, proc_arc: Arc<Mutex<SupervisedProcess>>) {
+    async fn attach_watcher(&self, app: Application, proc_arc: Arc<Mutex<SupervisedProcess>>) {
         let supervisor = self.clone();
         let slug = app.slug.clone();
+        let port = app.port;
+        let health_path = app.health_path.clone();
         let handle = tokio::spawn(async move {
-            supervisor.runner_loop(app, proc_arc).await;
+            supervisor.watcher_loop(app, proc_arc).await;
         });
         if let Some(p) = self.processes.read().await.get(&slug) {
             let mut proc = p.lock().await;
-            proc.runner = Some(handle);
+            if let Some(old) = proc.watcher.replace(handle) {
+                old.abort();
+            }
+            if proc.health.is_none() {
+                proc.health = Some(self.spawn_health_loop(slug.clone(), port, health_path));
+            }
         }
     }
 
-    async fn runner_loop(&self, app: Application, proc_arc: Arc<Mutex<SupervisedProcess>>) {
+    async fn watcher_loop(&self, app: Application, proc_arc: Arc<Mutex<SupervisedProcess>>) {
         let slug = app.slug.clone();
-        loop {
-            {
-                let proc = proc_arc.lock().await;
-                if proc.stop_requested {
-                    debug!(app_slug = %slug, "runner_loop: stop requested, exiting");
-                    return;
-                }
-            }
-
-            {
-                let mut proc = proc_arc.lock().await;
-                proc.state = AppState::Starting;
-            }
-            self.update_app_state(&slug, AppState::Starting).await;
-
-            let child_res = spawn_child(&app).await;
-            let mut child = match child_res {
-                Ok(c) => c,
-                Err(e) => {
-                    error!(app_slug = %slug, error = %e, "spawn failed");
-                    {
-                        let mut proc = proc_arc.lock().await;
-                        proc.state = AppState::Crashed;
-                    }
-                    self.update_app_state(&slug, AppState::Crashed).await;
-                    if !self.bump_restart_and_should_continue(&proc_arc).await {
-                        return;
-                    }
-                    let backoff = self.current_backoff(&proc_arc).await;
-                    sleep(backoff).await;
-                    continue;
-                }
-            };
-
-            let pid = child.id();
-            info!(app_slug = %slug, ?pid, "process spawned");
-
-            if let Some(stdout) = child.stdout.take() {
-                let s = slug.clone();
-                tokio::spawn(async move {
-                    let mut lines = BufReader::new(stdout).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        info!(app_slug = %s, level = "stdout", "{line}");
-                    }
-                });
-            }
-            if let Some(stderr) = child.stderr.take() {
-                let s = slug.clone();
-                tokio::spawn(async move {
-                    let mut lines = BufReader::new(stderr).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        warn!(app_slug = %s, level = "stderr", "{line}");
-                    }
-                });
-            }
-
-            {
+        // Wait up to 5s for the unit to become active after systemd-run.
+        for _ in 0..25 {
+            if unit_is_active(&slug).await {
+                let pid = unit_main_pid(&slug).await;
                 let mut proc = proc_arc.lock().await;
                 proc.pid = pid;
                 proc.state = AppState::Running;
                 proc.started_at = Some(Instant::now());
                 proc.last_start = Some(Instant::now());
-                if let Some(h) = proc.health.take() {
-                    h.abort();
-                }
-                proc.health =
-                    Some(self.spawn_health_loop(slug.clone(), app.port, app.health_path.clone()));
+                drop(proc);
+                self.update_app_state(&slug, AppState::Running).await;
+                break;
             }
-            self.update_app_state(&slug, AppState::Running).await;
+            sleep(Duration::from_millis(200)).await;
+        }
 
-            let exit_status = child.wait().await;
+        loop {
+            sleep(WATCH_INTERVAL).await;
 
             let stop_requested = {
+                let proc = proc_arc.lock().await;
+                proc.stop_requested
+            };
+            if stop_requested {
+                debug!(app_slug = %slug, "watcher: stop requested, exiting");
+                return;
+            }
+
+            if unit_is_active(&slug).await {
+                // Refresh PID in case it changed (shouldn't for transient simple service).
+                let pid = unit_main_pid(&slug).await;
+                let mut proc = proc_arc.lock().await;
+                if proc.pid != pid {
+                    proc.pid = pid;
+                }
+                continue;
+            }
+
+            // Unit not active: crashed or stopped externally.
+            let result = unit_result(&slug).await.unwrap_or_default();
+            warn!(app_slug = %slug, result = %result, "watcher: unit no longer active");
+
+            {
                 let mut proc = proc_arc.lock().await;
                 if let Some(h) = proc.health.take() {
                     h.abort();
                 }
                 proc.pid = None;
                 proc.started_at = None;
-                proc.stop_requested
-            };
-
-            match exit_status {
-                Ok(status) => {
-                    info!(app_slug = %slug, code = ?status.code(), "process exited");
-                }
-                Err(e) => {
-                    warn!(app_slug = %slug, error = %e, "process wait failed");
-                }
-            }
-
-            if stop_requested {
-                let mut proc = proc_arc.lock().await;
-                proc.state = AppState::Stopped;
-                self.update_app_state(&slug, AppState::Stopped).await;
-                return;
-            }
-
-            {
-                let mut proc = proc_arc.lock().await;
                 proc.state = AppState::Crashed;
             }
             self.update_app_state(&slug, AppState::Crashed).await;
+
+            let _ = run_systemctl(&["reset-failed", &unit_name(&slug)]).await;
 
             if !self.bump_restart_and_should_continue(&proc_arc).await {
                 error!(app_slug = %slug, "restart limit exceeded, giving up");
@@ -415,6 +404,35 @@ impl AppSupervisor {
             let backoff = self.current_backoff(&proc_arc).await;
             warn!(app_slug = %slug, backoff_ms = backoff.as_millis() as u64, "respawning after backoff");
             sleep(backoff).await;
+
+            {
+                let mut proc = proc_arc.lock().await;
+                if proc.stop_requested {
+                    return;
+                }
+                proc.state = AppState::Starting;
+            }
+            self.update_app_state(&slug, AppState::Starting).await;
+
+            if let Err(e) = systemd_run_app(&app).await {
+                error!(app_slug = %slug, error = %e, "respawn systemd-run failed");
+                let mut proc = proc_arc.lock().await;
+                proc.state = AppState::Crashed;
+                drop(proc);
+                self.update_app_state(&slug, AppState::Crashed).await;
+                continue;
+            }
+
+            {
+                let mut proc = proc_arc.lock().await;
+                if proc.health.is_none() {
+                    proc.health = Some(self.spawn_health_loop(
+                        slug.clone(),
+                        app.port,
+                        app.health_path.clone(),
+                    ));
+                }
+            }
         }
     }
 
@@ -475,31 +493,33 @@ impl AppSupervisor {
     }
 }
 
-async fn spawn_child(app: &Application) -> Result<Child> {
+async fn systemd_run_app(app: &Application) -> Result<()> {
     let src_dir = app.src_dir();
     let env_file = app.env_file();
+    let unit = unit_name(&app.slug);
 
-    let mut cmd = Command::new("/bin/bash");
-    cmd.arg("-c").arg(&app.run_command);
-    cmd.current_dir(&src_dir);
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd.kill_on_drop(true);
-
-    cmd.env("PORT", app.port.to_string());
-    cmd.env("DATABASE_PATH", app.db_path().to_string_lossy().to_string());
-    cmd.env("DB_PATH", app.db_path().to_string_lossy().to_string());
-
+    let mut cmd = Command::new("systemd-run");
+    cmd.arg(format!("--unit={unit}"));
+    cmd.arg(format!("--slice={SLICE}"));
+    cmd.arg("--collect");
+    cmd.arg("--quiet");
+    cmd.arg("--no-block");
+    cmd.arg(format!("--working-directory={}", src_dir.display()));
+    cmd.arg(format!("--description=HomeRoute app {}", app.slug));
+    cmd.arg(format!("--setenv=PORT={}", app.port));
+    cmd.arg(format!(
+        "--setenv=DATABASE_PATH={}",
+        app.db_path().display()
+    ));
+    cmd.arg(format!("--setenv=DB_PATH={}", app.db_path().display()));
     for (k, v) in &app.env_vars {
-        cmd.env(k, v);
+        cmd.arg(format!("--setenv={k}={v}"));
     }
-
     if env_file.exists() {
         match load_env_file(&env_file).await {
             Ok(vars) => {
                 for (k, v) in vars {
-                    cmd.env(k, v);
+                    cmd.arg(format!("--setenv={k}={v}"));
                 }
             }
             Err(e) => {
@@ -508,10 +528,75 @@ async fn spawn_child(app: &Application) -> Result<Child> {
         }
     }
 
-    let child = cmd
-        .spawn()
-        .with_context(|| format!("spawning {} in {}", app.slug, src_dir.display()))?;
-    Ok(child)
+    cmd.arg("--");
+    cmd.arg("/bin/bash");
+    cmd.arg("-c");
+    cmd.arg(&app.run_command);
+
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let output = cmd
+        .output()
+        .await
+        .with_context(|| format!("launching systemd-run for {}", app.slug))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "systemd-run exited {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    info!(app_slug = %app.slug, unit, "systemd-run ok");
+    Ok(())
+}
+
+async fn run_systemctl(args: &[&str]) -> Result<std::process::Output> {
+    let output = Command::new("systemctl")
+        .args(args)
+        .output()
+        .await
+        .with_context(|| format!("systemctl {:?}", args))?;
+    Ok(output)
+}
+
+async fn systemctl_show(slug: &str, prop: &str) -> Option<String> {
+    let out = Command::new("systemctl")
+        .args([
+            "show",
+            &unit_name(slug),
+            "-p",
+            prop,
+            "--value",
+            "--no-pager",
+        ])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let val = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if val.is_empty() { None } else { Some(val) }
+}
+
+async fn unit_is_active(slug: &str) -> bool {
+    matches!(
+        systemctl_show(slug, "ActiveState").await.as_deref(),
+        Some("active") | Some("activating") | Some("reloading")
+    )
+}
+
+async fn unit_main_pid(slug: &str) -> Option<u32> {
+    let v = systemctl_show(slug, "MainPID").await?;
+    let pid: u32 = v.parse().ok()?;
+    if pid == 0 { None } else { Some(pid) }
+}
+
+async fn unit_result(slug: &str) -> Option<String> {
+    systemctl_show(slug, "Result").await
 }
 
 async fn load_env_file(path: &PathBuf) -> Result<Vec<(String, String)>> {
@@ -574,32 +659,12 @@ async fn http_health_check(port: u16, path: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn send_signal(pid: u32, sig: Signal) {
-    if let Err(e) = kill(Pid::from_raw(pid as i32), sig) {
-        debug!(pid, ?sig, error = %e, "kill failed");
-    }
-}
-
-fn pid_alive(pid: u32) -> bool {
-    kill(Pid::from_raw(pid as i32), None).is_ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn load_env_file_parses_simple_format() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".env");
-        tokio::fs::write(&path, "FOO=bar\n# comment\nBAZ=\"quoted\"\n\nEMPTY=\n")
-            .await
-            .unwrap();
-        let pb = path.to_path_buf();
-        let vars = load_env_file(&pb).await.unwrap();
-        assert!(vars.iter().any(|(k, v)| k == "FOO" && v == "bar"));
-        assert!(vars.iter().any(|(k, v)| k == "BAZ" && v == "quoted"));
-        assert!(vars.iter().any(|(k, v)| k == "EMPTY" && v.is_empty()));
-        assert!(!vars.iter().any(|(k, _)| k == "# comment"));
+    #[test]
+    fn unit_name_format() {
+        assert_eq!(unit_name("foo"), "hr-app-foo.service");
     }
 }

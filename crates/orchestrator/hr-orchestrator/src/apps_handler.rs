@@ -11,7 +11,20 @@ use crate::scaffold;
 
 use hr_apps::types::{AppStack, AppState, Application, Visibility, valid_slug};
 use hr_apps::{AppSupervisor, ContextGenerator, DbManager, ProcessStatus};
-use hr_common::logging::{LogQuery, LogStore};
+use hr_common::logging::LogStore;
+
+fn detect_level(msg: &str) -> &'static str {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("error") || m.contains("panic") || m.contains("fatal") {
+        "error"
+    } else if m.contains("warn") {
+        "warn"
+    } else if m.contains("debug") {
+        "debug"
+    } else {
+        "info"
+    }
+}
 use hr_ipc::EdgeClient;
 use hr_ipc::types::{
     AppDbQueryResult, AppDbRelation, AppDbTableColumn, AppDbTableSchema,
@@ -421,28 +434,63 @@ impl AppsContext {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
-        let filter = LogQuery {
-            q: Some(slug.clone()),
-            limit: Some(limit.unwrap_or(200) as u32),
-            level: level.map(|l| vec![l.parse().unwrap_or(hr_common::logging::LogLevel::Info)]),
-            ..Default::default()
-        };
-        match self.log_store.query(&filter).await {
-            Ok(entries) => {
-                let logs: Vec<AppLogEntry> = entries
-                    .into_iter()
-                    .map(|e| AppLogEntry {
-                        timestamp: e.timestamp.to_rfc3339(),
-                        level: format!("{:?}", e.level).to_lowercase(),
-                        message: e.message,
-                        data: e.data,
-                    })
-                    .collect();
-                info!(slug = %slug, count = logs.len(), "AppLogs queried");
+        let n = limit.unwrap_or(200).min(5000);
+        let unit = format!("hr-app-{slug}.service");
+        let output = tokio::process::Command::new("journalctl")
+            .args([
+                "-u",
+                &unit,
+                "-n",
+                &n.to_string(),
+                "--no-pager",
+                "--output=short-iso",
+            ])
+            .output()
+            .await;
+        match output {
+            Ok(out) if out.status.success() => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                let level_filter = level.as_deref();
+                let mut logs: Vec<AppLogEntry> = Vec::new();
+                for line in text.lines() {
+                    if line.starts_with("--") || line.is_empty() {
+                        continue;
+                    }
+                    // Format: "2024-01-02T10:11:12+0000 host unit[pid]: message"
+                    let (timestamp, rest) = match line.split_once(' ') {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let msg = match rest.find("]: ") {
+                        Some(i) => rest[i + 3..].to_string(),
+                        None => match rest.find(": ") {
+                            Some(i) => rest[i + 2..].to_string(),
+                            None => rest.to_string(),
+                        },
+                    };
+                    let lvl = detect_level(&msg);
+                    if let Some(f) = level_filter {
+                        if !lvl.eq_ignore_ascii_case(f) {
+                            continue;
+                        }
+                    }
+                    logs.push(AppLogEntry {
+                        timestamp: timestamp.to_string(),
+                        level: lvl.to_string(),
+                        message: msg,
+                        data: None,
+                    });
+                }
+                info!(slug = %slug, count = logs.len(), "AppLogs queried (journald)");
                 IpcResponse::ok_data(AppLogsData { slug, logs })
             }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                warn!(slug = %slug, status = %out.status, stderr = %stderr, "journalctl failed");
+                IpcResponse::ok_data(AppLogsData { slug, logs: vec![] })
+            }
             Err(e) => {
-                error!(slug = %slug, error = %e, "AppLogs query failed");
+                error!(slug = %slug, error = %e, "journalctl spawn failed");
                 IpcResponse::err(format!("log query failed: {e}"))
             }
         }

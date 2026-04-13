@@ -270,9 +270,8 @@ async fn main() -> anyhow::Result<()> {
         let sup = supervisor.clone();
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
-            if let Err(e) = sup.shutdown_all().await {
-                warn!(error = %e, "AppSupervisor shutdown_all failed");
-            }
+            sup.detach_all().await;
+            info!("AppSupervisor detached — systemd units left running");
         });
     }
 
