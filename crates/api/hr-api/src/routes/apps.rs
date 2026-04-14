@@ -28,6 +28,7 @@ pub fn router() -> Router<ApiState> {
             get(get_app).patch(update_app).delete(delete_app),
         )
         .route("/apps/{slug}/control", post(control_app))
+        .route("/apps/{slug}/build", post(build_app))
         .route("/apps/{slug}/status", get(app_status))
         .route("/apps/{slug}/logs", get(app_logs))
         .route("/apps/{slug}/exec", post(app_exec))
@@ -299,11 +300,11 @@ async fn control_app(
         return r;
     }
     let action = body.action.to_lowercase();
-    if !matches!(action.as_str(), "start" | "stop" | "restart" | "rebuild") {
+    if !matches!(action.as_str(), "start" | "stop" | "restart") {
         warn!(slug, action, "Rejected invalid control action");
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"success": false, "error": "action must be one of: start, stop, restart, rebuild"})),
+            Json(json!({"success": false, "error": "action must be one of: start, stop, restart (use POST /apps/{slug}/build for builds)"})),
         )
             .into_response();
     }
@@ -436,6 +437,77 @@ async fn app_exec(
                 "app_exec done"
             );
             ipc_response(resp)
+        }
+        Err(e) => ipc_err_response(e),
+    }
+}
+
+// ── Build ───────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Default)]
+struct BuildRequest {
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+const BUILD_DEFAULT_TIMEOUT_SECS: u64 = 1800;
+const BUILD_MIN_TIMEOUT_SECS: u64 = 60;
+const BUILD_MAX_TIMEOUT_SECS: u64 = 7200;
+
+#[tracing::instrument(skip(state, body))]
+async fn build_app(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+    Json(body): Json<BuildRequest>,
+) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    let timeout_secs = body
+        .timeout_secs
+        .unwrap_or(BUILD_DEFAULT_TIMEOUT_SECS)
+        .clamp(BUILD_MIN_TIMEOUT_SECS, BUILD_MAX_TIMEOUT_SECS);
+    let started = Instant::now();
+    info!(slug, timeout_secs, "Building application");
+    // IPC timeout = build timeout + 60s grace so the IPC layer never fires
+    // before the build pipeline itself times out (which has a clearer error).
+    let ipc_timeout = std::time::Duration::from_secs(timeout_secs + 60);
+    let req = OrchestratorRequest::AppBuild {
+        slug: slug.clone(),
+        timeout_secs: Some(timeout_secs),
+    };
+    match state.orchestrator.request_with_timeout(&req, ipc_timeout).await {
+        Ok(resp) => {
+            info!(
+                slug,
+                duration_ms = started.elapsed().as_millis() as u64,
+                ok = resp.ok,
+                "build_app done"
+            );
+            if resp.ok {
+                Json(json!({"success": true, "data": resp.data})).into_response()
+            } else {
+                let err = resp.error.unwrap_or_else(|| "unknown error".into());
+                if err.contains("BUILD_BUSY") {
+                    warn!(slug, "build_app conflict: BUILD_BUSY");
+                    (
+                        StatusCode::CONFLICT,
+                        Json(json!({
+                            "success": false,
+                            "error": "BUILD_BUSY",
+                            "message": err,
+                        })),
+                    )
+                        .into_response()
+                } else {
+                    error!(slug, error = %err, "build_app failed");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"success": false, "error": err})),
+                    )
+                        .into_response()
+                }
+            }
         }
         Err(e) => ipc_err_response(e),
     }

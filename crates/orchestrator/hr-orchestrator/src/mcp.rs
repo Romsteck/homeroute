@@ -485,6 +485,21 @@ fn handle_tools_list(id: Value, project_slug: &Option<String>) -> Value {
     }
 }
 
+/// Single source of truth for the simplified tool names exposed when the MCP
+/// server is queried with `?project=<slug>`. Any name here MUST also appear
+/// (1) in `tool_definitions_project()` with a schema, and (2) as a match arm
+/// in `handle_tools_call`. The `project_scoped_tools_are_consistent` test
+/// enforces (1); a missing arm in (2) surfaces as "Tool not found" at runtime.
+fn is_project_simplified_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "status" | "start" | "stop" | "restart" | "exec" | "logs"
+            | "db_tables" | "db_schema" | "db_query" | "db_find" | "db_exec"
+            | "docs_read" | "docs_write"
+            | "git_log" | "git_branches"
+    )
+}
+
 fn tool_definitions_project() -> Value {
     json!([
         // ── Process control ──
@@ -492,7 +507,7 @@ fn tool_definitions_project() -> Value {
         { "name": "start", "description": "Start the application process.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "stop", "description": "Stop the application process.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "restart", "description": "Restart the application process (stop + start).", "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "exec", "description": "Execute a shell command in the project directory (e.g. pnpm build, cargo build --release).", "inputSchema": { "type": "object", "properties": { "command": { "type": "string", "description": "Shell command to execute" }, "timeout_secs": { "type": "integer", "default": 60 } }, "required": ["command"] } },
+        { "name": "exec", "description": "Execute a shell command in the project directory. Do NOT use this to run the build — invoke the `app-build` skill instead (it calls the dedicated HTTP endpoint).", "inputSchema": { "type": "object", "properties": { "command": { "type": "string", "description": "Shell command to execute" }, "timeout_secs": { "type": "integer", "default": 60 } }, "required": ["command"] } },
         { "name": "logs", "description": "Get recent application logs.", "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer", "default": 100 }, "level": { "type": "string", "description": "Filter by level (info, warn, error)" } } } },
         // ── Database ──
         { "name": "db_tables", "description": "List all tables in the application's SQLite database.", "inputSchema": { "type": "object", "properties": {} } },
@@ -521,12 +536,8 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
             "app.health" | "app.regenerate_context" | "app.delete" | "app.build" |
             "git.log" | "git.branches" |
             "studio.refresh_context" |
-            "secrets.list" | "secrets.get" | "secrets.set" | "secrets.delete" |
-            // Project-scoped simplified names
-            "status" | "start" | "stop" | "restart" | "exec" | "logs" |
-            "db_tables" | "db_schema" | "db_query" | "db_find" | "db_exec" |
-            "docs_read" | "docs_write" | "git_log" | "git_branches"
-        );
+            "secrets.list" | "secrets.get" | "secrets.set" | "secrets.delete"
+        ) || is_project_simplified_tool(tool_name);
         if needs_slug {
             if arguments.get("slug").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
                 arguments["slug"] = json!(slug);
@@ -1818,12 +1829,12 @@ fn tool_definitions_apps() -> Value {
         },
         {
             "name": "app.control",
-            "description": "Control an application process: start, stop, restart, or rebuild.",
+            "description": "Control an application process: start, stop, or restart.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "slug": { "type": "string" },
-                    "action": { "type": "string", "enum": ["start", "stop", "restart", "rebuild"] }
+                    "action": { "type": "string", "enum": ["start", "stop", "restart"] }
                 },
                 "required": ["slug", "action"]
             }
@@ -2605,4 +2616,38 @@ async fn tool_studio_refresh_all(id: Value, state: &McpState) -> Value {
         refreshed += 1;
     }
     tool_success(id, json!({ "refreshed": refreshed, "total": apps.len() }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Guarantees parity between `tool_definitions_project()` (what clients
+    /// discover) and `is_project_simplified_tool()` (what the dispatcher
+    /// treats as project-scoped and injects the slug into). If these drift,
+    /// a client sees a tool it cannot call (or calls one without a slug).
+    #[test]
+    fn project_scoped_tools_are_consistent() {
+        let defs = tool_definitions_project();
+        let names: Vec<String> = defs
+            .as_array()
+            .expect("tool_definitions_project must be an array")
+            .iter()
+            .map(|t| {
+                t.get("name")
+                    .and_then(|n| n.as_str())
+                    .expect("every tool definition has a name")
+                    .to_string()
+            })
+            .collect();
+
+        for name in &names {
+            assert!(
+                is_project_simplified_tool(name),
+                "tool `{name}` is advertised by tool_definitions_project() but \
+                 is_project_simplified_tool() does not recognize it. Add it \
+                 there AND add a match arm in handle_tools_call."
+            );
+        }
+    }
 }

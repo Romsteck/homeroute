@@ -68,7 +68,7 @@ impl ContextGenerator {
         let mcp_json = render_mcp_json_with_auth(&project_mcp, self.mcp_token.as_deref());
         log_write(&app.slug, &app_dir.join(".mcp.json"), &mcp_json)?;
 
-        // Also write into src/ (where code-server opens projects)
+        // Also write into src/ (where code-server opens projects — workspace root)
         let src_dir = app.src_dir();
         if src_dir.exists() {
             let src_claude_dir = src_dir.join(".claude");
@@ -76,12 +76,52 @@ impl ContextGenerator {
             log_write(&app.slug, &src_dir.join(".mcp.json"), &mcp_json)?;
             log_write(&app.slug, &src_claude_dir.join("settings.json"), &settings)?;
 
-            // Generate skills (slash commands) based on app stack
+            // Clean up every legacy slash-command — tout est passé en skills.
             let commands_dir = src_claude_dir.join("commands");
-            fs::create_dir_all(&commands_dir)?;
-            for (name, content) in render_skills(app) {
-                log_write(&app.slug, &commands_dir.join(format!("{name}.md")), &content)?;
+            for legacy in OBSOLETE_SLASH_COMMANDS {
+                remove_if_exists(&commands_dir.join(legacy), &app.slug);
             }
+            // Retire le dossier commands/ s'il est devenu vide.
+            if commands_dir.exists() {
+                if let Ok(mut entries) = fs::read_dir(&commands_dir) {
+                    if entries.next().is_none() {
+                        let _ = fs::remove_dir(&commands_dir);
+                    }
+                }
+            }
+
+            let skills_root = src_claude_dir.join("skills");
+            fs::create_dir_all(&skills_root)?;
+
+            // Skill app-build (lazy-loaded) + script bundlé.
+            let app_build_dir = skills_root.join("app-build");
+            fs::create_dir_all(&app_build_dir)?;
+            log_write(&app.slug, &app_build_dir.join("SKILL.md"), &render_app_build_skill(app))?;
+            log_write(&app.slug, &app_build_dir.join("build.sh"), &render_app_build_script(app))?;
+
+            // Skills auxiliaires (status, logs, db-info quand has_db).
+            let produced: std::collections::HashSet<&'static str> = render_extra_skills(app)
+                .iter()
+                .map(|(name, _)| *name)
+                .collect();
+            for (name, content) in render_extra_skills(app) {
+                let skill_dir = skills_root.join(name);
+                fs::create_dir_all(&skill_dir)?;
+                log_write(&app.slug, &skill_dir.join("SKILL.md"), &content)?;
+            }
+            // Nettoie les skills auxiliaires qui ne s'appliquent plus (ex: app-db-info
+            // quand has_db est passé à false).
+            for legacy_name in ALL_EXTRA_SKILL_NAMES {
+                if !produced.contains(legacy_name) {
+                    let dir = skills_root.join(legacy_name);
+                    if dir.exists() {
+                        let _ = fs::remove_dir_all(&dir);
+                    }
+                }
+            }
+
+            // Cleanup obsolete app-build rule at src level (if ever written there).
+            remove_if_exists(&src_claude_dir.join("rules").join("app-build.md"), &app.slug);
         }
 
         let mcp_tools = render_mcp_tools_md(app);
@@ -90,8 +130,16 @@ impl ContextGenerator {
         let workflow = self.render_workflow_md(app);
         log_write(&app.slug, &rules_dir.join("workflow.md"), &workflow)?;
 
-        let app_build = render_app_build_md(app);
-        log_write(&app.slug, &rules_dir.join("app-build.md"), &app_build)?;
+        // Cleanup obsolete files at parent level:
+        //   - ancien rules/app-build.md (remplacé par la skill)
+        //   - skills/app-build/ écrite par erreur au mauvais niveau avant le fix workspace
+        remove_if_exists(&rules_dir.join("app-build.md"), &app.slug);
+        let stale_skill = claude_dir.join("skills").join("app-build").join("SKILL.md");
+        remove_if_exists(&stale_skill, &app.slug);
+        let stale_skill_dir = claude_dir.join("skills").join("app-build");
+        if stale_skill_dir.exists() {
+            let _ = fs::remove_dir_all(&stale_skill_dir);
+        }
 
         let docs = render_docs_md(app);
         log_write(&app.slug, &rules_dir.join("docs.md"), &docs)?;
@@ -265,11 +313,10 @@ impl ContextGenerator {
              {db_section}\n\
              \n\
              ## Build & run\n\
-             - **Build:** `{build_cmd}`\n\
              - **Run:** `{run_command}`\n\
              - **Health path:** `{health_path}`\n\
-             - Edit sources in `{src_dir}`, then build on place, restart via MCP `app.control` \
-             (or `POST /api/apps/{slug}/control` with `{{\"action\":\"restart\"}}`), and verify on {url}.\n\
+             \n\
+             > **Build** : utilise la skill `app-build`. Ne lance jamais `{build_cmd}` manuellement — ça se fait sur CloudMaster.\n\
              \n\
              ## Regles de developpement\n\
              - **Toujours builder sur place** : compiler directement sur le serveur de production, jamais de cross-compile depuis un autre poste.\n\
@@ -307,7 +354,6 @@ impl ContextGenerator {
             build_cmd = build_cmd,
             run_command = app.run_command,
             health_path = app.health_path,
-            src_dir = app.src_dir().display(),
             env_vars = env_var_section,
             other_apps = other_apps_section,
         )
@@ -499,6 +545,9 @@ fn render_mcp_tools_md(app: &Application) -> String {
          ## Store (`store.*`)\n\
          - Tools for the HomeRoute mobile store (uploads, listings).\n\
          \n\
+         ## Build\n\
+         Pour builder cette app, utilise la skill **app-build** (lazy-loaded). Elle appelle l'endpoint HTTP bloquant via Bash.\n\
+         \n\
 ",
         name = app.name,
         slug = app.slug,
@@ -573,104 +622,131 @@ fn render_docs_md(app: &Application) -> String {
     )
 }
 
-fn render_app_build_md(app: &Application) -> String {
-    use crate::types::AppStack;
-    let header = "# Build (managed by HomeRoute)\n\n\
-                  > Generated automatically — do not edit. \
-                  Update the app's `build_command` / `build_artefact` fields instead.\n\n";
-    let concurrency_rule = "\n## Règle concurrence (OBLIGATOIRE)\n\n\
-                  Si `app.build` retourne une erreur `BUILD_BUSY` \
-                  (« another build is already running »), tu DOIS :\n\n\
-                  1. **Arrêter immédiatement** — ne relance pas le build automatiquement.\n\
-                  2. **Informer l'utilisateur** qu'un autre build de cette app est en cours \
-                  (probablement une autre discussion / un autre code-server).\n\
-                  3. **Attendre que l'utilisateur te donne explicitement l'ordre** de rebuilder \
-                  avant de rappeler `app.build` sur ce slug.\n\n\
-                  Pourquoi : deux builds simultanés sur le même slug corrompraient le source \
-                  côté CloudMaster (rsync concurrent). Le lock per-slug l'empêche déjà \
-                  techniquement, mais il faut aussi éviter le spam de retries qui bloquerait \
-                  l'autre conversation.\n";
+/// Self-contained bash script that triggers the remote build and prints the
+/// raw JSON response. Sourced from `SKILL.md` so the skill body stays focused
+/// on *when* to build rather than *how*.
+fn render_app_build_script(app: &Application) -> String {
+    format!(
+        "#!/usr/bin/env bash\n\
+         # Déclenche un build distant de l'app `{slug}` sur CloudMaster.\n\
+         # Géré par HomeRoute — ne pas éditer (régénéré à chaque AppUpdate).\n\
+         set -euo pipefail\n\
+         TIMEOUT_SECS=\"${{1:-1800}}\"\n\
+         curl -sS --max-time \"$TIMEOUT_SECS\" -X POST \\\n\
+           \"http://127.0.0.1:4000/api/apps/{slug}/build\" \\\n\
+           -H 'content-type: application/json' \\\n\
+           -d \"{{\\\"timeout_secs\\\":${{TIMEOUT_SECS}}}}\"\n",
+        slug = app.slug,
+    )
+}
 
-    match app.stack {
-        AppStack::Axum => {
-            let cmd = app
-                .build_command
-                .as_deref()
-                .unwrap_or("cargo build --release");
-            format!(
-                "{header}\
-                 ## Stack: Rust (Axum)\n\
-                 \n\
-                 **Build via the MCP tool `app.build` only.** Never run `cargo build` \
-                 manually inside the app studio — it is heavy and will starve Medion. \
-                 The build is executed remotely on CloudMaster (10.0.0.10) and the \
-                 artefacts are rsynced back to this app.\n\
-                 \n\
-                 - Effective build command: `{cmd}`\n\
-                 - Artefact rapatrié : `target/release/{slug}` (ou `build_artefact` si défini)\n\
-                 - After a successful build, restart with `app.control` (`action: \"restart\"`).\n\
-                 {concurrency_rule}",
-                cmd = cmd,
-                slug = app.slug,
-                concurrency_rule = concurrency_rule,
-            )
+fn render_app_build_skill(app: &Application) -> String {
+    use crate::types::AppStack;
+
+    let stack_label = app.stack.display_name();
+    let build_cmd = app
+        .build_command
+        .as_deref()
+        .unwrap_or("(no build command configured)");
+
+    let stack_section = match app.stack {
+        AppStack::Axum => format!(
+            "## Stack: Rust (Axum)\n\n\
+             - Artefact rapatrié depuis CloudMaster : `target/release/{slug}` (ou `build_artefact` si défini).\n\
+             - Build effectif côté CloudMaster : `{cmd}`.\n",
+            slug = app.slug,
+            cmd = build_cmd,
+        ),
+        AppStack::AxumVite => format!(
+            "## Stack: Rust (Axum) + Vite\n\n\
+             - Artefacts rapatriés : `target/release/{slug}` + `web/dist/` (ou `build_artefact` si défini).\n\
+             - Build effectif côté CloudMaster : `{cmd}`.\n",
+            slug = app.slug,
+            cmd = build_cmd,
+        ),
+        AppStack::NextJs => format!(
+            "## Stack: Next.js\n\n\
+             - Artefacts rapatriés : `.next/`, `public/`, `package.json`, `package-lock.json`, `node_modules/` (ou `build_artefact` si défini).\n\
+             - Build effectif côté CloudMaster : `{cmd}`.\n",
+            cmd = build_cmd,
+        ),
+        AppStack::Flutter => format!(
+            "## Stack: Flutter (mobile Android)\n\n\
+             - Build sur CloudMaster (`flutter build apk --release`), publication via la règle `store-publishing.md`.\n\
+             - Build effectif : `{cmd}`.\n",
+            cmd = build_cmd,
+        ),
+    };
+
+    format!(
+        "---\n\
+         name: app-build\n\
+         description: Build l'application {slug} ({stack}) sur CloudMaster et rapatrie les artefacts. Utilise cette skill QUAND l'utilisateur demande de builder/compiler/rebuild cette app — ne lance JAMAIS le build manuellement.\n\
+         allowed-tools: Bash(bash .claude/skills/app-build/build.sh*)\n\
+         ---\n\
+         \n\
+         # Build de l'app `{slug}`\n\
+         \n\
+         Cette skill déclenche un build distant de l'app sur CloudMaster (10.0.0.10) et rapatrie les artefacts via rsync. \
+         Tout passe par un endpoint HTTP bloquant — pas de build local.\n\
+         \n\
+         ## Commande\n\
+         \n\
+         ```bash\n\
+         bash .claude/skills/app-build/build.sh\n\
+         ```\n\
+         \n\
+         Le script prend un timeout optionnel en secondes (défaut 1800) :\n\
+         \n\
+         ```bash\n\
+         bash .claude/skills/app-build/build.sh 3600\n\
+         ```\n\
+         \n\
+         ## Retour\n\
+         \n\
+         Réponse JSON : `{{ ok, stages, summary, duration_ms }}`.\n\
+         \n\
+         - `ok: true` → build réussi, lire `summary` pour les détails.\n\
+         - `ok: false` → lire le tableau `stages` pour identifier la phase fautive (ssh-probe, rsync-up, compile, rsync-back, restart).\n\
+         \n\
+         ## Erreur HTTP 409 — BUILD_BUSY\n\
+         \n\
+         Si l'endpoint répond **HTTP 409** (`BUILD_BUSY`), un autre build de cette app est déjà en cours \
+         (probablement une autre conversation ou un autre code-server).\n\
+         \n\
+         **NE PAS RETRY automatiquement.** Tu DOIS :\n\
+         \n\
+         1. Informer l'utilisateur qu'un build est déjà en cours pour `{slug}`.\n\
+         2. Attendre son feu vert explicite avant de relancer.\n\
+         \n\
+         Pourquoi : deux builds concurrents sur le même slug corrompraient les sources côté CloudMaster (rsync concurrent).\n\
+         \n\
+         ## Après build OK\n\
+         \n\
+         Redémarrer le process supervisé via le tool MCP `restart` (action `restart` sur l'app `{slug}`).\n\
+         \n\
+         ## Interdits\n\
+         \n\
+         - **JAMAIS** lancer `{cmd}` localement dans le studio — ça doit tourner sur CloudMaster.\n\
+         - **JAMAIS** invoquer `cargo build`, `npm run build`, `pnpm build` à la main pour cette app.\n\
+         \n\
+         {stack_section}",
+        slug = app.slug,
+        stack = stack_label,
+        cmd = build_cmd,
+        stack_section = stack_section,
+    )
+}
+
+/// Remove a stale file silently. Logs at info if the file existed.
+fn remove_if_exists(path: &Path, slug: &str) {
+    match fs::remove_file(path) {
+        Ok(()) => {
+            info!(slug = %slug, file = %path.display(), "obsolete context file removed");
         }
-        AppStack::AxumVite => {
-            let cmd = app
-                .build_command
-                .as_deref()
-                .unwrap_or("cargo build --release && (cd web && npm ci && npm run build)");
-            format!(
-                "{header}\
-                 ## Stack: Rust (Axum) + Vite\n\
-                 \n\
-                 **Build via the MCP tool `app.build` only.** Don't run `cargo build` or \
-                 `npm run build` manually in the studio. The full build (server + client) \
-                 runs on CloudMaster and the artefacts are rsynced back here.\n\
-                 \n\
-                 - Effective build command: `{cmd}`\n\
-                 - Artefacts rapatriés : `target/release/{slug}` + `web/dist/` \
-                 (ou `build_artefact` si défini)\n\
-                 - After a successful build, restart with `app.control` (`action: \"restart\"`).\n\
-                 {concurrency_rule}",
-                cmd = cmd,
-                slug = app.slug,
-                concurrency_rule = concurrency_rule,
-            )
-        }
-        AppStack::NextJs => {
-            let cmd = app
-                .build_command
-                .as_deref()
-                .unwrap_or("npm ci && npm run build");
-            format!(
-                "{header}\
-                 ## Stack: Next.js\n\
-                 \n\
-                 **Build via the MCP tool `app.build` only.** Don't run `npm run build` \
-                 manually here. The build runs on CloudMaster and the resulting artefacts \
-                 are rsynced back to this app.\n\
-                 \n\
-                 - Effective build command: `{cmd}`\n\
-                 - Artefacts rapatriés : `.next/`, `public/`, `package.json`, \
-                 `package-lock.json`, `node_modules/` (ou `build_artefact` si défini)\n\
-                 - After a successful build, restart with `app.control` (`action: \"restart\"`).\n\
-                 {concurrency_rule}",
-                cmd = cmd,
-                concurrency_rule = concurrency_rule,
-            )
-        }
-        AppStack::Flutter => {
-            format!(
-                "{header}\
-                 ## Stack: Flutter (mobile Android)\n\
-                 \n\
-                 Cette app produit un APK publié dans le store mobile HomeRoute. \
-                 Build **toujours sur CloudMaster** : `export PATH=/ssd_pool/flutter/bin:$PATH && flutter build apk --release`. \
-                 Jamais sur le routeur.\n\
-                 \n\
-                 Publication : voir `.claude/rules/store-publishing.md`.\n"
-            )
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => {
+            warn!(slug = %slug, file = %path.display(), error = %e, "failed to remove obsolete context file");
         }
     }
 }
@@ -798,67 +874,79 @@ fn log_write(slug: &str, path: &Path, content: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn render_skills(app: &Application) -> Vec<(&'static str, String)> {
-    use crate::types::AppStack;
-    let build_cmd = app.build_command.as_deref().unwrap_or("echo 'no build command configured'");
+/// Skills additionnelles (read-only) en plus de `app-build`. Chaque entrée est
+/// (nom_skill, contenu_complet_avec_frontmatter). Le nom devient le dossier
+/// `src/.claude/skills/<nom>/SKILL.md`.
+fn render_extra_skills(app: &Application) -> Vec<(&'static str, String)> {
     let mut skills = vec![
-        ("build", format!(
-            "Build the project.\n\n\
-             Execute the build command via the `exec` MCP tool:\n\
-             ```\n{build_cmd}\n```\n\n\
-             Report the result (success or failure with error details)."
+        ("app-status", format!(
+            "---\n\
+             name: app-status\n\
+             description: Affiche l'état courant du process de l'app {slug} (state, PID, port, uptime, restart count). Utilise-moi quand l'utilisateur demande le statut, l'état, si l'app tourne, son PID ou son uptime.\n\
+             allowed-tools: \n\
+             ---\n\
+             \n\
+             # Statut de l'app `{slug}`\n\
+             \n\
+             Appelle le tool MCP `status` et affiche le résultat de manière concise : \
+             state, PID, port, uptime, restart count.\n",
+            slug = app.slug,
         )),
-        ("deploy", format!(
-            "Build and restart the application.\n\n\
-             1. Execute the build command via `exec`:\n   ```\n   {build_cmd}\n   ```\n\
-             2. If the build succeeds, call `restart` to restart the process.\n\
-             3. Wait 3 seconds, then call `status` to verify the app is running.\n\
-             4. Report the result."
+        ("app-logs", format!(
+            "---\n\
+             name: app-logs\n\
+             description: Récupère et analyse les logs récents de l'app {slug}. Utilise-moi quand l'utilisateur demande les logs, des erreurs récentes, pourquoi l'app crash, ou un diagnostic runtime.\n\
+             allowed-tools: \n\
+             ---\n\
+             \n\
+             # Logs de l'app `{slug}`\n\
+             \n\
+             Appelle le tool MCP `logs` (paramètres : `limit` optionnel, `level` optionnel). \
+             Identifie toute erreur ou warning et suggère des actions si pertinent.\n",
+            slug = app.slug,
         )),
-        ("status", "Get the current application status.\n\nCall the `status` MCP tool and display the result concisely: state, PID, port, uptime, restart count.".to_string()),
-        ("logs", "Get recent application logs and analyze them.\n\nCall the `logs` MCP tool. Identify any errors or warnings and suggest actions if needed.".to_string()),
     ];
 
     if app.has_db {
-        skills.push(("db-info",
-            "Get a summary of the application's database.\n\n\
-             1. Call `db_tables` to list all tables.\n\
-             2. For each table, call `db_schema` to get the columns and row count.\n\
-             3. Display a concise summary: table name, column count, row count.".to_string()
-        ));
-    }
-
-    match app.stack {
-        AppStack::NextJs => {
-            skills.push(("install", "Install Node.js dependencies.\n\nExecute `pnpm install` via the `exec` tool. Report any errors.".to_string()));
-        }
-        AppStack::AxumVite => {
-            skills.push(("build-server", format!(
-                "Build only the Rust server.\n\nExecute via `exec`:\n```\ncd server && cargo build --release\n```\nReport the result."
-            )));
-            skills.push(("build-client", "Build only the Vite/React client.\n\nExecute via `exec`:\n```\ncd client && pnpm build\n```\nReport the result.".to_string()));
-        }
-        AppStack::Axum => {
-            skills.push(("build-api", format!(
-                "Build the Rust API.\n\nExecute via `exec`:\n```\n{build_cmd}\n```\nReport the result."
-            )));
-        }
-        AppStack::Flutter => {
-            skills.push(("build-apk",
-                "Build the Flutter APK release on CloudMaster.\n\n\
-                 Execute via `exec`:\n```\nexport PATH=/ssd_pool/flutter/bin:$PATH && flutter build apk --release\n```\n\
-                 Report the output path and any errors.".to_string()));
-            skills.push(("publish-apk",
-                "Publish the latest APK release to the HomeRoute store.\n\n\
-                 1. Base64-encode `build/app/outputs/flutter-apk/app-release.apk`.\n\
-                 2. Call the MCP tool `store.upload` with the app slug, target version, and `apk_base64`.\n\
-                 3. Verify via `store.get` that the new version appears.\n\
-                 See `.claude/rules/store-publishing.md`.".to_string()));
-        }
+        skills.push(("app-db-info", format!(
+            "---\n\
+             name: app-db-info\n\
+             description: Donne un résumé de la base SQLite de l'app {slug} (tables, colonnes, row counts). Utilise-moi quand l'utilisateur demande ce qu'il y a en base, le schéma, ou un aperçu des données.\n\
+             allowed-tools: \n\
+             ---\n\
+             \n\
+             # Résumé base `{slug}`\n\
+             \n\
+             1. Appelle `db_tables` pour lister toutes les tables.\n\
+             2. Pour chaque table, appelle `db_schema` pour obtenir les colonnes et le row count.\n\
+             3. Affiche un résumé concis : nom de la table, nombre de colonnes, nombre de lignes.\n",
+            slug = app.slug,
+        )));
     }
 
     skills
 }
+
+/// Slash-commands & fichiers legacy à nettoyer à chaque régénération.
+/// Les builds sont désormais la skill `app-build` ; les raccourcis status/logs/db-info
+/// sont devenus des skills — plus rien ne vit dans `src/.claude/commands/`.
+const OBSOLETE_SLASH_COMMANDS: &[&str] = &[
+    "build.md",
+    "build-client.md",
+    "build-server.md",
+    "build-api.md",
+    "build-apk.md",
+    "publish-apk.md",
+    "install.md",
+    "deploy.md",
+    "status.md",
+    "logs.md",
+    "db-info.md",
+];
+
+/// Noms de skills auxiliaires potentiellement obsolètes à nettoyer si la stack
+/// de l'app change (ex: app passe de `has_db=true` à `false` → retirer app-db-info).
+const ALL_EXTRA_SKILL_NAMES: &[&str] = &["app-status", "app-logs", "app-db-info"];
 
 #[cfg(test)]
 mod tests {
@@ -896,8 +984,21 @@ mod tests {
         let wallet = make_app("wallet", "Wallet", false);
         let all = vec![trader.clone(), wallet.clone()];
 
+        // Create src/ so src_dir.exists() → true (code-server workspace root).
+        fs::create_dir_all(tmp.join("trader/src")).unwrap();
+
+        // Pré-créer un ancien rules/app-build.md bidon : doit être supprimé par generate_for_app.
+        let stale_rules_dir = tmp.join("trader/.claude/rules");
+        fs::create_dir_all(&stale_rules_dir).unwrap();
+        let stale_path = stale_rules_dir.join("app-build.md");
+        fs::write(&stale_path, "stale content").unwrap();
+        assert!(stale_path.exists());
+
         ctx.generate_for_app(&trader, &all, Some(vec!["users".into(), "trades".into()]))
             .unwrap();
+
+        // L'ancien fichier doit avoir été supprimé.
+        assert!(!stale_path.exists(), "ancien rules/app-build.md doit être supprimé");
 
         let claude_md = fs::read_to_string(tmp.join("trader/CLAUDE.md")).unwrap();
         assert!(claude_md.contains("# Trader"));
@@ -927,7 +1028,17 @@ mod tests {
 
         assert!(tmp.join("trader/.claude/rules/mcp-tools.md").exists());
         assert!(tmp.join("trader/.claude/rules/workflow.md").exists());
-        assert!(tmp.join("trader/.claude/rules/app-build.md").exists());
+        // Note: the app-build skill is written under `app.src_dir()/.claude/skills/`,
+        // which uses a hardcoded /opt/homeroute/apps path from Application::src_dir().
+        // We validate its content via render_app_build_skill directly below.
+        let skill_content = render_app_build_skill(&trader);
+        assert!(skill_content.contains("name: app-build"));
+        assert!(skill_content.contains("allowed-tools: Bash(bash .claude/skills/app-build/build.sh"));
+        assert!(skill_content.contains("bash .claude/skills/app-build/build.sh"));
+        // Le curl est maintenant dans le script séparé.
+        let script = render_app_build_script(&trader);
+        assert!(script.contains("/api/apps/trader/build"));
+        assert!(script.starts_with("#!/usr/bin/env bash"));
         assert!(tmp.join("trader/.claude/rules/docs.md").exists());
 
         let _ = fs::remove_dir_all(&tmp);

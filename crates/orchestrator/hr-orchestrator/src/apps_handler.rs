@@ -11,7 +11,9 @@ use crate::scaffold;
 
 use hr_apps::types::{AppStack, AppState, Application, Visibility, valid_slug};
 use hr_apps::{AppSupervisor, ContextGenerator, DbManager, ProcessStatus};
+use hr_common::events::AppBuildEvent;
 use hr_common::logging::LogStore;
+use tokio::sync::broadcast;
 
 fn detect_level(msg: &str) -> &'static str {
     let m = msg.to_ascii_lowercase();
@@ -54,6 +56,8 @@ pub struct AppsContext {
     /// Per-slug locks to serialise concurrent `build()` invocations.
     pub build_locks:
         Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Broadcast channel for build progress events.
+    pub app_build_tx: broadcast::Sender<AppBuildEvent>,
 }
 
 impl AppsContext {
@@ -357,33 +361,6 @@ impl AppsContext {
             "start" => self.supervisor.start(&slug).await,
             "stop" => self.supervisor.stop(&slug).await,
             "restart" => self.supervisor.restart(&slug).await,
-            "rebuild" => {
-                // TODO(V3C): run app.build_command then restart
-                match self.supervisor.registry.get(&slug).await {
-                    Some(app) => {
-                        if let Some(cmd) = app.build_command.clone() {
-                            info!(slug = %slug, "AppControl rebuild: running build_command");
-                            let out = tokio::process::Command::new("/bin/bash")
-                                .arg("-c")
-                                .arg(&cmd)
-                                .current_dir(app.src_dir())
-                                .output()
-                                .await;
-                            match out {
-                                Ok(o) if o.status.success() => self.supervisor.restart(&slug).await,
-                                Ok(o) => Err(anyhow::anyhow!(
-                                    "build failed: {}",
-                                    String::from_utf8_lossy(&o.stderr)
-                                )),
-                                Err(e) => Err(anyhow::anyhow!("spawn build: {e}")),
-                            }
-                        } else {
-                            self.supervisor.restart(&slug).await
-                        }
-                    }
-                    None => Err(anyhow::anyhow!("app not found: {slug}")),
-                }
-            }
             other => return IpcResponse::err(format!("invalid action: {other}")),
         };
 
@@ -910,6 +887,19 @@ impl AppsContext {
             }
         };
 
+        // Emit "started" event now that the lock is acquired.
+        emit_build_event(
+            &self.app_build_tx,
+            &slug,
+            "started",
+            None,
+            None,
+            None,
+            Some("build pipeline started".to_string()),
+            None,
+            None,
+        );
+
         let host = std::env::var("HR_BUILD_HOST").unwrap_or_else(|_| BUILD_HOST.to_string());
         let key = std::env::var("HR_BUILD_SSH_KEY").unwrap_or_else(|_| SSH_KEY.to_string());
         let timeout = Duration::from_secs(timeout_secs.unwrap_or(1800).max(1));
@@ -931,8 +921,24 @@ impl AppsContext {
 
         info!(slug = %slug, host = %host, build_command = %build_command, timeout_secs = timeout.as_secs(), "build: start");
 
+        let app_build_tx = self.app_build_tx.clone();
+        let slug_for_pipeline = slug.clone();
+        let supervisor_for_pipeline = self.supervisor.clone();
         let pipeline = async {
             let mut acc = StageAccumulator::new();
+            let emit_step = |step: u32, phase: &str, dur_ms: u64, msg: Option<String>| {
+                emit_build_event(
+                    &app_build_tx,
+                    &slug_for_pipeline,
+                    "step",
+                    Some(step),
+                    Some(5),
+                    Some(phase.to_string()),
+                    msg,
+                    Some(dur_ms),
+                    None,
+                );
+            };
 
             // 1) SSH probe
             info!(slug = %slug, host = %host, "build: ssh probe");
@@ -953,6 +959,7 @@ impl AppsContext {
             )
             .await;
             acc.push("ssh-probe", &probe);
+            emit_step(1, "ssh-probe", probe.duration_ms, None);
             if probe.exit_code != 0 {
                 error!(slug = %slug, exit_code = probe.exit_code, stderr = %truncate(&probe.stderr, 512), "build: ssh probe failed");
                 return acc.into_result(format!(
@@ -1004,6 +1011,7 @@ impl AppsContext {
             )
             .await;
             acc.push("rsync-up", &up);
+            emit_step(2, "rsync-up", up.duration_ms + mkdir.duration_ms, None);
             if up.exit_code != 0 {
                 return acc.into_result("rsync up failed".into(), started);
             }
@@ -1033,12 +1041,21 @@ impl AppsContext {
             )
             .await;
             acc.push("compile", &compile);
+            emit_step(3, "compile", compile.duration_ms, None);
             if compile.exit_code != 0 {
                 error!(slug = %slug, exit_code = compile.exit_code, "build: compile failed");
                 return acc.into_result("build command failed".into(), started);
             }
 
+            // 4b) stop the supervised process before overwriting artefacts on disk.
+            // Avoids serving a partially-rsynced .next/, target/release binary, etc.
+            // Best-effort: if the app is not running, this is a no-op.
+            if let Err(e) = supervisor_for_pipeline.stop(&slug_for_pipeline).await {
+                warn!(slug = %slug_for_pipeline, error = %e, "build: pre-rsync stop failed (continuing)");
+            }
+
             // 5) rsync each artefact back
+            let rsync_back_started = Instant::now();
             for art in &artefacts {
                 info!(slug = %slug, artefact = %art, "build: rsync down");
                 let remote_path = format!("{}/{}", remote_src, art);
@@ -1085,8 +1102,34 @@ impl AppsContext {
                     );
                 }
             }
+            emit_step(
+                4,
+                "rsync-back",
+                rsync_back_started.elapsed().as_millis() as u64,
+                None,
+            );
 
-            info!(slug = %slug, duration_ms = started.elapsed().as_millis() as u64, "build: ok");
+            // 6) restart the app so the freshly rsynced artefacts are picked up.
+            // Best-effort; if start fails we still consider the build OK and surface the warning.
+            let restart_started = Instant::now();
+            if let Err(e) = supervisor_for_pipeline.start(&slug_for_pipeline).await {
+                warn!(slug = %slug_for_pipeline, error = %e, "build: post-rsync start failed");
+                emit_step(
+                    5,
+                    "restart",
+                    restart_started.elapsed().as_millis() as u64,
+                    Some(format!("start failed: {e}")),
+                );
+            } else {
+                emit_step(
+                    5,
+                    "restart",
+                    restart_started.elapsed().as_millis() as u64,
+                    None,
+                );
+            }
+
+            info!(slug = %slug_for_pipeline, duration_ms = started.elapsed().as_millis() as u64, "build: ok");
             acc.into_result_ok(started)
         };
 
@@ -1097,6 +1140,64 @@ impl AppsContext {
                 IpcResponse::err(format!("build timed out after {}s", timeout.as_secs()))
             }
         };
+
+        // Emit final build event: "finished" on success, "error" otherwise.
+        let total_ms = started.elapsed().as_millis() as u64;
+        if resp.ok {
+            // The pipeline returns ok_data even when the inner command failed
+            // (it stuffs an exit_code in AppExecResult). Inspect that to know.
+            let exit_code = resp
+                .data
+                .as_ref()
+                .and_then(|d| d.get("exit_code"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            if exit_code == 0 {
+                emit_build_event(
+                    &self.app_build_tx,
+                    &slug,
+                    "finished",
+                    Some(5),
+                    Some(5),
+                    None,
+                    Some("build finished".to_string()),
+                    Some(total_ms),
+                    None,
+                );
+            } else {
+                let err_msg = resp
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("stderr"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| truncate(s, 512))
+                    .unwrap_or_else(|| "build failed".to_string());
+                emit_build_event(
+                    &self.app_build_tx,
+                    &slug,
+                    "error",
+                    None,
+                    Some(5),
+                    None,
+                    None,
+                    Some(total_ms),
+                    Some(err_msg),
+                );
+            }
+        } else {
+            let err_msg = resp.error.clone().unwrap_or_else(|| "build failed".into());
+            emit_build_event(
+                &self.app_build_tx,
+                &slug,
+                "error",
+                None,
+                Some(5),
+                None,
+                None,
+                Some(total_ms),
+                Some(err_msg),
+            );
+        }
 
         // Refresh the per-app context (build command may have changed).
         let all = self.supervisor.registry.list().await;
@@ -1200,6 +1301,40 @@ impl StageAccumulator {
         };
         IpcResponse::ok_data(result)
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_build_event(
+    tx: &broadcast::Sender<AppBuildEvent>,
+    slug: &str,
+    status: &str,
+    step: Option<u32>,
+    total_steps: Option<u32>,
+    phase: Option<String>,
+    message: Option<String>,
+    duration_ms: Option<u64>,
+    error: Option<String>,
+) {
+    let event = AppBuildEvent {
+        slug: slug.to_string(),
+        status: status.to_string(),
+        step,
+        total_steps,
+        phase: phase.clone(),
+        message,
+        duration_ms,
+        error: error.clone(),
+    };
+    info!(
+        slug = %slug,
+        status = %status,
+        step = ?step,
+        phase = ?phase,
+        duration_ms = ?duration_ms,
+        error = ?error,
+        "AppBuildEvent emitted"
+    );
+    let _ = tx.send(event);
 }
 
 fn cap_string(mut s: String) -> String {

@@ -172,10 +172,17 @@ pub enum OrchestratorRequest {
         slug: String,
         keep_data: bool,
     },
-    /// Control an app process: "start" | "stop" | "restart" | "rebuild".
+    /// Control an app process: "start" | "stop" | "restart".
     AppControl {
         slug: String,
         action: String,
+    },
+    /// Build an app remotely on CloudMaster (rsync source up → SSH build → rsync artefacts back).
+    /// Bounded by `timeout_secs` (default 1800, clamped to [60, 7200]).
+    AppBuild {
+        slug: String,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
     },
     /// Get runtime status (pid, state, port, uptime).
     AppStatus {

@@ -39,6 +39,8 @@ pub struct EventBus {
     pub log_entry: broadcast::Sender<crate::logging::LogEntry>,
     /// App state change events (supervisor → websocket for live status)
     pub app_state: broadcast::Sender<AppStateEvent>,
+    /// App build progress events (supervisor build pipeline → websocket)
+    pub app_build: broadcast::Sender<AppBuildEvent>,
 }
 
 impl EventBus {
@@ -62,6 +64,7 @@ impl EventBus {
             energy_metrics: broadcast::channel(64).0,
             log_entry: broadcast::channel(512).0,
             app_state: broadcast::channel(64).0,
+            app_build: broadcast::channel(128).0,
         }
     }
 }
@@ -390,6 +393,27 @@ pub struct AppStateEvent {
     pub port: u16,
     pub uptime_secs: u64,
     pub restart_count: u32,
+}
+
+/// App build progress event (orchestrator build pipeline → websocket).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppBuildEvent {
+    pub slug: String,
+    /// One of: "started" | "step" | "finished" | "error"
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_steps: Option<u32>,
+    /// e.g. "ssh-probe" | "rsync-up" | "compile" | "rsync-back" | "restart"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Energy metrics event (energy poller → websocket for frontend display).

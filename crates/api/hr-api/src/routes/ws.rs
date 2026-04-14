@@ -37,6 +37,7 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut energy_metrics_rx = state.events.energy_metrics.subscribe();
     let mut log_rx = state.events.log_entry.subscribe();
     let mut app_state_rx = state.events.app_state.subscribe();
+    let mut app_build_rx = state.events.app_build.subscribe();
 
     loop {
         tokio::select! {
@@ -384,6 +385,25 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("WebSocket app_state lagged by {}", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // App build progress events (orchestrator build pipeline)
+            result = app_build_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({
+                            "type": "app:build",
+                            "data": event
+                        });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("WebSocket app_build lagged by {}", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

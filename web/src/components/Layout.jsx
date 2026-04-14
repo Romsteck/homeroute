@@ -1,15 +1,91 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
 import Sidebar from "./Sidebar";
-import { Menu, Code2, ExternalLink, Play, Square, RefreshCw } from "lucide-react";
+import { Menu, Code2, ExternalLink, Play, Square, RefreshCw, Loader2, Check, AlertCircle, X } from "lucide-react";
 import TaskBell from "./tasks/TaskBell";
 import TaskDropdown from "./tasks/TaskDropdown";
 import Studio, { CODESERVER_BASE, statusDot } from "../pages/Studio";
 import { useStudio } from "../context/StudioContext";
 import { PageHeaderSlotProvider, usePageHeaderSlotRegister } from "../context/PageHeaderSlot";
+import useWebSocket from "../hooks/useWebSocket";
+
+function BuildBadge({ build, onDismiss }) {
+  if (!build) return null;
+  const status = build.status;
+  const step = build.step;
+  const total = build.total_steps ?? 5;
+  const phase = build.phase;
+
+  if (status === 'started' || status === 'step') {
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        className="flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] bg-blue-500/15 border border-blue-500/30 text-blue-300 shrink-0"
+      >
+        <Loader2 className="w-3 h-3 animate-spin" />
+        <span>Build {step ?? '…'}/{total}</span>
+        {phase && <span className="opacity-70">· {phase}</span>}
+      </div>
+    );
+  }
+
+  if (status === 'finished') {
+    const secs = build.duration_ms != null ? Math.round(build.duration_ms / 1000) : null;
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        className="flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 shrink-0 transition-opacity duration-300"
+      >
+        <Check className="w-3 h-3" />
+        <span>Build OK{secs != null ? ` · ${secs}s` : ''}</span>
+      </div>
+    );
+  }
+
+  if (status === 'error') {
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        title={build.error || build.message || 'Build failed'}
+        className="flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] bg-red-500/15 border border-red-500/30 text-red-300 shrink-0"
+      >
+        <AlertCircle className="w-3 h-3" />
+        <span>Build failed</span>
+        <button
+          onClick={onDismiss}
+          aria-label="Dismiss build error"
+          className="ml-0.5 p-0.5 rounded hover:bg-red-500/20"
+        >
+          <X className="w-3 h-3" />
+        </button>
+      </div>
+    );
+  }
+
+  return null;
+}
 
 function StudioHeaderInfo() {
   const { currentApp, status, selectedSlug, activeTab, busy, onControl } = useStudio();
+  const [buildState, setBuildState] = useState(null);
+
+  useWebSocket({
+    'app:build': (data) => {
+      if (!currentApp || data?.slug !== currentApp.slug) return;
+      setBuildState(data);
+      if (data.status === 'finished') {
+        setTimeout(() => setBuildState(null), 2500);
+      }
+    },
+  });
+
+  useEffect(() => {
+    setBuildState(null);
+  }, [currentApp?.slug]);
+
   if (!currentApp) return null;
 
   const state = (status?.state || currentApp.state || 'stopped').toLowerCase();
@@ -24,6 +100,7 @@ function StudioHeaderInfo() {
       <div className="flex items-center gap-2 shrink-0">
         <Code2 className="w-4 h-4 text-blue-400" />
         <span className={`w-2 h-2 rounded-full ${statusDot(state)}`} />
+        <BuildBadge build={buildState} onDismiss={() => setBuildState(null)} />
         <span className="text-[13px] font-medium text-white truncate max-w-[140px]">{currentApp.name}</span>
         <span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400">{currentApp.stack}</span>
       </div>

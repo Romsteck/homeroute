@@ -22,6 +22,7 @@ pub async fn serve_event_stream(
     socket_path: &Path,
     app_state_rx: broadcast::Sender<hr_common::events::AppStateEvent>,
     log_rx: broadcast::Sender<hr_common::logging::LogEntry>,
+    app_build_rx: broadcast::Sender<hr_common::events::AppBuildEvent>,
 ) -> anyhow::Result<()> {
     // Remove stale socket
     let _ = tokio::fs::remove_file(socket_path).await;
@@ -33,8 +34,9 @@ pub async fn serve_event_stream(
             Ok((stream, _)) => {
                 let app_tx = app_state_rx.clone();
                 let log_tx = log_rx.clone();
+                let build_tx = app_build_rx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_event_client(stream, app_tx, log_tx).await {
+                    if let Err(e) = handle_event_client(stream, app_tx, log_tx, build_tx).await {
                         warn!(error = %e, "Event stream client disconnected");
                     }
                 });
@@ -50,10 +52,12 @@ async fn handle_event_client(
     stream: UnixStream,
     app_state_tx: broadcast::Sender<hr_common::events::AppStateEvent>,
     log_tx: broadcast::Sender<hr_common::logging::LogEntry>,
+    app_build_tx: broadcast::Sender<hr_common::events::AppBuildEvent>,
 ) -> anyhow::Result<()> {
     let (_, mut writer) = stream.into_split();
     let mut app_rx = app_state_tx.subscribe();
     let mut log_rx = log_tx.subscribe();
+    let mut build_rx = app_build_tx.subscribe();
 
     info!("Event stream client connected");
 
@@ -62,6 +66,12 @@ async fn handle_event_client(
             Ok(ev) = app_rx.recv() => {
                 IpcEvent {
                     channel: "app:state".to_string(),
+                    payload: serde_json::to_value(&ev).unwrap_or_default(),
+                }
+            }
+            Ok(ev) = build_rx.recv() => {
+                IpcEvent {
+                    channel: "app:build".to_string(),
                     payload: serde_json::to_value(&ev).unwrap_or_default(),
                 }
             }
@@ -111,6 +121,11 @@ pub async fn connect_event_stream(
                             "app:state" => {
                                 if let Ok(ev) = serde_json::from_value::<hr_common::events::AppStateEvent>(event.payload) {
                                     let _ = events.app_state.send(ev);
+                                }
+                            }
+                            "app:build" => {
+                                if let Ok(ev) = serde_json::from_value::<hr_common::events::AppBuildEvent>(event.payload) {
+                                    let _ = events.app_build.send(ev);
                                 }
                             }
                             "app:log" => {

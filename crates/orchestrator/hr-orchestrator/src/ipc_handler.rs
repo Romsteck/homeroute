@@ -31,6 +31,7 @@ pub struct OrchestratorHandler {
     pub context_generator: Arc<ContextGenerator>,
     pub log_store: Arc<hr_common::logging::LogStore>,
     pub build_locks: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    pub app_build_tx: tokio::sync::broadcast::Sender<hr_common::events::AppBuildEvent>,
 }
 
 impl OrchestratorHandler {
@@ -44,6 +45,7 @@ impl OrchestratorHandler {
             base_domain: self.base_domain.clone(),
             log_store: self.log_store.clone(),
             build_locks: self.build_locks.clone(),
+            app_build_tx: self.app_build_tx.clone(),
         }
     }
 }
@@ -539,6 +541,9 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
             }
             OrchestratorRequest::AppControl { slug, action } => {
                 self.apps_ctx().control(slug, action).await
+            }
+            OrchestratorRequest::AppBuild { slug, timeout_secs } => {
+                self.apps_ctx().build(slug, timeout_secs).await
             }
             OrchestratorRequest::AppStatus { slug } => self.apps_ctx().status(&slug).await,
             OrchestratorRequest::AppLogs { slug, limit, level } => {

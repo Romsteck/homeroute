@@ -292,6 +292,7 @@ async fn main() -> anyhow::Result<()> {
         context_generator: context_generator.clone(),
         log_store: log_store.clone(),
         build_locks: build_locks.clone(),
+        app_build_tx: events.app_build.clone(),
     });
 
     // ── Refresh per-app context for every existing app at boot ──────
@@ -330,9 +331,10 @@ async fn main() -> anyhow::Result<()> {
     {
         let app_state_tx = events.app_state.clone();
         let log_tx = events.log_entry.clone();
+        let app_build_tx = events.app_build.clone();
         tokio::spawn(async move {
             let socket_path = std::path::Path::new(hr_ipc::event_stream::EVENT_STREAM_SOCKET);
-            if let Err(e) = hr_ipc::event_stream::serve_event_stream(socket_path, app_state_tx, log_tx).await {
+            if let Err(e) = hr_ipc::event_stream::serve_event_stream(socket_path, app_state_tx, log_tx, app_build_tx).await {
                 tracing::error!("Event stream server error: {e:#}");
             }
         });
@@ -353,6 +355,7 @@ async fn main() -> anyhow::Result<()> {
                 base_domain: env.base_domain.clone(),
                 log_store: log_store.clone(),
                 build_locks: build_locks.clone(),
+                app_build_tx: events.app_build.clone(),
             });
         }
         st
