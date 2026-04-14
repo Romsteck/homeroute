@@ -1,18 +1,33 @@
 //! Claude Code context generation for per-app Studio awareness.
 //!
-//! Generates per-app context files so that Claude Code (running in code-server
-//! or via the VS Code extension) has full project awareness:
-//!   - {apps_path}/{slug}/CLAUDE.md                  — project identity, DB schema, MCP usage
-//!   - {apps_path}/{slug}/.claude/settings.json      — MCP server + auto-approve permissions
-//!   - {apps_path}/{slug}/.claude/rules/mcp-tools.md — MCP tools documentation
-//!   - {apps_path}/{slug}/.claude/rules/workflow.md  — development workflow
-//!   - {apps_path}/{slug}/.claude/rules/docs.md      — docs.* MCP usage (obligatoire)
-//!   - {apps_path}/{slug}/.mcp.json                  — MCP server config (CLI compat)
+//! # INVARIANT — workspace per-app
 //!
-//! Also generates global workspace files at the apps root:
-//!   - {apps_path}/CLAUDE.md                  — workspace overview, all apps table
-//!   - {apps_path}/.claude/settings.json      — MCP server (no project scoping)
-//!   - {apps_path}/.mcp.json                  — MCP server config (CLI compat)
+//! Le workspace code-server de chaque app est `{apps_path}/{slug}/src/` (voir
+//! `web/src/pages/Studio.jsx` : `?folder=.../{slug}/src`). L'agent Claude Code
+//! ne lit **que** ce qui vit sous `src/`. TOUT fichier destiné à l'agent
+//! (CLAUDE.md, .claude/, .mcp.json) DOIT donc être écrit sous `src/` ; les
+//! fichiers au niveau `{apps_path}/{slug}/` (au-dessus de `src/`) sont
+//! invisibles pour l'agent et sont activement supprimés par `generate_for_app`
+//! pour éviter toute confusion avec une version stale.
+//!
+//! Fichiers per-app générés (tous sous `{slug}/src/`) :
+//!   - `src/CLAUDE.md`                         — carnet de bord agent-owned (write-once)
+//!   - `src/.mcp.json`                         — MCP server config (CLI compat)
+//!   - `src/.claude/settings.json`             — MCP server + auto-approve
+//!   - `src/.claude/rules/app-info.md`         — identité / stack / port / autres apps (régénéré)
+//!   - `src/.claude/rules/mcp-tools.md`        — tools MCP disponibles
+//!   - `src/.claude/rules/workflow.md`         — workflow dev
+//!   - `src/.claude/rules/docs.md`             — usage obligatoire de `docs.*`
+//!   - `src/.claude/rules/claude-md-upkeep.md` — règle de maintenance de CLAUDE.md
+//!   - `src/.claude/rules/store-publishing.md` — Flutter uniquement
+//!   - `src/.claude/skills/app-build/{SKILL.md,build.sh}`
+//!   - `src/.claude/skills/{app-status,app-logs,app-db-info}/SKILL.md`
+//!
+//! Fichiers workspace-root (pour le Studio global `studio.mynetwk.biz`,
+//! workspace = `/opt/homeroute/apps/`) :
+//!   - `{apps_path}/CLAUDE.md`
+//!   - `{apps_path}/.claude/settings.json`
+//!   - `{apps_path}/.mcp.json`
 
 use std::fs;
 use std::io;
@@ -46,6 +61,14 @@ impl ContextGenerator {
     }
 
     /// Generate all context files for a single app. Idempotent.
+    ///
+    /// INVARIANT : tout ce qui est destiné à l'agent est écrit sous
+    /// `app.src_dir() == {apps_path}/{slug}/src/`. Le niveau parent
+    /// `{apps_path}/{slug}/` est réservé aux fichiers runtime (db.sqlite, .env)
+    /// et les éventuels CLAUDE.md/.claude/.mcp.json qui s'y trouvent (vestiges)
+    /// sont supprimés par `cleanup_legacy_parent_context` à chaque appel.
+    ///
+    /// Voir le doc-comment du module (`//!`) pour la structure cible complète.
     pub fn generate_for_app(
         &self,
         app: &Application,
@@ -53,128 +76,111 @@ impl ContextGenerator {
         db_tables: Option<Vec<String>>,
     ) -> anyhow::Result<()> {
         let app_dir = self.apps_path.join(&app.slug);
-        let claude_dir = app_dir.join(".claude");
-        let rules_dir = claude_dir.join("rules");
-        fs::create_dir_all(&rules_dir)?;
+        let src_dir = app.src_dir();
+        // Note : `src_dir` est `{app.app_dir()}/src` par construction (voir
+        // types.rs) — mais `app.app_dir()` est hardcodé en /opt/homeroute/apps
+        // alors que `self.apps_path` peut différer en test. On utilise donc
+        // les DEUX : `self.apps_path.join(slug)` pour le cleanup legacy (qu'on
+        // veut relatif au ContextGenerator, pour les tests), et `app.src_dir()`
+        // pour la cible des writes (chemin réel en prod).
 
-        let claude_md = self.render_claude_md(app, all_apps, &db_tables);
-        log_write(&app.slug, &app_dir.join("CLAUDE.md"), &claude_md)?;
+        // Step 1 — Cleanup des fichiers au mauvais niveau (parent) : legacy du
+        // passé où on écrivait par erreur CLAUDE.md/.claude/.mcp.json à côté
+        // de src/ au lieu de dedans.
+        cleanup_legacy_parent_context(&app_dir, &app.slug);
 
-        // Project-scoped MCP endpoint: ?project={slug} pre-contextualizes all tools
+        // Step 2 — Si src_dir n'existe pas, rien à faire : scaffold incomplet.
+        if !src_dir.exists() {
+            warn!(
+                slug = %app.slug,
+                src_dir = %src_dir.display(),
+                "src_dir absent — context generation skipped (scaffold incomplete?)"
+            );
+            return Ok(());
+        }
+
+        let src_claude_dir = src_dir.join(".claude");
+        let src_rules_dir = src_claude_dir.join("rules");
+        let src_skills_dir = src_claude_dir.join("skills");
+        fs::create_dir_all(&src_rules_dir)?;
+        fs::create_dir_all(&src_skills_dir)?;
+
+        // Step 3 — Project-scoped MCP config + settings, au seul niveau src/.
         let project_mcp = format!("{}?project={}", self.mcp_endpoint, app.slug);
         let settings = render_settings_json_with_auth(&project_mcp, self.mcp_token.as_deref());
-        log_write(&app.slug, &claude_dir.join("settings.json"), &settings)?;
-
+        log_write(&app.slug, &src_claude_dir.join("settings.json"), &settings)?;
         let mcp_json = render_mcp_json_with_auth(&project_mcp, self.mcp_token.as_deref());
-        log_write(&app.slug, &app_dir.join(".mcp.json"), &mcp_json)?;
+        log_write(&app.slug, &src_dir.join(".mcp.json"), &mcp_json)?;
 
-        // Also write into src/ (where code-server opens projects — workspace root)
-        let src_dir = app.src_dir();
-        if src_dir.exists() {
-            let src_claude_dir = src_dir.join(".claude");
-            fs::create_dir_all(&src_claude_dir)?;
-            log_write(&app.slug, &src_dir.join(".mcp.json"), &mcp_json)?;
-            log_write(&app.slug, &src_claude_dir.join("settings.json"), &settings)?;
-
-            // Clean up every legacy slash-command — tout est passé en skills.
-            let commands_dir = src_claude_dir.join("commands");
-            for legacy in OBSOLETE_SLASH_COMMANDS {
-                remove_if_exists(&commands_dir.join(legacy), &app.slug);
-            }
-            // Retire le dossier commands/ s'il est devenu vide.
-            if commands_dir.exists() {
-                if let Ok(mut entries) = fs::read_dir(&commands_dir) {
-                    if entries.next().is_none() {
-                        let _ = fs::remove_dir(&commands_dir);
-                    }
-                }
-            }
-
-            let skills_root = src_claude_dir.join("skills");
-            fs::create_dir_all(&skills_root)?;
-
-            // Skill app-build (lazy-loaded) + script bundlé.
-            let app_build_dir = skills_root.join("app-build");
-            fs::create_dir_all(&app_build_dir)?;
-            log_write(&app.slug, &app_build_dir.join("SKILL.md"), &render_app_build_skill(app))?;
-            log_write(&app.slug, &app_build_dir.join("build.sh"), &render_app_build_script(app))?;
-
-            // Skills auxiliaires (status, logs, db-info quand has_db).
-            let produced: std::collections::HashSet<&'static str> = render_extra_skills(app)
-                .iter()
-                .map(|(name, _)| *name)
-                .collect();
-            for (name, content) in render_extra_skills(app) {
-                let skill_dir = skills_root.join(name);
-                fs::create_dir_all(&skill_dir)?;
-                log_write(&app.slug, &skill_dir.join("SKILL.md"), &content)?;
-            }
-            // Nettoie les skills auxiliaires qui ne s'appliquent plus (ex: app-db-info
-            // quand has_db est passé à false).
-            for legacy_name in ALL_EXTRA_SKILL_NAMES {
-                if !produced.contains(legacy_name) {
-                    let dir = skills_root.join(legacy_name);
-                    if dir.exists() {
-                        let _ = fs::remove_dir_all(&dir);
-                    }
-                }
-            }
-
-            // Cleanup obsolete app-build rule at src level (if ever written there).
-            remove_if_exists(&src_claude_dir.join("rules").join("app-build.md"), &app.slug);
-        }
-
-        let mcp_tools = render_mcp_tools_md(app);
-        log_write(&app.slug, &rules_dir.join("mcp-tools.md"), &mcp_tools)?;
-
-        let workflow = self.render_workflow_md(app);
-        log_write(&app.slug, &rules_dir.join("workflow.md"), &workflow)?;
-
-        // Cleanup obsolete files at parent level:
-        //   - ancien rules/app-build.md (remplacé par la skill)
-        //   - skills/app-build/ écrite par erreur au mauvais niveau avant le fix workspace
-        remove_if_exists(&rules_dir.join("app-build.md"), &app.slug);
-        let stale_skill = claude_dir.join("skills").join("app-build").join("SKILL.md");
-        remove_if_exists(&stale_skill, &app.slug);
-        let stale_skill_dir = claude_dir.join("skills").join("app-build");
-        if stale_skill_dir.exists() {
-            let _ = fs::remove_dir_all(&stale_skill_dir);
-        }
-
-        let docs = render_docs_md(app);
-        log_write(&app.slug, &rules_dir.join("docs.md"), &docs)?;
+        // Step 4 — Règles régénérées intégralement.
+        log_write(&app.slug, &src_rules_dir.join("app-info.md"),
+                  &render_app_info_md(app, all_apps, &db_tables))?;
+        log_write(&app.slug, &src_rules_dir.join("mcp-tools.md"),
+                  &render_mcp_tools_md(app))?;
+        log_write(&app.slug, &src_rules_dir.join("workflow.md"),
+                  &self.render_workflow_md(app))?;
+        log_write(&app.slug, &src_rules_dir.join("docs.md"),
+                  &render_docs_md(app))?;
+        log_write(&app.slug, &src_rules_dir.join("claude-md-upkeep.md"),
+                  &render_claude_md_upkeep_md())?;
 
         if matches!(app.stack, AppStack::Flutter) {
-            let store_pub = render_store_publishing_md(app);
-            log_write(&app.slug, &rules_dir.join("store-publishing.md"), &store_pub)?;
+            log_write(&app.slug, &src_rules_dir.join("store-publishing.md"),
+                      &render_store_publishing_md(app))?;
         } else {
-            let legacy = rules_dir.join("store-publishing.md");
-            if legacy.exists() {
-                let _ = fs::remove_file(&legacy);
+            remove_if_exists(&src_rules_dir.join("store-publishing.md"), &app.slug);
+        }
+
+        // Step 5 — Cleanup des règles obsolètes (scaffolds anciens, systèmes précédents).
+        for legacy in OBSOLETE_RULE_FILES {
+            remove_if_exists(&src_rules_dir.join(legacy), &app.slug);
+        }
+
+        // Step 6 — Skills.
+        let app_build_dir = src_skills_dir.join("app-build");
+        fs::create_dir_all(&app_build_dir)?;
+        log_write(&app.slug, &app_build_dir.join("SKILL.md"), &render_app_build_skill(app))?;
+        log_write(&app.slug, &app_build_dir.join("build.sh"), &render_app_build_script(app))?;
+
+        let produced: std::collections::HashSet<&'static str> = render_extra_skills(app)
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        for (name, content) in render_extra_skills(app) {
+            let skill_dir = src_skills_dir.join(name);
+            fs::create_dir_all(&skill_dir)?;
+            log_write(&app.slug, &skill_dir.join("SKILL.md"), &content)?;
+        }
+        for legacy_name in ALL_EXTRA_SKILL_NAMES {
+            if !produced.contains(legacy_name) {
+                let dir = src_skills_dir.join(legacy_name);
+                if dir.exists() {
+                    let _ = fs::remove_dir_all(&dir);
+                }
             }
         }
 
-        // Clean up legacy rule files from the env-agent era.
-        for legacy in &[
-            "deploy.md",
-            "env-context.md",
-            "env-rules.md",
-            "git.md",
-            "homeroute-deploy.md",
-            "homeroute-dev.md",
-            "homeroute-docs.md",
-            "homeroute-dataverse.md",
-            "homeroute-store.md",
-            "project.md",
-        ] {
-            let p = rules_dir.join(legacy);
-            if p.exists() {
-                let _ = fs::remove_file(&p);
+        // Step 7 — Cleanup des slash-commands legacy (tout est skill désormais).
+        let commands_dir = src_claude_dir.join("commands");
+        for legacy in OBSOLETE_SLASH_COMMANDS {
+            remove_if_exists(&commands_dir.join(legacy), &app.slug);
+        }
+        if commands_dir.exists() {
+            if let Ok(mut entries) = fs::read_dir(&commands_dir) {
+                if entries.next().is_none() {
+                    let _ = fs::remove_dir(&commands_dir);
+                }
             }
+        }
+
+        // Step 8 — CLAUDE.md initial (skeleton), créé UNE SEULE FOIS.
+        // L'agent est ensuite propriétaire du fichier : la régénération ne le touche plus.
+        let claude_md_path = src_dir.join("CLAUDE.md");
+        if write_if_missing(&claude_md_path, &render_initial_claude_md(app))? {
+            info!(slug = %app.slug, file = %claude_md_path.display(), "CLAUDE.md skeleton created");
         }
 
         info!(slug = %app.slug, "context files generated");
-        let _ = db_tables;
         Ok(())
     }
 
@@ -210,154 +216,6 @@ impl ContextGenerator {
     }
 
     // ── Renderers ──────────────────────────────────────────────────────
-
-    fn render_claude_md(
-        &self,
-        app: &Application,
-        all_apps: &[Application],
-        db_tables: &Option<Vec<String>>,
-    ) -> String {
-        let url = format!("https://{}", app.domain);
-
-        let visibility_label = match app.visibility {
-            Visibility::Public => "Public (no auth required)",
-            Visibility::Private => "Private (HomeRoute auth required)",
-        };
-
-        let db_section = match (app.has_db, db_tables) {
-            (true, Some(tables)) if !tables.is_empty() => {
-                let mut s = String::from("Managed SQLite database (Dataverse).\n\n**Tables :**\n");
-                for t in tables {
-                    s.push_str(&format!("- `{}`\n", t));
-                }
-                s.push_str("\n- Path: `");
-                s.push_str(&app.db_path().display().to_string());
-                s.push_str("`\n");
-                s.push_str(
-                    "- Use the MCP tools `db.*` — never open the .db file directly.\n\
-                     - Read: `db_tables`, `db_schema`, `db_get_schema`, `db_overview`, `db_count_rows`, `db_query`\n\
-                     - Mutate data: `db_exec` (INSERT/UPDATE/DELETE)\n\
-                     - Mutate schema: `db_create_table`, `db_drop_table`, `db_add_column`, `db_remove_column`, `db_create_relation`, `db_sync_schema`\n\
-                     - Always declare FK relations via `db_create_relation` to enable automatic JOIN expansion.\n",
-                );
-                s
-            }
-            (true, _) => format!(
-                "Managed SQLite database (Dataverse, tables not yet inspected).\n\n\
-                 - Path: `{}`\n\
-                 - Use the MCP tools `db.*` — never open the .db file directly.\n",
-                app.db_path().display(),
-            ),
-            (false, _) => "No database configured for this app.".to_string(),
-        };
-
-        let structure_section = match &app.description {
-            Some(desc) if !desc.trim().is_empty() => desc.clone(),
-            _ => format!(
-                "- Sources: `{}`\n- Build artifacts and the `.env` file live alongside `src/`.",
-                app.src_dir().display()
-            ),
-        };
-
-        let build_cmd = app.build_command.as_deref().unwrap_or("(no build step)");
-
-        let env_var_section = if app.env_vars.is_empty() {
-            "No custom environment variables declared.".to_string()
-        } else {
-            let mut s = String::from("Defined for this app (values are not shown):\n");
-            for k in app.env_vars.keys() {
-                s.push_str(&format!("- `{}`\n", k));
-            }
-            s.push_str(
-                "\nThe runtime always sees `PORT` (the app must listen on this port — never hardcode).\n",
-            );
-            s
-        };
-
-        let other_apps: Vec<String> = all_apps
-            .iter()
-            .filter(|a| a.slug != app.slug)
-            .map(|a| {
-                format!(
-                    "- {name} (`{slug}`) — {stack}, https://{domain}",
-                    name = a.name,
-                    slug = a.slug,
-                    stack = a.stack.display_name(),
-                    domain = a.domain,
-                )
-            })
-            .collect();
-
-        let other_apps_section = if other_apps.is_empty() {
-            "No other apps configured.".to_string()
-        } else {
-            other_apps.join("\n")
-        };
-
-        format!(
-            "# {name}\n\
-             \n\
-             ## Identity\n\
-             - **Name:** {name}\n\
-             - **Slug:** `{slug}`\n\
-             - **Stack:** {stack}\n\
-             - **URL:** {url}\n\
-             - **Visibility:** {visibility}\n\
-             - **Port:** {port}\n\
-             - **App directory:** `{app_dir}`\n\
-             \n\
-             ## Project structure\n\
-             {structure}\n\
-             \n\
-             ## Database\n\
-             {db_section}\n\
-             \n\
-             ## Build & run\n\
-             - **Run:** `{run_command}`\n\
-             - **Health path:** `{health_path}`\n\
-             \n\
-             > **Build** : utilise la skill `app-build`. Ne lance jamais `{build_cmd}` manuellement — ça se fait sur CloudMaster.\n\
-             \n\
-             ## Regles de developpement\n\
-             - **Toujours builder sur place** : compiler directement sur le serveur de production, jamais de cross-compile depuis un autre poste.\n\
-             - **Pas de mode dev** : pas de `pnpm dev`, `npm run dev`, ou watch mode. Toujours builder pour la production (`pnpm build`, `cargo build --release`).\n\
-             - **Pas de pipelines** : pas de chaine de promotion dev→acc→prod. Le workflow est : editer → builder → restart → verifier.\n\
-             \n\
-             ## Environment variables\n\
-             {env_vars}\n\
-             \n\
-             ## MCP\n\
-             A single MCP server (`homeroute`) is wired up via `.claude/settings.json` and \
-             `.mcp.json`. See `.claude/rules/mcp-tools.md` for the full tool list.\n\
-             \n\
-             Read-only tools (`app.list`, `app.status`, `app.logs`, `db.tables`, `db.schema`, \
-             `db.query`, `docs.get`, `docs.list`, `docs.search`) are auto-approved. \
-             Mutations (delete, schema writes, doc updates) require explicit confirmation.\n\
-             \n\
-             ## Logging\n\
-             - Use structured logging (`info!(field = value, \"message\")`) for every meaningful \
-             operation: HTTP handlers, IPC calls, config writes, errors.\n\
-             - Never log secrets, tokens or full request bodies.\n\
-             - Logs are visible via `app.logs` and the HomeRoute logs page.\n\
-             \n\
-             ## Other apps in this workspace\n\
-             {other_apps}\n",
-            name = app.name,
-            slug = app.slug,
-            stack = app.stack.display_name(),
-            url = url,
-            visibility = visibility_label,
-            port = app.port,
-            app_dir = app.app_dir().display(),
-            structure = structure_section,
-            db_section = db_section,
-            build_cmd = build_cmd,
-            run_command = app.run_command,
-            health_path = app.health_path,
-            env_vars = env_var_section,
-            other_apps = other_apps_section,
-        )
-    }
 
     fn render_root_claude_md(&self, all_apps: &[Application]) -> String {
         let mut table_rows = String::new();
@@ -751,6 +609,186 @@ fn remove_if_exists(path: &Path, slug: &str) {
     }
 }
 
+/// Rule toujours-active (`.claude/rules/app-info.md`) qui centralise l'identité
+/// et les infos dynamiques de l'app. C'est l'ancien corps de CLAUDE.md, déplacé
+/// hors du CLAUDE.md pour que celui-ci puisse devenir agent-owned (write-once).
+fn render_app_info_md(
+    app: &Application,
+    all_apps: &[Application],
+    db_tables: &Option<Vec<String>>,
+) -> String {
+    let url = format!("https://{}", app.domain);
+    let visibility_label = match app.visibility {
+        Visibility::Public => "Public (no auth required)",
+        Visibility::Private => "Private (HomeRoute auth required)",
+    };
+
+    let db_section = match (app.has_db, db_tables) {
+        (true, Some(tables)) if !tables.is_empty() => {
+            let mut s = String::from("Managed SQLite database (Dataverse).\n\n**Tables :**\n");
+            for t in tables {
+                s.push_str(&format!("- `{}`\n", t));
+            }
+            s.push_str("\n- Path: `");
+            s.push_str(&app.db_path().display().to_string());
+            s.push_str("`\n");
+            s.push_str(
+                "- Utilise les tools MCP `db.*` — n'ouvre jamais le fichier `.db` directement.\n",
+            );
+            s
+        }
+        (true, _) => format!(
+            "Managed SQLite database (Dataverse, tables not yet inspected).\n\n\
+             - Path: `{}`\n\
+             - Utilise les tools MCP `db.*` — n'ouvre jamais le fichier `.db` directement.\n",
+            app.db_path().display(),
+        ),
+        (false, _) => "Pas de base de données configurée pour cette app.".to_string(),
+    };
+
+    let env_var_section = if app.env_vars.is_empty() {
+        "Aucune variable d'environnement custom déclarée. `PORT` est injecté automatiquement.".to_string()
+    } else {
+        let mut s = String::from("Variables d'environnement déclarées (injectées par le superviseur) :\n\n");
+        for (k, _) in app.env_vars.iter() {
+            s.push_str(&format!("- `{}`\n", k));
+        }
+        s.push_str("\n`PORT` est toujours injecté en plus.");
+        s
+    };
+
+    let mut other_apps = String::from("## Autres apps du workspace\n\n");
+    let mut has_others = false;
+    for other in all_apps {
+        if other.slug == app.slug {
+            continue;
+        }
+        has_others = true;
+        other_apps.push_str(&format!(
+            "- **{name}** (`{slug}`) — {stack}, https://{domain}\n",
+            name = other.name,
+            slug = other.slug,
+            stack = other.stack.display_name(),
+            domain = other.domain,
+        ));
+    }
+    if !has_others {
+        other_apps.push_str("_(aucune autre app enregistrée pour l'instant)_\n");
+    }
+
+    let build_cmd = app.build_command.as_deref().unwrap_or("(no build step)");
+
+    format!(
+        "# {name} — informations\n\
+         \n\
+         > Ce fichier est **régénéré** à chaque `AppUpdate`/`AppRegenerateContext`/boot.\n\
+         > Ne le modifie pas à la main — tes changements seraient écrasés.\n\
+         > Pour tes propres notes, utilise `CLAUDE.md` (agent-owned).\n\
+         \n\
+         ## Identité\n\
+         - **Nom :** {name}\n\
+         - **Slug :** `{slug}`\n\
+         - **Stack :** {stack}\n\
+         - **URL publique :** {url} ({visibility})\n\
+         - **Port interne :** {port}\n\
+         - **Health check :** `{health}`\n\
+         - **Commande de run :** `{run}`\n\
+         - **Commande de build (CloudMaster) :** `{build}`\n\
+         - **Dossier source (workspace) :** `{src_dir}`\n\
+         \n\
+         ## Base de données\n\
+         {db}\n\
+         \n\
+         ## Environnement\n\
+         {env}\n\
+         \n\
+         {others}",
+        name = app.name,
+        slug = app.slug,
+        stack = app.stack.display_name(),
+        url = url,
+        visibility = visibility_label,
+        port = app.port,
+        health = app.health_path,
+        run = app.run_command,
+        build = build_cmd,
+        src_dir = app.src_dir().display(),
+        db = db_section,
+        env = env_var_section,
+        others = other_apps,
+    )
+}
+
+/// Skeleton initial écrit dans `src/CLAUDE.md` **une seule fois** à la création
+/// de l'app. Ensuite il appartient à l'agent qui l'enrichit au fil du temps.
+/// Les règles comportementales vivent dans `.claude/rules/`, voir aussi la
+/// rule `claude-md-upkeep.md` qui détaille ce qu'il faut (et ne faut pas) y
+/// écrire.
+fn render_initial_claude_md(app: &Application) -> String {
+    format!(
+        "# {name} — Carnet de bord\n\
+         \n\
+         Ce fichier est **le tien** : architecture, décisions, apprentissages, \
+         TODOs, pièges rencontrés. Lis d'abord \
+         [`.claude/rules/claude-md-upkeep.md`](.claude/rules/claude-md-upkeep.md) \
+         avant d'y ajouter du contenu.\n\
+         \n\
+         Les informations techniques dynamiques (stack, port, autres apps, env \
+         vars, DB) sont dans [`.claude/rules/app-info.md`](.claude/rules/app-info.md) \
+         — ne les recopie pas ici.\n\
+         \n\
+         ---\n\
+         \n\
+         _Ajoute tes notes sous cette ligne. HomeRoute ne réécrira jamais ce \
+         fichier (sauf demande explicite via `AppRegenerateContext` avec un \
+         futur flag `force_claude_md`)._\n",
+        name = app.name,
+    )
+}
+
+/// Rule statique (même contenu pour toutes les apps) qui documente le rôle de
+/// `CLAUDE.md` et sa relation aux règles de `.claude/rules/`.
+fn render_claude_md_upkeep_md() -> String {
+    "# Maintenance de CLAUDE.md — règle obligatoire\n\
+     \n\
+     `CLAUDE.md` (à la racine du workspace) est le **carnet de bord du projet** : \
+     décisions d'architecture, apprentissages, TODOs non-bloquants, pièges connus, \
+     conventions locales spécifiques à cette app. Il t'appartient — tu dois le \
+     tenir à jour.\n\
+     \n\
+     ## Quand mettre à jour CLAUDE.md\n\
+     \n\
+     - Nouvelle décision d'architecture ou refactor significatif.\n\
+     - Piège ou edge-case non évident rencontré (« pourquoi cette ligne bizarre »).\n\
+     - Convention locale établie (nommage, structure d'un dossier, pattern récurrent).\n\
+     - TODO technique que tu ne traites pas maintenant.\n\
+     - Lien utile (issue, PR, doc externe) qu'un futur agent devra connaître.\n\
+     \n\
+     Ajoute une section datée `## YYYY-MM-DD — titre court`. Préfère condenser \
+     ou supprimer une vieille section plutôt que laisser s'accumuler du bruit.\n\
+     \n\
+     ## Ce qui ne doit PAS aller dans CLAUDE.md\n\
+     \n\
+     Les règles opérationnelles de l'app vivent dans `.claude/rules/` (source de \
+     vérité). **Ne les recopie jamais dans CLAUDE.md** — tu créerais des \
+     divergences. Si tu dois les citer, référence leur chemin :\n\
+     \n\
+     - Identité, stack, port, domaine, autres apps → [`app-info.md`](app-info.md) (**régénéré automatiquement**)\n\
+     - Tools MCP disponibles → [`mcp-tools.md`](mcp-tools.md)\n\
+     - Workflow (tests, lint, deploy, interdits) → [`workflow.md`](workflow.md)\n\
+     - Documentation partagée (`docs.*`) → [`docs.md`](docs.md)\n\
+     - Build → skill `app-build`\n\
+     \n\
+     ## Style\n\
+     \n\
+     - Sections courtes, datées, orientées « futur toi-même qui ouvre le projet \
+       dans 3 mois ».\n\
+     - Pas de duplication avec les rules ci-dessus.\n\
+     - Le ton est libre mais précis : privilégie les faits et les décisions aux \
+       narrations.\n"
+        .to_string()
+}
+
 fn render_store_publishing_md(app: &Application) -> String {
     format!(
         "# Publication Store — Règles obligatoires\n\
@@ -864,6 +902,21 @@ fn write_if_changed(path: &Path, content: &str) -> io::Result<bool> {
     Ok(true)
 }
 
+/// Write `content` to `path` only if the file does not already exist. Returns
+/// `true` if the file was created. Utilisé pour les fichiers « agent-owned »
+/// (typiquement `CLAUDE.md`) qu'on initialise avec un skeleton mais qu'on ne
+/// doit jamais écraser ensuite — sinon l'agent perdrait ses notes.
+fn write_if_missing(path: &Path, content: &str) -> io::Result<bool> {
+    if path.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, content)?;
+    Ok(true)
+}
+
 fn log_write(slug: &str, path: &Path, content: &str) -> io::Result<()> {
     let changed = write_if_changed(path, content)?;
     if changed {
@@ -948,6 +1001,39 @@ const OBSOLETE_SLASH_COMMANDS: &[&str] = &[
 /// de l'app change (ex: app passe de `has_db=true` à `false` → retirer app-db-info).
 const ALL_EXTRA_SKILL_NAMES: &[&str] = &["app-status", "app-logs", "app-db-info"];
 
+/// Fichiers `rules/*.md` obsolètes à nettoyer à chaque génération. Certains
+/// étaient produits par un système antérieur (bootstrap env-agent) et sont
+/// encore présents sous `src/.claude/rules/` dans les apps existantes ; d'autres
+/// ont été renommés ou fusionnés au fil du temps.
+const OBSOLETE_RULE_FILES: &[&str] = &[
+    "env-rules.md",
+    "env-context.md",
+    "git.md",
+    "app-build.md",
+    "deploy.md",
+    "project.md",
+    "homeroute-deploy.md",
+    "homeroute-dev.md",
+    "homeroute-docs.md",
+    "homeroute-dataverse.md",
+    "homeroute-store.md",
+];
+
+/// Nettoie les fichiers de contexte agent qui traînent au niveau `app_dir`
+/// (au-dessus de `src/`). Aucun fichier utile ne doit vivre là — voir
+/// l'INVARIANT du module. Silencieux si rien à supprimer.
+fn cleanup_legacy_parent_context(app_dir: &Path, slug: &str) {
+    remove_if_exists(&app_dir.join("CLAUDE.md"), slug);
+    remove_if_exists(&app_dir.join(".mcp.json"), slug);
+    let parent_claude = app_dir.join(".claude");
+    if parent_claude.exists() {
+        match fs::remove_dir_all(&parent_claude) {
+            Ok(()) => info!(slug, path = %parent_claude.display(), "legacy parent .claude/ removed"),
+            Err(e) => warn!(slug, path = %parent_claude.display(), error = %e, "failed to remove legacy parent .claude/"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -984,32 +1070,41 @@ mod tests {
         let wallet = make_app("wallet", "Wallet", false);
         let all = vec![trader.clone(), wallet.clone()];
 
-        // Create src/ so src_dir.exists() → true (code-server workspace root).
+        // Scaffold src/ pour que `app.src_dir().exists()` soit vrai dans le test.
+        // ⚠ Application::src_dir() est hardcodé en /opt/homeroute/apps/... donc on
+        // construit le path "relatif au tmp" manuellement pour les assertions,
+        // sachant que le code réel utilise le hardcoded. On valide donc le contenu
+        // renderer par renderer ici plutôt que leur écriture physique sous tmp.
         fs::create_dir_all(tmp.join("trader/src")).unwrap();
 
-        // Pré-créer un ancien rules/app-build.md bidon : doit être supprimé par generate_for_app.
-        let stale_rules_dir = tmp.join("trader/.claude/rules");
-        fs::create_dir_all(&stale_rules_dir).unwrap();
-        let stale_path = stale_rules_dir.join("app-build.md");
-        fs::write(&stale_path, "stale content").unwrap();
-        assert!(stale_path.exists());
+        // Pré-créer des vestiges au niveau parent (app_dir) : CLAUDE.md, .mcp.json, .claude/
+        // → doivent tous disparaître après generate_for_app (cleanup legacy).
+        let parent_dir = tmp.join("trader");
+        fs::write(parent_dir.join("CLAUDE.md"), "stale parent CLAUDE").unwrap();
+        fs::write(parent_dir.join(".mcp.json"), "{}").unwrap();
+        fs::create_dir_all(parent_dir.join(".claude/rules")).unwrap();
+        fs::write(parent_dir.join(".claude/settings.json"), "{}").unwrap();
+        fs::write(parent_dir.join(".claude/rules/app-build.md"), "stale rule").unwrap();
+        assert!(parent_dir.join("CLAUDE.md").exists());
+        assert!(parent_dir.join(".claude").exists());
 
         ctx.generate_for_app(&trader, &all, Some(vec!["users".into(), "trades".into()]))
             .unwrap();
 
-        // L'ancien fichier doit avoir été supprimé.
-        assert!(!stale_path.exists(), "ancien rules/app-build.md doit être supprimé");
+        // Cleanup legacy parent-level : tout a disparu.
+        assert!(!parent_dir.join("CLAUDE.md").exists(),
+                "trader/CLAUDE.md parent-level doit être supprimé");
+        assert!(!parent_dir.join(".mcp.json").exists(),
+                "trader/.mcp.json parent-level doit être supprimé");
+        assert!(!parent_dir.join(".claude").exists(),
+                "trader/.claude/ parent-level doit être supprimé intégralement");
 
-        let claude_md = fs::read_to_string(tmp.join("trader/CLAUDE.md")).unwrap();
-        assert!(claude_md.contains("# Trader"));
-        assert!(claude_md.contains("`trader`"));
-        assert!(claude_md.contains("Vite+Rust"));
-        assert!(claude_md.contains("`users`"));
-        assert!(claude_md.contains("`trades`"));
-        assert!(claude_md.contains("Wallet"));
-        assert!(claude_md.contains("`API_KEY`"));
-
-        let settings = fs::read_to_string(tmp.join("trader/.claude/settings.json")).unwrap();
+        // Les renderers produisent le bon contenu (vérif directe, indépendante du
+        // path d'écriture physique qui dépend du hardcoded src_dir).
+        let settings = render_settings_json_with_auth(
+            "http://127.0.0.1:4001/mcp?project=trader",
+            None,
+        );
         let parsed: serde_json::Value = serde_json::from_str(&settings).unwrap();
         assert_eq!(
             parsed["mcpServers"]["homeroute"]["url"].as_str().unwrap(),
@@ -1023,24 +1118,45 @@ mod tests {
                 .any(|v| v.as_str() == Some("mcp__homeroute__app_list"))
         );
 
-        let mcp_json = fs::read_to_string(tmp.join("trader/.mcp.json")).unwrap();
-        assert!(mcp_json.contains("\"homeroute\""));
+        // app-info.md contient l'identité + autres apps + DB tables.
+        let app_info = render_app_info_md(&trader, &all, &Some(vec!["users".into(), "trades".into()]));
+        assert!(app_info.contains("`trader`"));
+        assert!(app_info.contains("Vite+Rust"));
+        assert!(app_info.contains("`users`"));
+        assert!(app_info.contains("`trades`"));
+        assert!(app_info.contains("Wallet"));
+        assert!(app_info.contains("`API_KEY`"));
 
-        assert!(tmp.join("trader/.claude/rules/mcp-tools.md").exists());
-        assert!(tmp.join("trader/.claude/rules/workflow.md").exists());
-        // Note: the app-build skill is written under `app.src_dir()/.claude/skills/`,
-        // which uses a hardcoded /opt/homeroute/apps path from Application::src_dir().
-        // We validate its content via render_app_build_skill directly below.
+        // Skeleton CLAUDE.md minimal, n'inclut PAS les infos dynamiques.
+        let initial_md = render_initial_claude_md(&trader);
+        assert!(initial_md.contains("# Trader — Carnet de bord"));
+        assert!(!initial_md.contains("Vite+Rust"),
+                "skeleton CLAUDE.md ne doit pas dupliquer app-info.md");
+
+        // Skill app-build + script.
         let skill_content = render_app_build_skill(&trader);
         assert!(skill_content.contains("name: app-build"));
         assert!(skill_content.contains("allowed-tools: Bash(bash .claude/skills/app-build/build.sh"));
         assert!(skill_content.contains("bash .claude/skills/app-build/build.sh"));
-        // Le curl est maintenant dans le script séparé.
         let script = render_app_build_script(&trader);
         assert!(script.contains("/api/apps/trader/build"));
         assert!(script.starts_with("#!/usr/bin/env bash"));
-        assert!(tmp.join("trader/.claude/rules/docs.md").exists());
 
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn generate_for_app_skips_when_src_missing() {
+        let tmp = std::env::temp_dir().join("hr-apps-context-test-no-src");
+        let _ = fs::remove_dir_all(&tmp);
+        let ctx = test_generator(&tmp);
+        let app = make_app("ghost", "Ghost", false);
+        // src_dir absent → generate_for_app doit retourner Ok sans crash, avec warn.
+        let result = ctx.generate_for_app(&app, &[app.clone()], None);
+        assert!(result.is_ok(), "no-src should be a soft skip, not an error");
+        // Rien n'a été créé sous tmp/ghost/
+        assert!(!tmp.join("ghost/.claude").exists());
+        assert!(!tmp.join("ghost/CLAUDE.md").exists());
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -1079,11 +1195,56 @@ mod tests {
     }
 
     #[test]
-    fn no_db_app_renders_no_database_section() {
-        let tmp = std::env::temp_dir().join("hr-apps-context-test-4");
-        let ctx = test_generator(&tmp);
+    fn app_info_md_no_db_renders_no_database_section() {
         let app = make_app("static", "Static", false);
-        let md = ctx.render_claude_md(&app, &[app.clone()], &None);
-        assert!(md.contains("No database configured"));
+        let md = render_app_info_md(&app, &[app.clone()], &None);
+        assert!(
+            md.contains("Pas de base de données"),
+            "app-info.md should say no DB when has_db=false: {md}"
+        );
+    }
+
+    #[test]
+    fn app_info_md_has_identity_fields() {
+        let mut trader = make_app("trader", "Trader", true);
+        trader.port = 3008;
+        let calendar = make_app("calendar", "Calendar", false);
+        let md = render_app_info_md(&trader, &[trader.clone(), calendar.clone()], &Some(vec!["users".into()]));
+        assert!(md.contains("**Slug :** `trader`"));
+        assert!(md.contains("**Port interne :** 3008"));
+        assert!(md.contains("Calendar"), "liste des autres apps: {md}");
+        assert!(md.contains("`users`"));
+    }
+
+    #[test]
+    fn claude_md_upkeep_rule_is_static_and_mentions_rules() {
+        let md = render_claude_md_upkeep_md();
+        assert!(md.contains("# Maintenance de CLAUDE.md"));
+        assert!(md.contains("app-info.md"));
+        assert!(md.contains("mcp-tools.md"));
+        assert!(md.contains("workflow.md"));
+    }
+
+    #[test]
+    fn initial_claude_md_is_a_skeleton() {
+        let trader = make_app("trader", "Trader", true);
+        let md = render_initial_claude_md(&trader);
+        assert!(md.contains("# Trader — Carnet de bord"));
+        assert!(md.contains("claude-md-upkeep.md"));
+        assert!(md.contains("app-info.md"));
+    }
+
+    #[test]
+    fn write_if_missing_only_writes_once() {
+        let tmp = std::env::temp_dir().join("hr-apps-context-write-if-missing");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("claude.md");
+        assert!(write_if_missing(&path, "v1").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "v1");
+        // Deuxième appel : le fichier existe, pas de write.
+        assert!(!write_if_missing(&path, "v2").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "v1");
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

@@ -192,6 +192,14 @@ Les applications sont gérées **directement sur l'hôte** par le supervisor `hr
 - Visibility : `public` (accès anonyme) ou `private` (auth via hr-auth)
 - Logs : capturés par le supervisor (stdout/stderr) → exposés via l'API logs
 
+### Workspace per-app (⚠ règle invariante)
+
+Le workspace code-server d'une app est **`{slug}/src/`**, pas `{slug}/`. Tous les fichiers destinés à l'agent Claude Code (`CLAUDE.md`, `.claude/`, `.mcp.json`) DOIVENT vivre sous `src/` — tout fichier au-dessus de `src/` est invisible pour l'agent et sera supprimé automatiquement.
+
+`src/CLAUDE.md` est **agent-owned** (write-once) ; les infos dynamiques (stack, port, autres apps) sont dans `src/.claude/rules/app-info.md` (régénéré).
+
+Détails complets et check de violation : [.claude/rules/apps-workspace-layout.md](.claude/rules/apps-workspace-layout.md).
+
 ### Studio (code-server global)
 
 - URL : `studio.mynetwk.biz` → `127.0.0.1:8443`
