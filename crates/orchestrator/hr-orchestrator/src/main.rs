@@ -250,6 +250,7 @@ async fn main() -> anyhow::Result<()> {
         events.app_state.clone(),
     );
     let db_manager = DbManager::new("/opt/homeroute/apps");
+    let todos_manager = hr_apps::todos::TodosManager::new("/opt/homeroute/apps", events.clone());
     let mcp_endpoint_url = std::env::var("HR_APPS_MCP_ENDPOINT")
         .unwrap_or_else(|_| "http://127.0.0.1:4001/mcp".to_string());
     let context_generator = Arc::new(ContextGenerator::new(
@@ -289,6 +290,7 @@ async fn main() -> anyhow::Result<()> {
         base_domain: env.base_domain.clone(),
         app_supervisor: supervisor.clone(),
         db_manager: db_manager.clone(),
+        todos: todos_manager.clone(),
         context_generator: context_generator.clone(),
         log_store: log_store.clone(),
         build_locks: build_locks.clone(),
@@ -332,9 +334,10 @@ async fn main() -> anyhow::Result<()> {
         let app_state_tx = events.app_state.clone();
         let log_tx = events.log_entry.clone();
         let app_build_tx = events.app_build.clone();
+        let app_todos_tx = events.app_todos.clone();
         tokio::spawn(async move {
             let socket_path = std::path::Path::new(hr_ipc::event_stream::EVENT_STREAM_SOCKET);
-            if let Err(e) = hr_ipc::event_stream::serve_event_stream(socket_path, app_state_tx, log_tx, app_build_tx).await {
+            if let Err(e) = hr_ipc::event_stream::serve_event_stream(socket_path, app_state_tx, log_tx, app_build_tx, app_todos_tx).await {
                 tracing::error!("Event stream server error: {e:#}");
             }
         });
@@ -349,6 +352,7 @@ async fn main() -> anyhow::Result<()> {
             s.apps_ctx = Some(apps_handler::AppsContext {
                 supervisor: supervisor.clone(),
                 db_manager: db_manager.clone(),
+                todos: todos_manager.clone(),
                 context_generator: context_generator.clone(),
                 edge: edge.clone(),
                 git: git_service.clone(),

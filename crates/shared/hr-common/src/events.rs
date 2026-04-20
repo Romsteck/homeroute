@@ -41,6 +41,8 @@ pub struct EventBus {
     pub app_state: broadcast::Sender<AppStateEvent>,
     /// App build progress events (supervisor build pipeline → websocket)
     pub app_build: broadcast::Sender<AppBuildEvent>,
+    /// Per-app todos change events (todos manager → websocket for Studio right-panel)
+    pub app_todos: broadcast::Sender<AppTodosEvent>,
 }
 
 impl EventBus {
@@ -65,6 +67,7 @@ impl EventBus {
             log_entry: broadcast::channel(512).0,
             app_state: broadcast::channel(64).0,
             app_build: broadcast::channel(128).0,
+            app_todos: broadcast::channel(64).0,
         }
     }
 }
@@ -414,6 +417,15 @@ pub struct AppBuildEvent {
     pub duration_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Per-app todos change event (todos manager → websocket for Studio panel).
+/// `todos` is a full snapshot of the app's todo list (kept as generic JSON
+/// values to avoid a dependency cycle with `hr-apps`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppTodosEvent {
+    pub slug: String,
+    pub todos: Vec<serde_json::Value>,
 }
 
 /// Energy metrics event (energy poller → websocket for frontend display).

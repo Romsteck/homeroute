@@ -23,6 +23,7 @@ pub async fn serve_event_stream(
     app_state_rx: broadcast::Sender<hr_common::events::AppStateEvent>,
     log_rx: broadcast::Sender<hr_common::logging::LogEntry>,
     app_build_rx: broadcast::Sender<hr_common::events::AppBuildEvent>,
+    app_todos_rx: broadcast::Sender<hr_common::events::AppTodosEvent>,
 ) -> anyhow::Result<()> {
     // Remove stale socket
     let _ = tokio::fs::remove_file(socket_path).await;
@@ -35,8 +36,9 @@ pub async fn serve_event_stream(
                 let app_tx = app_state_rx.clone();
                 let log_tx = log_rx.clone();
                 let build_tx = app_build_rx.clone();
+                let todos_tx = app_todos_rx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_event_client(stream, app_tx, log_tx, build_tx).await {
+                    if let Err(e) = handle_event_client(stream, app_tx, log_tx, build_tx, todos_tx).await {
                         warn!(error = %e, "Event stream client disconnected");
                     }
                 });
@@ -53,11 +55,13 @@ async fn handle_event_client(
     app_state_tx: broadcast::Sender<hr_common::events::AppStateEvent>,
     log_tx: broadcast::Sender<hr_common::logging::LogEntry>,
     app_build_tx: broadcast::Sender<hr_common::events::AppBuildEvent>,
+    app_todos_tx: broadcast::Sender<hr_common::events::AppTodosEvent>,
 ) -> anyhow::Result<()> {
     let (_, mut writer) = stream.into_split();
     let mut app_rx = app_state_tx.subscribe();
     let mut log_rx = log_tx.subscribe();
     let mut build_rx = app_build_tx.subscribe();
+    let mut todos_rx = app_todos_tx.subscribe();
 
     info!("Event stream client connected");
 
@@ -72,6 +76,12 @@ async fn handle_event_client(
             Ok(ev) = build_rx.recv() => {
                 IpcEvent {
                     channel: "app:build".to_string(),
+                    payload: serde_json::to_value(&ev).unwrap_or_default(),
+                }
+            }
+            Ok(ev) = todos_rx.recv() => {
+                IpcEvent {
+                    channel: "app:todos".to_string(),
                     payload: serde_json::to_value(&ev).unwrap_or_default(),
                 }
             }
@@ -126,6 +136,11 @@ pub async fn connect_event_stream(
                             "app:build" => {
                                 if let Ok(ev) = serde_json::from_value::<hr_common::events::AppBuildEvent>(event.payload) {
                                     let _ = events.app_build.send(ev);
+                                }
+                            }
+                            "app:todos" => {
+                                if let Ok(ev) = serde_json::from_value::<hr_common::events::AppTodosEvent>(event.payload) {
+                                    let _ = events.app_todos.send(ev);
                                 }
                             }
                             "app:log" => {

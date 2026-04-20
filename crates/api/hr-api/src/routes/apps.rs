@@ -34,6 +34,7 @@ pub fn router() -> Router<ApiState> {
         .route("/apps/{slug}/exec", post(app_exec))
         .route("/apps/{slug}/env", get(get_app_env).put(update_app_env))
         .route("/apps/{slug}/regenerate-context", post(regenerate_context))
+        .route("/apps/{slug}/todos", get(app_todos))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -324,6 +325,33 @@ async fn control_app(
                 action,
                 duration_ms = started.elapsed().as_millis() as u64,
                 "control_app done"
+            );
+            ipc_response(resp)
+        }
+        Err(e) => ipc_err_response(e),
+    }
+}
+
+#[tracing::instrument(skip(state))]
+async fn app_todos(State(state): State<ApiState>, Path(slug): Path<String>) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    let started = Instant::now();
+    info!(slug, "Fetching app todos");
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::AppTodosList {
+            slug: slug.clone(),
+            status: None,
+        })
+        .await
+    {
+        Ok(resp) => {
+            info!(
+                slug,
+                duration_ms = started.elapsed().as_millis() as u64,
+                "app_todos done"
             );
             ipc_response(resp)
         }

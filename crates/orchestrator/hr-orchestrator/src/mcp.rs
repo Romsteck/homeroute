@@ -497,6 +497,7 @@ fn is_project_simplified_tool(name: &str) -> bool {
             | "db_tables" | "db_schema" | "db_query" | "db_find" | "db_exec"
             | "docs_read" | "docs_write"
             | "git_log" | "git_branches"
+            | "todos_list" | "todos_create" | "todos_update" | "todos_delete"
     )
 }
 
@@ -520,7 +521,12 @@ fn tool_definitions_project() -> Value {
         { "name": "docs_write", "description": "Update a documentation section.", "inputSchema": { "type": "object", "properties": { "section": { "type": "string", "enum": ["meta", "structure", "features", "backend", "notes"] }, "content": { "type": "string" } }, "required": ["section", "content"] } },
         // ── Git ──
         { "name": "git_log", "description": "Get recent git commit history.", "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer", "default": 20 } } } },
-        { "name": "git_branches", "description": "List git branches.", "inputSchema": { "type": "object", "properties": {} } }
+        { "name": "git_branches", "description": "List git branches.", "inputSchema": { "type": "object", "properties": {} } },
+        // ── Todos (per-app, live in Studio right-panel) ──
+        { "name": "todos_list", "description": "List the app's todos (optionally filtered by status). Visible live in the Studio right-side panel.", "inputSchema": { "type": "object", "properties": { "status": { "type": "string", "enum": ["pending", "in_progress", "done", "blocked"] } } } },
+        { "name": "todos_create", "description": "Create a new todo for this app. Appears instantly in the Studio panel.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string", "description": "Short title" }, "description": { "type": "string" } }, "required": ["name"] } },
+        { "name": "todos_update", "description": "Update a todo's fields. Use `status` = pending|in_progress|done|blocked; set `status_reason` when blocking.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "description": { "type": "string" }, "status": { "type": "string", "enum": ["pending", "in_progress", "done", "blocked"] }, "status_reason": { "type": "string" } }, "required": ["id"] } },
+        { "name": "todos_delete", "description": "Delete a todo by id.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } }
     ])
 }
 
@@ -656,6 +662,10 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "docs_write" => tool_docs_update(id, &arguments).await,
         "git_log" => tool_git_log(id, &arguments, state).await,
         "git_branches" => tool_git_branches(id, &arguments).await,
+        "todos_list" => tool_todos_list(id, &arguments, state).await,
+        "todos_create" => tool_todos_create(id, &arguments, state).await,
+        "todos_update" => tool_todos_update(id, &arguments, state).await,
+        "todos_delete" => tool_todos_delete(id, &arguments, state).await,
         _ => {
             warn!(tool = tool_name, "Unknown tool");
             error_response(id, METHOD_NOT_FOUND, format!("Tool not found: {tool_name}"))
@@ -2616,6 +2626,94 @@ async fn tool_studio_refresh_all(id: Value, state: &McpState) -> Value {
         refreshed += 1;
     }
     tool_success(id, json!({ "refreshed": refreshed, "total": apps.len() }))
+}
+
+// ── Todos tools ─────────────────────────────────────────────────────
+
+async fn tool_todos_list(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let status = args.get("status").and_then(|v| v.as_str()).map(String::from);
+    ipc_resp_to_mcp(id, ctx.todos_list(slug.to_string(), status).await)
+}
+
+async fn tool_todos_create(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing name".into());
+    };
+    let description = args
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    ipc_resp_to_mcp(
+        id,
+        ctx.todos_create(slug.to_string(), name.to_string(), description)
+            .await,
+    )
+}
+
+async fn tool_todos_update(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(todo_id) = args.get("id").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing id".into());
+    };
+    let name = args.get("name").and_then(|v| v.as_str()).map(String::from);
+    let description = args
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let status = args.get("status").and_then(|v| v.as_str()).map(String::from);
+    let status_reason = args
+        .get("status_reason")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    ipc_resp_to_mcp(
+        id,
+        ctx.todos_update(
+            slug.to_string(),
+            todo_id.to_string(),
+            name,
+            description,
+            status,
+            status_reason,
+        )
+        .await,
+    )
+}
+
+async fn tool_todos_delete(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(todo_id) = args.get("id").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing id".into());
+    };
+    ipc_resp_to_mcp(
+        id,
+        ctx.todos_delete(slug.to_string(), todo_id.to_string()).await,
+    )
 }
 
 #[cfg(test)]

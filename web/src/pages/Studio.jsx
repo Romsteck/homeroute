@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import useWebSocket from '../hooks/useWebSocket';
 import { useStudio } from '../context/StudioContext';
 import DbExplorer from './DbExplorer';
+import TodosPanel from '../components/TodosPanel';
 import {
   Code2, BookOpen, Database, ScrollText, KeyRound, Settings as SettingsIcon,
   ExternalLink, Save, Loader2, Plus, Play, Square, Trash2, X, Globe, Lock,
@@ -561,6 +562,8 @@ export default function Studio() {
           )}
         </div>
       </div>
+
+      {selectedSlug && <TodosPanel slug={selectedSlug} />}
 
       {showCreate && <CreateAppModal onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); fetchApps(); }} />}
     </div>

@@ -279,6 +279,35 @@ pub enum OrchestratorRequest {
         slug: String,
         relation: serde_json::Value,
     },
+
+    // ── Per-app todos (JSON-backed, live via app_todos event) ─────
+    AppTodosList {
+        slug: String,
+        #[serde(default)]
+        status: Option<String>,
+    },
+    AppTodosCreate {
+        slug: String,
+        name: String,
+        #[serde(default)]
+        description: Option<String>,
+    },
+    AppTodosUpdate {
+        slug: String,
+        id: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        status_reason: Option<String>,
+    },
+    AppTodosDelete {
+        slug: String,
+        id: String,
+    },
 }
 
 // ── OrchestratorClient ───────────────────────────────────────

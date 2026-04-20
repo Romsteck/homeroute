@@ -18,6 +18,7 @@
 //!   - `src/.claude/rules/mcp-tools.md`        — tools MCP disponibles
 //!   - `src/.claude/rules/workflow.md`         — workflow dev
 //!   - `src/.claude/rules/docs.md`             — usage obligatoire de `docs.*`
+//!   - `src/.claude/rules/todos.md`            — usage obligatoire de `todos.*` (panneau Studio)
 //!   - `src/.claude/rules/claude-md-upkeep.md` — règle de maintenance de CLAUDE.md
 //!   - `src/.claude/rules/store-publishing.md` — Flutter uniquement
 //!   - `src/.claude/skills/app-build/{SKILL.md,build.sh}`
@@ -121,6 +122,8 @@ impl ContextGenerator {
                   &self.render_workflow_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("docs.md"),
                   &render_docs_md(app))?;
+        log_write(&app.slug, &src_rules_dir.join("todos.md"),
+                  &render_todos_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("claude-md-upkeep.md"),
                   &render_claude_md_upkeep_md())?;
 
@@ -399,6 +402,12 @@ fn render_mcp_tools_md(app: &Application) -> String {
          - `docs.get` — read a doc section (`meta`, `structure`, `features`, `backend`, `notes`)\n\
          - `docs.search` — full-text search across all docs\n\
          - `docs.update` — update a section (mutation, not auto-approved)\n\
+         \n\
+         ## Todos (`todos_*`) — visibles dans le panneau droit du Studio\n\
+         - `todos_list` — lister les todos (filtre optionnel par `status`)\n\
+         - `todos_create` — créer (`name`, `description?`)\n\
+         - `todos_update` — modifier (`id`, `status?`, `status_reason?`, etc.)\n\
+         - `todos_delete` — supprimer (`id`)\n\
          \n\
          ## Store (`store.*`)\n\
          - Tools for the HomeRoute mobile store (uploads, listings).\n\
@@ -746,6 +755,59 @@ fn render_initial_claude_md(app: &Application) -> String {
     )
 }
 
+/// Rule obligatoire pour l'usage des tools MCP `todos.*` — les todos sont
+/// visibles en live dans le panneau latéral droit du Studio de l'app.
+fn render_todos_md(app: &Application) -> String {
+    format!(
+        "# Todos — {name} (OBLIGATOIRE)\n\
+         \n\
+         Cette app possède un système de todos scopé projet, accessible via les tools \
+         MCP `todos_*`. Les todos sont stockés dans `todos.json` de l'app et affichés \
+         **en temps réel** dans le panneau latéral droit du Studio \
+         ({slug}.mynetwk.biz via studio.mynetwk.biz).\n\
+         \n\
+         Contrairement aux todos du Hub (qui sont globaux), ceux-ci sont **scopés à \
+         l'app** et destinés à l'utilisateur qui regarde le Studio en direct. Utilise-les \
+         comme un compagnon de travail visible.\n\
+         \n\
+         ## Règles obligatoires\n\
+         \n\
+         ### Au début d'une session non triviale\n\
+         - Appeler `todos_list` avec `status = \"pending\"` pour voir les todos déjà ouverts.\n\
+         - S'il reste des todos de sessions précédentes, les prendre en compte avant d'en créer de nouveaux.\n\
+         \n\
+         ### Pendant le travail\n\
+         - **Nouvelle tâche identifiée** → `todos_create` avec un `name` court et une `description` claire.\n\
+         - **Début de travail sur un todo** → `todos_update` avec `status = \"in_progress\"`.\n\
+         - **Blocage** → `todos_update` avec `status = \"blocked\"` + `status_reason` expliquant quoi.\n\
+         - **Tâche terminée** → `todos_update` avec `status = \"done\"`.\n\
+         - **Todo obsolète / doublon** → `todos_delete`.\n\
+         \n\
+         ## Forme attendue\n\
+         \n\
+         | Champ | Rôle |\n\
+         |---|---|\n\
+         | `name` | Titre court (≈ 80 chars max), orienté action |\n\
+         | `description` | Contexte / ce qu'il faut faire, orienté utilisateur |\n\
+         | `status` | `pending` / `in_progress` / `done` / `blocked` |\n\
+         | `status_reason` | Obligatoire pour `blocked`, utile pour les autres si non évident |\n\
+         \n\
+         ## Tools MCP\n\
+         \n\
+         | Tool | Usage |\n\
+         |---|---|\n\
+         | `todos_list` | Lister (filtre optionnel par `status`) |\n\
+         | `todos_create` | Créer (`name`, `description?`) |\n\
+         | `todos_update` | Modifier (`id`, puis les champs à changer) |\n\
+         | `todos_delete` | Supprimer (`id`) |\n\
+         \n\
+         Le `slug` de l'app (`{slug}`) est injecté automatiquement par le MCP projet — \
+         ne le passe pas dans les arguments.\n",
+        name = app.name,
+        slug = app.slug,
+    )
+}
+
 /// Rule statique (même contenu pour toutes les apps) qui documente le rôle de
 /// `CLAUDE.md` et sa relation aux règles de `.claude/rules/`.
 fn render_claude_md_upkeep_md() -> String {
@@ -871,6 +933,10 @@ fn render_settings_json_with_auth(mcp_endpoint: &str, token: Option<&str>) -> St
                 "mcp__homeroute__docs_get",
                 "mcp__homeroute__docs_list",
                 "mcp__homeroute__docs_search",
+                "mcp__homeroute__todos_list",
+                "mcp__homeroute__todos_create",
+                "mcp__homeroute__todos_update",
+                "mcp__homeroute__todos_delete",
             ],
             "deny": [],
         }

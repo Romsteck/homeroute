@@ -38,6 +38,7 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
     let mut log_rx = state.events.log_entry.subscribe();
     let mut app_state_rx = state.events.app_state.subscribe();
     let mut app_build_rx = state.events.app_build.subscribe();
+    let mut app_todos_rx = state.events.app_todos.subscribe();
 
     loop {
         tokio::select! {
@@ -385,6 +386,25 @@ async fn handle_socket(mut socket: WebSocket, state: ApiState) {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("WebSocket app_state lagged by {}", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            // Per-app todos live updates
+            result = app_todos_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let msg = json!({
+                            "type": "app:todos",
+                            "data": event
+                        });
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("WebSocket app_todos lagged by {}", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

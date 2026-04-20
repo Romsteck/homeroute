@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use crate::scaffold;
 
 use hr_apps::types::{AppStack, AppState, Application, Visibility, valid_slug};
+use hr_apps::todos::{TodoStatus, TodosManager};
 use hr_apps::{AppSupervisor, ContextGenerator, DbManager, ProcessStatus};
 use hr_common::events::AppBuildEvent;
 use hr_common::logging::LogStore;
@@ -48,6 +49,7 @@ const OUTPUT_CAP_BYTES: usize = 1024 * 1024;
 pub struct AppsContext {
     pub supervisor: AppSupervisor,
     pub db_manager: DbManager,
+    pub todos: TodosManager,
     pub context_generator: Arc<ContextGenerator>,
     pub edge: Arc<EdgeClient>,
     pub git: Arc<hr_git::GitService>,
@@ -818,6 +820,103 @@ impl AppsContext {
         }
     }
 
+    // ── Todos (per-app JSON store, live via app_todos event) ─────
+
+    pub async fn todos_list(&self, slug: String, status: Option<String>) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        let filter = match status.as_deref() {
+            None => None,
+            Some(s) => match TodoStatus::parse(s) {
+                Ok(v) => Some(v),
+                Err(e) => return IpcResponse::err(e.to_string()),
+            },
+        };
+        match self.todos.list(&slug, filter).await {
+            Ok(todos) => {
+                info!(slug = %slug, count = todos.len(), "AppTodosList ok");
+                IpcResponse::ok_data(serde_json::json!({ "todos": todos }))
+            }
+            Err(e) => {
+                error!(slug = %slug, error = %e, "AppTodosList failed");
+                IpcResponse::err(format!("todos_list: {e}"))
+            }
+        }
+    }
+
+    pub async fn todos_create(
+        &self,
+        slug: String,
+        name: String,
+        description: Option<String>,
+    ) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        match self.todos.create(&slug, name, description).await {
+            Ok(todo) => {
+                info!(slug = %slug, id = %todo.id, "AppTodosCreate ok");
+                IpcResponse::ok_data(serde_json::json!({ "todo": todo }))
+            }
+            Err(e) => {
+                error!(slug = %slug, error = %e, "AppTodosCreate failed");
+                IpcResponse::err(format!("todos_create: {e}"))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn todos_update(
+        &self,
+        slug: String,
+        id: String,
+        name: Option<String>,
+        description: Option<String>,
+        status: Option<String>,
+        status_reason: Option<String>,
+    ) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        let status_enum = match status.as_deref() {
+            None => None,
+            Some(s) => match TodoStatus::parse(s) {
+                Ok(v) => Some(v),
+                Err(e) => return IpcResponse::err(e.to_string()),
+            },
+        };
+        match self
+            .todos
+            .update(&slug, &id, name, description, status_enum, status_reason)
+            .await
+        {
+            Ok(todo) => {
+                info!(slug = %slug, id = %todo.id, "AppTodosUpdate ok");
+                IpcResponse::ok_data(serde_json::json!({ "todo": todo }))
+            }
+            Err(e) => {
+                error!(slug = %slug, error = %e, "AppTodosUpdate failed");
+                IpcResponse::err(format!("todos_update: {e}"))
+            }
+        }
+    }
+
+    pub async fn todos_delete(&self, slug: String, id: String) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        match self.todos.delete(&slug, &id).await {
+            Ok(()) => {
+                info!(slug = %slug, id = %id, "AppTodosDelete ok");
+                IpcResponse::ok_data(serde_json::json!({ "ok": true }))
+            }
+            Err(e) => {
+                error!(slug = %slug, id = %id, error = %e, "AppTodosDelete failed");
+                IpcResponse::err(format!("todos_delete: {e}"))
+            }
+        }
+    }
 }
 
 impl AppsContext {

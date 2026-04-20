@@ -16,6 +16,7 @@ use hr_common::events::{PowerAction, WakeResult};
 use crate::apps_handler::AppsContext;
 use crate::backup_pipeline::BackupPipeline;
 
+use hr_apps::todos::TodosManager;
 use hr_apps::{AppSupervisor, ContextGenerator, DbManager};
 
 const BACKUP_SERVER_HOST_ID: &str = "877bcb76-4fb8-4164-940c-707201adf9bc";
@@ -28,6 +29,7 @@ pub struct OrchestratorHandler {
     pub base_domain: String,
     pub app_supervisor: AppSupervisor,
     pub db_manager: DbManager,
+    pub todos: TodosManager,
     pub context_generator: Arc<ContextGenerator>,
     pub log_store: Arc<hr_common::logging::LogStore>,
     pub build_locks: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
@@ -39,6 +41,7 @@ impl OrchestratorHandler {
         AppsContext {
             supervisor: self.app_supervisor.clone(),
             db_manager: self.db_manager.clone(),
+            todos: self.todos.clone(),
             context_generator: self.context_generator.clone(),
             edge: self.edge.clone(),
             git: self.git.clone(),
@@ -603,6 +606,29 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
             }
             OrchestratorRequest::AppDbCreateRelation { slug, relation } => {
                 self.apps_ctx().db_create_relation(slug, relation).await
+            }
+            OrchestratorRequest::AppTodosList { slug, status } => {
+                self.apps_ctx().todos_list(slug, status).await
+            }
+            OrchestratorRequest::AppTodosCreate {
+                slug,
+                name,
+                description,
+            } => self.apps_ctx().todos_create(slug, name, description).await,
+            OrchestratorRequest::AppTodosUpdate {
+                slug,
+                id,
+                name,
+                description,
+                status,
+                status_reason,
+            } => {
+                self.apps_ctx()
+                    .todos_update(slug, id, name, description, status, status_reason)
+                    .await
+            }
+            OrchestratorRequest::AppTodosDelete { slug, id } => {
+                self.apps_ctx().todos_delete(slug, id).await
             }
         }
     }
