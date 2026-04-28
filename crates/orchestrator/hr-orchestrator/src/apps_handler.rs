@@ -591,17 +591,32 @@ impl AppsContext {
         } else {
             None
         };
-        if let Err(e) = self
-            .context_generator
-            .generate_for_app(&app, &all, db_tables)
-        {
-            error!(slug = %slug, error = %e, "AppRegenerateContext failed");
-            return IpcResponse::err(format!("generate_for_app: {e}"));
+
+        match app.sources_on {
+            SourcesLocation::Medion => {
+                if let Err(e) = self
+                    .context_generator
+                    .generate_for_app(&app, &all, db_tables)
+                {
+                    error!(slug = %slug, error = %e, "AppRegenerateContext failed (medion)");
+                    return IpcResponse::err(format!("generate_for_app: {e}"));
+                }
+            }
+            SourcesLocation::CloudMaster => {
+                if let Err(e) =
+                    regen_context_on_cloudmaster(&app, &self.context_generator, &all, db_tables)
+                        .await
+                {
+                    error!(slug = %slug, error = %e, "AppRegenerateContext failed (cloudmaster)");
+                    return IpcResponse::err(format!("regen on cloudmaster: {e}"));
+                }
+            }
         }
+
         if let Err(e) = self.context_generator.generate_root(&all) {
             warn!(error = %e, "AppRegenerateContext root failed");
         }
-        info!(slug = %slug, "AppRegenerateContext ok");
+        info!(slug = %slug, sources_on = ?app.sources_on, "AppRegenerateContext ok");
         IpcResponse::ok_data(serde_json::json!({ "ok": true }))
     }
 
@@ -1839,6 +1854,80 @@ async fn scaffold_on_cloudmaster(
         host = %host,
         remote_src = %remote_src,
         "scaffold_on_cloudmaster: done"
+    );
+    Ok(())
+}
+
+/// AppRegenerateContext path quand `sources_on == CloudMaster` :
+/// régénère CLAUDE.md / .claude/ / .mcp.json dans un tmpdir local puis
+/// rsync UP vers CloudMaster sans toucher au reste du src/. On utilise
+/// `--include` pour ne pousser que les fichiers de contexte.
+#[tracing::instrument(skip(ctx_generator, all_apps, db_tables), fields(slug = %app.slug))]
+async fn regen_context_on_cloudmaster(
+    app: &Application,
+    ctx_generator: &ContextGenerator,
+    all_apps: &[Application],
+    db_tables: Option<Vec<String>>,
+) -> anyhow::Result<()> {
+    let host = std::env::var("HR_BUILD_HOST").unwrap_or_else(|_| BUILD_HOST.to_string());
+    let key = std::env::var("HR_BUILD_SSH_KEY").unwrap_or_else(|_| SSH_KEY.to_string());
+    let slug = app.slug.as_str();
+    let remote_src = format!("/opt/homeroute/apps/{slug}/src");
+
+    let tmp = PathBuf::from(format!(
+        "/tmp/hr-regen-{slug}-{}",
+        std::process::id()
+    ));
+    if tmp.exists() {
+        let _ = tokio::fs::remove_dir_all(&tmp).await;
+    }
+    tokio::fs::create_dir_all(&tmp).await?;
+
+    let res = ctx_generator.generate_for_app_at(app, &tmp, all_apps, db_tables, false);
+    if let Err(e) = res {
+        let _ = tokio::fs::remove_dir_all(&tmp).await;
+        return Err(e.context("local regen failed"));
+    }
+
+    // Rsync UP only the agent context files, not the whole tmpdir.
+    // -R is implicit through trailing slash semantics; we filter via --include.
+    let ssh_e_arg = format!(
+        "ssh -i {key} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+    );
+    let local_src_str = format!("{}/", tmp.display());
+    let dest = format!("{host}:{remote_src}/");
+    let up = run_capture(
+        "rsync",
+        &[
+            "-a", "-W",
+            "--include=CLAUDE.md",
+            "--include=.mcp.json",
+            "--include=.claude/",
+            "--include=.claude/**",
+            "--exclude=*",
+            "-e", &ssh_e_arg,
+            &local_src_str,
+            &dest,
+        ],
+        None,
+    )
+    .await;
+
+    let _ = tokio::fs::remove_dir_all(&tmp).await;
+
+    if up.exit_code != 0 {
+        anyhow::bail!(
+            "rsync regen up failed (exit={}): {}",
+            up.exit_code,
+            truncate(&up.stderr, 256)
+        );
+    }
+
+    info!(
+        slug = %slug,
+        host = %host,
+        remote_src = %remote_src,
+        "regen_context_on_cloudmaster: done"
     );
     Ok(())
 }
