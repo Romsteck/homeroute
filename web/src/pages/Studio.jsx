@@ -4,6 +4,7 @@ import useWebSocket from '../hooks/useWebSocket';
 import { useStudio } from '../context/StudioContext';
 import DbExplorer from './DbExplorer';
 import TodosPanel from '../components/TodosPanel';
+import StudioIframe from '../components/StudioIframe';
 import {
   Code2, BookOpen, Database, ScrollText, KeyRound, Settings as SettingsIcon,
   ExternalLink, Save, Loader2, Plus, Play, Square, Trash2, X, Globe, Lock,
@@ -101,8 +102,7 @@ function AppSidebar({ apps, selectedSlug, onSelect, onAdd, busy, onControl }) {
 // ── Code Tab ──
 
 function CodeTab({ slug }) {
-  const url = `${CODESERVER_BASE}/?folder=/opt/homeroute/apps/${slug}/src`;
-  return <iframe src={url} className="w-full h-full border-0 bg-[#1e1e1e]" title={`Code - ${slug}`} allow="clipboard-read; clipboard-write" />;
+  return <StudioIframe folder={`/opt/homeroute/apps/${slug}/src`} title={`Code - ${slug}`} />;
 }
 
 // ── Logs Tab ──

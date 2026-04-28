@@ -36,8 +36,15 @@ const T_NEXT_LAYOUT: &str = include_str!("../../hr-apps/templates/next-js/app/la
 
 #[tracing::instrument(skip(app), fields(slug = %app.slug, stack = ?app.stack))]
 pub async fn scaffold_stack_template(app: &Application) -> anyhow::Result<()> {
-    let src = app.src_dir();
-    tokio::fs::create_dir_all(&src).await?;
+    scaffold_stack_template_at(app, &app.src_dir()).await
+}
+
+/// Variante explicite : scaffold le template stack dans `src` (au lieu de
+/// `app.src_dir()` hardcodé). Utilisé par AppCreate quand les sources vivent
+/// sur CloudMaster — on génère localement dans un tmpdir puis on rsync UP.
+#[tracing::instrument(skip(app, src), fields(slug = %app.slug, stack = ?app.stack, target = %src.display()))]
+pub async fn scaffold_stack_template_at(app: &Application, src: &Path) -> anyhow::Result<()> {
+    tokio::fs::create_dir_all(src).await?;
 
     match app.stack {
         AppStack::Axum => {
@@ -62,7 +69,7 @@ pub async fn scaffold_stack_template(app: &Application) -> anyhow::Result<()> {
         }
     }
 
-    info!(slug = %app.slug, "scaffold template applied");
+    info!(slug = %app.slug, target = %src.display(), "scaffold template applied");
     Ok(())
 }
 

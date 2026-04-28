@@ -19,6 +19,7 @@ pub mod apps;
 pub mod apps_db;
 pub mod backup;
 pub mod docs;
+pub mod edge;
 pub mod edge_stats;
 pub mod git;
 pub mod logs;

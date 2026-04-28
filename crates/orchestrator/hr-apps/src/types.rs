@@ -49,6 +49,25 @@ pub enum AppState {
     Unknown,
 }
 
+/// Where the canonical `src/` tree of this app lives. Determines whether the
+/// `app.build` pipeline must rsync sources up to CloudMaster or whether the
+/// sources already live there (post wave-2 migration).
+///
+/// The default is `CloudMaster`: nouvelles apps sont scaffoldées directement
+/// sur CloudMaster (workspace agent + build remote sans rsync UP). Les apps
+/// existantes (legacy) ont leur valeur explicite dans `apps.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SourcesLocation {
+    /// Sources live on Medion under `/opt/homeroute/apps/{slug}/src/` (legacy
+    /// pre-migration layout). Build must rsync them up to CloudMaster first.
+    Medion,
+    /// Sources live on CloudMaster under `/opt/homeroute/apps/{slug}/src/`.
+    /// Build skips the rsync-up step — only the artefact is rsynced back down.
+    #[default]
+    CloudMaster,
+}
+
 pub fn valid_slug(slug: &str) -> bool {
     !slug.is_empty()
         && slug.len() <= 64
@@ -86,6 +105,10 @@ pub struct Application {
     pub env_vars: BTreeMap<String, String>,
     #[serde(default)]
     pub state: AppState,
+    /// Where the canonical sources live. Defaults to `Medion` for back-compat
+    /// with the existing `apps.json` (no field present → Medion).
+    #[serde(default)]
+    pub sources_on: SourcesLocation,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -111,6 +134,7 @@ impl Application {
             health_path,
             env_vars: BTreeMap::new(),
             state: AppState::Stopped,
+            sources_on: SourcesLocation::default(),
             created_at: now,
             updated_at: now,
         }

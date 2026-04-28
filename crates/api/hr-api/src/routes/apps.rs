@@ -29,6 +29,7 @@ pub fn router() -> Router<ApiState> {
         )
         .route("/apps/{slug}/control", post(control_app))
         .route("/apps/{slug}/build", post(build_app))
+        .route("/apps/{slug}/deploy", post(build_app))
         .route("/apps/{slug}/status", get(app_status))
         .route("/apps/{slug}/logs", get(app_logs))
         .route("/apps/{slug}/exec", post(app_exec))

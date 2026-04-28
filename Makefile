@@ -7,7 +7,7 @@ PROD_HOST := romain@10.0.0.20
 PROD_DIR  := /opt/homeroute
 PROD_API  := http://10.0.0.20:4000
 
-.PHONY: server netcore edge orchestrator web all deploy deploy-prod deploy-netcore deploy-edge deploy-orchestrator deploy-studio test clean store host-agent host-agent-prod check-prod check-not-prod
+.PHONY: server netcore edge orchestrator web all deploy deploy-prod deploy-netcore deploy-edge deploy-orchestrator deploy-studio test clean store host-agent host-agent-prod check-prod check-not-prod check-on-cloudmaster
 
 SHELL := /bin/bash
 
@@ -25,6 +25,18 @@ check-prod:
 	@ssh -o ConnectTimeout=5 -o BatchMode=yes $(PROD_HOST) 'sudo -n systemctl is-active homeroute' > /dev/null 2>&1 \
 		|| (echo "⛔ Cannot reach production server or homeroute is not running" && exit 1)
 	@echo "✓ Production server OK"
+
+# Safety: ensure builds happen on CloudMaster (10.0.0.10), not on prod or random hosts.
+# Override with FORCE_BUILD=1 if you really know what you're doing.
+check-on-cloudmaster:
+	@if [ "$$FORCE_BUILD" = "1" ]; then \
+		echo "⚠ FORCE_BUILD=1 — skipping host check (you are on $$(hostname))"; \
+	elif [ "$$(hostname)" != "cloudmaster" ]; then \
+		echo "⛔ Builds must run on cloudmaster (10.0.0.10), not on $$(hostname)."; \
+		echo "   SSH there: ssh romain@10.0.0.10  (then cd /nvme/homeroute && make ...)"; \
+		echo "   Override (rare): make ... FORCE_BUILD=1"; \
+		exit 1; \
+	fi
 
 # Build hr-netcore binary (DNS/DHCP/Adblock/IPv6)
 netcore:
@@ -57,7 +69,7 @@ deploy: check-not-prod all
 	systemctl restart homeroute
 
 # Deploy to production from dev server (restarts hr-edge + hr-orchestrator + homeroute, NOT hr-netcore)
-deploy-prod: check-prod all
+deploy-prod: check-on-cloudmaster check-prod all
 	@echo "Deploying to production ($(PROD_HOST))..."
 	rsync -az --info=progress2 crates/target/release/homeroute $(PROD_HOST):$(PROD_DIR)/crates/target/release/homeroute
 	rsync -az --info=progress2 crates/target/release/hr-edge $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-edge
@@ -73,7 +85,7 @@ deploy-prod: check-prod all
 		|| (echo "⛔ Health check FAILED — check logs: ssh $(PROD_HOST) 'journalctl -u homeroute -u hr-edge -u hr-orchestrator -n 50'" && exit 1)
 
 # Deploy hr-edge separately (Proxy/TLS/ACME/Auth/Tunnel)
-deploy-edge: check-prod edge
+deploy-edge: check-on-cloudmaster check-prod edge
 	@echo "Deploying hr-edge to production..."
 	rsync -az --info=progress2 crates/target/release/hr-edge $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-edge
 	ssh $(PROD_HOST) 'sudo systemctl restart hr-edge'
@@ -81,7 +93,7 @@ deploy-edge: check-prod edge
 	@echo "✓ hr-edge deployed"
 
 # Deploy hr-orchestrator separately (hr-apps supervisor, Git, DB)
-deploy-orchestrator: check-prod orchestrator
+deploy-orchestrator: check-on-cloudmaster check-prod orchestrator
 	@echo "Deploying hr-orchestrator to production..."
 	rsync -az --info=progress2 crates/target/release/hr-orchestrator $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-orchestrator
 	rsync -az systemd/hr-apps.slice $(PROD_HOST):$(PROD_DIR)/systemd/hr-apps.slice
@@ -91,7 +103,7 @@ deploy-orchestrator: check-prod orchestrator
 	@echo "✓ hr-orchestrator deployed"
 
 # Deploy hr-netcore separately (rare — only when DNS/DHCP/Adblock/IPv6 code changes)
-deploy-netcore: check-prod netcore
+deploy-netcore: check-on-cloudmaster check-prod netcore
 	@echo "Deploying hr-netcore to production..."
 	rsync -az --info=progress2 crates/target/release/hr-netcore $(PROD_HOST):$(PROD_DIR)/crates/target/release/hr-netcore
 	ssh $(PROD_HOST) 'sudo systemctl restart hr-netcore'
@@ -99,7 +111,7 @@ deploy-netcore: check-prod netcore
 	@echo "✓ hr-netcore deployed"
 
 # Install / refresh code-server on the production router (studio.mynetwk.biz → 127.0.0.1:8443)
-deploy-studio: check-prod
+deploy-studio: check-on-cloudmaster check-prod
 	@echo "Installing/refreshing code-server on production..."
 	rsync -az scripts/setup-studio.sh $(PROD_HOST):$(PROD_DIR)/scripts/setup-studio.sh
 	ssh $(PROD_HOST) 'sudo bash $(PROD_DIR)/scripts/setup-studio.sh'

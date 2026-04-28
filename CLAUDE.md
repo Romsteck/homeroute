@@ -57,14 +57,23 @@ crates/
     └── hr-api/                #   routes axum, WebSocket events
 ```
 
-### Apps locales
+### Apps locales — topologie split DEV/PROD
 
-HomeRoute exécute les apps directement sur l'hôte sous le contrôle d'un **supervisor Tokio** intégré à `hr-orchestrator` (`hr-apps`). Pas de container par app, pas d'environnements.
+Depuis 2026-04-27, les apps HomeRoute vivent en **topologie split** :
 
-- 1 app = 1 dossier `/opt/homeroute/apps/{slug}/` + 1 processus supervisé
-- URL publique : `{slug}.mynetwk.biz` (route ajoutée à hr-edge)
+- **Sources canoniques** : sur **CloudMaster** (10.0.0.10) sous `/opt/homeroute/apps/{slug}/src/`. C'est là que tu édites le code dans le studio.
+- **Runtime** : sur **Medion** (10.0.0.254). Le supervisor Tokio (`hr-apps`) lance les processus depuis les artefacts buildés rsyncés. `db.sqlite`, `.env` et le port-registry restent sur Medion (jamais déplacés).
+- **Build** : exclusivement sur CloudMaster (toolchains cargo/npm/pnpm/flutter). Medion n'a aucune toolchain.
+- **Deploy** : `POST /api/apps/{slug}/deploy` (alias de `/build`) → CloudMaster compile, rsync les artefacts vers Medion, hr-apps restart le process. Endpoint exposé dans le frontend via le bouton "Deploy" per-app.
+
+Le flag `sources_on: SourcesLocation` sur chaque `Application` (`medion` | `cloudmaster`) contrôle si le build skippe le rsync UP. Les apps créées après 2026-04-27 sont en `cloudmaster` par défaut. Les apps existantes ont été migrées en Phase 6.
+
+- 1 app = 1 dossier `/opt/homeroute/apps/{slug}/` (sur les DEUX hosts, contenus différents)
+- URL publique : `{slug}.mynetwk.biz` (route ajoutée à hr-edge sur Medion)
 - Visibility : `public` (anon) ou `private` (auth via hr-auth)
-- Code-server global sur `studio.mynetwk.biz` → `127.0.0.1:8443`, workspace `/opt/homeroute/apps/`
+- Code-server global sur `codeserver.mynetwk.biz` → reverse-proxy hr-edge Medion → CloudMaster `10.0.0.10:8443` (hr-studio.service côté CloudMaster), workspace `/opt/homeroute/apps/`
+- Si CloudMaster est éteint : l'iframe Studio affiche un bouton "Démarrer CloudMaster" qui appelle `POST /api/hosts/{cloudmaster_id}/wake` (WOL via NIC `b4:2e:99:c9:e7:5f`).
+- Backup nightly automatique : systemd timer `cm-backup-apps-src.timer` sur CloudMaster → `medion:/ssd_pool/backups/cm-apps-src/YYYY-MM-DD/`, hardlink-based, rétention 14j.
 
 ### IPC Sockets
 
@@ -112,7 +121,9 @@ HomeRoute exécute les apps directement sur l'hôte sous le contrôle d'un **sup
 | **DEV** | cloudmaster | 10.0.0.10 | Build, tests, développement |
 | **PROD** | — | 10.0.0.254 | Exécution de HomeRoute |
 
-⚠️ **JAMAIS** démarrer homeroute sur le serveur de dev. Aucun service ne doit y tourner.
+⚠️ **JAMAIS** démarrer homeroute (le service Rust) sur CloudMaster. Seul tourne là-bas : code-server (`hr-studio.service`, port 8443) servant les sources des apps, `hr-host-agent` (heartbeat), `cm-backup-apps-src.timer` (backup nightly), et le code-server perso de l'utilisateur (port 9080, `code.mynetwk.biz`).
+
+⚠️ **TOUTES les commandes `make deploy-*`** sont gardées par `check-on-cloudmaster` qui vérifie `hostname == "cloudmaster"`. Override exceptionnel : `make deploy-* FORCE_BUILD=1` (déconseillé).
 
 ## Commandes
 
@@ -152,32 +163,6 @@ ssh root@10.0.0.254 'systemctl reload hr-netcore'    # hot-reload DNS/DHCP/Adblo
 - **TOUJOURS** `make deploy-orchestrator` si modification de hr-apps, hr-git, hr-db, hr-orchestrator
 - **TOUJOURS** `make deploy-netcore` si modification de hr-dns, hr-dhcp, hr-ipv6, hr-adblock, hr-netcore
 - Exécuter une commande dans le contexte d'une app via l'API `POST /api/apps/{slug}/exec`
-
-## Équipes d'agents (OBLIGATOIRE)
-
-**TOUJOURS** créer une équipe (TeamCreate + Task) sauf pour les modifications triviales (typo, 1 ligne).
-
-### Subagents spécialisés disponibles
-
-| Tâche | subagent_type |
-|-------|---------------|
-| Backend Rust, crates/, API | `backend-rust` |
-| Frontend React/Vite (web/) | `frontend-react` |
-| Autre (investigations, scripts) | `general-purpose` |
-
-### Répartitions types
-
-- **Fullstack** : `backend-rust` + `frontend-react` en parallèle
-- **Refactoring** : un agent `backend-rust` par crate concernée
-- **Bug** : un agent investigation + un agent correctif
-
-### Reporting — limitation connue et workarounds
-
-Les agents peuvent parfois ne pas marquer leurs tâches comme complètes. Pour contourner :
-
-1. **Inclure dans chaque prompt de spawn** : _"Quand tu as terminé : appelle TaskUpdate pour marquer la tâche completed, puis envoie-moi un SendMessage résumant ce que tu as fait."_
-2. **Si un agent semble bloqué** : lui envoyer un SendMessage — _"Où en es-tu ? Si terminé, marque la tâche et résume."_
-3. Les subagents `backend-rust` et `frontend-react` incluent déjà ces instructions dans leur system prompt.
 
 ## Applications HomeRoute
 

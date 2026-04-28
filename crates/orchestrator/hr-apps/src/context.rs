@@ -76,21 +76,13 @@ impl ContextGenerator {
         all_apps: &[Application],
         db_tables: Option<Vec<String>>,
     ) -> anyhow::Result<()> {
-        let app_dir = self.apps_path.join(&app.slug);
         let src_dir = app.src_dir();
-        // Note : `src_dir` est `{app.app_dir()}/src` par construction (voir
-        // types.rs) — mais `app.app_dir()` est hardcodé en /opt/homeroute/apps
-        // alors que `self.apps_path` peut différer en test. On utilise donc
-        // les DEUX : `self.apps_path.join(slug)` pour le cleanup legacy (qu'on
-        // veut relatif au ContextGenerator, pour les tests), et `app.src_dir()`
-        // pour la cible des writes (chemin réel en prod).
+        let app_dir = self.apps_path.join(&app.slug);
 
-        // Step 1 — Cleanup des fichiers au mauvais niveau (parent) : legacy du
-        // passé où on écrivait par erreur CLAUDE.md/.claude/.mcp.json à côté
-        // de src/ au lieu de dedans.
+        // Cleanup des fichiers au mauvais niveau, même si src_dir n'existe pas.
         cleanup_legacy_parent_context(&app_dir, &app.slug);
 
-        // Step 2 — Si src_dir n'existe pas, rien à faire : scaffold incomplet.
+        // Si src_dir absent : scaffold incomplet, soft-skip (avec warn).
         if !src_dir.exists() {
             warn!(
                 slug = %app.slug,
@@ -98,6 +90,39 @@ impl ContextGenerator {
                 "src_dir absent — context generation skipped (scaffold incomplete?)"
             );
             return Ok(());
+        }
+
+        self.generate_for_app_at(app, &src_dir, all_apps, db_tables, false)
+    }
+
+    /// Variante explicite de [`Self::generate_for_app`] qui prend en paramètre
+    /// le `src_dir` cible (au lieu de `app.src_dir()` hardcodé). Utilisé par
+    /// AppCreate pour générer le contexte dans un tmpdir local avant rsync UP
+    /// vers CloudMaster.
+    ///
+    /// `cleanup_legacy_parent` contrôle si on supprime les vestiges au niveau
+    /// `{apps_path}/{slug}/` (CLAUDE.md/.mcp.json/.claude/) — utile pour la
+    /// génération in-place sur Medion (true), inutile pour un tmpdir (false).
+    pub fn generate_for_app_at(
+        &self,
+        app: &Application,
+        src_dir: &Path,
+        all_apps: &[Application],
+        db_tables: Option<Vec<String>>,
+        cleanup_legacy_parent: bool,
+    ) -> anyhow::Result<()> {
+        let app_dir = self.apps_path.join(&app.slug);
+
+        // Step 1 — Cleanup des fichiers au mauvais niveau (parent) : legacy du
+        // passé où on écrivait par erreur CLAUDE.md/.claude/.mcp.json à côté
+        // de src/ au lieu de dedans.
+        if cleanup_legacy_parent {
+            cleanup_legacy_parent_context(&app_dir, &app.slug);
+        }
+
+        // Step 2 — Si src_dir n'existe pas, créer le squelette (cas tmpdir vide).
+        if !src_dir.exists() {
+            fs::create_dir_all(src_dir)?;
         }
 
         let src_claude_dir = src_dir.join(".claude");

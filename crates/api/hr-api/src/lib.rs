@@ -59,6 +59,7 @@ fn api_routes() -> Router<ApiState> {
         .nest("/services", routes::services::router())
         .merge(routes::apps::router())
         .merge(routes::apps_db::router())
+        .nest("/edge/routes", routes::edge::router())
         .nest("/edge/stats", routes::edge_stats::router())
         .nest("/store", routes::store::router())
         .nest("/git", routes::git::router())

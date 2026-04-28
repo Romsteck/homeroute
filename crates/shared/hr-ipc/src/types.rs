@@ -183,8 +183,16 @@ pub struct ApplicationDto {
     pub env_vars: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub state: String,
+    /// "medion" (legacy) or "cloudmaster" (post wave-2). Defaults to "medion"
+    /// when missing from older payloads for back-compat.
+    #[serde(default = "default_sources_on")]
+    pub sources_on: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+fn default_sources_on() -> String {
+    "medion".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
