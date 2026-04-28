@@ -108,6 +108,23 @@ async fn read_stored_mode(host_id: &str) -> String {
         .unwrap_or_else(|_| "economy".to_string())
 }
 
+// Hosts unreachable at boot (CM offline) are picked up later by the offline→online transition in the poller.
+pub async fn restore_saved_modes_on_startup() {
+    for host in HOSTS {
+        let mode = read_stored_mode(host.id).await;
+        info!(host = host.id, mode = %mode, "Restoring saved energy mode at startup");
+        match apply_mode_on_host(host, &mode).await {
+            Ok(()) => info!(host = host.id, mode = %mode, "Energy mode restored"),
+            Err(e) => warn!(
+                host = host.id,
+                mode = %mode,
+                error = %e,
+                "Failed to restore energy mode (host may be offline, will retry on online transition)"
+            ),
+        }
+    }
+}
+
 // ─── Local sysfs reading ────────────────────────────────────────────────────
 
 pub async fn read_local_temperature() -> Option<f64> {
@@ -736,6 +753,8 @@ async fn stop_benchmark() -> Json<Value> {
 pub async fn energy_metrics_poller(events: Arc<EventBus>) {
     let mut prev_stats: HashMap<String, (u64, u64)> = HashMap::new();
     let mut cached_models: HashMap<String, String> = HashMap::new();
+    // Track online flips so we re-apply the saved mode after a remote-host reboot.
+    let mut prev_online: HashMap<String, bool> = HashMap::new();
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
 
     loop {
@@ -812,6 +831,24 @@ pub async fn energy_metrics_poller(events: Arc<EventBus>) {
             if let Some(ip) = host.ip {
                 match read_remote_metrics(ip).await {
                     Some(m) => {
+                        let was_online = prev_online.get(host.id).copied().unwrap_or(false);
+                        if !was_online {
+                            let mode_to_apply = read_stored_mode(host.id).await;
+                            info!(
+                                host = host.id,
+                                mode = %mode_to_apply,
+                                "Host came online, re-applying saved energy mode"
+                            );
+                            if let Err(e) = apply_mode_on_host(host, &mode_to_apply).await {
+                                warn!(
+                                    host = host.id,
+                                    error = %e,
+                                    "Failed to re-apply energy mode after online transition"
+                                );
+                            }
+                        }
+                        prev_online.insert(host.id.to_string(), true);
+
                         let key = host.id.to_string();
                         let cpu_percent = if let Some((idle, total)) =
                             parse_cpu_stat(&m.cpu_stat_line)
@@ -860,6 +897,7 @@ pub async fn energy_metrics_poller(events: Arc<EventBus>) {
                         });
                     }
                     None => {
+                        prev_online.insert(host.id.to_string(), false);
                         // Host unreachable — send offline event so frontend knows
                         let mode = read_stored_mode(host.id).await;
                         let _ = events.energy_metrics.send(EnergyMetricsEvent {

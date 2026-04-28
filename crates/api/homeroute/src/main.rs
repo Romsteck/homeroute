@@ -410,6 +410,11 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Restore energy modes for all hosts (sticky across reboots)
+    tokio::spawn(async {
+        hr_api::routes::energy::restore_saved_modes_on_startup().await;
+    });
+
     // Energy metrics poller (every 3s — local + remote hosts)
     {
         let events = events.clone();
