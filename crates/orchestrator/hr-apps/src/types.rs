@@ -45,6 +45,7 @@ pub enum AppState {
     Stopped,
     Starting,
     Running,
+    Stopping,
     Crashed,
     Unknown,
 }

@@ -1696,6 +1696,7 @@ fn state_to_str(s: &AppState) -> &'static str {
         AppState::Stopped => "stopped",
         AppState::Starting => "starting",
         AppState::Running => "running",
+        AppState::Stopping => "stopping",
         AppState::Crashed => "crashed",
         AppState::Unknown => "unknown",
     }

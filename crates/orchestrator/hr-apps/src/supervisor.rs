@@ -20,6 +20,13 @@ const HEALTH_INTERVAL: Duration = Duration::from_secs(10);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
+// Délai d'attente que l'unité atteigne ActiveState=inactive après SIGTERM gracieux.
+// Au-delà, on envoie SIGKILL.
+const STOP_GRACE: Duration = Duration::from_secs(30);
+// Délai d'attente après SIGKILL avant d'abandonner.
+const STOP_KILL_GRACE: Duration = Duration::from_secs(5);
+// Intervalle de polling de ActiveState pendant un stop.
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const RESTART_RESET_AFTER: Duration = Duration::from_secs(300);
 const MAX_RESTARTS_PER_MIN: u32 = 10;
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
@@ -168,7 +175,10 @@ impl AppSupervisor {
         Ok(())
     }
 
-    /// Stop an app: `systemctl stop` the transient unit.
+    /// Stop an app: `systemctl stop` the transient unit, puis attend que l'unité
+    /// soit réellement `inactive` (avec fallback SIGKILL si le process traîne).
+    /// Retour synchrone : à la fin de l'await, l'unité est garantie déchargée
+    /// — un `systemd-run` immédiat suivant cet appel ne se fera pas refuser.
     pub async fn stop(&self, slug: &str) -> Result<()> {
         let proc_arc = match self.processes.read().await.get(slug).cloned() {
             Some(p) => p,
@@ -181,8 +191,10 @@ impl AppSupervisor {
         let (watcher, health) = {
             let mut proc = proc_arc.lock().await;
             proc.stop_requested = true;
+            proc.state = AppState::Stopping;
             (proc.watcher.take(), proc.health.take())
         };
+        self.update_app_state(slug, AppState::Stopping).await;
 
         if let Some(h) = health {
             h.abort();
@@ -191,16 +203,46 @@ impl AppSupervisor {
             w.abort();
         }
 
-        info!(app_slug = slug, "stop: systemctl stop");
-        if let Err(e) = tokio::time::timeout(
-            STOP_TIMEOUT,
-            run_systemctl(&["stop", &unit_name(slug)]),
-        )
-        .await
-        {
-            warn!(app_slug = slug, error = %e, "stop: systemctl timed out");
+        let unit = unit_name(slug);
+
+        // 1. SIGTERM via `systemctl stop`. La commande retourne quand systemd
+        //    accepte le job, pas quand le process est mort. STOP_TIMEOUT borne
+        //    la commande systemctl elle-même contre un blocage pathologique.
+        info!(app_slug = slug, unit = %unit, "stop: SIGTERM");
+        match tokio::time::timeout(STOP_TIMEOUT, run_systemctl(&["stop", &unit])).await {
+            Err(_) => warn!(app_slug = slug, unit = %unit, "stop: systemctl stop hung past STOP_TIMEOUT, will keep waiting on unit state"),
+            Ok(Err(e)) => warn!(app_slug = slug, unit = %unit, error = %e, "stop: systemctl stop failed, will keep waiting on unit state"),
+            Ok(Ok(_)) => {}
         }
-        let _ = run_systemctl(&["reset-failed", &unit_name(slug)]).await;
+
+        // 2. Attendre la désactivation effective (ActiveState=inactive|failed).
+        if !wait_unit_inactive(slug, STOP_GRACE).await {
+            warn!(
+                app_slug = slug,
+                unit = %unit,
+                grace_secs = STOP_GRACE.as_secs(),
+                "stop: graceful shutdown timed out, sending SIGKILL"
+            );
+            let _ = run_systemctl(&[
+                "kill",
+                "--signal=SIGKILL",
+                "--kill-whom=all",
+                &unit,
+            ])
+            .await;
+            if !wait_unit_inactive(slug, STOP_KILL_GRACE).await {
+                error!(app_slug = slug, unit = %unit, "stop: unit still active after SIGKILL");
+                return Err(anyhow!("unit {} refused to stop after SIGKILL", unit));
+            }
+            info!(app_slug = slug, unit = %unit, "stop: SIGKILL succeeded");
+        } else {
+            info!(app_slug = slug, unit = %unit, "stop: unit inactive");
+        }
+
+        // 3. reset-failed pour cleaner si l'unité est en `failed` (SIGKILL ou
+        //    crash final). Sans ça, certaines opérations systemd ultérieures
+        //    pourraient considérer le slot encore occupé.
+        let _ = run_systemctl(&["reset-failed", &unit]).await;
 
         {
             let mut proc = proc_arc.lock().await;
@@ -212,11 +254,12 @@ impl AppSupervisor {
         Ok(())
     }
 
-    /// Restart an app (stop then start).
+    /// Restart an app (stop then start). `stop()` est synchrone — il garantit
+    /// que l'unité systemd est `inactive`/déchargée avant retour, donc on peut
+    /// enchaîner directement sur `start()` sans risque de collision.
     pub async fn restart(&self, slug: &str) -> Result<()> {
         info!(app_slug = slug, "restart");
         self.stop(slug).await?;
-        sleep(Duration::from_millis(200)).await;
         self.start(slug).await
     }
 
@@ -379,8 +422,26 @@ impl AppSupervisor {
                 continue;
             }
 
-            // Unit not active: crashed or stopped externally.
+            // Unit not active: crashed, stopped externally, ou en cours de stop volontaire.
             let result = unit_result(&slug).await.unwrap_or_default();
+
+            // Re-check stop_requested ici : `stop()` peut avoir flippé le flag
+            // pendant qu'on était dans `unit_is_active().await`. Si c'est le cas,
+            // on est en train d'observer un shutdown volontaire — ne pas écraser
+            // l'état `Stopping` posé par stop() avec `Crashed`.
+            let stop_requested_now = {
+                let proc = proc_arc.lock().await;
+                proc.stop_requested
+            };
+            if stop_requested_now {
+                debug!(
+                    app_slug = %slug,
+                    result = %result,
+                    "watcher: unit no longer active, but stop requested — exiting without Crashed"
+                );
+                return;
+            }
+
             warn!(app_slug = %slug, result = %result, "watcher: unit no longer active");
 
             {
@@ -587,6 +648,34 @@ async fn unit_is_active(slug: &str) -> bool {
         systemctl_show(slug, "ActiveState").await.as_deref(),
         Some("active") | Some("activating") | Some("reloading")
     )
+}
+
+/// Attend que l'unité systemd atteigne `ActiveState=inactive|failed` (ou disparaisse).
+///
+/// `systemctl stop` retourne dès que systemd accepte la requête, pas quand le
+/// process supervisé a effectivement terminé son shutdown gracieux. Tant que
+/// l'unité reste `deactivating`, `systemd-run --unit=...` refuse de la recréer
+/// (« Unit hr-app-xxx.service was already loaded or has a fragment file »).
+/// On poll donc jusqu'à confirmation que l'unité est libre.
+///
+/// Avec `--collect`, l'unité transient est automatiquement déchargée juste après
+/// le passage à `inactive`/`failed` — donc dès qu'on observe l'un de ces états,
+/// la prochaine création de la même unité fonctionne.
+///
+/// Retourne `true` si la fenêtre s'est terminée à temps, `false` sur timeout.
+async fn wait_unit_inactive(slug: &str, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let state = systemctl_show(slug, "ActiveState").await;
+        match state.as_deref() {
+            Some("inactive") | Some("failed") | None => return true,
+            _ => {}
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        sleep(STOP_POLL_INTERVAL).await;
+    }
 }
 
 async fn unit_main_pid(slug: &str) -> Option<u32> {
