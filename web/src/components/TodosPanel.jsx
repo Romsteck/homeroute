@@ -1,15 +1,13 @@
 import { useState, useEffect } from 'react';
-import { Loader2, CheckCircle2, Circle, Clock, AlertTriangle } from 'lucide-react';
+import { Loader2, Circle, Clock } from 'lucide-react';
 import useWebSocket from '../hooks/useWebSocket';
 import api from '../api/client';
 
-const STATUS_ORDER = ['in_progress', 'pending', 'blocked'];
+const STATUS_ORDER = ['in_progress', 'pending'];
 
 const STATUS_META = {
   pending:     { label: 'Pending',     badge: 'bg-gray-600 text-gray-200',     Icon: Circle },
   in_progress: { label: 'In progress', badge: 'bg-blue-500/20 text-blue-300 border border-blue-500/30', Icon: Clock },
-  done:        { label: 'Done',        badge: 'bg-green-500/20 text-green-300 border border-green-500/30', Icon: CheckCircle2 },
-  blocked:     { label: 'Blocked',     badge: 'bg-red-500/20 text-red-300 border border-red-500/30',     Icon: AlertTriangle },
 };
 
 function TodoItem({ todo }) {
@@ -38,9 +36,6 @@ function TodoItem({ todo }) {
             <span className={`inline-block px-1.5 py-0.5 text-[10px] font-medium rounded ${meta.badge}`}>
               {meta.label}
             </span>
-            {todo.status_reason && (
-              <span className="text-[11px] italic text-gray-500 break-words">{todo.status_reason}</span>
-            )}
           </div>
         </div>
       </div>
@@ -75,17 +70,16 @@ export default function TodosPanel({ slug }) {
     },
   });
 
-  const pending = todos.filter(t => t.status !== 'done');
   const grouped = STATUS_ORDER.map(s => ({
     status: s,
-    items: pending.filter(t => t.status === s),
+    items: todos.filter(t => t.status === s),
   })).filter(g => g.items.length > 0);
 
   return (
     <aside className="w-[300px] min-w-[300px] h-full bg-gray-800/30 border-l border-gray-700 flex flex-col">
       <div className="flex items-center justify-between px-3 py-2 border-b border-gray-700 shrink-0">
         <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">Todos</span>
-        <span className="text-[11px] text-gray-400 bg-gray-700/50 px-1.5 py-0.5 rounded">{pending.length}</span>
+        <span className="text-[11px] text-gray-400 bg-gray-700/50 px-1.5 py-0.5 rounded">{todos.length}</span>
       </div>
       <div className="flex-1 overflow-y-auto">
         {loading ? (

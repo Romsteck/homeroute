@@ -647,10 +647,9 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 name,
                 description,
                 status,
-                status_reason,
             } => {
                 self.apps_ctx()
-                    .todos_update(slug, id, name, description, status, status_reason)
+                    .todos_update(slug, id, name, description, status)
                     .await
             }
             OrchestratorRequest::AppTodosDelete { slug, id } => {

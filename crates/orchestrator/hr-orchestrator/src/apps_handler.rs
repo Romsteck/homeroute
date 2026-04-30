@@ -922,7 +922,6 @@ impl AppsContext {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn todos_update(
         &self,
         slug: String,
@@ -930,7 +929,6 @@ impl AppsContext {
         name: Option<String>,
         description: Option<String>,
         status: Option<String>,
-        status_reason: Option<String>,
     ) -> IpcResponse {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
@@ -944,7 +942,7 @@ impl AppsContext {
         };
         match self
             .todos
-            .update(&slug, &id, name, description, status_enum, status_reason)
+            .update(&slug, &id, name, description, status_enum)
             .await
         {
             Ok(todo) => {

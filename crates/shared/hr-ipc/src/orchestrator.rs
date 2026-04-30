@@ -327,8 +327,6 @@ pub enum OrchestratorRequest {
         description: Option<String>,
         #[serde(default)]
         status: Option<String>,
-        #[serde(default)]
-        status_reason: Option<String>,
     },
     AppTodosDelete {
         slug: String,

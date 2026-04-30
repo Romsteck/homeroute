@@ -523,10 +523,10 @@ fn tool_definitions_project() -> Value {
         { "name": "git_log", "description": "Get recent git commit history.", "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer", "default": 20 } } } },
         { "name": "git_branches", "description": "List git branches.", "inputSchema": { "type": "object", "properties": {} } },
         // ── Todos (per-app, live in Studio right-panel) ──
-        { "name": "todos_list", "description": "List the app's todos (optionally filtered by status). Visible live in the Studio right-side panel.", "inputSchema": { "type": "object", "properties": { "status": { "type": "string", "enum": ["pending", "in_progress", "done", "blocked"] } } } },
-        { "name": "todos_create", "description": "Create a new todo for this app. Appears instantly in the Studio panel.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string", "description": "Short title" }, "description": { "type": "string" } }, "required": ["name"] } },
-        { "name": "todos_update", "description": "Update a todo's fields. Use `status` = pending|in_progress|done|blocked; set `status_reason` when blocking.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "description": { "type": "string" }, "status": { "type": "string", "enum": ["pending", "in_progress", "done", "blocked"] }, "status_reason": { "type": "string" } }, "required": ["id"] } },
-        { "name": "todos_delete", "description": "Delete a todo by id.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } }
+        { "name": "todos_list", "description": "List the app's todos (optionally filtered by status). Visible live in the Studio right-side panel — consult it at session start, at every transition, and before reporting back to the user.", "inputSchema": { "type": "object", "properties": { "status": { "type": "string", "enum": ["pending", "in_progress"] } } } },
+        { "name": "todos_create", "description": "Create a new todo for this app (starts as pending). Appears instantly in the Studio panel — visible to the user. Use only for items the user should see; for internal technical notes, prefer the app's CLAUDE.md.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string", "description": "Short action-oriented title (≤80 chars)" }, "description": { "type": "string" } }, "required": ["name"] } },
+        { "name": "todos_update", "description": "Update a todo's fields. Only two statuses exist: `pending` (note) and `in_progress` (current task — only one at a time, others are auto-demoted). To complete or abandon a task, use `todos_delete` — there is no `done` status.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "description": { "type": "string" }, "status": { "type": "string", "enum": ["pending", "in_progress"] } }, "required": ["id"] } },
+        { "name": "todos_delete", "description": "Delete a todo by id. This is how todos are completed — there is no 'done' status, finished tasks must be deleted. Also use this when the user asks to drop a todo.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } }
     ])
 }
 
@@ -2681,10 +2681,6 @@ async fn tool_todos_update(id: Value, args: &Value, state: &McpState) -> Value {
         .and_then(|v| v.as_str())
         .map(String::from);
     let status = args.get("status").and_then(|v| v.as_str()).map(String::from);
-    let status_reason = args
-        .get("status_reason")
-        .and_then(|v| v.as_str())
-        .map(String::from);
     ipc_resp_to_mcp(
         id,
         ctx.todos_update(
@@ -2693,7 +2689,6 @@ async fn tool_todos_update(id: Value, args: &Value, state: &McpState) -> Value {
             name,
             description,
             status,
-            status_reason,
         )
         .await,
     )

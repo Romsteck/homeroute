@@ -434,10 +434,10 @@ fn render_mcp_tools_md(app: &Application) -> String {
          - `docs.update` — update a section (mutation, not auto-approved)\n\
          \n\
          ## Todos (`todos_*`) — visibles dans le panneau droit du Studio\n\
-         - `todos_list` — lister les todos (filtre optionnel par `status`)\n\
-         - `todos_create` — créer (`name`, `description?`)\n\
-         - `todos_update` — modifier (`id`, `status?`, `status_reason?`, etc.)\n\
-         - `todos_delete` — supprimer (`id`)\n\
+         - `todos_list` — lister les todos (filtre optionnel par `status` : `pending` ou `in_progress`)\n\
+         - `todos_create` — créer (`name`, `description?`) — démarre en `pending`\n\
+         - `todos_update` — modifier (`id`, `status?` parmi `pending`/`in_progress`)\n\
+         - `todos_delete` — supprimer (`id`) — c'est ainsi qu'on clôt une tâche (pas de statut « done »)\n\
          \n\
          ## Store (`store.*`)\n\
          - Tools for the HomeRoute mobile store (uploads, listings).\n\
@@ -867,51 +867,86 @@ fn render_initial_claude_md(app: &Application) -> String {
     )
 }
 
-/// Rule obligatoire pour l'usage des tools MCP `todos.*` — les todos sont
+/// Rule obligatoire pour l'usage des tools MCP `todos_*` — les todos sont
 /// visibles en live dans le panneau latéral droit du Studio de l'app.
 fn render_todos_md(app: &Application) -> String {
     format!(
         "# Todos — {name} (OBLIGATOIRE)\n\
          \n\
-         Cette app possède un système de todos scopé projet, accessible via les tools \
-         MCP `todos_*`. Les todos sont stockés dans `todos.json` de l'app et affichés \
-         **en temps réel** dans le panneau latéral droit du Studio \
-         ({slug}.mynetwk.biz via studio.mynetwk.biz).\n\
+         Cette app possède une todolist **vivante** scopée à `{slug}`, exposée via les \
+         tools MCP `todos_*`. Elle s'affiche **en temps réel** dans le panneau latéral \
+         droit du Studio ({slug}.mynetwk.biz via studio.mynetwk.biz). C'est un \
+         compagnon de travail **visible par l'utilisateur**, pas ton bloc-notes interne.\n\
          \n\
-         Contrairement aux todos du Hub (qui sont globaux), ceux-ci sont **scopés à \
-         l'app** et destinés à l'utilisateur qui regarde le Studio en direct. Utilise-les \
-         comme un compagnon de travail visible.\n\
+         ## Réflexes obligatoires\n\
          \n\
-         ## Règles obligatoires\n\
+         Ces trois moments ne sont pas négociables :\n\
          \n\
-         ### Au début d'une session non triviale\n\
-         - Appeler `todos_list` avec `status = \"pending\"` pour voir les todos déjà ouverts.\n\
-         - S'il reste des todos de sessions précédentes, les prendre en compte avant d'en créer de nouveaux.\n\
+         1. **Au début de chaque session** — `todos_list` immédiatement. Toujours. Tu \
+         prends connaissance de ce qui traîne avant d'attaquer.\n\
+         2. **À chaque transition naturelle** — fin d'une étape, blocage, changement \
+         de focus, après avoir résolu un truc : reconsulte la liste. Une tâche que tu \
+         viens de finir est probablement **dedans** — `todos_delete` avant de poursuivre. \
+         Ne laisse jamais un todo livré derrière toi entre deux étapes.\n\
+         3. **Avant de rendre ton rapport final à l'utilisateur** — ouvre `todos_list` \
+         une dernière fois. Tout ce qui est livré : `delete`. Tout ce qui n'a plus de \
+         raison d'être : `delete`. La liste finale ne doit contenir QUE ce qui reste \
+         réellement à faire ou en cours.\n\
          \n\
-         ### Pendant le travail\n\
-         - **Nouvelle tâche identifiée** → `todos_create` avec un `name` court et une `description` claire.\n\
-         - **Début de travail sur un todo** → `todos_update` avec `status = \"in_progress\"`.\n\
-         - **Blocage** → `todos_update` avec `status = \"blocked\"` + `status_reason` expliquant quoi.\n\
-         - **Tâche terminée** → `todos_update` avec `status = \"done\"`.\n\
-         - **Todo obsolète / doublon** → `todos_delete`.\n\
+         Si tu termines un tour sans avoir fait ce dernier balayage, l'utilisateur \
+         voit des fantômes dans son panneau. C'est un échec.\n\
          \n\
-         ## Forme attendue\n\
+         ## Anti-patterns à proscrire\n\
          \n\
-         | Champ | Rôle |\n\
-         |---|---|\n\
-         | `name` | Titre court (≈ 80 chars max), orienté action |\n\
-         | `description` | Contexte / ce qu'il faut faire, orienté utilisateur |\n\
-         | `status` | `pending` / `in_progress` / `done` / `blocked` |\n\
-         | `status_reason` | Obligatoire pour `blocked`, utile pour les autres si non évident |\n\
+         - ❌ **Créé-puis-oublié** : tu crées un todo pour tracer un diagnostic, tu \
+         fixes le problème dans la même session, tu rends le rapport sans toucher au \
+         todo. → `todos_delete` **immédiatement** après la résolution, pas après le \
+         rapport.\n\
+         - ❌ **Hors scope** : tu bosses dans `{slug}`, tu découvres un follow-up qui \
+         concerne `hr-apps`, `homeroute`, ou une autre app. Ne crée PAS un todo ici. \
+         Ce panneau est dédié à `{slug}`. Mentionne le follow-up **dans la conversation \
+         avec l'utilisateur** — c'est lui qui décidera où le tracer.\n\
+         - ❌ **Surutilisation** : un todo s'adresse à **l'utilisateur qui regarde le \
+         Studio**. Pour des notes purement techniques destinées au prochain agent \
+         (chemins de code, hypothèses internes, conventions locales), `CLAUDE.md` à la \
+         racine de l'app est mieux. Critère : « Est-ce que l'utilisateur veut savoir \
+         que je laisse ça pour plus tard ? » Si non → pas un todo.\n\
+         - ❌ **Statut décoratif** : pas de « done », « completed », « archived ». \
+         Terminé = supprimé.\n\
+         \n\
+         ## Sémantique des statuts\n\
+         \n\
+         Seuls deux statuts existent :\n\
+         \n\
+         - **`pending`** — note « à penser plus tard ». Pas encore en cours.\n\
+         - **`in_progress`** — la tâche que tu fais **maintenant**. **Une seule à la \
+         fois**. Si tu démarres un nouveau todo sans clore le précédent, le backend \
+         demote automatiquement l'ancien à `pending` — évite-toi la surprise et fais-le \
+         consciemment.\n\
+         \n\
+         Une tâche **terminée** est **supprimée** (`todos_delete`). Pas de status \
+         « done ». Une tâche dont la suppression est demandée par l'utilisateur est \
+         aussi supprimée — pas marquée d'une autre façon.\n\
+         \n\
+         ## Mapping action → tool (référence)\n\
+         \n\
+         - **Démarrer une tâche** → `todos_update(id, status: \"in_progress\")` ou \
+         `todos_create(name, description)` puis update.\n\
+         - **Tâche terminée** → `todos_delete(id)` ⚠ supprimer, ne pas « compléter ».\n\
+         - **Note / follow-up à garder en tête** → `todos_create(name, description)` \
+         (le statut par défaut est `pending`).\n\
+         - **Progrès partiel sur in_progress** → `todos_update(id, description)` avec \
+         des notes.\n\
+         - **Suppression demandée par l'utilisateur** → `todos_delete(id)`.\n\
          \n\
          ## Tools MCP\n\
          \n\
          | Tool | Usage |\n\
          |---|---|\n\
          | `todos_list` | Lister (filtre optionnel par `status`) |\n\
-         | `todos_create` | Créer (`name`, `description?`) |\n\
+         | `todos_create` | Créer (`name`, `description?`) — démarre en `pending` |\n\
          | `todos_update` | Modifier (`id`, puis les champs à changer) |\n\
-         | `todos_delete` | Supprimer (`id`) |\n\
+         | `todos_delete` | Supprimer (`id`) — c'est ainsi qu'on clôt |\n\
          \n\
          Le `slug` de l'app (`{slug}`) est injecté automatiquement par le MCP projet — \
          ne le passe pas dans les arguments.\n",

@@ -2,6 +2,16 @@
 //!
 //! Live-updated via the `app_todos` broadcast channel on `EventBus` — the Studio
 //! right-side panel subscribes through the WS API.
+//!
+//! ## Sémantique (volontairement minimaliste)
+//!
+//! Deux statuts uniquement : `pending` (note à penser plus tard) et `in_progress`
+//! (en cours maintenant — une seule à la fois). Une tâche terminée ou abandonnée
+//! est **supprimée** (`delete`). Pas de status `done`/`blocked`/`completed`.
+//!
+//! Les anciens fichiers `todos.json` qui contiennent `done`/`blocked` sont migrés
+//! au load : les `done` sont droppés, les `blocked` repassés à `pending` (avec
+//! le `status_reason` éventuel fusionné dans la `description`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,8 +29,6 @@ use tracing::{info, instrument, warn};
 pub enum TodoStatus {
     Pending,
     InProgress,
-    Done,
-    Blocked,
 }
 
 impl TodoStatus {
@@ -28,8 +36,11 @@ impl TodoStatus {
         match s {
             "pending" => Ok(Self::Pending),
             "in_progress" => Ok(Self::InProgress),
-            "done" => Ok(Self::Done),
-            "blocked" => Ok(Self::Blocked),
+            "done" | "blocked" | "completed" | "archived" => Err(anyhow!(
+                "todo status '{s}' is no longer supported — terminated todos must be \
+                 deleted via todos_delete (no 'done' status). Only 'pending' and \
+                 'in_progress' are accepted."
+            )),
             other => Err(anyhow!("invalid todo status: {other}")),
         }
     }
@@ -42,8 +53,6 @@ pub struct Todo {
     #[serde(default)]
     pub description: Option<String>,
     pub status: TodoStatus,
-    #[serde(default)]
-    pub status_reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -91,13 +100,135 @@ impl TodosManager {
             .clone()
     }
 
-    async fn load(&self, slug: &str) -> Result<TodosFile> {
+    /// Read the JSON file and migrate legacy todos (done/blocked + status_reason)
+    /// to the simplified two-status model. Returns the file plus a flag telling
+    /// the caller whether it must persist the migration.
+    async fn load_with_migration(&self, slug: &str) -> Result<(TodosFile, bool)> {
         let path = self.path_for(slug);
-        match tokio::fs::read(&path).await {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes).unwrap_or_default()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(TodosFile::default()),
-            Err(e) => Err(anyhow!("read {}: {e}", path.display())),
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((TodosFile::default(), false))
+            }
+            Err(e) => return Err(anyhow!("read {}: {e}", path.display())),
+        };
+        let raw: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(slug, error = %e, "todos.json unreadable — starting from empty");
+                return Ok((TodosFile::default(), false));
+            }
+        };
+        let raw_todos = raw
+            .get("todos")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut migrated = false;
+        let mut out: Vec<Todo> = Vec::with_capacity(raw_todos.len());
+        for entry in raw_todos {
+            let status_str = entry
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("pending")
+                .to_string();
+            let legacy_reason = entry
+                .get("status_reason")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string());
+            let name = entry
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let id = entry
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if name.is_empty() || id.is_empty() {
+                warn!(slug, "dropping malformed todo entry during load");
+                migrated = true;
+                continue;
+            }
+            // Migration des statuts legacy
+            let new_status = match status_str.as_str() {
+                "pending" => TodoStatus::Pending,
+                "in_progress" => TodoStatus::InProgress,
+                "done" | "completed" | "archived" => {
+                    info!(slug, id = %id, "migrating legacy 'done' todo → dropped");
+                    migrated = true;
+                    continue;
+                }
+                "blocked" => {
+                    info!(slug, id = %id, "migrating legacy 'blocked' todo → pending");
+                    migrated = true;
+                    TodoStatus::Pending
+                }
+                other => {
+                    warn!(slug, id = %id, status = %other, "unknown legacy status → pending");
+                    migrated = true;
+                    TodoStatus::Pending
+                }
+            };
+            let mut description = entry
+                .get("description")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string());
+            // Si on avait un status_reason et qu'on perd le statut, on le préserve
+            // dans la description pour ne pas perdre l'information.
+            if let Some(reason) = legacy_reason {
+                if status_str == "blocked" {
+                    let prefix = format!("⚠ ancien blocage : {reason}");
+                    description = Some(match description {
+                        Some(d) => format!("{prefix}\n\n{d}"),
+                        None => prefix,
+                    });
+                    migrated = true;
+                }
+            }
+            let created_at = entry
+                .get("created_at")
+                .and_then(|v| v.as_str())
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(Utc::now);
+            let updated_at = entry
+                .get("updated_at")
+                .and_then(|v| v.as_str())
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or(created_at);
+            out.push(Todo {
+                id,
+                name,
+                description,
+                status: new_status,
+                created_at,
+                updated_at,
+            });
         }
+        // Si le fichier original avait un champ `status_reason` même sans status legacy,
+        // on l'a déjà droppé via la projection — c'est aussi une migration silencieuse.
+        // On ne flippe pas `migrated` pour ça si le statut était déjà valide :
+        // l'absence dans le nouveau schéma sera juste reflétée au prochain save naturel.
+        Ok((TodosFile { todos: out }, migrated))
+    }
+
+    async fn load(&self, slug: &str) -> Result<TodosFile> {
+        let (file, migrated) = self.load_with_migration(slug).await?;
+        if migrated {
+            // Persiste la migration immédiatement et broadcaste pour rafraîchir le panneau.
+            if let Err(e) = self.save(slug, &file).await {
+                warn!(slug, error = %e, "failed to persist todos migration");
+            } else {
+                info!(slug, count = file.todos.len(), "todos migration persisted");
+                self.broadcast(slug, &file.todos);
+            }
+        }
+        Ok(file)
     }
 
     async fn save(&self, slug: &str, file: &TodosFile) -> Result<()> {
@@ -159,7 +290,6 @@ impl TodosManager {
             name: name.trim().to_string(),
             description: description.map(|d| d.trim().to_string()).filter(|d| !d.is_empty()),
             status: TodoStatus::Pending,
-            status_reason: None,
             created_at: now,
             updated_at: now,
         };
@@ -171,7 +301,6 @@ impl TodosManager {
     }
 
     #[instrument(skip(self), fields(slug = %slug, id = %id))]
-    #[allow(clippy::too_many_arguments)]
     pub async fn update(
         &self,
         slug: &str,
@@ -179,7 +308,6 @@ impl TodosManager {
         name: Option<String>,
         description: Option<String>,
         status: Option<TodoStatus>,
-        status_reason: Option<String>,
     ) -> Result<Todo> {
         let lock = self.lock_for(slug).await;
         let _g = lock.lock().await;
@@ -189,6 +317,27 @@ impl TodosManager {
             .iter()
             .position(|t| t.id == id)
             .ok_or_else(|| anyhow!("todo {id} not found"))?;
+
+        // Enforce single in_progress : si on demande d'en démarrer un, demoter les autres.
+        if matches!(status, Some(TodoStatus::InProgress)) {
+            let now = Utc::now();
+            for (i, t) in file.todos.iter_mut().enumerate() {
+                if i == idx {
+                    continue;
+                }
+                if t.status == TodoStatus::InProgress {
+                    warn!(
+                        slug,
+                        demoted_id = %t.id,
+                        demoted_name = %t.name,
+                        "demoting previous in_progress todo to pending (single in_progress rule)"
+                    );
+                    t.status = TodoStatus::Pending;
+                    t.updated_at = now;
+                }
+            }
+        }
+
         let t = &mut file.todos[idx];
         if let Some(n) = name {
             if !n.trim().is_empty() {
@@ -201,10 +350,6 @@ impl TodosManager {
         }
         if let Some(s) = status {
             t.status = s;
-        }
-        if let Some(r) = status_reason {
-            let trimmed = r.trim().to_string();
-            t.status_reason = if trimmed.is_empty() { None } else { Some(trimmed) };
         }
         t.updated_at = Utc::now();
         let todo = t.clone();
