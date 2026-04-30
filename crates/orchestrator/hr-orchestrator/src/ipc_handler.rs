@@ -548,6 +548,32 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
             OrchestratorRequest::AppBuild { slug, timeout_secs } => {
                 self.apps_ctx().build(slug, timeout_secs).await
             }
+            OrchestratorRequest::AppShip { slug, timeout_secs } => {
+                self.apps_ctx().ship(slug, timeout_secs).await
+            }
+            OrchestratorRequest::AppEmitBuildEvent {
+                slug,
+                status,
+                phase,
+                message,
+                duration_ms,
+                error,
+                step,
+                total_steps,
+            } => {
+                self.apps_ctx()
+                    .emit_external_build_event(
+                        slug,
+                        status,
+                        phase,
+                        message,
+                        duration_ms,
+                        error,
+                        step,
+                        total_steps,
+                    )
+                    .await
+            }
             OrchestratorRequest::AppStatus { slug } => self.apps_ctx().status(&slug).await,
             OrchestratorRequest::AppLogs { slug, limit, level } => {
                 self.apps_ctx().logs(slug, limit, level).await

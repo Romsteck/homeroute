@@ -170,6 +170,11 @@ impl ContextGenerator {
         log_write(&app.slug, &app_build_dir.join("SKILL.md"), &render_app_build_skill(app))?;
         log_write(&app.slug, &app_build_dir.join("build.sh"), &render_app_build_script(app))?;
 
+        let app_deploy_dir = src_skills_dir.join("app-deploy");
+        fs::create_dir_all(&app_deploy_dir)?;
+        log_write(&app.slug, &app_deploy_dir.join("SKILL.md"), &render_app_deploy_skill(app))?;
+        log_write(&app.slug, &app_deploy_dir.join("deploy.sh"), &render_app_deploy_script(app))?;
+
         let produced: std::collections::HashSet<&'static str> = render_extra_skills(app)
             .iter()
             .map(|(name, _)| *name)
@@ -514,20 +519,116 @@ fn render_docs_md(app: &Application) -> String {
     )
 }
 
-/// Self-contained bash script that triggers the remote build and prints the
-/// raw JSON response. Sourced from `SKILL.md` so the skill body stays focused
-/// on *when* to build rather than *how*.
+/// Self-contained bash script that runs the build LOCALLY on CloudMaster
+/// (where the agent + sources live) and emits status events to the Studio's
+/// per-app live panel via the homeroute API on Medion.
+///
+/// The agent sees the cargo/pnpm output streamed in its terminal; the Studio
+/// sees only the start/end milestones (no log forwarding).
 fn render_app_build_script(app: &Application) -> String {
+    let build_command = app
+        .build_command
+        .as_deref()
+        .unwrap_or("echo 'no build_command configured'; exit 1");
+    let template = r#"#!/usr/bin/env bash
+# Build local de l'app `__SLUG__` (sources et toolchain sur CloudMaster).
+# Émet des events au Studio (panel per-app live) via /api/apps/__SLUG__/build-event.
+# Géré par HomeRoute — ne pas éditer (régénéré à chaque AppUpdate).
+set -euo pipefail
+API_BASE="${API_BASE:-http://10.0.0.254:4000}"
+SLUG="__SLUG__"
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+
+emit() {
+  curl -sS --max-time 5 -X POST "$API_BASE/api/apps/$SLUG/build-event" \
+    -H 'content-type: application/json' \
+    -d "$1" >/dev/null 2>&1 || true
+}
+
+on_err() {
+  ec=$?
+  ELAPSED_MS=$(( ($(date +%s) - START) * 1000 ))
+  emit "{\"status\":\"error\",\"phase\":\"compile\",\"duration_ms\":$ELAPSED_MS,\"error\":\"build exited $ec\"}"
+  exit $ec
+}
+trap on_err ERR
+
+emit '{"status":"started","phase":"compile","message":"local build on cloudmaster"}'
+START=$(date +%s)
+echo "=== Build local: $SLUG ==="
+echo "Cwd: $SRC_DIR"
+cd "$SRC_DIR"
+export CI=true NPM_CONFIG_FUND=false
+__BUILD_COMMAND__
+ELAPSED_MS=$(( ($(date +%s) - START) * 1000 ))
+emit "{\"status\":\"finished\",\"phase\":\"compile\",\"duration_ms\":$ELAPSED_MS,\"message\":\"build OK (local)\"}"
+echo "=== Build OK ($ELAPSED_MS ms) ==="
+echo "Pour livrer en prod : bash .claude/skills/app-deploy/deploy.sh"
+"#;
+    template
+        .replace("__SLUG__", &app.slug)
+        .replace("__BUILD_COMMAND__", build_command)
+}
+
+/// Skill `app-deploy` : pousse les artefacts pre-buildés vers Medion + restart.
+fn render_app_deploy_script(app: &Application) -> String {
+    let template = r#"#!/usr/bin/env bash
+# Deploy de l'app `__SLUG__` : envoie les artefacts pre-buildés vers Medion + restart.
+# Pré-requis : avoir lancé `bash .claude/skills/app-build/build.sh` au préalable.
+# Géré par HomeRoute — ne pas éditer.
+set -euo pipefail
+API_BASE="${API_BASE:-http://10.0.0.254:4000}"
+TIMEOUT_SECS="${1:-900}"
+curl -sS --max-time "$TIMEOUT_SECS" -X POST \
+  "$API_BASE/api/apps/__SLUG__/ship" \
+  -H 'content-type: application/json' \
+  -d "{\"timeout_secs\":${TIMEOUT_SECS}}"
+"#;
+    template.replace("__SLUG__", &app.slug)
+}
+
+fn render_app_deploy_skill(app: &Application) -> String {
     format!(
-        "#!/usr/bin/env bash\n\
-         # Déclenche un build distant de l'app `{slug}` sur CloudMaster.\n\
-         # Géré par HomeRoute — ne pas éditer (régénéré à chaque AppUpdate).\n\
-         set -euo pipefail\n\
-         TIMEOUT_SECS=\"${{1:-1800}}\"\n\
-         curl -sS --max-time \"$TIMEOUT_SECS\" -X POST \\\n\
-           \"http://127.0.0.1:4000/api/apps/{slug}/build\" \\\n\
-           -H 'content-type: application/json' \\\n\
-           -d \"{{\\\"timeout_secs\\\":${{TIMEOUT_SECS}}}}\"\n",
+        "---\n\
+         name: app-deploy\n\
+         description: Livre les artefacts pre-buildés de l'app `{slug}` vers Medion (rsync + restart). Utilise cette skill QUAND l'utilisateur demande de déployer/livrer/ship cette app — APRÈS un build local réussi.\n\
+         allowed-tools: Bash(bash .claude/skills/app-deploy/deploy.sh*)\n\
+         ---\n\
+         \n\
+         # Deploy de l'app `{slug}`\n\
+         \n\
+         Cette skill **livre** les artefacts (déjà compilés localement par `app-build`) vers Medion (10.0.0.254), puis redémarre le process supervisé. Pas de compile ici.\n\
+         \n\
+         ## Pré-requis\n\
+         \n\
+         - L'agent DOIT avoir lancé `bash .claude/skills/app-build/build.sh` avec succès dans cette session ou une précédente.\n\
+         - Les artefacts (`build_artefact` de l'app) doivent exister sous `src/`.\n\
+         \n\
+         ## Commande\n\
+         \n\
+         ```bash\n\
+         bash .claude/skills/app-deploy/deploy.sh\n\
+         ```\n\
+         \n\
+         Timeout optionnel en secondes (défaut 900) :\n\
+         \n\
+         ```bash\n\
+         bash .claude/skills/app-deploy/deploy.sh 1200\n\
+         ```\n\
+         \n\
+         ## Retour\n\
+         \n\
+         JSON `{{ ok, stages, summary, duration_ms }}`. Étapes émises au Studio : `stop` → `rsync-back` → `restart`.\n\
+         \n\
+         ## Workflow type\n\
+         \n\
+         1. `bash .claude/skills/app-build/build.sh`  (build local sur CloudMaster, voir output cargo)\n\
+         2. `bash .claude/skills/app-deploy/deploy.sh`  (livre + restart sur Medion)\n\
+         3. Vérifier dans le panel Studio que l'app est `running`.\n\
+         \n\
+         ## Erreur HTTP 409 — BUILD_BUSY\n\
+         \n\
+         Un autre build/ship pour `{slug}` est déjà en cours. NE PAS RETRY automatiquement — informer l'utilisateur et attendre.\n",
         slug = app.slug,
     )
 }
@@ -544,28 +645,27 @@ fn render_app_build_skill(app: &Application) -> String {
     let stack_section = match app.stack {
         AppStack::Axum => format!(
             "## Stack: Rust (Axum)\n\n\
-             - Artefact rapatrié depuis CloudMaster : `target/release/{slug}` (ou `build_artefact` si défini).\n\
-             - Build effectif côté CloudMaster : `{cmd}`.\n",
+             - Artefact attendu sous `src/` après build : `target/release/{slug}` (ou `build_artefact` si défini).\n\
+             - Commande de build : `{cmd}`.\n",
             slug = app.slug,
             cmd = build_cmd,
         ),
         AppStack::AxumVite => format!(
             "## Stack: Rust (Axum) + Vite\n\n\
-             - Artefacts rapatriés : `target/release/{slug}` + `web/dist/` (ou `build_artefact` si défini).\n\
-             - Build effectif côté CloudMaster : `{cmd}`.\n",
+             - Artefacts attendus : `target/release/{slug}` + `web/dist/` (ou `build_artefact` si défini).\n\
+             - Commande de build : `{cmd}`.\n",
             slug = app.slug,
             cmd = build_cmd,
         ),
         AppStack::NextJs => format!(
             "## Stack: Next.js\n\n\
-             - Artefacts rapatriés : `.next/`, `public/`, `package.json`, `package-lock.json`, `node_modules/` (ou `build_artefact` si défini).\n\
-             - Build effectif côté CloudMaster : `{cmd}`.\n",
+             - Artefacts attendus : `.next/`, `public/`, `node_modules/` (ou `build_artefact` si défini).\n\
+             - Commande de build : `{cmd}`.\n",
             cmd = build_cmd,
         ),
         AppStack::Flutter => format!(
             "## Stack: Flutter (mobile Android)\n\n\
-             - Build sur CloudMaster (`flutter build apk --release`), publication via la règle `store-publishing.md`.\n\
-             - Build effectif : `{cmd}`.\n",
+             - Commande de build : `{cmd}` (publication via la règle `store-publishing.md`).\n",
             cmd = build_cmd,
         ),
     };
@@ -573,14 +673,20 @@ fn render_app_build_skill(app: &Application) -> String {
     format!(
         "---\n\
          name: app-build\n\
-         description: Build l'application {slug} ({stack}) sur CloudMaster et rapatrie les artefacts. Utilise cette skill QUAND l'utilisateur demande de builder/compiler/rebuild cette app — ne lance JAMAIS le build manuellement.\n\
+         description: Build local de l'application {slug} ({stack}) sur CloudMaster (toolchain locale, output cargo/pnpm visible en live). Utilise cette skill QUAND l'utilisateur demande de builder/compiler/rebuild cette app.\n\
          allowed-tools: Bash(bash .claude/skills/app-build/build.sh*)\n\
          ---\n\
          \n\
-         # Build de l'app `{slug}`\n\
+         # Build de l'app `{slug}` (local sur CloudMaster)\n\
          \n\
-         Cette skill déclenche un build distant de l'app sur CloudMaster (10.0.0.10) et rapatrie les artefacts via rsync. \
-         Tout passe par un endpoint HTTP bloquant — pas de build local.\n\
+         Cette skill compile l'app **directement** sur CloudMaster (où vivent sources et toolchain). \
+         L'output (cargo, pnpm, etc.) est visible en live dans ton terminal. Le Studio est notifié en parallèle via `/api/apps/{slug}/build-event` pour afficher l'état dans le panel per-app.\n\
+         \n\
+         **Important** : ce build NE LIVRE PAS l'artefact à Medion. Pour livrer + restart en prod, enchaîne ensuite avec :\n\
+         \n\
+         ```bash\n\
+         bash .claude/skills/app-deploy/deploy.sh\n\
+         ```\n\
          \n\
          ## Commande\n\
          \n\
@@ -588,44 +694,25 @@ fn render_app_build_skill(app: &Application) -> String {
          bash .claude/skills/app-build/build.sh\n\
          ```\n\
          \n\
-         Le script prend un timeout optionnel en secondes (défaut 1800) :\n\
-         \n\
-         ```bash\n\
-         bash .claude/skills/app-build/build.sh 3600\n\
-         ```\n\
+         Tu peux itérer sans deploy : edit → build → re-edit → re-build. Tant que tu n'as pas fait `app-deploy`, le runtime Medion ne change pas (c'est volontaire).\n\
          \n\
          ## Retour\n\
          \n\
-         Réponse JSON : `{{ ok, stages, summary, duration_ms }}`.\n\
+         Le script affiche l'output cargo/pnpm en stream + un événement `started` puis `finished` (ou `error`) émis au Studio. Exit code 0 si le build passe.\n\
          \n\
-         - `ok: true` → build réussi, lire `summary` pour les détails.\n\
-         - `ok: false` → lire le tableau `stages` pour identifier la phase fautive (ssh-probe, rsync-up, compile, rsync-back, restart).\n\
+         ## Workflow type\n\
          \n\
-         ## Erreur HTTP 409 — BUILD_BUSY\n\
-         \n\
-         Si l'endpoint répond **HTTP 409** (`BUILD_BUSY`), un autre build de cette app est déjà en cours \
-         (probablement une autre conversation ou un autre code-server).\n\
-         \n\
-         **NE PAS RETRY automatiquement.** Tu DOIS :\n\
-         \n\
-         1. Informer l'utilisateur qu'un build est déjà en cours pour `{slug}`.\n\
-         2. Attendre son feu vert explicite avant de relancer.\n\
-         \n\
-         Pourquoi : deux builds concurrents sur le même slug corrompraient les sources côté CloudMaster (rsync concurrent).\n\
-         \n\
-         ## Après build OK\n\
-         \n\
-         Redémarrer le process supervisé via le tool MCP `restart` (action `restart` sur l'app `{slug}`).\n\
+         1. `bash .claude/skills/app-build/build.sh`  (compile local, voir l'output)\n\
+         2. Itérer si besoin (fix erreurs, re-build)\n\
+         3. `bash .claude/skills/app-deploy/deploy.sh`  (livre + restart prod)\n\
          \n\
          ## Interdits\n\
          \n\
-         - **JAMAIS** lancer `{cmd}` localement dans le studio — ça doit tourner sur CloudMaster.\n\
-         - **JAMAIS** invoquer `cargo build`, `npm run build`, `pnpm build` à la main pour cette app.\n\
+         - **JAMAIS** appeler les anciens endpoints `/api/apps/{slug}/build` ou `/api/apps/{slug}/deploy` à la main : ils refont l'aller-retour SSH inutile.\n\
          \n\
          {stack_section}",
         slug = app.slug,
         stack = stack_label,
-        cmd = build_cmd,
         stack_section = stack_section,
     )
 }

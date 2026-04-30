@@ -30,6 +30,8 @@ pub fn router() -> Router<ApiState> {
         .route("/apps/{slug}/control", post(control_app))
         .route("/apps/{slug}/build", post(build_app))
         .route("/apps/{slug}/deploy", post(build_app))
+        .route("/apps/{slug}/ship", post(ship_app))
+        .route("/apps/{slug}/build-event", post(emit_build_event))
         .route("/apps/{slug}/status", get(app_status))
         .route("/apps/{slug}/logs", get(app_logs))
         .route("/apps/{slug}/exec", post(app_exec))
@@ -538,6 +540,105 @@ async fn build_app(
                 }
             }
         }
+        Err(e) => ipc_err_response(e),
+    }
+}
+
+// ── Ship (rsync pre-built artefact + restart, no compile) ─────────
+
+const SHIP_DEFAULT_TIMEOUT_SECS: u64 = 900;
+
+#[tracing::instrument(skip(state, body))]
+async fn ship_app(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+    Json(body): Json<BuildRequest>,
+) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    let timeout_secs = body
+        .timeout_secs
+        .unwrap_or(SHIP_DEFAULT_TIMEOUT_SECS)
+        .clamp(BUILD_MIN_TIMEOUT_SECS, BUILD_MAX_TIMEOUT_SECS);
+    let started = Instant::now();
+    info!(slug, timeout_secs, "Shipping pre-built artefacts");
+    let ipc_timeout = std::time::Duration::from_secs(timeout_secs + 60);
+    let req = OrchestratorRequest::AppShip {
+        slug: slug.clone(),
+        timeout_secs: Some(timeout_secs),
+    };
+    match state.orchestrator.request_with_timeout(&req, ipc_timeout).await {
+        Ok(resp) => {
+            info!(
+                slug,
+                duration_ms = started.elapsed().as_millis() as u64,
+                ok = resp.ok,
+                "ship_app done"
+            );
+            if resp.ok {
+                Json(json!({"success": true, "data": resp.data})).into_response()
+            } else {
+                let err = resp.error.unwrap_or_else(|| "unknown error".into());
+                if err.contains("BUILD_BUSY") {
+                    (
+                        StatusCode::CONFLICT,
+                        Json(json!({"success": false, "error": "BUILD_BUSY", "message": err})),
+                    )
+                        .into_response()
+                } else {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"success": false, "error": err})),
+                    )
+                        .into_response()
+                }
+            }
+        }
+        Err(e) => ipc_err_response(e),
+    }
+}
+
+// ── Build event broadcast (used by local app-build skill) ─────────
+
+#[derive(Debug, Deserialize)]
+struct BuildEventRequest {
+    status: String,
+    #[serde(default)]
+    phase: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    duration_ms: Option<u64>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    step: Option<u32>,
+    #[serde(default)]
+    total_steps: Option<u32>,
+}
+
+#[tracing::instrument(skip(state, body))]
+async fn emit_build_event(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+    Json(body): Json<BuildEventRequest>,
+) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    let req = OrchestratorRequest::AppEmitBuildEvent {
+        slug: slug.clone(),
+        status: body.status,
+        phase: body.phase,
+        message: body.message,
+        duration_ms: body.duration_ms,
+        error: body.error,
+        step: body.step,
+        total_steps: body.total_steps,
+    };
+    match state.orchestrator.request(&req).await {
+        Ok(resp) => ipc_response(resp),
         Err(e) => ipc_err_response(e),
     }
 }

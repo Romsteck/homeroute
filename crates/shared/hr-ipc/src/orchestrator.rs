@@ -184,6 +184,32 @@ pub enum OrchestratorRequest {
         #[serde(default)]
         timeout_secs: Option<u64>,
     },
+    /// Ship pre-built artefacts from CloudMaster to Medion (skip compile).
+    /// Used when the agent has already run the build locally on CloudMaster
+    /// and just wants to push the artefacts + restart the supervised process.
+    AppShip {
+        slug: String,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
+    /// Broadcast a custom AppBuildEvent (used by local builds via the
+    /// app-build skill to notify the Studio's per-app live panel).
+    AppEmitBuildEvent {
+        slug: String,
+        status: String,
+        #[serde(default)]
+        phase: Option<String>,
+        #[serde(default)]
+        message: Option<String>,
+        #[serde(default)]
+        duration_ms: Option<u64>,
+        #[serde(default)]
+        error: Option<String>,
+        #[serde(default)]
+        step: Option<u32>,
+        #[serde(default)]
+        total_steps: Option<u32>,
+    },
     /// Get runtime status (pid, state, port, uptime).
     AppStatus {
         slug: String,

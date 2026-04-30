@@ -1456,6 +1456,289 @@ impl AppsContext {
 
         resp
     }
+
+    /// Broadcast an externally-supplied AppBuildEvent on the per-app channel.
+    /// Used by the `app-build` skill (running locally on CloudMaster) to keep
+    /// the Studio's per-app live panel in sync with build progress.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn emit_external_build_event(
+        &self,
+        slug: String,
+        status: String,
+        phase: Option<String>,
+        message: Option<String>,
+        duration_ms: Option<u64>,
+        error: Option<String>,
+        step: Option<u32>,
+        total_steps: Option<u32>,
+    ) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        emit_build_event(
+            &self.app_build_tx,
+            &slug,
+            &status,
+            step,
+            total_steps,
+            phase,
+            message,
+            duration_ms,
+            error,
+        );
+        IpcResponse::ok_data(serde_json::json!({ "ok": true }))
+    }
+
+    /// Ship pre-built artefacts from CloudMaster to Medion + restart the
+    /// supervised process. Skips compile (the agent already ran the build
+    /// locally on CloudMaster). Steps: stop → rsync-back per artefact → restart.
+    /// Emits AppBuildEvents on the per-app channel so the Studio panel reflects
+    /// progress.
+    pub async fn ship(&self, slug: String, timeout_secs: Option<u64>) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        let app = match self.supervisor.registry.get(&slug).await {
+            Some(a) => a,
+            None => return IpcResponse::err(format!("app not found: {slug}")),
+        };
+
+        let (_default_build_cmd, default_artefacts) = match build_defaults_for_stack(&app) {
+            Some(d) => d,
+            None => {
+                return IpcResponse::err(
+                    "stack not supported by app.ship; configure build_artefact manually".to_string(),
+                );
+            }
+        };
+        let artefacts: Vec<String> = match app.build_artefact.as_deref() {
+            Some(custom) => custom
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            None => default_artefacts,
+        };
+        if artefacts.is_empty() {
+            return IpcResponse::err("no artefacts to ship (empty build_artefact)");
+        }
+
+        // Per-slug lock partagé avec build() — pour éviter qu'un ship se
+        // déclenche pendant qu'un build tourne (ou inversement).
+        let lock = {
+            let mut map = self.build_locks.lock().await;
+            map.entry(slug.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = match lock.try_lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return IpcResponse::err(format!(
+                    "BUILD_BUSY: another build/ship for '{slug}' is in progress. Wait."
+                ));
+            }
+        };
+
+        emit_build_event(
+            &self.app_build_tx,
+            &slug,
+            "started",
+            None,
+            None,
+            Some("ship".to_string()),
+            Some("ship pipeline started (skip compile)".to_string()),
+            None,
+            None,
+        );
+
+        let host = std::env::var("HR_BUILD_HOST").unwrap_or_else(|_| BUILD_HOST.to_string());
+        let key = std::env::var("HR_BUILD_SSH_KEY").unwrap_or_else(|_| SSH_KEY.to_string());
+        let timeout = Duration::from_secs(timeout_secs.unwrap_or(900).max(60).min(7200));
+        let started = Instant::now();
+        let remote_src = format!("/opt/homeroute/apps/{}/src", slug);
+        let local_src = app.src_dir();
+
+        let ctl_socket = format!("/tmp/hr-ship-ssh-{}-{}.sock", slug, std::process::id());
+        let ctl_path_opt = format!("ControlPath={ctl_socket}");
+        let ssh_e_arg = format!(
+            "ssh -i {key} -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+             -o ControlMaster=auto -o {ctl_path_opt} -o ControlPersist=30 \
+             -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
+        );
+
+        info!(slug = %slug, host = %host, "ship: start");
+
+        let app_build_tx = self.app_build_tx.clone();
+        let slug_for_pipeline = slug.clone();
+        let supervisor_for_pipeline = self.supervisor.clone();
+        let key_clone = key.clone();
+        let host_clone = host.clone();
+        let ctl_path_opt_clone = ctl_path_opt.clone();
+        let pipeline = async {
+            let mut acc = StageAccumulator::new();
+
+            // 1) Stop the supervised process before overwriting artefacts.
+            let stop_started = Instant::now();
+            if let Err(e) = supervisor_for_pipeline.stop(&slug_for_pipeline).await {
+                warn!(slug = %slug_for_pipeline, error = %e, "ship: pre-rsync stop failed (continuing)");
+            }
+            emit_build_event(
+                &app_build_tx,
+                &slug_for_pipeline,
+                "step",
+                Some(1),
+                Some(3),
+                Some("stop".to_string()),
+                None,
+                Some(stop_started.elapsed().as_millis() as u64),
+                None,
+            );
+
+            // 2) Rsync each artefact back from CloudMaster to Medion.
+            let rsync_back_started = Instant::now();
+            for art in &artefacts {
+                info!(slug = %slug_for_pipeline, artefact = %art, "ship: rsync down");
+                let remote_path = format!("{}/{}", remote_src, art);
+                let local_path = local_src.join(art);
+                if let Some(parent) = local_path.parent() {
+                    let _ = tokio::fs::create_dir_all(parent).await;
+                }
+                let exists = run_capture(
+                    "ssh",
+                    &[
+                        "-i", &key_clone,
+                        "-o", "BatchMode=yes",
+                        "-o", "StrictHostKeyChecking=accept-new",
+                        "-o", "ControlMaster=auto",
+                        "-o", &ctl_path_opt_clone,
+                        "-o", "ControlPersist=30",
+                        &host_clone,
+                        &format!("test -e {}", shell_quote(&remote_path)),
+                    ],
+                    None,
+                )
+                .await;
+                if exists.exit_code != 0 {
+                    acc.push(&format!("check-{art}"), &exists);
+                    return acc.into_result(
+                        format!("artefact missing on remote: {art} (build it first locally on CloudMaster)"),
+                        started,
+                    );
+                }
+                let is_dir = run_capture(
+                    "ssh",
+                    &[
+                        "-i", &key_clone,
+                        "-o", "BatchMode=yes",
+                        "-o", "StrictHostKeyChecking=accept-new",
+                        "-o", "ControlMaster=auto",
+                        "-o", &ctl_path_opt_clone,
+                        "-o", "ControlPersist=30",
+                        &host_clone,
+                        &format!("test -d {}", shell_quote(&remote_path)),
+                    ],
+                    None,
+                )
+                .await;
+                let dir_mode = is_dir.exit_code == 0;
+                let (src_arg, dst_arg, extra_args): (String, String, &[&str]) = if dir_mode {
+                    let _ = tokio::fs::create_dir_all(&local_path).await;
+                    (
+                        format!("{}:{}/", host_clone, remote_path),
+                        format!("{}/", local_path.display()),
+                        &["--delete"],
+                    )
+                } else {
+                    (
+                        format!("{}:{}", host_clone, remote_path),
+                        local_path.display().to_string(),
+                        &[],
+                    )
+                };
+                let mut rsync_args: Vec<&str> = vec!["-a", "-W"];
+                rsync_args.extend_from_slice(extra_args);
+                rsync_args.extend_from_slice(&["-e", &ssh_e_arg, &src_arg, &dst_arg]);
+                let down = run_capture("rsync", &rsync_args, None).await;
+                acc.push(&format!("rsync-down:{art}"), &down);
+                if down.exit_code != 0 {
+                    return acc.into_result(format!("rsync down failed for {art}"), started);
+                }
+            }
+            emit_build_event(
+                &app_build_tx,
+                &slug_for_pipeline,
+                "step",
+                Some(2),
+                Some(3),
+                Some("rsync-back".to_string()),
+                None,
+                Some(rsync_back_started.elapsed().as_millis() as u64),
+                None,
+            );
+
+            // 3) Restart supervisor.
+            let restart_started = Instant::now();
+            let restart_msg = if let Err(e) = supervisor_for_pipeline.start(&slug_for_pipeline).await {
+                warn!(slug = %slug_for_pipeline, error = %e, "ship: post-rsync start failed");
+                Some(format!("start failed: {e}"))
+            } else {
+                None
+            };
+            emit_build_event(
+                &app_build_tx,
+                &slug_for_pipeline,
+                "step",
+                Some(3),
+                Some(3),
+                Some("restart".to_string()),
+                restart_msg,
+                Some(restart_started.elapsed().as_millis() as u64),
+                None,
+            );
+
+            info!(slug = %slug_for_pipeline, duration_ms = started.elapsed().as_millis() as u64, "ship: ok");
+            acc.into_result_ok(started)
+        };
+
+        let resp = match tokio::time::timeout(timeout, pipeline).await {
+            Ok(r) => r,
+            Err(_) => {
+                error!(slug = %slug, "ship: timeout");
+                IpcResponse::err(format!("ship timed out after {}s", timeout.as_secs()))
+            }
+        };
+
+        let total_ms = started.elapsed().as_millis() as u64;
+        if resp.ok {
+            emit_build_event(
+                &self.app_build_tx,
+                &slug,
+                "finished",
+                Some(3),
+                Some(3),
+                Some("ship".to_string()),
+                Some("ship finished".to_string()),
+                Some(total_ms),
+                None,
+            );
+        } else {
+            let err_msg = resp.error.clone().unwrap_or_else(|| "ship failed".into());
+            emit_build_event(
+                &self.app_build_tx,
+                &slug,
+                "error",
+                None,
+                Some(3),
+                Some("ship".to_string()),
+                None,
+                Some(total_ms),
+                Some(err_msg),
+            );
+        }
+
+        resp
+    }
 }
 
 /// Returns `(default_build_command, default_artefact_paths)` for stacks that
