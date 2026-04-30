@@ -231,10 +231,34 @@ pub async fn resolve(query: &DnsQuery, state: &SharedDnsState) -> ResolveResult 
                 };
             }
 
-            // Local domain is authoritative for ALL record types — return NODATA
-            // instead of forwarding upstream. This prevents HTTPS/SVCB (type 65)
-            // queries from leaking to Cloudflare, which would advertise h3 ALPN
-            // and cause ERR_QUIC_PROTOCOL_ERROR on LAN (our proxy doesn't speak QUIC).
+            // No record matched. Two distinct cases below:
+            //  - Wildcard explicitly disabled (wildcard_ipv4 == "" AND wildcard_ipv6 == "")
+            //    AND query is for an "address-shaped" type (A/AAAA/ANY) → NXDOMAIN.
+            //    Tells the client the host doesn't exist, fail-fast in the browser.
+            //  - Otherwise (either wildcard set but type didn't match, or query for
+            //    a non-address type like HTTPS/SVCB/MX/TXT) → NODATA.
+            //    NODATA preserves the anti-leak guard for HTTPS/SVCB toward Cloudflare.
+            //
+            // Local domain stays authoritative — never forward upstream.
+            let wildcard_disabled =
+                config.wildcard_ipv4.is_empty() && config.wildcard_ipv6.is_empty();
+            let address_query = matches!(
+                qtype,
+                RecordType::A | RecordType::AAAA | RecordType::ANY
+            );
+            if wildcard_disabled && address_query {
+                debug!(
+                    "Local domain {} has no managed/static record and wildcard is disabled — NXDOMAIN",
+                    name
+                );
+                return ResolveResult {
+                    records: vec![],
+                    rcode: RCODE_NXDOMAIN,
+                    cached: false,
+                    blocked: false,
+                };
+            }
+
             return ResolveResult {
                 records: vec![],
                 rcode: RCODE_NOERROR,

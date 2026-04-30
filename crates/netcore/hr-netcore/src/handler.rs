@@ -35,6 +35,9 @@ impl IpcHandler<IpcRequest, IpcResponse> for NetcoreHandler {
             IpcRequest::DnsRemoveStaticRecordsByValue { value } => {
                 self.handle_dns_remove_static_records_by_value(value).await
             }
+            IpcRequest::DnsSetManagedRecords { owner, records } => {
+                self.handle_dns_set_managed_records(owner, records).await
+            }
             IpcRequest::DhcpLeases => self.handle_dhcp_leases().await,
             IpcRequest::AdblockStats => self.handle_adblock_stats().await,
             IpcRequest::AdblockWhitelistList => self.handle_adblock_whitelist_list().await,
@@ -123,6 +126,7 @@ impl NetcoreHandler {
                 record_type: r.record_type.clone(),
                 value: r.value.clone(),
                 ttl: r.ttl,
+                managed_by: r.managed_by.clone(),
             })
             .collect();
         IpcResponse::ok_data(DnsStaticRecordsData { records })
@@ -143,6 +147,7 @@ impl NetcoreHandler {
             record_type,
             value,
             ttl,
+            managed_by: None,
         });
         IpcResponse::ok_empty()
     }
@@ -152,6 +157,33 @@ impl NetcoreHandler {
     async fn handle_dns_remove_static_records_by_value(&self, value: String) -> IpcResponse {
         let mut s = self.dns_state.write().await;
         s.remove_static_records_by_value(&value);
+        IpcResponse::ok_empty()
+    }
+
+    // ── DnsSetManagedRecords ────────────────────────────────────────────
+
+    async fn handle_dns_set_managed_records(
+        &self,
+        owner: String,
+        records: Vec<StaticRecordDto>,
+    ) -> IpcResponse {
+        let count = records.len();
+        let new_records: Vec<hr_dns::config::StaticRecord> = records
+            .into_iter()
+            .map(|r| hr_dns::config::StaticRecord {
+                name: r.name,
+                record_type: r.record_type,
+                value: r.value,
+                ttl: r.ttl,
+                managed_by: None, // overridden by replace_managed_records
+            })
+            .collect();
+
+        let mut s = self.dns_state.write().await;
+        s.replace_managed_records(&owner, new_records);
+        s.dns_cache.clear().await;
+
+        info!(owner = %owner, count = count, "DNS managed records replaced");
         IpcResponse::ok_empty()
     }
 

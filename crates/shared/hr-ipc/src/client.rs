@@ -93,6 +93,20 @@ impl NetcoreClient {
         .await
     }
 
+    /// Replace the full set of records owned by `owner` on hr-netcore.
+    /// User records and records owned by other sources are preserved.
+    pub async fn dns_set_managed_records(
+        &self,
+        owner: &str,
+        records: Vec<StaticRecordDto>,
+    ) -> Result<IpcResponse> {
+        self.request(&IpcRequest::DnsSetManagedRecords {
+            owner: owner.to_string(),
+            records,
+        })
+        .await
+    }
+
     pub async fn dhcp_leases(&self) -> Result<Vec<LeaseInfo>> {
         let resp = self.request(&IpcRequest::DhcpLeases).await?;
         extract_data(resp)

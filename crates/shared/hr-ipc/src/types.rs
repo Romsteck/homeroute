@@ -18,6 +18,12 @@ pub enum IpcRequest {
     DnsRemoveStaticRecordsByValue {
         value: String,
     },
+    /// Replace the full set of static records owned by a given source.
+    /// User records (managed_by = None) and records owned by other sources are preserved.
+    DnsSetManagedRecords {
+        owner: String,
+        records: Vec<StaticRecordDto>,
+    },
     DhcpLeases,
     AdblockStats,
     AdblockWhitelistList,
@@ -100,12 +106,18 @@ pub struct DnsStatusData {
     pub adblock_enabled: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StaticRecordDto {
     pub name: String,
     pub record_type: String,
     pub value: String,
     pub ttl: u32,
+    /// Some("hr-edge") = auto-généré depuis le reverse proxy.
+    /// None = record utilisateur. Présent dans la réponse pour permettre à l'UI
+    /// de distinguer les deux univers ; ignoré côté serveur lors de l'écriture
+    /// (l'owner est stamped par le handler).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_by: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

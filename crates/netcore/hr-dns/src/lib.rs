@@ -50,6 +50,22 @@ impl DnsState {
     pub fn remove_static_records_by_value(&mut self, value: &str) {
         self.config.static_records.retain(|r| r.value != value);
     }
+
+    /// Replace the full set of records owned by `owner`. Records with a
+    /// different `managed_by` (including `None` = user records) are preserved.
+    /// New records are stamped with `managed_by = Some(owner)` to make ownership
+    /// idempotent across calls.
+    ///
+    /// The DNS cache is NOT cleared here — the caller (handler) is expected to
+    /// invalidate it after mutation, since `clear()` is async and we want to
+    /// keep this method synchronous like its peers.
+    pub fn replace_managed_records(
+        &mut self,
+        owner: &str,
+        new_records: Vec<config::StaticRecord>,
+    ) {
+        config::replace_managed_in(&mut self.config.static_records, owner, new_records);
+    }
 }
 
 pub type SharedDnsState = Arc<RwLock<DnsState>>;

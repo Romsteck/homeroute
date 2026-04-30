@@ -5,12 +5,15 @@ use hr_ipc::server::IpcHandler;
 use hr_ipc::types::IpcResponse;
 use tracing::{info, warn};
 
+use crate::dns_route_sync::DnsRouteSync;
+
 pub struct EdgeHandler {
     pub auth: Arc<hr_auth::AuthService>,
     pub acme: Arc<hr_acme::AcmeManager>,
     pub proxy: Arc<hr_proxy::ProxyState>,
     pub tls_manager: Arc<hr_proxy::TlsManager>,
     pub env: Arc<hr_common::config::EnvConfig>,
+    pub dns_route_sync: Arc<DnsRouteSync>,
 }
 
 impl EdgeHandler {
@@ -81,10 +84,12 @@ impl IpcHandler<EdgeRequest, IpcResponse> for EdgeHandler {
                         local_only,
                     },
                 );
+                self.dns_route_sync.request_sync();
                 IpcResponse::ok_empty()
             }
             EdgeRequest::RemoveAppRoute { domain } => {
                 self.proxy.remove_app_route(&domain);
+                self.dns_route_sync.request_sync();
                 IpcResponse::ok_empty()
             }
             EdgeRequest::ListAppRoutes => IpcResponse::ok_data(self.proxy.list_app_routes()),
@@ -98,6 +103,7 @@ impl IpcHandler<EdgeRequest, IpcResponse> for EdgeHandler {
                         }
                         self.reload_acme_certs();
                         self.proxy.reload_config(new_config);
+                        self.dns_route_sync.request_sync();
                         IpcResponse::ok_empty()
                     }
                     Err(e) => IpcResponse::err(format!("Config reload failed: {}", e)),
@@ -120,6 +126,7 @@ impl IpcHandler<EdgeRequest, IpcResponse> for EdgeHandler {
                                 }
                                 self.reload_acme_certs();
                                 self.proxy.reload_config(new_config);
+                                self.dns_route_sync.request_sync();
                                 IpcResponse::ok_empty()
                             }
                             Err(e) => IpcResponse::err(format!("Config reload failed: {}", e)),

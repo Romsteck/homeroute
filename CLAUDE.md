@@ -21,7 +21,7 @@ hr-edge (443, 80)                hr-orchestrator (4001)
 ```
 
 - **`hr-netcore`** : DNS, DHCP, Adblock, IPv6 — ne redémarre quasi jamais
-- **`hr-edge`** : Reverse proxy HTTPS, TLS/ACME, Auth — restart rare
+- **`hr-edge`** : Reverse proxy HTTPS, TLS/ACME, Auth — restart rare. **Pousse aussi les FQDN du proxy vers le DNS local** (`DnsRouteSync`, owner `hr-edge` dans les `static_records`).
 - **`hr-orchestrator`** : Supervisor Tokio des apps locales (`hr-apps`), Git, DB SQLite — restart modéré
 - **`homeroute`** : API REST thin shell, WebSocket events frontend, SPA — restart fréquent (zéro impact proxy)
 - **Communication** : IPC Unix sockets (`/run/hr-{service}.sock`, JSON-line)
@@ -109,6 +109,26 @@ Le flag `sources_on: SourcesLocation` sur chaque `Application` (`medion` | `clou
 | 8443 | code-server local (studio.mynetwk.biz) | code-server |
 | 53 | DNS | hr-netcore |
 | 67 | DHCP | hr-netcore |
+
+## DNS local (synchro avec le reverse proxy)
+
+Le DNS local (`hr-netcore` sur 10.0.0.254) **n'a plus de wildcard** depuis 2026-04-30. Tout FQDN sous `mynetwk.biz` qui n'a pas de route reverse proxy explicite retourne **NXDOMAIN** sur le LAN. La zone reste authoritative — pas de forward upstream pour les domaines locaux.
+
+Les FQDN connus sont **automatiquement** poussés dans le DNS local par hr-edge (`DnsRouteSync`) à chaque mutation de route :
+
+- builtins (`proxy.`, `auth.`)
+- routes manuelles enabled (`reverseproxy-config.json::hosts[]`)
+- toutes les apps (locales et distantes)
+
+Tous résolvent vers `EDGE_SERVER_IP` (= 10.0.0.254 actuellement) — c'est hr-edge qui termine TLS pour tout le monde.
+
+Côté `dns-dhcp-config.json::dns.static_records`, ces records sont marqués `managed_by: "hr-edge"`. Les records sans ce champ sont des records **utilisateur** (édités à la main) — ils ne sont jamais écrasés par le sync. Ne jamais ajouter manuellement un record avec `managed_by: "hr-edge"` — il sera supprimé au prochain push.
+
+L'apex `mynetwk.biz` n'est volontairement pas inclus : il retourne NXDOMAIN.
+
+Vérification rapide : `bash scripts/smoke-test-dns-sync.sh` (sur Medion) — toutes les routes doivent résoudre, les domaines inconnus doivent NXDOMAIN.
+
+L'accès externe via Cloudflare n'est pas affecté — Cloudflare a son propre wildcard. **À ce jour, le wildcard Cloudflare est encore actif** : un FQDN inconnu via Internet pointe toujours vers Medion. Une migration analogue côté Cloudflare est à planifier (TODO).
 
 ## Cloudflare
 

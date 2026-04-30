@@ -1,3 +1,4 @@
+mod dns_route_sync;
 mod ipc_handler;
 
 use hr_acme::{AcmeConfig, AcmeManager, WildcardType};
@@ -6,7 +7,10 @@ use hr_common::config::EnvConfig;
 use hr_common::events::{CertReadyEvent, EventBus};
 use hr_common::service_registry::new_service_registry;
 use hr_common::supervisor::{ServicePriority, spawn_supervised};
+use hr_ipc::client::NetcoreClient;
 use hr_proxy::{ProxyConfig, ProxyState, TlsManager};
+
+use crate::dns_route_sync::{DnsRouteSync, resolve_server_ip};
 use signal_hook::consts::SIGHUP;
 use signal_hook_tokio::Signals;
 use std::net::SocketAddr;
@@ -191,7 +195,19 @@ async fn main() -> anyhow::Result<()> {
         proxy_config.active_routes().len()
     );
 
-    // Env route cache kept but no longer polled (environments removed)
+    // ── DNS route sync (push managed records to hr-netcore) ─────────
+    let netcore_client = Arc::new(NetcoreClient::new("/run/hr-netcore.sock"));
+    let edge_server_ip = resolve_server_ip(env.edge_server_ip);
+    let dns_route_sync = DnsRouteSync::new(
+        proxy_state.clone(),
+        netcore_client.clone(),
+        env.base_domain.clone(),
+        edge_server_ip,
+    );
+    {
+        let sync = dns_route_sync.clone();
+        tokio::spawn(async move { sync.run().await });
+    }
 
     // ── Store shared refs for SIGHUP reload ──────────────────────────
     let proxy_state_reload = proxy_state.clone();
@@ -300,6 +316,7 @@ async fn main() -> anyhow::Result<()> {
             proxy: proxy_state.clone(),
             tls_manager: tls_manager.clone(),
             env: Arc::new(env.clone()),
+            dns_route_sync: dns_route_sync.clone(),
         });
 
         let ipc_reg = service_registry.clone();
@@ -324,6 +341,7 @@ async fn main() -> anyhow::Result<()> {
     // ── SIGHUP handler ───────────────────────────────────────────────
     let acme_sighup = acme.clone();
     let env_sighup = env.clone();
+    let dns_sync_sighup = dns_route_sync.clone();
     tokio::spawn(async move {
         if let Err(e) = handle_sighup(
             proxy_config_path_reload,
@@ -331,6 +349,7 @@ async fn main() -> anyhow::Result<()> {
             tls_manager_reload,
             acme_sighup,
             env_sighup,
+            dns_sync_sighup,
         )
         .await
         {
@@ -617,6 +636,7 @@ async fn handle_sighup(
     tls_manager: Arc<TlsManager>,
     acme: Arc<hr_acme::AcmeManager>,
     env: hr_common::config::EnvConfig,
+    dns_route_sync: Arc<DnsRouteSync>,
 ) -> anyhow::Result<()> {
     let mut signals = Signals::new([SIGHUP])?;
 
@@ -633,6 +653,7 @@ async fn handle_sighup(
                     // which wipes certs not referenced by routes)
                     reload_acme_certs(&tls_manager, &acme, &env.base_domain);
                     proxy_state.reload_config(new_config);
+                    dns_route_sync.request_sync();
                     info!("Proxy config reloaded");
                 }
                 Err(e) => {

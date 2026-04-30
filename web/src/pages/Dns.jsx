@@ -30,11 +30,6 @@ function Dns() {
             cacheSize: raw.dns?.cache_size,
             dnsServers: raw.dns?.upstream_servers,
             staticRecords: raw.dns?.static_records || [],
-            dhcpOptions: raw.dhcp?.static_leases?.map(l => `${l.mac} → ${l.ip} (${l.hostname || ''})`),
-            wildcardAddress: raw.dns?.wildcard_ipv4 ? {
-              domain: raw.dns.local_domain,
-              ip: raw.dns.wildcard_ipv4
-            } : null,
             ipv6: {
               raEnabled: raw.ipv6?.ra_enabled,
             }
@@ -60,7 +55,7 @@ function Dns() {
   function renderDnsTab() {
     return (
       <div className="space-y-px">
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-px">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-px">
           <Section title="Serveurs DNS upstream" className="!mb-0">
             <div className="space-y-1">
               {config?.dnsServers?.map(server => (
@@ -77,30 +72,19 @@ function Dns() {
             </div>
             <p className="text-sm text-gray-400 mt-1">entrées</p>
           </Section>
-
-          <Section title="Wildcard DNS" className="!mb-0">
-            {config?.wildcardAddress ? (
-              <div className="font-mono text-sm break-all">
-                <span className="text-purple-400">*.{config.wildcardAddress.domain}</span>
-                <span className="text-gray-400 mx-2">→</span>
-                <span className="text-green-400">{config.wildcardAddress.ip}</span>
-              </div>
-            ) : (
-              <span className="text-gray-500 text-sm">Non configuré</span>
-            )}
-          </Section>
         </div>
 
         <Section title={`Enregistrements DNS (${config?.staticRecords?.length || 0})`}>
           {config?.staticRecords?.length > 0 ? (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm min-w-[500px]">
+              <table className="w-full text-sm min-w-[600px]">
                 <thead>
                   <tr className="text-left text-gray-400 border-b border-gray-700">
                     <th className="pb-2">Nom</th>
                     <th className="pb-2">Type</th>
                     <th className="pb-2">Valeur</th>
                     <th className="pb-2">TTL</th>
+                    <th className="pb-2">Source</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -119,6 +103,17 @@ function Dns() {
                       </td>
                       <td className="py-2 font-mono text-sm break-all">{record.value}</td>
                       <td className="py-2 text-gray-400">{record.ttl}s</td>
+                      <td className="py-2">
+                        {record.managed_by === 'hr-edge' ? (
+                          <span className="px-2 py-0.5 text-xs font-medium bg-blue-900/50 text-blue-300" title="Auto-généré depuis le reverse proxy">
+                            Auto (proxy)
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 text-xs font-medium bg-gray-700 text-gray-300" title="Record utilisateur manuel">
+                            Manuel
+                          </span>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -135,7 +130,7 @@ function Dns() {
   function renderDhcpTab() {
     return (
       <div className="space-y-px">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-px">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-px">
           <Section title="Configuration DHCP" className="!mb-0">
             <dl className="space-y-3 text-sm">
               <div className="flex justify-between">
@@ -153,21 +148,7 @@ function Dns() {
             </dl>
           </Section>
 
-          <Section title="Options DHCP" className="!mb-0">
-            <div className="space-y-1">
-              {config?.dhcpOptions?.length > 0 ? (
-                config.dhcpOptions.map((opt, i) => (
-                  <div key={i} className="font-mono text-xs bg-gray-900 px-2 py-1 break-all">
-                    {opt}
-                  </div>
-                ))
-              ) : (
-                <span className="text-gray-500 text-sm">-</span>
-              )}
-            </div>
-          </Section>
-
-          <Section title="Configuration IPv6" contrast className="!mb-0 sm:col-span-2 lg:col-span-3">
+          <Section title="Configuration IPv6" contrast className="!mb-0">
             <dl className="space-y-2 text-sm">
               <div className="flex justify-between">
                 <dt className="text-gray-400">Router Advertisement</dt>

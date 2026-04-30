@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 /// Configuration principale chargée depuis les variables d'environnement
@@ -35,6 +36,9 @@ pub struct EnvConfig {
     pub log_dir: PathBuf,
     /// Chemin du frontend buildé
     pub web_dist_path: PathBuf,
+    /// IP locale de hr-edge à publier dans le DNS pour les domaines internes.
+    /// Si None, hr-edge fera de l'auto-détection avec fallback 10.0.0.254.
+    pub edge_server_ip: Option<Ipv4Addr>,
 }
 
 impl Default for EnvConfig {
@@ -61,6 +65,7 @@ impl Default for EnvConfig {
             data_dir: PathBuf::from("/opt/homeroute/data"),
             log_dir: PathBuf::from("/var/log/homeroute"),
             web_dist_path: PathBuf::from("/opt/homeroute/web/dist"),
+            edge_server_ip: None,
         }
     }
 }
@@ -121,6 +126,12 @@ impl EnvConfig {
         }
         if let Ok(v) = std::env::var("ACME_STAGING") {
             config.acme_staging = v == "1" || v.to_lowercase() == "true";
+        }
+        if let Ok(v) = std::env::var("EDGE_SERVER_IP") {
+            match v.parse::<Ipv4Addr>() {
+                Ok(ip) => config.edge_server_ip = Some(ip),
+                Err(e) => eprintln!("EDGE_SERVER_IP invalid ({}): {}", v, e),
+            }
         }
         config
     }
