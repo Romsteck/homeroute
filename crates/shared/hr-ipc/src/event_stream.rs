@@ -24,6 +24,9 @@ pub async fn serve_event_stream(
     log_rx: broadcast::Sender<hr_common::logging::LogEntry>,
     app_build_rx: broadcast::Sender<hr_common::events::AppBuildEvent>,
     app_todos_rx: broadcast::Sender<hr_common::events::AppTodosEvent>,
+    host_status_rx: broadcast::Sender<hr_common::events::HostStatusEvent>,
+    host_power_rx: broadcast::Sender<hr_common::events::HostPowerEvent>,
+    host_metrics_rx: broadcast::Sender<hr_common::events::HostMetricsEvent>,
 ) -> anyhow::Result<()> {
     // Remove stale socket
     let _ = tokio::fs::remove_file(socket_path).await;
@@ -37,8 +40,22 @@ pub async fn serve_event_stream(
                 let log_tx = log_rx.clone();
                 let build_tx = app_build_rx.clone();
                 let todos_tx = app_todos_rx.clone();
+                let host_status_tx = host_status_rx.clone();
+                let host_power_tx = host_power_rx.clone();
+                let host_metrics_tx = host_metrics_rx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_event_client(stream, app_tx, log_tx, build_tx, todos_tx).await {
+                    if let Err(e) = handle_event_client(
+                        stream,
+                        app_tx,
+                        log_tx,
+                        build_tx,
+                        todos_tx,
+                        host_status_tx,
+                        host_power_tx,
+                        host_metrics_tx,
+                    )
+                    .await
+                    {
                         warn!(error = %e, "Event stream client disconnected");
                     }
                 });
@@ -56,12 +73,18 @@ async fn handle_event_client(
     log_tx: broadcast::Sender<hr_common::logging::LogEntry>,
     app_build_tx: broadcast::Sender<hr_common::events::AppBuildEvent>,
     app_todos_tx: broadcast::Sender<hr_common::events::AppTodosEvent>,
+    host_status_tx: broadcast::Sender<hr_common::events::HostStatusEvent>,
+    host_power_tx: broadcast::Sender<hr_common::events::HostPowerEvent>,
+    host_metrics_tx: broadcast::Sender<hr_common::events::HostMetricsEvent>,
 ) -> anyhow::Result<()> {
     let (_, mut writer) = stream.into_split();
     let mut app_rx = app_state_tx.subscribe();
     let mut log_rx = log_tx.subscribe();
     let mut build_rx = app_build_tx.subscribe();
     let mut todos_rx = app_todos_tx.subscribe();
+    let mut host_status_rx = host_status_tx.subscribe();
+    let mut host_power_rx = host_power_tx.subscribe();
+    let mut host_metrics_rx = host_metrics_tx.subscribe();
 
     info!("Event stream client connected");
 
@@ -82,6 +105,24 @@ async fn handle_event_client(
             Ok(ev) = todos_rx.recv() => {
                 IpcEvent {
                     channel: "app:todos".to_string(),
+                    payload: serde_json::to_value(&ev).unwrap_or_default(),
+                }
+            }
+            Ok(ev) = host_status_rx.recv() => {
+                IpcEvent {
+                    channel: "host:status".to_string(),
+                    payload: serde_json::to_value(&ev).unwrap_or_default(),
+                }
+            }
+            Ok(ev) = host_power_rx.recv() => {
+                IpcEvent {
+                    channel: "host:power".to_string(),
+                    payload: serde_json::to_value(&ev).unwrap_or_default(),
+                }
+            }
+            Ok(ev) = host_metrics_rx.recv() => {
+                IpcEvent {
+                    channel: "host:metrics".to_string(),
                     payload: serde_json::to_value(&ev).unwrap_or_default(),
                 }
             }
@@ -167,6 +208,21 @@ pub async fn connect_event_stream(
                                         },
                                     };
                                     let _ = events.log_entry.send(entry);
+                                }
+                            }
+                            "host:status" => {
+                                if let Ok(ev) = serde_json::from_value::<hr_common::events::HostStatusEvent>(event.payload) {
+                                    let _ = events.host_status.send(ev);
+                                }
+                            }
+                            "host:power" => {
+                                if let Ok(ev) = serde_json::from_value::<hr_common::events::HostPowerEvent>(event.payload) {
+                                    let _ = events.host_power.send(ev);
+                                }
+                            }
+                            "host:metrics" => {
+                                if let Ok(ev) = serde_json::from_value::<hr_common::events::HostMetricsEvent>(event.payload) {
+                                    let _ = events.host_metrics.send(ev);
                                 }
                             }
                             _ => {}

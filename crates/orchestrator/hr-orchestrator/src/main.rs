@@ -335,9 +335,23 @@ async fn main() -> anyhow::Result<()> {
         let log_tx = events.log_entry.clone();
         let app_build_tx = events.app_build.clone();
         let app_todos_tx = events.app_todos.clone();
+        let host_status_tx = events.host_status.clone();
+        let host_power_tx = events.host_power.clone();
+        let host_metrics_tx = events.host_metrics.clone();
         tokio::spawn(async move {
             let socket_path = std::path::Path::new(hr_ipc::event_stream::EVENT_STREAM_SOCKET);
-            if let Err(e) = hr_ipc::event_stream::serve_event_stream(socket_path, app_state_tx, log_tx, app_build_tx, app_todos_tx).await {
+            if let Err(e) = hr_ipc::event_stream::serve_event_stream(
+                socket_path,
+                app_state_tx,
+                log_tx,
+                app_build_tx,
+                app_todos_tx,
+                host_status_tx,
+                host_power_tx,
+                host_metrics_tx,
+            )
+            .await
+            {
                 tracing::error!("Event stream server error: {e:#}");
             }
         });
