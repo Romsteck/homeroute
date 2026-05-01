@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate, useSearchParams } from 'react-router-dom';
+import { Routes, Route, Navigate, useSearchParams, useParams } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { TaskProvider } from './context/TaskContext';
 import { StudioProvider } from './context/StudioContext';
@@ -20,11 +20,19 @@ import Login from './pages/Login';
 import Profile from './pages/Profile';
 import Backup from './pages/Backup';
 import Energy from './pages/Energy';
-import Docs from './pages/Docs';
 import AppDetail from './pages/AppDetail';
 import DbExplorer from './pages/DbExplorer';
 import SchemaPage from './pages/SchemaPage';
 import Logs from './pages/Logs';
+
+// Redirige les liens legacy /docs/:appId vers le tab Documentation du Studio.
+function DocsRedirect() {
+  const { appId } = useParams();
+  const target = appId
+    ? `/studio?app=${encodeURIComponent(appId)}&tab=docs`
+    : '/studio?tab=docs';
+  return <Navigate to={target} replace />;
+}
 
 // Component to protect routes that require authentication
 function ProtectedRoute({ children }) {
@@ -122,8 +130,9 @@ function AppRoutes() {
               <Route path="/apps/:slug" element={<Navigate to="/studio" replace />} />
               <Route path="/database" element={<DbExplorer />} />
               <Route path="/schema" element={<SchemaPage />} />
-              <Route path="/docs" element={<Docs />} />
-              <Route path="/docs/:appId" element={<Docs />} />
+              {/* Docs UI a été retirée du menu principal — la doc vit dans le tab Documentation du Studio. */}
+              <Route path="/docs" element={<Navigate to="/studio?tab=docs" replace />} />
+              <Route path="/docs/:appId" element={<DocsRedirect />} />
             </Routes>
           </Layout>
           </StudioProvider>

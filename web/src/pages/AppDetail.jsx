@@ -20,7 +20,6 @@ import {
   Activity,
   KeyRound,
   Code2,
-  BookOpen,
 } from 'lucide-react';
 import {
   getApp,
@@ -39,7 +38,6 @@ const TABS = [
   { key: 'code', label: 'Code', icon: Code2 },
   { key: 'db', label: 'DB', icon: Database, requiresDb: true },
   { key: 'logs', label: 'Logs', icon: ScrollText },
-  { key: 'docs', label: 'Docs', icon: BookOpen },
   { key: 'env', label: 'Env', icon: KeyRound },
   { key: 'settings', label: 'Settings', icon: SettingsIcon },
 ];
@@ -190,69 +188,6 @@ function CodeTab({ slug }) {
         title={`Code-server - ${slug}`}
         allow="clipboard-read; clipboard-write"
       />
-    </div>
-  );
-}
-
-function DocsTab({ slug }) {
-  const [docs, setDocs] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-
-  const fetchDocs = useCallback(async () => {
-    try {
-      setLoading(true);
-      const res = await fetch(`/api/docs/${slug}`);
-      if (res.ok) {
-        const data = await res.json();
-        setDocs(data.data || data);
-      } else if (res.status === 404) {
-        setDocs(null);
-      } else {
-        setError('Erreur lors du chargement de la documentation');
-      }
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-    }
-  }, [slug]);
-
-  useEffect(() => { fetchDocs(); }, [fetchDocs]);
-
-  if (loading) return <div className="flex justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-blue-400" /></div>;
-  if (error) return <div className="p-4 bg-red-500/10 border border-red-500/20 rounded text-red-400">{error}</div>;
-  if (!docs) return (
-    <div className="text-center py-12 text-gray-400">
-      <BookOpen className="w-12 h-12 mx-auto mb-3 opacity-30" />
-      <p>Aucune documentation pour cette application</p>
-      <p className="text-sm mt-1">Utilisez l'outil MCP <code>docs.create</code> pour en creer une</p>
-    </div>
-  );
-
-  const sections = ['features', 'structure', 'backend', 'notes'].filter(s => docs[s]);
-
-  return (
-    <div className="space-y-4">
-      {docs.meta && (
-        <div className="p-4 bg-gray-700/30 rounded border border-gray-700">
-          <h3 className="font-medium text-white">{docs.meta.name || slug}</h3>
-          {docs.meta.description && <p className="text-sm text-gray-400 mt-1">{docs.meta.description}</p>}
-          {docs.meta.stack && <span className="text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded mt-2 inline-block">{docs.meta.stack}</span>}
-        </div>
-      )}
-      {sections.map(section => (
-        <div key={section} className="p-4 bg-gray-800 rounded border border-gray-700">
-          <h4 className="text-sm font-medium text-gray-300 uppercase tracking-wider mb-2">{section}</h4>
-          <pre className="text-sm text-gray-300 whitespace-pre-wrap font-sans">{docs[section]}</pre>
-        </div>
-      ))}
-      {sections.length === 0 && (
-        <p className="text-gray-500 text-center py-8">Documentation vide — sections a remplir via MCP docs.update</p>
-      )}
-      <button onClick={fetchDocs} className="text-sm text-blue-400 hover:text-blue-300 flex items-center gap-1">
-        <RefreshCw className="w-3.5 h-3.5" /> Actualiser
-      </button>
     </div>
   );
 }
@@ -794,7 +729,6 @@ export default function AppDetail() {
         {tab === 'code' && <CodeTab slug={slug} />}
         {tab === 'db' && app.has_db && <DbExplorer appSlug={slug} embedded={true} />}
         {tab === 'logs' && <LogsTab slug={slug} />}
-        {tab === 'docs' && <DocsTab slug={slug} />}
         {tab === 'env' && <EnvTab slug={slug} />}
         {tab === 'settings' && <SettingsTab app={app} onUpdate={handleUpdate} onDelete={handleDelete} />}
       </div>

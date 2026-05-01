@@ -4,6 +4,7 @@ members = [
     # shared
     "shared/hr-common",
     "shared/hr-ipc",
+    "shared/hr-docs",
     # edge (443, 80)
     "edge/hr-edge",
     "edge/hr-proxy",
@@ -114,6 +115,9 @@ base64 = "0.22"
 
 # Dataverse
 hr-db = { path = "orchestrator/hr-db" }
+
+# Docs (per-app documentation, structured: overview/screens/features/components + mermaid)
+hr-docs = { path = "shared/hr-docs" }
 
 # QUIC
 quinn = "0.11"

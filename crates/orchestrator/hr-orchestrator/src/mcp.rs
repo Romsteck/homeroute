@@ -8,6 +8,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use hr_common::events::{PowerAction, WakeResult};
+use hr_docs::{DocType, Frontmatter, Store, validate_app_id, validate_entry_name};
 use hr_registry::AgentRegistry;
 use hr_registry::protocol::HostRegistryMessage;
 use serde::Deserialize;
@@ -41,6 +42,8 @@ pub struct McpState {
     pub git: Arc<hr_git::GitService>,
     pub edge: Arc<hr_ipc::EdgeClient>,
     pub apps_ctx: Option<crate::apps_handler::AppsContext>,
+    /// FTS5 index for `docs.search`. None if FTS init failed at boot.
+    pub docs_index: Option<Arc<hr_docs::Index>>,
 }
 
 impl McpState {
@@ -59,6 +62,7 @@ impl McpState {
             git,
             edge,
             apps_ctx: None,
+            docs_index: None,
         })
     }
 }
@@ -347,68 +351,132 @@ fn tool_definitions_extended() -> Value {
                 "required": ["slug", "version", "apk_base64"]
             }
         },
-        // ── Docs ──
+        // ── Docs (v2: structured by overview/screens/features/components + mermaid) ──
         {
-            "name": "docs.list",
-            "description": "List all apps with their documentation status. Returns app_id, name, and which sections are filled.",
-            "inputSchema": { "type": "object", "properties": {} }
+            "name": "docs.overview",
+            "description": "DOC-FIRST OBLIGATOIRE. Premier appel à faire avant toute exploration de code dans une app. Renvoie la vue d'ensemble (overview), un index compact de tous les écrans/features/composants (titre + résumé 1 ligne), et des stats. À utiliser pour cadrer la tâche avant tout grep/Read.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "app_id": { "type": "string" } },
+                "required": ["app_id"]
+            }
+        },
+        {
+            "name": "docs.list_entries",
+            "description": "Liste compacte des entrées de doc d'une app, filtrable par type. Préférer docs.search dès qu'on a un mot-clé — list_entries sert pour explorer une catégorie complète.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "app_id": { "type": "string" },
+                    "type": { "type": "string", "enum": ["screen", "feature", "component"] }
+                },
+                "required": ["app_id"]
+            }
         },
         {
             "name": "docs.get",
-            "description": "Get documentation content for an app. Returns all sections or a specific one.",
+            "description": "Lire une entrée de doc complète (frontmatter + body markdown + diagramme mermaid si présent). Type ∈ {overview, screen, feature, component}. Pour overview, name doit être 'overview'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "app_id": { "type": "string", "description": "Application identifier (directory name in docs/)" },
-                    "section": { "type": "string", "description": "Optional section: meta, structure, features, backend, notes. Omit for all." }
+                    "app_id": { "type": "string" },
+                    "type": { "type": "string", "enum": ["overview", "screen", "feature", "component"] },
+                    "name": { "type": "string", "description": "Entry name (alphanumeric + - _ .). Use 'overview' for type=overview." }
                 },
-                "required": ["app_id"]
-            }
-        },
-        {
-            "name": "docs.create",
-            "description": "Create empty documentation files for a new app.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_id": { "type": "string", "description": "Application identifier" }
-                },
-                "required": ["app_id"]
-            }
-        },
-        {
-            "name": "docs.update",
-            "description": "Update the content of a documentation section for an app.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "app_id": { "type": "string", "description": "Application identifier" },
-                    "section": { "type": "string", "description": "Section to update: meta, structure, features, backend, notes" },
-                    "content": { "type": "string", "description": "New content (Markdown for md sections, JSON string for meta)" }
-                },
-                "required": ["app_id", "section", "content"]
+                "required": ["app_id", "type", "name"]
             }
         },
         {
             "name": "docs.search",
-            "description": "Full-text search across all documentation files.",
+            "description": "Recherche full-text BM25 dans la doc. Filtres optionnels app_id et type. Retourne snippets surlignés et ranking.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "Search query" }
+                    "query": { "type": "string" },
+                    "app_id": { "type": "string" },
+                    "type": { "type": "string", "enum": ["overview", "screen", "feature", "component"] },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
                 },
                 "required": ["query"]
             }
         },
         {
+            "name": "docs.list_apps",
+            "description": "Liste toutes les apps documentées avec stats de complétude (counts par type, has_overview).",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "docs.completeness",
-            "description": "Check which documentation sections are filled vs empty for an app.",
+            "description": "Diagnostic de complétude pour une app : has_overview, counts par type, missing_summaries, missing_diagrams.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "app_id": { "type": "string" } },
+                "required": ["app_id"]
+            }
+        },
+        {
+            "name": "docs.diagram_get",
+            "description": "Récupère le diagramme mermaid attaché à une entrée. Retourne {mermaid: string|null}.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "app_id": { "type": "string", "description": "Application identifier" }
+                    "app_id": { "type": "string" },
+                    "type": { "type": "string", "enum": ["overview", "screen", "feature", "component"] },
+                    "name": { "type": "string" }
                 },
-                "required": ["app_id"]
+                "required": ["app_id", "type", "name"]
+            }
+        },
+        {
+            "name": "docs.update",
+            "description": "Crée ou met à jour une entrée de doc. Le frontmatter est un objet structuré (title, summary, scope, parent_screen, code_refs[], links[]). Le body est markdown brut. Pour features : scope ∈ {global, screen:<name>}. Stamp updated_at automatique.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "app_id": { "type": "string" },
+                    "type": { "type": "string", "enum": ["overview", "screen", "feature", "component"] },
+                    "name": { "type": "string" },
+                    "frontmatter": {
+                        "type": "object",
+                        "properties": {
+                            "title": { "type": "string" },
+                            "summary": { "type": "string", "description": "≤120 chars, affiché dans l'index compact" },
+                            "scope": { "type": "string", "description": "Pour features uniquement: 'global' ou 'screen:<name>'" },
+                            "parent_screen": { "type": "string" },
+                            "code_refs": { "type": "array", "items": { "type": "string" } },
+                            "links": { "type": "array", "items": { "type": "string" } }
+                        }
+                    },
+                    "body": { "type": "string" }
+                },
+                "required": ["app_id", "type", "name", "body"]
+            }
+        },
+        {
+            "name": "docs.delete",
+            "description": "Supprime une entrée et son diagramme attaché. Refuse de supprimer l'overview.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "app_id": { "type": "string" },
+                    "type": { "type": "string", "enum": ["screen", "feature", "component"] },
+                    "name": { "type": "string" }
+                },
+                "required": ["app_id", "type", "name"]
+            }
+        },
+        {
+            "name": "docs.diagram_set",
+            "description": "Attache ou met à jour un diagramme mermaid à une entrée. Taille max 32 KB. Bonnes pratiques : flowchart LR/TD, boîtes carrées [Texte], max 12 nœuds.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "app_id": { "type": "string" },
+                    "type": { "type": "string", "enum": ["overview", "screen", "feature", "component"] },
+                    "name": { "type": "string" },
+                    "mermaid": { "type": "string" }
+                },
+                "required": ["app_id", "type", "name", "mermaid"]
             }
         },
         // ── Reverse Proxy ──
@@ -495,7 +563,9 @@ fn is_project_simplified_tool(name: &str) -> bool {
         name,
         "status" | "start" | "stop" | "restart" | "exec" | "logs"
             | "db_tables" | "db_schema" | "db_query" | "db_find" | "db_exec"
-            | "docs_read" | "docs_write"
+            | "docs_overview" | "docs_list_entries" | "docs_get" | "docs_search"
+            | "docs_completeness" | "docs_diagram_get"
+            | "docs_update" | "docs_delete" | "docs_diagram_set"
             | "git_log" | "git_branches"
             | "todos_list" | "todos_create" | "todos_update" | "todos_delete"
     )
@@ -516,9 +586,16 @@ fn tool_definitions_project() -> Value {
         { "name": "db_query", "description": "Run a SELECT query against the database.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
         { "name": "db_find", "description": "Query table rows with structured filters, sort, pagination and relation expand. No SQL required.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "filters": { "type": "array", "description": "List of {column, op, value?}. op: eq|ne|gt|lt|gte|lte|like|in|is_null|is_not_null" }, "limit": { "type": "integer", "default": 100 }, "offset": { "type": "integer", "default": 0 }, "order_by": { "type": "string" }, "order_desc": { "type": "boolean", "default": false }, "expand": { "type": "array", "items": { "type": "string" }, "description": "Foreign-key relations to hydrate" } }, "required": ["table"] } },
         { "name": "db_exec", "description": "Execute a mutation (INSERT, UPDATE, DELETE) against the database.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
-        // ── Documentation ──
-        { "name": "docs_read", "description": "Read the project documentation (all sections or a specific one).", "inputSchema": { "type": "object", "properties": { "section": { "type": "string", "enum": ["meta", "structure", "features", "backend", "notes"] } } } },
-        { "name": "docs_write", "description": "Update a documentation section.", "inputSchema": { "type": "object", "properties": { "section": { "type": "string", "enum": ["meta", "structure", "features", "backend", "notes"] }, "content": { "type": "string" } }, "required": ["section", "content"] } },
+        // ── Documentation (DOC-FIRST OBLIGATOIRE — voir .claude/rules/docs.md) ──
+        { "name": "docs_overview", "description": "DOC-FIRST OBLIGATOIRE. Premier appel à faire avant toute exploration de code. Renvoie l'overview, l'index compact (écrans/features/composants avec titre+résumé 1 ligne) et les stats de l'app courante.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "docs_list_entries", "description": "Liste compacte des entrées de doc, filtrable par type. Préférer docs_search si on a un mot-clé.", "inputSchema": { "type": "object", "properties": { "type": { "type": "string", "enum": ["screen", "feature", "component"] } } } },
+        { "name": "docs_get", "description": "Lire une entrée complète (frontmatter + body markdown + diagramme mermaid si présent).", "inputSchema": { "type": "object", "properties": { "type": { "type": "string", "enum": ["overview", "screen", "feature", "component"] }, "name": { "type": "string", "description": "Use 'overview' for type=overview." } }, "required": ["type", "name"] } },
+        { "name": "docs_search", "description": "Recherche full-text BM25 dans la doc de l'app. Filtre optionnel par type. Retourne snippets surlignés et ranking.", "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "type": { "type": "string", "enum": ["overview", "screen", "feature", "component"] }, "limit": { "type": "integer", "minimum": 1, "maximum": 100 } }, "required": ["query"] } },
+        { "name": "docs_completeness", "description": "Diagnostic : has_overview, counts par type, missing_summaries, missing_diagrams.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "docs_diagram_get", "description": "Récupère le diagramme mermaid attaché à une entrée.", "inputSchema": { "type": "object", "properties": { "type": { "type": "string", "enum": ["overview", "screen", "feature", "component"] }, "name": { "type": "string" } }, "required": ["type", "name"] } },
+        { "name": "docs_update", "description": "Crée/met à jour une entrée. Frontmatter structuré (title, summary≤120, scope=global|screen:<name>, parent_screen, code_refs, links). Body markdown brut.", "inputSchema": { "type": "object", "properties": { "type": { "type": "string", "enum": ["overview", "screen", "feature", "component"] }, "name": { "type": "string" }, "frontmatter": { "type": "object", "properties": { "title": { "type": "string" }, "summary": { "type": "string" }, "scope": { "type": "string" }, "parent_screen": { "type": "string" }, "code_refs": { "type": "array", "items": { "type": "string" } }, "links": { "type": "array", "items": { "type": "string" } } } }, "body": { "type": "string" } }, "required": ["type", "name", "body"] } },
+        { "name": "docs_delete", "description": "Supprime une entrée (refuse l'overview).", "inputSchema": { "type": "object", "properties": { "type": { "type": "string", "enum": ["screen", "feature", "component"] }, "name": { "type": "string" } }, "required": ["type", "name"] } },
+        { "name": "docs_diagram_set", "description": "Attache un diagramme mermaid à une entrée. Bonnes pratiques : flowchart LR/TD, boîtes [Texte], max 12 nœuds.", "inputSchema": { "type": "object", "properties": { "type": { "type": "string", "enum": ["overview", "screen", "feature", "component"] }, "name": { "type": "string" }, "mermaid": { "type": "string" } }, "required": ["type", "name", "mermaid"] } },
         // ── Git ──
         { "name": "git_log", "description": "Get recent git commit history.", "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer", "default": 20 } } } },
         { "name": "git_branches", "description": "List git branches.", "inputSchema": { "type": "object", "properties": {} } },
@@ -590,13 +667,17 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "reverseproxy.add" => tool_reverseproxy_add(id, &arguments).await,
         "reverseproxy.delete" => tool_reverseproxy_delete(id, &arguments).await,
         "reverseproxy.toggle" => tool_reverseproxy_toggle(id, &arguments).await,
-        // ── Docs ──
-        "docs.list" => tool_docs_list(id).await,
+        // ── Docs (v2) ──
+        "docs.overview" => tool_docs_overview(id, &arguments).await,
+        "docs.list_entries" => tool_docs_list_entries(id, &arguments).await,
         "docs.get" => tool_docs_get(id, &arguments).await,
-        "docs.create" => tool_docs_create(id, &arguments).await,
-        "docs.update" => tool_docs_update(id, &arguments).await,
-        "docs.search" => tool_docs_search(id, &arguments).await,
+        "docs.search" => tool_docs_search(id, &arguments, state).await,
+        "docs.list_apps" => tool_docs_list_apps(id).await,
         "docs.completeness" => tool_docs_completeness(id, &arguments).await,
+        "docs.diagram_get" => tool_docs_diagram_get(id, &arguments).await,
+        "docs.update" => tool_docs_update(id, &arguments, state).await,
+        "docs.delete" => tool_docs_delete(id, &arguments, state).await,
+        "docs.diagram_set" => tool_docs_diagram_set(id, &arguments, state).await,
         // ── Database ──
         // ── App* (V3 — hr-apps direct supervision) ──
         "app.list" => tool_app_list(id, state).await,
@@ -658,8 +739,15 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "db_add_column" => tool_db_add_column(id, &arguments, state).await,
         "db_remove_column" => tool_db_remove_column(id, &arguments, state).await,
         "db_create_relation" => tool_db_create_relation(id, &arguments, state).await,
-        "docs_read" => tool_docs_get(id, &arguments).await,
-        "docs_write" => tool_docs_update(id, &arguments).await,
+        "docs_overview" => tool_docs_overview(id, &arguments).await,
+        "docs_list_entries" => tool_docs_list_entries(id, &arguments).await,
+        "docs_get" => tool_docs_get(id, &arguments).await,
+        "docs_search" => tool_docs_search(id, &arguments, state).await,
+        "docs_completeness" => tool_docs_completeness(id, &arguments).await,
+        "docs_diagram_get" => tool_docs_diagram_get(id, &arguments).await,
+        "docs_update" => tool_docs_update(id, &arguments, state).await,
+        "docs_delete" => tool_docs_delete(id, &arguments, state).await,
+        "docs_diagram_set" => tool_docs_diagram_set(id, &arguments, state).await,
         "git_log" => tool_git_log(id, &arguments, state).await,
         "git_branches" => tool_git_branches(id, &arguments).await,
         "todos_list" => tool_todos_list(id, &arguments, state).await,
@@ -1480,296 +1568,405 @@ async fn tool_reverseproxy_toggle(id: Value, args: &Value) -> Value {
     }
 }
 
-// ── Docs tools ──────────────────────────────────────────────────────
+// ── Docs tools (v2: structured by overview/screens/features/components + mermaid) ──
 
-const DOCS_DIR: &str = "/opt/homeroute/data/docs";
-const DOCS_SECTIONS: &[&str] = &["structure", "features", "backend", "notes"];
-
-fn docs_validate_id(app_id: &str) -> bool {
-    !app_id.is_empty()
-        && !app_id.contains('/')
-        && !app_id.contains("..")
-        && app_id
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+fn docs_store() -> Store {
+    Store::new(hr_docs::DEFAULT_DOCS_DIR)
 }
 
-fn docs_validate_section(section: &str) -> bool {
-    section == "meta" || DOCS_SECTIONS.contains(&section)
+fn parse_doc_type(s: &str) -> Option<DocType> {
+    DocType::from_str(s)
 }
 
-async fn tool_docs_list(id: Value) -> Value {
-    let dir = std::path::Path::new(DOCS_DIR);
-    if !dir.exists() {
-        return tool_success(id, json!({ "apps": [] }));
-    }
-    let mut apps = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return tool_error(id, "Failed to read docs directory");
+fn entry_to_json(entry: &hr_docs::DocEntry, diagram: Option<&str>) -> Value {
+    json!({
+        "app_id": entry.app_id,
+        "type": entry.doc_type.as_str(),
+        "name": entry.name,
+        "frontmatter": entry.frontmatter,
+        "body": entry.body,
+        "diagram": diagram,
+    })
+}
+
+async fn tool_docs_overview(id: Value, args: &Value) -> Value {
+    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
     };
-    for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
-        }
-        let app_id = entry.file_name().to_string_lossy().to_string();
-        let app_dir = entry.path();
-
-        // Read meta.json for name
-        let name = std::fs::read_to_string(app_dir.join("meta.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
-            .unwrap_or_else(|| app_id.clone());
-
-        // Count filled sections
-        let mut filled = 0u32;
-        let total = 5u32;
-        if app_dir.join("meta.json").exists() {
-            let content = std::fs::read_to_string(app_dir.join("meta.json")).unwrap_or_default();
-            if content.trim().len() > 2 {
-                filled += 1;
-            }
-        }
-        for section in DOCS_SECTIONS {
-            let path = app_dir.join(format!("{section}.md"));
-            if path.exists() {
-                let content = std::fs::read_to_string(&path).unwrap_or_default();
-                if !content.trim().is_empty() {
-                    filled += 1;
-                }
-            }
-        }
-
-        apps.push(json!({
-            "app_id": app_id,
-            "name": name,
-            "filled_sections": filled,
-            "total_sections": total,
-        }));
+    if !validate_app_id(app_id) {
+        return tool_error(id, "Invalid app_id");
     }
-    apps.sort_by(|a, b| {
-        a.get("app_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .cmp(b.get("app_id").and_then(|v| v.as_str()).unwrap_or(""))
-    });
-    tool_success(id, json!({ "apps": apps }))
+    match docs_store().overview(app_id) {
+        Ok(ov) => tool_success(id, serde_json::to_value(&ov).unwrap_or(json!({}))),
+        Err(hr_docs::StoreError::AppNotFound(_)) => tool_error(id, &format!("No docs found for '{app_id}'")),
+        Err(e) => tool_error(id, &format!("overview failed: {e}")),
+    }
+}
+
+async fn tool_docs_list_entries(id: Value, args: &Value) -> Value {
+    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
+    };
+    if !validate_app_id(app_id) {
+        return tool_error(id, "Invalid app_id");
+    }
+    let doc_type = match args.get("type").and_then(|v| v.as_str()) {
+        None => None,
+        Some(s) => match parse_doc_type(s) {
+            Some(t) => Some(t),
+            None => return tool_error(id, &format!("Invalid type '{s}'")),
+        },
+    };
+    match docs_store().list_entries(app_id, doc_type) {
+        Ok(entries) => tool_success(id, json!({ "app_id": app_id, "entries": entries })),
+        Err(e) => tool_error(id, &format!("list_entries failed: {e}")),
+    }
 }
 
 async fn tool_docs_get(id: Value, args: &Value) -> Value {
     let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing app_id".into());
     };
-    if !docs_validate_id(app_id) {
+    let Some(doc_type_str) = args.get("type").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing type".into());
+    };
+    let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing name".into());
+    };
+    if !validate_app_id(app_id) {
         return tool_error(id, "Invalid app_id");
     }
-    let app_dir = std::path::Path::new(DOCS_DIR).join(app_id);
-    if !app_dir.exists() {
-        return tool_error(id, &format!("No docs found for '{app_id}'"));
-    }
-
-    let section = args.get("section").and_then(|v| v.as_str());
-    if let Some(s) = section {
-        if !docs_validate_section(s) {
-            return tool_error(
-                id,
-                &format!("Invalid section '{s}'. Valid: meta, structure, features, backend, notes"),
-            );
+    let Some(doc_type) = parse_doc_type(doc_type_str) else {
+        return tool_error(id, &format!("Invalid type '{doc_type_str}'"));
+    };
+    let store = docs_store();
+    match store.read_entry(app_id, doc_type, name) {
+        Ok(entry) => {
+            let diagram = store.read_diagram(app_id, doc_type, &entry.name).ok().flatten();
+            tool_success(id, entry_to_json(&entry, diagram.as_deref()))
         }
-        let filename = if s == "meta" {
-            "meta.json".to_string()
-        } else {
-            format!("{s}.md")
-        };
-        let content = std::fs::read_to_string(app_dir.join(&filename)).unwrap_or_default();
-        return tool_success(
-            id,
-            json!({ "app_id": app_id, "section": s, "content": content }),
-        );
-    }
-
-    // Return all sections
-    let meta = std::fs::read_to_string(app_dir.join("meta.json")).unwrap_or_default();
-    let mut sections = json!({ "meta": meta });
-    for s in DOCS_SECTIONS {
-        let content = std::fs::read_to_string(app_dir.join(format!("{s}.md"))).unwrap_or_default();
-        sections[s] = json!(content);
-    }
-    tool_success(id, json!({ "app_id": app_id, "sections": sections }))
-}
-
-async fn tool_docs_create(id: Value, args: &Value) -> Value {
-    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
-    };
-    if !docs_validate_id(app_id) {
-        return tool_error(id, "Invalid app_id");
-    }
-    let app_dir = std::path::Path::new(DOCS_DIR).join(app_id);
-    if app_dir.exists() {
-        return tool_error(id, &format!("Docs already exist for '{app_id}'"));
-    }
-    if let Err(e) = std::fs::create_dir_all(&app_dir) {
-        return tool_error(id, &format!("Failed to create directory: {e}"));
-    }
-    // Create empty meta.json
-    let meta = json!({ "name": app_id, "stack": "", "description": "", "logo": "" });
-    let _ = std::fs::write(
-        app_dir.join("meta.json"),
-        serde_json::to_string_pretty(&meta).unwrap_or_default(),
-    );
-    // Create empty markdown files
-    for s in DOCS_SECTIONS {
-        let _ = std::fs::write(app_dir.join(format!("{s}.md")), "");
-    }
-    info!(app_id, "Created docs");
-    tool_success(
-        id,
-        json!({ "created": app_id, "sections": ["meta", "structure", "features", "backend", "notes"] }),
-    )
-}
-
-async fn tool_docs_update(id: Value, args: &Value) -> Value {
-    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
-    };
-    let Some(section) = args.get("section").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing section".into());
-    };
-    let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
-        return error_response(id, INVALID_PARAMS, "Missing content".into());
-    };
-    if !docs_validate_id(app_id) {
-        return tool_error(id, "Invalid app_id");
-    }
-    if !docs_validate_section(section) {
-        return tool_error(id, &format!("Invalid section '{section}'"));
-    }
-    let app_dir = std::path::Path::new(DOCS_DIR).join(app_id);
-    if !app_dir.exists() {
-        // Auto-create if not exists
-        if let Err(e) = std::fs::create_dir_all(&app_dir) {
-            return tool_error(id, &format!("Failed to create directory: {e}"));
+        Err(hr_docs::StoreError::EntryNotFound { .. }) => {
+            tool_error(id, &format!("Entry not found: {app_id}/{doc_type_str}/{name}"))
         }
+        Err(e) => tool_error(id, &format!("get failed: {e}")),
     }
-    let filename = if section == "meta" {
-        "meta.json".to_string()
-    } else {
-        format!("{section}.md")
-    };
-    let path = app_dir.join(&filename);
-    if let Err(e) = std::fs::write(&path, content) {
-        return tool_error(id, &format!("Failed to write: {e}"));
-    }
-    info!(app_id, section, "Updated docs section");
-    tool_success(
-        id,
-        json!({ "app_id": app_id, "section": section, "updated": true }),
-    )
 }
 
-async fn tool_docs_search(id: Value, args: &Value) -> Value {
+async fn tool_docs_search(id: Value, args: &Value, state: &McpState) -> Value {
     let Some(query) = args.get("query").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing query".into());
     };
-    let query_lower = query.to_lowercase();
-    let dir = std::path::Path::new(DOCS_DIR);
-    if !dir.exists() {
-        return tool_success(id, json!({ "results": [] }));
+    let app_id = args.get("app_id").and_then(|v| v.as_str());
+    if let Some(a) = app_id {
+        if !validate_app_id(a) {
+            return tool_error(id, "Invalid app_id");
+        }
     }
-    let mut results = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return tool_error(id, "Failed to read docs directory");
+    let doc_type = match args.get("type").and_then(|v| v.as_str()) {
+        None => None,
+        Some(s) => match parse_doc_type(s) {
+            Some(t) => Some(t),
+            None => return tool_error(id, &format!("Invalid type '{s}'")),
+        },
     };
-    for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
-        }
-        let app_id = entry.file_name().to_string_lossy().to_string();
-        let app_dir = entry.path();
-        // Search meta.json
-        if let Ok(content) = std::fs::read_to_string(app_dir.join("meta.json")) {
-            if content.to_lowercase().contains(&query_lower) {
-                results.push(json!({ "app_id": app_id, "section": "meta", "snippet": docs_snippet(&content, &query_lower) }));
-            }
-        }
-        // Search markdown sections
-        for s in DOCS_SECTIONS {
-            let path = app_dir.join(format!("{s}.md"));
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if content.to_lowercase().contains(&query_lower) {
-                    results.push(json!({ "app_id": app_id, "section": s, "snippet": docs_snippet(&content, &query_lower) }));
-                }
-            }
-        }
+    let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32);
+
+    let Some(idx) = state.docs_index.as_ref() else {
+        return tool_error(id, "Docs index unavailable (init failed at boot)");
+    };
+    match idx.search(query, app_id, doc_type, limit) {
+        Ok(hits) => tool_success(
+            id,
+            json!({ "query": query, "count": hits.len(), "results": hits }),
+        ),
+        Err(e) => tool_error(id, &format!("search failed: {e}")),
     }
-    tool_success(
-        id,
-        json!({ "query": query, "results": results, "count": results.len() }),
-    )
 }
 
-fn docs_snippet(content: &str, query_lower: &str) -> String {
-    let lower = content.to_lowercase();
-    if let Some(pos) = lower.find(query_lower) {
-        let start = pos.saturating_sub(40);
-        let end = (pos + query_lower.len() + 40).min(content.len());
-        // Ensure valid UTF-8 boundaries
-        let start = content.floor_char_boundary(start);
-        let end = content.ceil_char_boundary(end);
-        let mut snippet = String::new();
-        if start > 0 {
-            snippet.push_str("...");
-        }
-        snippet.push_str(&content[start..end]);
-        if end < content.len() {
-            snippet.push_str("...");
-        }
-        snippet
-    } else {
-        content.chars().take(80).collect()
+async fn tool_docs_list_apps(id: Value) -> Value {
+    let store = docs_store();
+    let app_ids = match store.list_app_ids() {
+        Ok(v) => v,
+        Err(e) => return tool_error(id, &format!("list_app_ids failed: {e}")),
+    };
+    let mut apps = Vec::new();
+    for app_id in app_ids {
+        let Ok(meta) = store.read_meta(&app_id) else {
+            continue;
+        };
+        let stats = store
+            .overview(&app_id)
+            .map(|o| o.stats)
+            .unwrap_or_default();
+        apps.push(json!({
+            "app_id": app_id,
+            "name": meta.name,
+            "schema_version": meta.schema_version,
+            "stats": stats,
+            "has_overview": stats.has_overview,
+        }));
     }
+    tool_success(id, json!({ "apps": apps }))
 }
 
 async fn tool_docs_completeness(id: Value, args: &Value) -> Value {
     let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
         return error_response(id, INVALID_PARAMS, "Missing app_id".into());
     };
-    if !docs_validate_id(app_id) {
+    if !validate_app_id(app_id) {
         return tool_error(id, "Invalid app_id");
     }
-    let app_dir = std::path::Path::new(DOCS_DIR).join(app_id);
-    if !app_dir.exists() {
-        return tool_error(id, &format!("No docs found for '{app_id}'"));
+    let store = docs_store();
+    let overview = match store.overview(app_id) {
+        Ok(o) => o,
+        Err(hr_docs::StoreError::AppNotFound(_)) => {
+            return tool_error(id, &format!("No docs found for '{app_id}'"));
+        }
+        Err(e) => return tool_error(id, &format!("completeness failed: {e}")),
+    };
+    let mut missing_summaries: Vec<String> = Vec::new();
+    let mut missing_diagrams: Vec<String> = Vec::new();
+    for group in [&overview.index.screens, &overview.index.features, &overview.index.components] {
+        for e in group {
+            let key = format!("{}:{}", e.doc_type.as_str(), e.name);
+            if e.summary.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+                missing_summaries.push(key.clone());
+            }
+            if !e.has_diagram {
+                missing_diagrams.push(key);
+            }
+        }
     }
-    let mut sections = Vec::new();
-    // Check meta
-    let meta_filled = std::fs::read_to_string(app_dir.join("meta.json"))
-        .map(|s| s.trim().len() > 2)
-        .unwrap_or(false);
-    sections.push(json!({ "section": "meta", "filled": meta_filled }));
-    // Check markdown sections
-    for s in DOCS_SECTIONS {
-        let filled = std::fs::read_to_string(app_dir.join(format!("{s}.md")))
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false);
-        sections.push(json!({ "section": s, "filled": filled }));
+    // Orphan links: link points to entry that doesn't exist in the index.
+    let mut existing = std::collections::HashSet::new();
+    for group in [&overview.index.screens, &overview.index.features, &overview.index.components] {
+        for e in group {
+            existing.insert(format!("{}:{}", e.doc_type.as_str(), e.name));
+        }
     }
-    let filled_count = sections
-        .iter()
-        .filter(|s| s["filled"].as_bool().unwrap_or(false))
-        .count();
+    let mut orphan_links: Vec<String> = Vec::new();
+    let all_entries = store.list_entries(app_id, None).unwrap_or_default();
+    let _ = all_entries; // (kept for potential future per-entry orphan checks)
+    if let Some(ov) = overview.overview.as_ref() {
+        for link in &ov.frontmatter.links {
+            if !existing.contains(link) {
+                orphan_links.push(format!("overview→{link}"));
+            }
+        }
+    }
     tool_success(
         id,
         json!({
             "app_id": app_id,
-            "sections": sections,
-            "filled": filled_count,
-            "total": 5,
-            "complete": filled_count == 5,
+            "has_overview": overview.stats.has_overview,
+            "counts": {
+                "screens": overview.stats.screens,
+                "features": overview.stats.features,
+                "components": overview.stats.components,
+                "with_diagram": overview.stats.with_diagram,
+            },
+            "missing_summaries": missing_summaries,
+            "missing_diagrams": missing_diagrams,
+            "orphan_links": orphan_links,
         }),
     )
 }
+
+async fn tool_docs_diagram_get(id: Value, args: &Value) -> Value {
+    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
+    };
+    let Some(doc_type_str) = args.get("type").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing type".into());
+    };
+    let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing name".into());
+    };
+    if !validate_app_id(app_id) {
+        return tool_error(id, "Invalid app_id");
+    }
+    let Some(doc_type) = parse_doc_type(doc_type_str) else {
+        return tool_error(id, &format!("Invalid type '{doc_type_str}'"));
+    };
+    match docs_store().read_diagram(app_id, doc_type, name) {
+        Ok(opt) => tool_success(
+            id,
+            json!({
+                "app_id": app_id,
+                "type": doc_type_str,
+                "name": name,
+                "mermaid": opt,
+            }),
+        ),
+        Err(e) => tool_error(id, &format!("diagram_get failed: {e}")),
+    }
+}
+
+async fn tool_docs_update(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
+    };
+    let Some(doc_type_str) = args.get("type").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing type".into());
+    };
+    let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing name".into());
+    };
+    let Some(body) = args.get("body").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing body".into());
+    };
+    if !validate_app_id(app_id) {
+        return tool_error(id, "Invalid app_id");
+    }
+    let Some(doc_type) = parse_doc_type(doc_type_str) else {
+        return tool_error(id, &format!("Invalid type '{doc_type_str}'"));
+    };
+    if doc_type != DocType::Overview && !validate_entry_name(name) {
+        return tool_error(id, "Invalid name");
+    }
+
+    // Parse optional frontmatter object.
+    let mut frontmatter = match args.get("frontmatter") {
+        Some(Value::Object(_)) => {
+            match serde_json::from_value::<Frontmatter>(args["frontmatter"].clone()) {
+                Ok(fm) => fm,
+                Err(e) => return tool_error(id, &format!("Invalid frontmatter: {e}")),
+            }
+        }
+        _ => Frontmatter::default(),
+    };
+
+    // Auto-derive parent_screen from scope=screen:<name> if not explicit.
+    if doc_type == DocType::Feature {
+        if let Some(ref s) = frontmatter.scope {
+            if let Some(ps) = s.strip_prefix("screen:") {
+                if frontmatter.parent_screen.is_none() && !ps.is_empty() {
+                    frontmatter.parent_screen = Some(ps.to_string());
+                }
+            }
+        }
+    }
+
+    // Ensure the app's docs dir exists (auto-create if missing — keeps the agent's flow simple).
+    let store = docs_store();
+    let _ = store.ensure_layout(app_id);
+    if !store.app_dir(app_id).exists() {
+        let _ = std::fs::create_dir_all(store.app_dir(app_id));
+    }
+    if !store.app_dir(app_id).join("meta.json").exists() {
+        let _ = store.write_meta(app_id, &hr_docs::Meta::new(app_id));
+    }
+
+    match store.write_entry(app_id, doc_type, name, frontmatter, body) {
+        Ok(entry) => {
+            // Sync FTS index.
+            if let Some(idx) = state.docs_index.as_ref() {
+                if let Err(e) = idx.upsert(&entry) {
+                    warn!(error = %e, "Docs index upsert failed");
+                }
+            }
+            info!(app_id, doc_type = doc_type_str, name = %entry.name, "Docs entry updated");
+            tool_success(
+                id,
+                json!({
+                    "app_id": app_id,
+                    "type": doc_type_str,
+                    "name": entry.name,
+                    "updated_at": entry.frontmatter.updated_at,
+                }),
+            )
+        }
+        Err(e) => tool_error(id, &format!("update failed: {e}")),
+    }
+}
+
+async fn tool_docs_delete(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
+    };
+    let Some(doc_type_str) = args.get("type").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing type".into());
+    };
+    let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing name".into());
+    };
+    if !validate_app_id(app_id) {
+        return tool_error(id, "Invalid app_id");
+    }
+    let Some(doc_type) = parse_doc_type(doc_type_str) else {
+        return tool_error(id, &format!("Invalid type '{doc_type_str}'"));
+    };
+    if doc_type == DocType::Overview {
+        return tool_error(id, "Cannot delete the overview");
+    }
+    match docs_store().delete_entry(app_id, doc_type, name) {
+        Ok(deleted) => {
+            if deleted {
+                if let Some(idx) = state.docs_index.as_ref() {
+                    if let Err(e) = idx.remove(app_id, doc_type, name) {
+                        warn!(error = %e, "Docs index remove failed");
+                    }
+                }
+                info!(app_id, doc_type = doc_type_str, name, "Docs entry deleted");
+            }
+            tool_success(
+                id,
+                json!({
+                    "app_id": app_id,
+                    "type": doc_type_str,
+                    "name": name,
+                    "deleted": deleted,
+                }),
+            )
+        }
+        Err(e) => tool_error(id, &format!("delete failed: {e}")),
+    }
+}
+
+async fn tool_docs_diagram_set(id: Value, args: &Value, state: &McpState) -> Value {
+    let Some(app_id) = args.get("app_id").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing app_id".into());
+    };
+    let Some(doc_type_str) = args.get("type").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing type".into());
+    };
+    let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing name".into());
+    };
+    let Some(mermaid) = args.get("mermaid").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing mermaid".into());
+    };
+    if !validate_app_id(app_id) {
+        return tool_error(id, "Invalid app_id");
+    }
+    let Some(doc_type) = parse_doc_type(doc_type_str) else {
+        return tool_error(id, &format!("Invalid type '{doc_type_str}'"));
+    };
+    let store = docs_store();
+    if let Err(e) = store.write_diagram(app_id, doc_type, name, mermaid) {
+        return tool_error(id, &format!("diagram_set failed: {e}"));
+    }
+    // The diagram flag is now true; re-index the entry so search reflects it.
+    if let (Some(idx), Ok(entry)) = (
+        state.docs_index.as_ref(),
+        store.read_entry(app_id, doc_type, name),
+    ) {
+        if let Err(e) = idx.upsert(&entry) {
+            warn!(error = %e, "Docs index upsert failed after diagram set");
+        }
+    }
+    info!(app_id, doc_type = doc_type_str, name, bytes = mermaid.len(), "Docs diagram set");
+    tool_success(
+        id,
+        json!({
+            "app_id": app_id,
+            "type": doc_type_str,
+            "name": name,
+            "ok": true,
+        }),
+    )
+}
+
 
 // (db tools removed -- now managed per-environment by env-agent)
 // (db tools removed -- now managed per-environment by env-agent)

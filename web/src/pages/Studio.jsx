@@ -5,6 +5,7 @@ import { useStudio } from '../context/StudioContext';
 import DbExplorer from './DbExplorer';
 import TodosPanel from '../components/TodosPanel';
 import StudioIframe from '../components/StudioIframe';
+import DocsTab from '../components/docs/DocsTab';
 import {
   Code2, BookOpen, Database, ScrollText, KeyRound, Settings as SettingsIcon,
   ExternalLink, Save, Loader2, Plus, Play, Square, Trash2, X, Globe, Lock,
@@ -154,80 +155,6 @@ function LogsTab({ slug }) {
           );
         })}
         {filtered.length === 0 && <div className="text-center py-12 text-gray-500">{filter ? 'Aucun log correspondant' : 'Aucun log'}</div>}
-      </div>
-    </div>
-  );
-}
-
-// ── Docs Tab ──
-
-function DocsTab({ slug }) {
-  const [docs, setDocs] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [editing, setEditing] = useState(null);
-  const [editContent, setEditContent] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  const SECTIONS = [{ key: 'features', label: 'Features' }, { key: 'structure', label: 'Structure' }, { key: 'backend', label: 'Backend' }, { key: 'notes', label: 'Notes' }];
-
-  useEffect(() => {
-    setLoading(true);
-    fetch(`/api/docs/${slug}`).then(r => r.ok ? r.json() : null).then(j => {
-      const d = j?.data || j;
-      setDocs(d && d.success !== false ? d : null);
-    }).catch(() => {}).finally(() => setLoading(false));
-  }, [slug]);
-
-  const handleSave = async () => {
-    if (!editing) return;
-    setSaving(true);
-    try { await fetch(`/api/docs/${slug}/${editing}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: editContent }) }); } catch {}
-    setDocs(prev => prev ? { ...prev, [editing]: editContent } : prev);
-    setEditing(null);
-    setSaving(false);
-  };
-
-  if (loading) return <div className="flex items-center justify-center h-full text-gray-500"><Loader2 className="w-5 h-5 animate-spin" /></div>;
-  if (!docs) return <div className="flex items-center justify-center h-full text-gray-500 text-sm">Aucune documentation — utilisez <code className="text-blue-400 mx-1">docs.create</code></div>;
-
-  const getContent = k => Array.isArray(docs.sections) ? (docs.sections.find(s => s.section === k)?.content || '') : (docs[k] || '');
-
-  return (
-    <div className="flex flex-col h-full p-6 overflow-y-auto">
-      {docs.meta && (
-        <div className="mb-4 p-4 bg-gray-700/30 rounded border border-gray-700">
-          <h3 className="font-medium text-white">{docs.meta.name || slug}</h3>
-          {docs.meta.description && <p className="text-sm text-gray-400 mt-1">{docs.meta.description}</p>}
-        </div>
-      )}
-      <div className="flex flex-col gap-4 max-w-4xl">
-        {SECTIONS.map(({ key, label }) => {
-          const content = getContent(key);
-          const isEditing = editing === key;
-          return (
-            <div key={key} className="rounded-lg bg-gray-800 border border-gray-700">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
-                <h3 className="text-sm font-semibold text-white">{label}</h3>
-                {!isEditing && <button onClick={() => { setEditing(key); setEditContent(content); }} className="px-2 py-1 text-xs text-blue-400 hover:bg-blue-500/10 rounded border-none bg-transparent cursor-pointer">Editer</button>}
-              </div>
-              <div className="p-4">
-                {isEditing ? (
-                  <div className="flex flex-col gap-2">
-                    <textarea value={editContent} onChange={e => setEditContent(e.target.value)} className="w-full h-48 p-3 rounded text-sm font-mono resize-y outline-none bg-gray-900 text-white border border-gray-700" />
-                    <div className="flex gap-2 justify-end">
-                      <button onClick={() => setEditing(null)} className="px-3 py-1.5 text-xs text-gray-400 border-none bg-transparent cursor-pointer">Annuler</button>
-                      <button onClick={handleSave} disabled={saving} className="px-3 py-1.5 text-xs text-white bg-blue-500 rounded border-none cursor-pointer disabled:opacity-50 flex items-center gap-1">
-                        {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />} {saving ? 'Sauvegarde...' : 'Sauvegarder'}
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <pre className={`text-sm whitespace-pre-wrap font-sans ${content ? 'text-gray-300' : 'text-gray-600'}`}>{content || 'Aucun contenu.'}</pre>
-                )}
-              </div>
-            </div>
-          );
-        })}
       </div>
     </div>
   );

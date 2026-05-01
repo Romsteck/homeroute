@@ -119,6 +119,19 @@ async fn main() -> anyhow::Result<()> {
     );
     info!("Task store initialized");
 
+    // Open the docs FTS5 index in read-mostly mode. hr-orchestrator owns writes; we use this
+    // handle only for `/api/docs/search`. Multi-process SQLite with WAL is safe for reads.
+    let docs_index = match hr_docs::Index::open(hr_docs::DEFAULT_INDEX_PATH) {
+        Ok(idx) => {
+            info!(fts5 = idx.fts5_available, "Docs index opened (read)");
+            Some(Arc::new(idx))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to open docs index — search disabled");
+            None
+        }
+    };
+
     let api_state = hr_api::state::ApiState {
         auth: auth.clone(),
         acme: acme.clone(),
@@ -138,6 +151,7 @@ async fn main() -> anyhow::Result<()> {
         update_log,
         task_store: task_store.clone(),
         log_store: log_store.clone(),
+        docs_index,
     };
 
     let api_router = hr_api::build_router(api_state);

@@ -139,14 +139,16 @@ impl ContextGenerator {
         log_write(&app.slug, &src_dir.join(".mcp.json"), &mcp_json)?;
 
         // Step 4 — Règles régénérées intégralement.
+        // ORDRE : docs.md en TÊTE pour souligner que la lecture de la doc passe avant
+        // toute autre chose (cf. plan « DOC-FIRST OBLIGATOIRE »).
+        log_write(&app.slug, &src_rules_dir.join("docs.md"),
+                  &render_docs_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("app-info.md"),
                   &render_app_info_md(app, all_apps, &db_tables))?;
         log_write(&app.slug, &src_rules_dir.join("mcp-tools.md"),
                   &render_mcp_tools_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("workflow.md"),
                   &self.render_workflow_md(app))?;
-        log_write(&app.slug, &src_rules_dir.join("docs.md"),
-                  &render_docs_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("todos.md"),
                   &render_todos_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("claude-md-upkeep.md"),
@@ -284,6 +286,22 @@ impl ContextGenerator {
              Each app lives under `{apps_path}/<slug>/` with its own sources, build \
              artifacts, `.env` and (optionally) managed SQLite DB.\n\
              \n\
+             ## Documentation (DOC-FIRST OBLIGATOIRE)\n\
+             \n\
+             Chaque app expose une documentation structurée (overview + écrans + \
+             features per-screen/global + composants + diagrammes mermaid) accessible via \
+             les tools MCP `docs.*`. **Avant toute modification dans une app**, suivre \
+             le workflow doc-first :\n\
+             \n\
+             1. `docs.overview(app_id=<slug>)` — panorama compact (overview + index)\n\
+             2. `docs.search` ou `docs.get` — cibler la zone touchée\n\
+             3. Modifier le code\n\
+             4. `docs.update` + `docs.diagram_set` si flux changé\n\
+             \n\
+             La doc est la source de vérité de l'intention. **Ne jamais coder à \
+             l'aveugle sans la lire d'abord.** Voir la rule `.claude/rules/docs.md` dans \
+             chaque app pour le détail.\n\
+             \n\
              ## Apps\n\
              | Name | Slug | Stack | URL | Visibility | DB path |\n\
              | --- | --- | --- | --- | --- | --- |\n\
@@ -309,13 +327,19 @@ impl ContextGenerator {
              A single MCP server `homeroute` is configured at `{mcp_endpoint}` via \
              `.claude/settings.json` and `.mcp.json`. Read-only tools (`app.list`, \
              `app.status`, `app.logs`, `db.tables`, `db.schema`, `db.query`, \
-             `docs.*`) are auto-approved.\n\
+             `docs.overview`, `docs.list_entries`, `docs.get`, `docs.search`, \
+             `docs.completeness`, `docs.diagram_get`) are auto-approved. Doc \
+             mutations (`docs.update`, `docs.delete`, `docs.diagram_set`) require \
+             confirmation.\n\
              \n\
              ## Rules\n\
+             - **Always read the app's docs (`docs.overview`) BEFORE exploring code or \
+             making changes.**\n\
              - Never use `ssh`, `scp` or direct filesystem access on `*.db` files — go \
              through the MCP `db.*` tools.\n\
              - Apps must read their listening port from `PORT`, never hardcode it.\n\
-             - Update each app's docs (`docs.update`) after meaningful changes.\n",
+             - Update each app's docs (`docs.update` / `docs.diagram_set`) after meaningful \
+             changes (new screen, feature, component, or flow).\n",
             apps_path = self.apps_path.display(),
             table_rows = table_rows,
             base_domain = self.base_domain,
@@ -381,10 +405,14 @@ impl ContextGenerator {
              for this app automatically.\n\
              - Never open the `.db` file by hand.\n\
              \n\
-             ## Documentation\n\
-             - Always read the existing docs with `docs.get` before non-trivial changes.\n\
-             - After a feature, structural change or backend tweak, update the relevant \
-             section with `docs.update`.\n\
+             ## Documentation (DOC-FIRST OBLIGATOIRE)\n\
+             - **Avant toute exploration de code**, appelle `docs_overview` — c'est non \
+             négociable. Voir `.claude/rules/docs.md`.\n\
+             - Cible avec `docs_search` ou `docs_list_entries` selon que tu as un \
+             mot-clé ou que tu explores une catégorie.\n\
+             - Lis l'entrée pertinente avec `docs_get` (et son `docs_diagram_get` si flux).\n\
+             - Après une feature / écran / composant ajouté ou modifié : `docs_update` \
+             (et `docs_diagram_set` si le flux change).\n\
              \n\
              ## Logging\n\
              - Add structured log lines for new handlers, IPC calls, errors, and \
@@ -413,6 +441,18 @@ fn render_mcp_tools_md(app: &Application) -> String {
          auto-approved via `.claude/settings.json` — mutations require explicit \
          confirmation.\n\
          \n\
+         ## Documentation (`docs_*`) — DOC-FIRST OBLIGATOIRE\n\
+         **Avant toute exploration de code, appelle `docs_overview`.** Voir `.claude/rules/docs.md` pour le workflow complet.\n\
+         - `docs_overview` — vue d'ensemble + index compact (à lire EN PREMIER)\n\
+         - `docs_list_entries` — liste les entrées par type (screen/feature/component)\n\
+         - `docs_get` — lit une entrée complète (markdown + diagramme mermaid)\n\
+         - `docs_search` — recherche full-text BM25 ciblée\n\
+         - `docs_completeness` — diagnostic des sections manquantes\n\
+         - `docs_diagram_get` — récupère un diagramme mermaid\n\
+         - `docs_update` — crée/met à jour une entrée (mutation, non auto-approuvé)\n\
+         - `docs_diagram_set` — attache un diagramme mermaid (mutation, non auto-approuvé)\n\
+         - `docs_delete` — supprime une entrée (mutation, non auto-approuvé)\n\
+         \n\
          ## Apps (`app.*`)\n\
          - `app.list` — list every application\n\
          - `app.status` — runtime status of an app (state, port, health)\n\
@@ -426,12 +466,6 @@ fn render_mcp_tools_md(app: &Application) -> String {
          - `db.tables` — list tables for `{slug}` (or any app)\n\
          - `db.schema` — describe a table\n\
          - `db.query` — read or mutate via SQL (mutating SQL is not auto-approved)\n\
-         \n\
-         ## Documentation (`docs.*`)\n\
-         - `docs.list` — list documented apps and completeness\n\
-         - `docs.get` — read a doc section (`meta`, `structure`, `features`, `backend`, `notes`)\n\
-         - `docs.search` — full-text search across all docs\n\
-         - `docs.update` — update a section (mutation, not auto-approved)\n\
          \n\
          ## Todos (`todos_*`) — visibles dans le panneau droit du Studio\n\
          - `todos_list` — lister les todos (filtre optionnel par `status` : `pending` ou `in_progress`)\n\
@@ -453,67 +487,187 @@ fn render_mcp_tools_md(app: &Application) -> String {
 
 fn render_docs_md(app: &Application) -> String {
     format!(
-        "# Documentation — {name} (OBLIGATOIRE)\n\
-         \n\
-         Chaque application HomeRoute possède une documentation centralisée accessible \
-         via les tools MCP `docs.*`. Tu **DOIS** la lire et la tenir à jour — c'est \
-         ce qui permet aux futures sessions (et aux autres agents) de comprendre l'app \
-         sans relire tout le code.\n\
-         \n\
-         ## Règles obligatoires\n\
-         \n\
-         ### Avant de modifier l'app\n\
-         - **TOUJOURS** appeler `docs.get` avec `app_id = \"{slug}\"` avant toute \
-         modification significative.\n\
-         - Lire au minimum les sections pertinentes (`structure`, `features`, `backend`) \
-         pour éviter les incohérences avec les décisions passées.\n\
-         \n\
-         ### Après modification de l'app\n\
-         - **TOUJOURS** mettre à jour la doc via `docs.update` quand :\n\
-         \n\
-         | Changement | Section à mettre à jour |\n\
-         |---|---|\n\
-         | Nouvelle feature utilisateur | `features` |\n\
-         | Structure / architecture modifiée | `structure` |\n\
-         | API, routes, logique backend | `backend` |\n\
-         | Nom, stack, description, logo | `meta` (JSON) |\n\
-         | Décision notable, TODO, remarque | `notes` |\n\
-         \n\
-         ### Vérification de complétude\n\
-         - Après mise à jour, appeler `docs.completeness` avec `app_id = \"{slug}\"` \
-         pour repérer les sections vides.\n\
-         - Si des sections sont vides **et** que l'information est disponible → les remplir.\n\
-         \n\
-         ## Style de documentation\n\
-         \n\
-         - Descriptions **orientées utilisateur**, pas techniques.\n\
-         - Les features décrivent **ce que l'utilisateur peut faire**, pas l'implémentation.\n\
-         \n\
-         ✅ Bon : « Page permettant aux utilisateurs de gérer leur profil et préférences »\n\
-         \n\
-         ❌ Mauvais : « Composant React avec useState qui fetch /api/users »\n\
-         \n\
-         ## Sections disponibles\n\
-         \n\
-         | Section | Format | Contenu |\n\
-         |---|---|---|\n\
-         | `meta` | JSON | `name`, `stack`, `description`, `logo` |\n\
-         | `structure` | Markdown | Architecture, organisation du code |\n\
-         | `features` | Markdown | Liste des fonctionnalités utilisateur |\n\
-         | `backend` | Markdown | API, routes, logique serveur |\n\
-         | `notes` | Markdown | Notes générales, décisions, TODOs |\n\
-         \n\
-         ## Tools MCP (rappel)\n\
-         \n\
-         | Tool | Usage |\n\
-         |---|---|\n\
-         | `docs.list` | Lister toutes les apps documentées avec statut de complétude |\n\
-         | `docs.get` | Lire la doc (toutes sections ou une seule) |\n\
-         | `docs.update` | Mettre à jour une section (mutation) |\n\
-         | `docs.search` | Recherche full-text dans toutes les docs |\n\
-         | `docs.completeness` | Vérifier sections remplies vs vides |\n\
-         \n\
-         Sur cette app, passe `app_id = \"{slug}\"` à chaque appel.\n",
+        r#"# Documentation — {name} (DOC-FIRST OBLIGATOIRE)
+
+> **TL;DR** : avant TOUT travail sur cette app — avant le moindre `Read`, le moindre `grep`,
+> la moindre exploration — tu **DOIS** appeler `docs_overview`. La doc est la source de
+> vérité de l'intention. La lire en dernier conduit à recréer ce qui existe ou à casser
+> un invariant.
+
+## 1. Workflow obligatoire (dans cet ordre)
+
+1. **`docs_overview`** — TOUJOURS EN PREMIER. Renvoie l'overview prose + un index compact
+   de toutes les entrées (titre + résumé 1 ligne) + stats. Permet de cadrer la tâche en peu
+   de tokens.
+2. **`docs_search` (mot-clé)** ou **`docs_list_entries` (par catégorie)** — pour cibler la
+   zone touchée par la tâche utilisateur. Préfère `docs_search` dès qu'un mot-clé est
+   exploitable.
+3. **`docs_get`** — lire les entrées pertinentes en détail (markdown + diagramme mermaid).
+4. **`docs_diagram_get`** — si l'entrée a un diagramme et que tu modifies un flux, lis-le.
+5. **Exploration code** — UNIQUEMENT après les étapes 1-4. Sinon tu travailles à l'aveugle.
+6. **Modification** — applique le changement.
+7. **`docs_update`** — mets à jour les entrées impactées. **Ajoute** une nouvelle entrée si
+   tu introduis un nouvel écran / feature / composant.
+8. **`docs_diagram_set`** — régénère le mermaid si le flux a changé.
+9. **`docs_completeness`** — vérifie qu'il ne manque pas de summary / diagramme.
+
+## 2. Tools disponibles
+
+| Tool | Auto-approuvé | Quand l'utiliser |
+|---|---|---|
+| `docs_overview` | ✅ | Premier appel de chaque tâche |
+| `docs_list_entries` | ✅ | Explorer une catégorie (`type` ∈ screen/feature/component) |
+| `docs_get` | ✅ | Lire une entrée précise |
+| `docs_search` | ✅ | Recherche FTS5 ranked, mot-clé requis |
+| `docs_completeness` | ✅ | Diagnostic de complétude |
+| `docs_diagram_get` | ✅ | Lire un diagramme mermaid attaché |
+| `docs_update` | ❌ mutation | Créer / mettre à jour une entrée |
+| `docs_delete` | ❌ mutation | Supprimer une entrée (refuse l'overview) |
+| `docs_diagram_set` | ❌ mutation | Attacher / mettre à jour un diagramme |
+
+> Tous les tools MCP de cette app sont déjà contextualisés sur `app_id = "{slug}"` —
+> tu n'as pas besoin de le passer explicitement.
+
+## 3. Taxonomie (essentielle — distingue clairement les 3 catégories)
+
+| `type` | Quand l'utiliser | Champ `scope` |
+|---|---|---|
+| `overview` | UNE entrée par app : pitch utilisateur, archi, index. `name = "overview"`. | — |
+| `screen` | UNE page / un écran de l'UI utilisateur (Login, Dashboard, Profile). | — |
+| `feature` (`scope = "global"`) | Capacité TRANSVERSE qui touche ≥ 2 écrans (auth, notifications, i18n, theming, recherche globale). | `global` |
+| `feature` (`scope = "screen:<name>"`) | Capacité propre à UN écran (ex: « éditer profil » sur l'écran Profile). | `screen:<name>` |
+| `component` | Composant UI réutilisable indépendant des écrans (Button, Modal, Chart). | — |
+
+**Règle de classification** : si une feature touche au moins 2 écrans → `scope = "global"`.
+Sinon → `scope = "screen:<name>"`. Le champ `parent_screen` est dérivé automatiquement
+quand `scope = "screen:<name>"`.
+
+## 4. Templates skeleton
+
+### Overview (`type=overview`, `name=overview`)
+```markdown
+# Vue d'ensemble — <App>
+
+## Pitch utilisateur (3 phrases max)
+
+## Architecture (1 paragraphe + diagramme global mermaid)
+
+## Index
+- Écrans : Login, Dashboard, Settings
+- Features globales : Authentification, Notifications
+- Composants clés : Sidebar, Card
+```
+
+### Screen (`type=screen`)
+```markdown
+# <Nom écran>
+
+**Route** : `/path`
+**Rôle utilisateur** : 1-2 phrases sur ce que l'utilisateur fait ici.
+
+## Données affichées
+- ...
+
+## Features rattachées
+- (références dans les `links` du frontmatter)
+
+## États / transitions
+- ...
+```
+
+### Feature (`type=feature`)
+```markdown
+# <Nom feature>
+
+**Description utilisateur** : ce que l'utilisateur peut faire (orienté usage, pas implé).
+
+## Flux
+- déclencheur → action → résultat (rendu en mermaid via docs_diagram_set)
+
+## Écrans concernés
+- (depuis frontmatter `links`)
+
+## Backend touché (synthèse user-facing)
+- endpoints, règles métier visibles côté utilisateur
+```
+
+### Component (`type=component`)
+```markdown
+# <Nom composant>
+
+**Rôle utilisateur** : ce qu'il rend possible.
+
+**Props** : liste courte
+**Utilisé par** : écrans / features (depuis `links`)
+**Variants** : ...
+```
+
+## 5. Frontmatter (passé via le param `frontmatter` de `docs_update`)
+
+```json
+{{
+  "title": "Connexion",
+  "summary": "≤120 chars, affiché dans l'index compact",
+  "scope": "global",                     // features uniquement
+  "parent_screen": "login",              // si scope=screen:<name>
+  "code_refs": ["apps/{slug}/src/routes/auth.rs:1-80"],
+  "links": ["screen:login", "component:auth-form"]
+}}
+```
+
+`title` et `summary` sont essentiels — ils alimentent l'index compact retourné par
+`docs_overview`. Un agent qui ouvre l'app pour la première fois LIT cet index avant tout
+le reste : si `summary` est vide, il est aveugle.
+
+## 6. Bonnes pratiques mermaid
+
+- Header : `flowchart LR` (lecture gauche-droite) ou `flowchart TD` (top-down). **Pas** le
+  vieux `graph`.
+- **Boîtes carrées uniquement** : nœuds en `[Texte lisible]` (rectangles). Pas de cercles
+  ni de losanges sauf décision explicite.
+- Flèches simples : `-->` avec label optionnel `-->|label|`.
+- IDs en kebab-case (`user-input`), labels humains.
+- **Max 12 nœuds par diagramme**. Si dépassé, découper en plusieurs diagrammes (overview =
+  vue large ; feature = zoom).
+- Pas d'icônes, pas de couleurs custom (le rendu utilise le thème dark global).
+- Un `subgraph` pour grouper si > 6 nœuds, sinon flat.
+
+Exemple cible (à coller via `docs_diagram_set`) :
+```mermaid
+flowchart LR
+  user[Utilisateur] --> form[Formulaire login]
+  form --> api[POST /api/auth]
+  api --> session[Session créée]
+  session --> dash[Dashboard]
+```
+
+## 7. Règles de mise à jour
+
+- **Nouvel écran** → créer entrée `screen` + ajouter le lien depuis l'overview.
+- **Nouvelle feature** → créer entrée `feature` avec scope correct + lier depuis le(s)
+  écran(s) concerné(s) via `links`.
+- **Modification d'un flux** → régénérer le diagramme via `docs_diagram_set`.
+- **Doc incohérente avec le code que tu lis** → corriger la doc dans le même PR / commit.
+- **Style** : descriptions orientées utilisateur (« ce qu'il peut faire »), JAMAIS
+  l'implémentation (« composant React useState fetch... »).
+
+## 8. Cycle d'exemple
+
+> Tâche utilisateur : « Ajoute un bouton "Mot de passe oublié" sur l'écran login. »
+
+1. `docs_overview` → je vois qu'il y a un écran `login` et une feature globale `auth`.
+2. `docs_get(type=screen, name=login)` → je lis le rôle, les états, les liens.
+3. `docs_get(type=feature, name=auth-login)` → je vois le flux actuel.
+4. `docs_diagram_get(type=feature, name=auth-login)` → je lis le mermaid.
+5. Exploration code, modif.
+6. `docs_update(type=feature, name=auth-password-reset, scope="screen:login", ...)` →
+   je crée la nouvelle feature.
+7. `docs_diagram_set(type=feature, name=auth-password-reset, mermaid="flowchart LR\n...")` →
+   nouveau flux.
+8. `docs_update(type=screen, name=login, ...)` → j'ajoute le lien vers la nouvelle feature
+   dans `links`.
+9. `docs_completeness` → je vérifie que mon nouveau summary est rempli.
+"#,
         name = app.name,
         slug = app.slug,
     )
@@ -849,6 +1003,11 @@ fn render_initial_claude_md(app: &Application) -> String {
     format!(
         "# {name} — Carnet de bord\n\
          \n\
+         > **DOC-FIRST** : avant toute tâche, appelle `docs_overview` pour avoir le \
+         contexte business + l'index des écrans / features / composants. La doc est la \
+         source de vérité de l'intention. Voir \
+         [`.claude/rules/docs.md`](.claude/rules/docs.md).\n\
+         \n\
          Ce fichier est **le tien** : architecture, décisions, apprentissages, \
          TODOs, pièges rencontrés. Lis d'abord \
          [`.claude/rules/claude-md-upkeep.md`](.claude/rules/claude-md-upkeep.md) \
@@ -1077,9 +1236,12 @@ fn render_settings_json_with_auth(mcp_endpoint: &str, token: Option<&str>) -> St
                 "mcp__homeroute__db_sync_schema",
                 "mcp__homeroute__db_overview",
                 "mcp__homeroute__db_count_rows",
+                "mcp__homeroute__docs_overview",
+                "mcp__homeroute__docs_list_entries",
                 "mcp__homeroute__docs_get",
-                "mcp__homeroute__docs_list",
                 "mcp__homeroute__docs_search",
+                "mcp__homeroute__docs_completeness",
+                "mcp__homeroute__docs_diagram_get",
                 "mcp__homeroute__todos_list",
                 "mcp__homeroute__todos_create",
                 "mcp__homeroute__todos_update",

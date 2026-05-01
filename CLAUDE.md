@@ -248,23 +248,70 @@ C'est du self-improvement : Claude Code améliore les outils qu'il utilise lui-m
 
 - Si modification de `crates/orchestrator/hr-orchestrator/src/mcp.rs` → `make deploy-orchestrator`
 
-## Documentation des Apps
+## Documentation des Apps (DOC-FIRST OBLIGATOIRE)
 
-Les applications HomeRoute disposent d'un système de documentation centralisé stocké dans `/opt/homeroute/data/docs/`. Chaque app a 5 sections : `meta` (JSON), `structure`, `features`, `backend`, `notes` (Markdown).
+Chaque app HomeRoute possède une documentation **structurée** stockée dans `/opt/homeroute/data/docs/{app_id}/`. La documentation est organisée en 4 catégories :
 
-### Outils MCP docs
+| Type | Description | Fichier |
+|---|---|---|
+| `overview` | Vue d'ensemble (1 par app) : pitch utilisateur, archi, index | `overview.md` |
+| `screen` | Une page/écran de l'UI | `screens/{name}.md` |
+| `feature` | Capacité utilisateur — globale (cross-écrans) ou per-screen (`scope=screen:<name>`) | `features/{name}.md` |
+| `component` | Composant UI réutilisable | `components/{name}.md` |
+
+Chaque entrée a un frontmatter YAML (`title`, `summary`, `scope`, `parent_screen`, `code_refs`, `links`) + un body markdown + (optionnel) un diagramme mermaid attaché à `diagrams/{type}-{name}.mmd`.
+
+L'index full-text vit dans `/opt/homeroute/data/docs/_index.sqlite` (FTS5 BM25). Reconstructible.
+
+### Outils MCP docs (v2)
+
+**Lecture (auto-approuvés)** :
 
 | Outil | Usage |
 |-------|-------|
-| `docs.list` | Lister les apps documentées avec statut de complétude |
-| `docs.get` | Lire la doc d'une app (params: `app_id`, `section` optionnel) |
-| `docs.create` | Créer le scaffold pour une nouvelle app |
-| `docs.update` | Mettre à jour une section (params: `app_id`, `section`, `content`) |
-| `docs.search` | Recherche full-text dans toutes les docs |
-| `docs.completeness` | Vérifier sections remplies vs vides |
+| `docs.overview` | Premier appel obligatoire — overview + index compact + stats |
+| `docs.list_entries` | Liste les entrées par type |
+| `docs.get` | Lire une entrée complète (frontmatter + body + diagramme) |
+| `docs.search` | Recherche FTS5 BM25 (snippets surlignés, ranking) |
+| `docs.completeness` | Diagnostic : missing summaries, missing diagrams |
+| `docs.diagram_get` | Récupère un mermaid attaché |
+| `docs.list_apps` | Liste toutes les apps documentées |
 
-### Règle obligatoire
+**Mutations (non auto-approuvées)** :
 
-- **TOUJOURS** lire la doc (`docs.get`) avant de modifier significativement une app
-- **TOUJOURS** mettre à jour la doc après ajout/modification de features, structure, ou backend
-- Descriptions orientées utilisateur, pas techniques
+| Outil | Usage |
+|-------|-------|
+| `docs.update` | Crée/met à jour une entrée |
+| `docs.delete` | Supprime une entrée (refuse l'overview) |
+| `docs.diagram_set` | Attache/met à jour un diagramme mermaid (max 32 KB) |
+
+### Workflow DOC-FIRST (obligatoire)
+
+1. **`docs.overview(app_id=<slug>)`** AVANT toute exploration de code
+2. `docs.search` (mot-clé) ou `docs.list_entries` (catégorie) pour cibler
+3. `docs.get` pour lire les entrées pertinentes en détail
+4. **Ensuite seulement** : exploration code + modification
+5. `docs.update` pour refléter les changements
+6. `docs.diagram_set` si un flux change
+7. `docs.completeness` pour vérifier qu'il ne manque pas de summary/diagramme
+
+### Règles
+
+- **JAMAIS** coder à l'aveugle dans une app sans avoir lu sa doc
+- Descriptions **orientées utilisateur** (« ce qu'il peut faire »), pas implémentation
+- Si feature touche ≥ 2 écrans → `scope=global` ; sinon → `scope=screen:<name>`
+- Mermaid : `flowchart LR/TD`, **boîtes carrées uniquement**, max 12 nœuds par diagramme
+
+### REST API frontend (lecture seule)
+
+Le frontend tab Documentation du Studio consomme `/api/docs/*` (lecture seule). **Seul l'agent modifie la doc** via MCP.
+
+| Méthode | Route | Usage |
+|---|---|---|
+| GET | `/api/docs` | Liste apps |
+| GET | `/api/docs/:app_id/overview` | Overview + index |
+| GET | `/api/docs/:app_id/entries?type=` | Liste filtrable |
+| GET | `/api/docs/:app_id/:type/:name` | Entrée complète |
+| GET | `/api/docs/:app_id/:type/:name/diagram` | Diagramme mermaid |
+| GET | `/api/docs/search?q=` | Recherche FTS5 |
+| GET | `/api/docs/:app_id/completeness` | Diagnostic |

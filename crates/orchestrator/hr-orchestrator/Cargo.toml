@@ -15,6 +15,7 @@ hr-registry = { path = "../hr-registry" }
 hr-container = { path = "../hr-container" }
 hr-git = { path = "../hr-git" }
 hr-acme = { path = "../../edge/hr-acme" }
+hr-docs = { workspace = true }
 
 tokio = { workspace = true }
 tracing = { workspace = true }

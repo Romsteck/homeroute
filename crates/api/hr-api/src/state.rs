@@ -45,4 +45,8 @@ pub struct ApiState {
     pub proxy_config_path: PathBuf,
     /// Path to reverseproxy-config.json
     pub reverseproxy_config_path: PathBuf,
+
+    /// Read-only handle on the docs FTS5 index. None if init failed at boot.
+    /// hr-orchestrator owns writes; hr-api uses this for `/api/docs/search` only.
+    pub docs_index: Option<Arc<hr_docs::Index>>,
 }

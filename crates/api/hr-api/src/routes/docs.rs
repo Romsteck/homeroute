@@ -1,273 +1,276 @@
-//! Documentation: per-app docs with sections (meta, structure, features, backend, notes).
+//! Read-only REST routes for the v2 docs system.
+//!
+//! Mutations (create, update, delete, diagram_set) live exclusively on the MCP side — the
+//! frontend is read-only by design. The agent is the sole writer.
 
-use axum::extract::{Path, Query};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
+use hr_docs::{DocType, Store, validate_app_id, validate_entry_name};
 use serde::Deserialize;
 use serde_json::json;
-use tracing::info;
 
 use crate::state::ApiState;
 
-const DOCS_DIR: &str = "/opt/homeroute/data/docs";
-const SECTIONS: &[&str] = &["structure", "features", "backend", "notes"];
-
-fn validate_id(id: &str) -> bool {
-    !id.is_empty()
-        && !id.contains('/')
-        && !id.contains("..")
-        && id
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+fn store() -> Store {
+    Store::new(hr_docs::DEFAULT_DOCS_DIR)
 }
 
-fn validate_section(s: &str) -> bool {
-    s == "meta" || SECTIONS.contains(&s)
+fn parse_type(s: &str) -> Option<DocType> {
+    DocType::from_str(s)
 }
 
 pub fn router() -> Router<ApiState> {
     Router::new()
-        .route("/", get(list_docs))
-        .route("/search", get(search_docs))
-        .route("/{app_id}", get(get_docs).post(create_docs))
-        .route("/{app_id}/{section}", get(get_section).post(update_section))
+        .route("/", get(list_apps))
+        .route("/search", get(search))
+        .route("/{app_id}/overview", get(get_overview))
+        .route("/{app_id}/entries", get(list_entries))
+        .route("/{app_id}/completeness", get(completeness))
+        .route("/{app_id}/{doc_type}/{name}", get(get_entry))
+        .route("/{app_id}/{doc_type}/{name}/diagram", get(get_diagram))
 }
 
-/// GET /api/docs — list all documented apps
-async fn list_docs() -> impl IntoResponse {
-    let dir = std::path::Path::new(DOCS_DIR);
-    if !dir.exists() {
-        return Json(json!({ "success": true, "apps": [] })).into_response();
-    }
-    let mut apps = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "success": false, "error": "Failed to read docs directory" })),
-        )
-            .into_response();
+fn err(status: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (status, Json(json!({ "success": false, "error": msg })))
+}
+
+/// GET /api/docs — list all documented apps with completeness stats.
+async fn list_apps() -> impl IntoResponse {
+    let store = store();
+    let app_ids = match store.list_app_ids() {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response(),
     };
-    for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+    let mut apps = Vec::with_capacity(app_ids.len());
+    for app_id in app_ids {
+        let Ok(meta) = store.read_meta(&app_id) else {
             continue;
-        }
-        let app_id = entry.file_name().to_string_lossy().to_string();
-        let app_dir = entry.path();
-
-        let meta: serde_json::Value = std::fs::read_to_string(app_dir.join("meta.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(json!({}));
-
-        let name = meta
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&app_id)
-            .to_string();
-
-        let mut filled = 0u32;
-        if app_dir.join("meta.json").exists() {
-            let content = std::fs::read_to_string(app_dir.join("meta.json")).unwrap_or_default();
-            if content.trim().len() > 2 {
-                filled += 1;
-            }
-        }
-        for s in SECTIONS {
-            if let Ok(content) = std::fs::read_to_string(app_dir.join(format!("{s}.md"))) {
-                if !content.trim().is_empty() {
-                    filled += 1;
-                }
-            }
-        }
-
+        };
+        let stats = store.overview(&app_id).map(|o| o.stats).unwrap_or_default();
         apps.push(json!({
             "app_id": app_id,
-            "name": name,
-            "meta": meta,
-            "filled": filled,
-            "total": 5,
+            "name": meta.name,
+            "stack": meta.stack,
+            "description": meta.description,
+            "logo": meta.logo,
+            "schema_version": meta.schema_version,
+            "stats": stats,
+            "has_overview": stats.has_overview,
         }));
     }
-    apps.sort_by(|a, b| {
-        a["app_id"]
-            .as_str()
-            .unwrap_or("")
-            .cmp(b["app_id"].as_str().unwrap_or(""))
-    });
     Json(json!({ "success": true, "apps": apps })).into_response()
 }
 
-/// GET /api/docs/:appId — get all sections
-async fn get_docs(Path(app_id): Path<String>) -> impl IntoResponse {
-    if !validate_id(&app_id) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "success": false, "error": "Invalid app_id" })),
-        )
-            .into_response();
+/// GET /api/docs/:app_id/overview — overview entry + compact index of all entries.
+async fn get_overview(Path(app_id): Path<String>) -> impl IntoResponse {
+    if !validate_app_id(&app_id) {
+        return err(StatusCode::BAD_REQUEST, "Invalid app_id").into_response();
     }
-    let app_dir = std::path::Path::new(DOCS_DIR).join(&app_id);
-    if !app_dir.exists() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "success": false, "error": "Not found" })),
-        )
-            .into_response();
-    }
-
-    let meta = std::fs::read_to_string(app_dir.join("meta.json")).unwrap_or_default();
-    let meta_parsed: serde_json::Value = serde_json::from_str(&meta).unwrap_or(json!({}));
-
-    let mut sections = json!({});
-    for s in SECTIONS {
-        let content = std::fs::read_to_string(app_dir.join(format!("{s}.md"))).unwrap_or_default();
-        sections[s] = json!(content);
-    }
-
-    Json(json!({
-        "success": true,
-        "app_id": app_id,
-        "meta": meta_parsed,
-        "sections": sections,
-    }))
-    .into_response()
-}
-
-/// POST /api/docs/:appId — create docs for an app
-async fn create_docs(Path(app_id): Path<String>) -> impl IntoResponse {
-    if !validate_id(&app_id) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "success": false, "error": "Invalid app_id" })),
-        )
-            .into_response();
-    }
-    let app_dir = std::path::Path::new(DOCS_DIR).join(&app_id);
-    if app_dir.exists() {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({ "success": false, "error": "Already exists" })),
-        )
-            .into_response();
-    }
-    if let Err(e) = std::fs::create_dir_all(&app_dir) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "success": false, "error": format!("Failed: {e}") })),
-        )
-            .into_response();
-    }
-    let meta = json!({ "name": app_id, "stack": "", "description": "", "logo": "" });
-    let _ = std::fs::write(
-        app_dir.join("meta.json"),
-        serde_json::to_string_pretty(&meta).unwrap_or_default(),
-    );
-    for s in SECTIONS {
-        let _ = std::fs::write(app_dir.join(format!("{s}.md")), "");
-    }
-    info!(app_id, "Created docs");
-    Json(json!({ "success": true, "app_id": app_id })).into_response()
-}
-
-/// GET /api/docs/:appId/:section
-async fn get_section(Path((app_id, section)): Path<(String, String)>) -> impl IntoResponse {
-    if !validate_id(&app_id) || !validate_section(&section) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "success": false, "error": "Invalid params" })),
-        )
-            .into_response();
-    }
-    let app_dir = std::path::Path::new(DOCS_DIR).join(&app_id);
-    let filename = if section == "meta" {
-        "meta.json".to_string()
-    } else {
-        format!("{section}.md")
-    };
-    let content = std::fs::read_to_string(app_dir.join(&filename)).unwrap_or_default();
-    Json(json!({ "success": true, "app_id": app_id, "section": section, "content": content }))
-        .into_response()
-}
-
-/// POST /api/docs/:appId/:section — update section content
-#[derive(Deserialize)]
-struct UpdateBody {
-    content: String,
-}
-
-async fn update_section(
-    Path((app_id, section)): Path<(String, String)>,
-    Json(body): Json<UpdateBody>,
-) -> impl IntoResponse {
-    if !validate_id(&app_id) || !validate_section(&section) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "success": false, "error": "Invalid params" })),
-        )
-            .into_response();
-    }
-    let app_dir = std::path::Path::new(DOCS_DIR).join(&app_id);
-    if !app_dir.exists() {
-        if let Err(e) = std::fs::create_dir_all(&app_dir) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "success": false, "error": format!("Failed: {e}") })),
-            )
-                .into_response();
+    match store().overview(&app_id) {
+        Ok(ov) => Json(json!({ "success": true, "data": ov })).into_response(),
+        Err(hr_docs::StoreError::AppNotFound(_)) => {
+            err(StatusCode::NOT_FOUND, "App not found").into_response()
         }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response(),
     }
-    let filename = if section == "meta" {
-        "meta.json".to_string()
-    } else {
-        format!("{section}.md")
-    };
-    if let Err(e) = std::fs::write(app_dir.join(&filename), &body.content) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "success": false, "error": format!("Write failed: {e}") })),
-        )
-            .into_response();
-    }
-    info!(app_id, section, "Updated docs section");
-    Json(json!({ "success": true })).into_response()
 }
 
-/// GET /api/docs/search?q=query
+#[derive(Deserialize)]
+struct ListEntriesQuery {
+    #[serde(default, rename = "type")]
+    doc_type: Option<String>,
+}
+
+/// GET /api/docs/:app_id/entries?type=screen
+async fn list_entries(
+    Path(app_id): Path<String>,
+    Query(q): Query<ListEntriesQuery>,
+) -> impl IntoResponse {
+    if !validate_app_id(&app_id) {
+        return err(StatusCode::BAD_REQUEST, "Invalid app_id").into_response();
+    }
+    let doc_type = match q.doc_type.as_deref() {
+        None => None,
+        Some(s) => match parse_type(s) {
+            Some(t) => Some(t),
+            None => {
+                return err(StatusCode::BAD_REQUEST, &format!("Invalid type '{s}'"))
+                    .into_response();
+            }
+        },
+    };
+    match store().list_entries(&app_id, doc_type) {
+        Ok(entries) => Json(json!({
+            "success": true,
+            "app_id": app_id,
+            "entries": entries,
+        }))
+        .into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response(),
+    }
+}
+
+/// GET /api/docs/:app_id/:type/:name — full entry with optional diagram.
+async fn get_entry(
+    Path((app_id, doc_type, name)): Path<(String, String, String)>,
+) -> impl IntoResponse {
+    if !validate_app_id(&app_id) {
+        return err(StatusCode::BAD_REQUEST, "Invalid app_id").into_response();
+    }
+    let Some(doc_type_e) = parse_type(&doc_type) else {
+        return err(StatusCode::BAD_REQUEST, &format!("Invalid type '{doc_type}'"))
+            .into_response();
+    };
+    if doc_type_e != DocType::Overview && !validate_entry_name(&name) {
+        return err(StatusCode::BAD_REQUEST, "Invalid name").into_response();
+    }
+    let s = store();
+    match s.read_entry(&app_id, doc_type_e, &name) {
+        Ok(entry) => {
+            let diagram = s
+                .read_diagram(&app_id, doc_type_e, &entry.name)
+                .ok()
+                .flatten();
+            Json(json!({
+                "success": true,
+                "data": {
+                    "app_id": entry.app_id,
+                    "type": entry.doc_type.as_str(),
+                    "name": entry.name,
+                    "frontmatter": entry.frontmatter,
+                    "body": entry.body,
+                    "diagram": diagram,
+                }
+            }))
+            .into_response()
+        }
+        Err(hr_docs::StoreError::EntryNotFound { .. }) => {
+            err(StatusCode::NOT_FOUND, "Entry not found").into_response()
+        }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response(),
+    }
+}
+
+/// GET /api/docs/:app_id/:type/:name/diagram
+async fn get_diagram(
+    Path((app_id, doc_type, name)): Path<(String, String, String)>,
+) -> impl IntoResponse {
+    if !validate_app_id(&app_id) {
+        return err(StatusCode::BAD_REQUEST, "Invalid app_id").into_response();
+    }
+    let Some(doc_type_e) = parse_type(&doc_type) else {
+        return err(StatusCode::BAD_REQUEST, &format!("Invalid type '{doc_type}'"))
+            .into_response();
+    };
+    match store().read_diagram(&app_id, doc_type_e, &name) {
+        Ok(opt) => Json(json!({
+            "success": true,
+            "app_id": app_id,
+            "type": doc_type,
+            "name": name,
+            "mermaid": opt,
+        }))
+        .into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response(),
+    }
+}
+
 #[derive(Deserialize)]
 struct SearchQuery {
     q: String,
+    #[serde(default)]
+    app_id: Option<String>,
+    #[serde(default, rename = "type")]
+    doc_type: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
 }
 
-async fn search_docs(Query(query): Query<SearchQuery>) -> impl IntoResponse {
-    let q = query.q.to_lowercase();
-    let dir = std::path::Path::new(DOCS_DIR);
-    if !dir.exists() {
-        return Json(json!({ "success": true, "results": [] })).into_response();
+/// GET /api/docs/search?q=…&app_id=…&type=…&limit=…
+async fn search(State(state): State<ApiState>, Query(q): Query<SearchQuery>) -> impl IntoResponse {
+    if let Some(ref a) = q.app_id {
+        if !validate_app_id(a) {
+            return err(StatusCode::BAD_REQUEST, "Invalid app_id").into_response();
+        }
     }
-    let mut results = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Json(json!({ "success": true, "results": [] })).into_response();
+    let doc_type = match q.doc_type.as_deref() {
+        None => None,
+        Some(s) => match parse_type(s) {
+            Some(t) => Some(t),
+            None => {
+                return err(StatusCode::BAD_REQUEST, &format!("Invalid type '{s}'"))
+                    .into_response();
+            }
+        },
     };
-    for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
+    let Some(idx) = state.docs_index.as_ref() else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Docs index unavailable (init failed at boot)",
+        )
+        .into_response();
+    };
+    match idx.search(&q.q, q.app_id.as_deref(), doc_type, q.limit) {
+        Ok(hits) => Json(json!({
+            "success": true,
+            "query": q.q,
+            "count": hits.len(),
+            "results": hits,
+        }))
+        .into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response(),
+    }
+}
+
+/// GET /api/docs/:app_id/completeness — diagnostic about missing summaries / diagrams.
+async fn completeness(Path(app_id): Path<String>) -> impl IntoResponse {
+    if !validate_app_id(&app_id) {
+        return err(StatusCode::BAD_REQUEST, "Invalid app_id").into_response();
+    }
+    let s = store();
+    let overview = match s.overview(&app_id) {
+        Ok(o) => o,
+        Err(hr_docs::StoreError::AppNotFound(_)) => {
+            return err(StatusCode::NOT_FOUND, "App not found").into_response();
         }
-        let app_id = entry.file_name().to_string_lossy().to_string();
-        let app_dir = entry.path();
-        if let Ok(content) = std::fs::read_to_string(app_dir.join("meta.json")) {
-            if content.to_lowercase().contains(&q) {
-                results.push(json!({ "app_id": app_id, "section": "meta" }));
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")).into_response(),
+    };
+    let mut missing_summaries: Vec<String> = Vec::new();
+    let mut missing_diagrams: Vec<String> = Vec::new();
+    for group in [
+        &overview.index.screens,
+        &overview.index.features,
+        &overview.index.components,
+    ] {
+        for e in group {
+            let key = format!("{}:{}", e.doc_type.as_str(), e.name);
+            if e.summary
+                .as_deref()
+                .map(|x| x.trim().is_empty())
+                .unwrap_or(true)
+            {
+                missing_summaries.push(key.clone());
             }
-        }
-        for s in SECTIONS {
-            if let Ok(content) = std::fs::read_to_string(app_dir.join(format!("{s}.md"))) {
-                if content.to_lowercase().contains(&q) {
-                    results.push(json!({ "app_id": app_id, "section": s }));
-                }
+            if !e.has_diagram {
+                missing_diagrams.push(key);
             }
         }
     }
-    Json(json!({ "success": true, "results": results, "count": results.len() })).into_response()
+    Json(json!({
+        "success": true,
+        "app_id": app_id,
+        "has_overview": overview.stats.has_overview,
+        "counts": {
+            "screens": overview.stats.screens,
+            "features": overview.stats.features,
+            "components": overview.stats.components,
+            "with_diagram": overview.stats.with_diagram,
+        },
+        "missing_summaries": missing_summaries,
+        "missing_diagrams": missing_diagrams,
+    }))
+    .into_response()
 }

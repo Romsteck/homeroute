@@ -263,6 +263,37 @@ async fn main() -> anyhow::Result<()> {
         app_registry.list().await.len()
     );
 
+    // ── Docs migration + FTS5 index ─────────────────────────────────
+    // Runs at every boot. Idempotent: apps already at schema_version=2 are skipped.
+    // The index is rebuilt from filesystem if empty (first boot or manual deletion).
+    let docs_index = {
+        let report = hr_docs::run_all(hr_docs::DEFAULT_DOCS_DIR);
+        if !report.errors.is_empty() {
+            warn!(errors = ?report.errors, "Docs migration produced errors");
+        }
+        info!(
+            migrated = report.migrated_apps.len(),
+            already_v2 = report.already_v2.len(),
+            "Docs migration pass complete"
+        );
+        match hr_docs::Index::open_or_rebuild(
+            hr_docs::DEFAULT_INDEX_PATH,
+            hr_docs::DEFAULT_DOCS_DIR,
+        ) {
+            Ok(idx) => {
+                info!(
+                    fts5 = idx.fts5_available,
+                    "Docs index ready"
+                );
+                Some(Arc::new(idx))
+            }
+            Err(e) => {
+                warn!(error = %e, "Docs index init failed — search will be unavailable");
+                None
+            }
+        }
+    };
+
     if let Err(e) = supervisor.start_all_running().await {
         warn!(error = %e, "start_all_running failed at boot");
     }
@@ -375,6 +406,7 @@ async fn main() -> anyhow::Result<()> {
                 build_locks: build_locks.clone(),
                 app_build_tx: events.app_build.clone(),
             });
+            s.docs_index = docs_index.clone();
         }
         st
     };

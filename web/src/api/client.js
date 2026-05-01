@@ -210,10 +210,15 @@ export const createAppDbRelation = (slug, body) => api.post(`/apps/${slug}/db/re
 export const getLogs = (params = {}) => api.get('/logs', { params });
 export const getLogStats = () => api.get('/logs/stats');
 
-// ========== Docs ==========
-export const getDocsList = () => api.get('/docs');
-export const getDocsApp = (appId) => api.get(`/docs/${appId}`);
-export const createDocsApp = (appId) => api.post(`/docs/${appId}`);
-export const getDocsSection = (appId, section) => api.get(`/docs/${appId}/${section}`);
-export const updateDocsSection = (appId, section, content) => api.post(`/docs/${appId}/${section}`, { content });
-export const searchDocs = (q) => api.get('/docs/search', { params: { q } });
+// ========== Docs (v2: structured overview/screens/features/components + mermaid) ==========
+// Read-only — mutations go through MCP from the agent.
+export const listDocsApps = () => api.get('/docs');
+export const getDocsOverview = (appId) => api.get(`/docs/${appId}/overview`);
+export const listDocsEntries = (appId, params = {}) =>
+  api.get(`/docs/${appId}/entries`, { params });
+export const getDocsEntry = (appId, type, name) =>
+  api.get(`/docs/${appId}/${type}/${encodeURIComponent(name)}`);
+export const getDocsDiagram = (appId, type, name) =>
+  api.get(`/docs/${appId}/${type}/${encodeURIComponent(name)}/diagram`);
+export const searchDocs = (params) => api.get('/docs/search', { params });
+export const getDocsCompleteness = (appId) => api.get(`/docs/${appId}/completeness`);
