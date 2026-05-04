@@ -23,10 +23,11 @@
 # Run on the prod router (10.0.0.254).
 #
 # Design choices:
-#   - Runs as **root**. A dedicated `homeroute-studio` user would be safer, but
-#     all the other homeroute-managed services run as root for parity, and the
-#     studio frequently needs to read/write under /opt/homeroute/apps which is
-#     also root-owned. Documented here so the next maintainer doesn't wonder.
+#   - Runs as a dedicated **`hr-studio`** system user (not root). This isolates
+#     the Studio's `~/.claude/` (memory, settings, MCP, auto-approve) from any
+#     other service or admin session on the host. `/opt/homeroute/apps/` is
+#     group-owned by `hr-studio` with setgid so both the Studio and `romain`
+#     (added to the group) can edit each other's files seamlessly.
 #   - code-server is launched with `--auth none`. We do NOT want code-server's
 #     own password screen — auth is enforced one layer up by hr-edge using the
 #     hr-auth session cookie on `studio.mynetwk.biz`. Binding only to 127.0.0.1
@@ -44,6 +45,10 @@ STUDIO_BIND="${STUDIO_BIND:-127.0.0.1:8443}"
 STUDIO_PORT="${STUDIO_PORT:-8443}"
 STUDIO_DOMAIN="${STUDIO_DOMAIN:-studio.mynetwk.biz}"
 HOMEROUTE_API="${HOMEROUTE_API:-http://127.0.0.1:4000}"
+STUDIO_USER="${STUDIO_USER:-hr-studio}"
+STUDIO_GROUP="${STUDIO_GROUP:-hr-studio}"
+STUDIO_HOME="${STUDIO_HOME:-/var/lib/hr-studio}"
+EXTRA_GROUP_MEMBERS="${EXTRA_GROUP_MEMBERS:-romain}"
 DRY_RUN=false
 
 # =============================================================================
@@ -104,21 +109,83 @@ preflight() {
         command -v "$bin" >/dev/null 2>&1 || die "missing required binary: $bin"
     done
 
+    ensure_user_and_group
+
     if [[ ! -d "$APPS_DIR" ]]; then
-        log_info "creating $APPS_DIR (root:root 0755)"
+        log_info "creating $APPS_DIR ($STUDIO_USER:$STUDIO_GROUP 2775)"
         run "mkdir -p '$APPS_DIR'"
-        run "chown root:root '$APPS_DIR'"
-        run "chmod 0755 '$APPS_DIR'"
+        run "chown '$STUDIO_USER:$STUDIO_GROUP' '$APPS_DIR'"
+        run "chmod 2775 '$APPS_DIR'"
     else
         log_ok "$APPS_DIR already exists"
     fi
 
+    apply_apps_permissions
+
     if [[ ! -d "$DATA_DIR" ]]; then
-        log_info "creating $DATA_DIR (code-server user-data-dir)"
+        log_info "creating $DATA_DIR (code-server user-data-dir, owned by $STUDIO_USER)"
         run "mkdir -p '$DATA_DIR'"
+        run "chown -R '$STUDIO_USER:$STUDIO_GROUP' '$DATA_DIR'"
+    else
+        local current_owner
+        current_owner="$(stat -c '%U:%G' "$DATA_DIR" 2>/dev/null || echo unknown)"
+        if [[ "$current_owner" != "${STUDIO_USER}:${STUDIO_GROUP}" ]]; then
+            log_info "rechowning $DATA_DIR ($current_owner -> $STUDIO_USER:$STUDIO_GROUP)"
+            run "chown -R '$STUDIO_USER:$STUDIO_GROUP' '$DATA_DIR'"
+        else
+            log_ok "$DATA_DIR already owned by $STUDIO_USER:$STUDIO_GROUP"
+        fi
     fi
 
     log_ok "preflight passed"
+}
+
+# =============================================================================
+# Ensure the dedicated system user/group exists
+# =============================================================================
+ensure_user_and_group() {
+    if getent group "$STUDIO_GROUP" >/dev/null 2>&1; then
+        log_ok "group $STUDIO_GROUP already exists"
+    else
+        log_info "creating system group $STUDIO_GROUP"
+        run "groupadd --system '$STUDIO_GROUP'"
+    fi
+
+    if id "$STUDIO_USER" >/dev/null 2>&1; then
+        log_ok "user $STUDIO_USER already exists"
+    else
+        log_info "creating system user $STUDIO_USER (home=$STUDIO_HOME, shell=/bin/bash)"
+        run "useradd --system --gid '$STUDIO_GROUP' --create-home \
+              --home-dir '$STUDIO_HOME' --shell /bin/bash \
+              --comment 'HomeRoute Studio service' '$STUDIO_USER'"
+    fi
+
+    if [[ -n "$EXTRA_GROUP_MEMBERS" ]]; then
+        local member
+        for member in $EXTRA_GROUP_MEMBERS; do
+            if ! id "$member" >/dev/null 2>&1; then
+                log_warn "extra group member '$member' does not exist — skipping"
+                continue
+            fi
+            if id -nG "$member" | tr ' ' '\n' | grep -qx "$STUDIO_GROUP"; then
+                log_ok "$member already in group $STUDIO_GROUP"
+            else
+                log_info "adding $member to group $STUDIO_GROUP"
+                run "usermod -aG '$STUDIO_GROUP' '$member'"
+            fi
+        done
+    fi
+}
+
+# =============================================================================
+# Permissions on /opt/homeroute/apps/ — group-owned by hr-studio with setgid
+# =============================================================================
+apply_apps_permissions() {
+    log_info "ensuring $APPS_DIR is group=$STUDIO_GROUP, g+rwX, setgid on dirs"
+    run "chgrp -R '$STUDIO_GROUP' '$APPS_DIR'"
+    run "chmod -R g+rwX '$APPS_DIR'"
+    run "find '$APPS_DIR' -type d -exec chmod g+s {} +"
+    log_ok "$APPS_DIR permissions applied (group=$STUDIO_GROUP, setgid on dirs)"
 }
 
 # =============================================================================
@@ -160,8 +227,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
+User=${STUDIO_USER}
+Group=${STUDIO_GROUP}
+UMask=0002
 WorkingDirectory=${APPS_DIR}
+Environment=HOME=${STUDIO_HOME}
 Environment=PASSWORD=
 Environment=HASHED_PASSWORD=
 ExecStart=/usr/bin/code-server \\

@@ -141,7 +141,9 @@ L'accès externe via Cloudflare n'est pas affecté — Cloudflare a son propre w
 | **DEV** | cloudmaster | 10.0.0.10 | Build, tests, développement |
 | **PROD** | — | 10.0.0.254 | Exécution de HomeRoute |
 
-⚠️ **JAMAIS** démarrer homeroute (le service Rust) sur CloudMaster. Seul tourne là-bas : code-server (`hr-studio.service`, port 8443) servant les sources des apps, `hr-host-agent` (heartbeat), `cm-backup-apps-src.timer` (backup nightly), et le code-server perso de l'utilisateur (port 9080, `code.mynetwk.biz`).
+⚠️ **JAMAIS** démarrer homeroute (le service Rust) sur CloudMaster. Seul tourne là-bas : code-server du Studio (`hr-studio.service`, port 8443, **user système `hr-studio`**) servant les sources des apps, `hr-host-agent` (heartbeat), `cm-backup-apps-src.timer` (backup nightly), et le code-server perso de l'utilisateur (port 9080, `code.mynetwk.biz`, user `romain`).
+
+**Isolation Studio ↔ perso** : `hr-studio.service` tourne sous le user système dédié `hr-studio` (HOME=`/var/lib/hr-studio`) — son `~/.claude/` (mémoire, settings, MCP, auto-approve) est totalement isolé du `~/.claude/` du user `romain`. Le dossier `/opt/homeroute/apps/` est `romain:hr-studio` avec setgid sur les dirs et `g+rwX` ; `romain` est dans le groupe `hr-studio` pour pouvoir éditer librement les fichiers créés par le Studio (et inversement). Le service force `UMask=0002` pour que les fichiers créés héritent du `g+rw`.
 
 ⚠️ **TOUTES les commandes `make deploy-*`** sont gardées par `check-on-cloudmaster` qui vérifie `hostname == "cloudmaster"`. Override exceptionnel : `make deploy-* FORCE_BUILD=1` (déconseillé).
 
