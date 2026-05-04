@@ -224,6 +224,10 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
 
   // ── Inline edit ──
   function handleStartEdit(row, col, value) {
+    if (isPgBackend) {
+      showToast('Édition désactivée sur postgres-dataverse — utilise db.graphql', 'err');
+      return;
+    }
     const colSchema = schema?.columns?.find(c => c.name === col);
     if (colSchema?.primary_key) return;
     setEditingCell({ row, col });
@@ -324,6 +328,17 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
 
   const totalCount = result?.total_count || 0;
 
+  // Backend awareness: block SQL-brut writes when the app is on the
+  // postgres-dataverse backend. Reads still go through the IPC layer
+  // which routes correctly per backend; writes need a GraphQL UI that
+  // hasn't shipped yet (see Phase F.2 in the dataverse plan).
+  const selectedApp = appsWithTables.find(a => a.app.slug === selectedAppSlug)?.app;
+  const dbBackend = selectedApp?.db_backend || 'legacy-sqlite';
+  const isPgBackend = dbBackend === 'postgres-dataverse';
+  const writesDisabledReason = isPgBackend
+    ? 'Désactivé sur postgres-dataverse. Utilise l\'endpoint GraphQL /api/apps/{slug}/db/graphql ou les tools MCP db.graphql / db.insert / db.update / db.delete.'
+    : null;
+
   return (
     <div className={`flex h-full overflow-hidden ${embedded ? '' : 'rounded border border-gray-700'}`}>
       {/* Sidebar */}
@@ -354,6 +369,23 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
             )}
           </div>
 
+          {selectedAppSlug && (
+            <span
+              className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${
+                isPgBackend
+                  ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                  : 'bg-amber-500/10 text-amber-300 border border-amber-500/20'
+              }`}
+              title={
+                isPgBackend
+                  ? 'Postgres + GraphQL (managé via hr-dataverse)'
+                  : 'SQLite legacy (hr-db) — migration vers postgres-dataverse à venir'
+              }
+            >
+              {isPgBackend ? 'pg+graphql' : 'sqlite'}
+            </span>
+          )}
+
           {selectedTable && (
             <div className="flex items-center gap-1">
               <input
@@ -363,11 +395,21 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
                 placeholder="Rechercher..."
                 className="bg-gray-900 text-white text-xs rounded px-2 py-1 border border-gray-600 w-40 outline-none"
               />
-              <button onClick={() => setShowAddRow(true)} className="p-1.5 text-gray-400 hover:text-green-400 hover:bg-gray-700 rounded border-none bg-transparent cursor-pointer" title="Ajouter">
+              <button
+                onClick={() => setShowAddRow(true)}
+                disabled={isPgBackend}
+                className="p-1.5 text-gray-400 hover:text-green-400 hover:bg-gray-700 rounded border-none bg-transparent cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                title={writesDisabledReason || 'Ajouter'}
+              >
                 <Plus className="w-3.5 h-3.5" />
               </button>
               {selectedRows.size > 0 && (
-                <button onClick={() => setShowDeleteConfirm(true)} className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded border-none bg-transparent cursor-pointer" title="Supprimer">
+                <button
+                  onClick={() => setShowDeleteConfirm(true)}
+                  disabled={isPgBackend}
+                  className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded border-none bg-transparent cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                  title={writesDisabledReason || 'Supprimer'}
+                >
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
               )}
@@ -380,6 +422,16 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
             </div>
           )}
         </div>
+
+        {/* Postgres-dataverse banner: explain that writes go through GraphQL */}
+        {isPgBackend && selectedTable && (
+          <div className="px-4 py-1.5 text-[11px] bg-emerald-500/5 text-emerald-200 border-b border-emerald-500/20 shrink-0">
+            Cette app est sur le backend <strong>postgres-dataverse</strong>. Les
+            écritures via SQL brut sont désactivées — utilise le tool MCP{' '}
+            <code className="bg-black/40 px-1 rounded">db.graphql</code> ou
+            l'endpoint <code className="bg-black/40 px-1 rounded">/api/apps/{selectedAppSlug}/db/graphql</code>.
+          </div>
+        )}
 
         {/* Error */}
         {error && (

@@ -69,6 +69,25 @@ pub enum SourcesLocation {
     CloudMaster,
 }
 
+/// Which managed database engine an app uses.
+///
+/// During the migration window both engines coexist in the binary. Each app
+/// declares its backend in `apps.json` and the AppsContext routes its
+/// `db_*` calls accordingly. Apps with no `db_backend` field default to
+/// `LegacySqlite` so existing `apps.json` files keep working unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DbBackend {
+    /// `hr-db` SQLite engine, file `/opt/homeroute/apps/{slug}/db.sqlite`.
+    /// Default for backward compatibility with apps provisioned before the
+    /// dataverse rollout.
+    #[default]
+    LegacySqlite,
+    /// `hr-dataverse` Postgres engine, dedicated database `app_{slug}` on
+    /// the shared cluster. Schema-ops + GraphQL surface, no SQLite file.
+    PostgresDataverse,
+}
+
 pub fn valid_slug(slug: &str) -> bool {
     !slug.is_empty()
         && slug.len() <= 64
@@ -110,6 +129,11 @@ pub struct Application {
     /// with the existing `apps.json` (no field present → Medion).
     #[serde(default)]
     pub sources_on: SourcesLocation,
+    /// Which managed-DB engine this app uses. Existing apps default to
+    /// `LegacySqlite`; new apps are created with `PostgresDataverse`
+    /// (controlled by the registry's create flow).
+    #[serde(default)]
+    pub db_backend: DbBackend,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -136,6 +160,7 @@ impl Application {
             env_vars: BTreeMap::new(),
             state: AppState::Stopped,
             sources_on: SourcesLocation::default(),
+            db_backend: DbBackend::default(),
             created_at: now,
             updated_at: now,
         }

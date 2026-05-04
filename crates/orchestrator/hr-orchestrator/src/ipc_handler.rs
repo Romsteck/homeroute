@@ -18,6 +18,7 @@ use crate::backup_pipeline::BackupPipeline;
 
 use hr_apps::todos::TodosManager;
 use hr_apps::{AppSupervisor, ContextGenerator, DbManager};
+use hr_dataverse::DataverseManager;
 
 const BACKUP_SERVER_HOST_ID: &str = "877bcb76-4fb8-4164-940c-707201adf9bc";
 
@@ -29,6 +30,10 @@ pub struct OrchestratorHandler {
     pub base_domain: String,
     pub app_supervisor: AppSupervisor,
     pub db_manager: DbManager,
+    /// New Postgres+GraphQL backend. `None` when `HR_DATAVERSE_ADMIN_URL`
+    /// is absent at boot, in which case any app flagged
+    /// `db_backend: postgres-dataverse` will receive an explicit error.
+    pub dataverse_manager: Option<Arc<DataverseManager>>,
     pub todos: TodosManager,
     pub context_generator: Arc<ContextGenerator>,
     pub log_store: Arc<hr_common::logging::LogStore>,
@@ -41,6 +46,7 @@ impl OrchestratorHandler {
         AppsContext {
             supervisor: self.app_supervisor.clone(),
             db_manager: self.db_manager.clone(),
+            dataverse_manager: self.dataverse_manager.clone(),
             todos: self.todos.clone(),
             context_generator: self.context_generator.clone(),
             edge: self.edge.clone(),
@@ -632,6 +638,19 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
             }
             OrchestratorRequest::AppDbCreateRelation { slug, relation } => {
                 self.apps_ctx().db_create_relation(slug, relation).await
+            }
+            OrchestratorRequest::AppDbGraphql {
+                slug,
+                query,
+                variables,
+                operation_name,
+            } => {
+                self.apps_ctx()
+                    .db_graphql(slug, query, variables, operation_name)
+                    .await
+            }
+            OrchestratorRequest::AppDbIntrospect { slug } => {
+                self.apps_ctx().db_introspect(slug).await
             }
             OrchestratorRequest::AppTodosList { slug, status } => {
                 self.apps_ctx().todos_list(slug, status).await

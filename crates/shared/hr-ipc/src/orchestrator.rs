@@ -306,6 +306,23 @@ pub enum OrchestratorRequest {
         relation: serde_json::Value,
     },
 
+    // ── Postgres-Dataverse only ──────────────────────────────────────
+    /// Execute an arbitrary GraphQL query/mutation. The response is the
+    /// canonical `{ data, errors }` JSON envelope.
+    AppDbGraphql {
+        slug: String,
+        query: String,
+        #[serde(default)]
+        variables: Option<serde_json::Value>,
+        #[serde(default)]
+        operation_name: Option<String>,
+    },
+    /// Return the SDL of the app's GraphQL schema (single-shot data
+    /// model for agents).
+    AppDbIntrospect {
+        slug: String,
+    },
+
     // ── Per-app todos (JSON-backed, live via app_todos event) ─────
     AppTodosList {
         slug: String,

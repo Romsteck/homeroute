@@ -563,6 +563,7 @@ fn is_project_simplified_tool(name: &str) -> bool {
         name,
         "status" | "start" | "stop" | "restart" | "exec" | "logs"
             | "db_tables" | "db_schema" | "db_query" | "db_find" | "db_exec"
+            | "db_graphql" | "db_introspect"
             | "docs_overview" | "docs_list_entries" | "docs_get" | "docs_search"
             | "docs_completeness" | "docs_diagram_get"
             | "docs_update" | "docs_delete" | "docs_diagram_set"
@@ -585,7 +586,9 @@ fn tool_definitions_project() -> Value {
         { "name": "db_schema", "description": "Describe a table's schema (columns, types, row count).", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" } }, "required": ["table"] } },
         { "name": "db_query", "description": "Run a SELECT query against the database.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
         { "name": "db_find", "description": "Query table rows with structured filters, sort, pagination and relation expand. No SQL required.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "filters": { "type": "array", "description": "List of {column, op, value?}. op: eq|ne|gt|lt|gte|lte|like|in|is_null|is_not_null" }, "limit": { "type": "integer", "default": 100 }, "offset": { "type": "integer", "default": 0 }, "order_by": { "type": "string" }, "order_desc": { "type": "boolean", "default": false }, "expand": { "type": "array", "items": { "type": "string" }, "description": "Foreign-key relations to hydrate" } }, "required": ["table"] } },
-        { "name": "db_exec", "description": "Execute a mutation (INSERT, UPDATE, DELETE) against the database.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
+        { "name": "db_exec", "description": "Execute a mutation (INSERT, UPDATE, DELETE) against the database. Legacy SQLite backend only — apps on postgres-dataverse must use db_graphql.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
+        { "name": "db_graphql", "description": "Execute a GraphQL query/mutation against the app's managed schema (postgres-dataverse backend). Returns {data, errors}. Prefer this over db_query/db_exec on dataverse-backed apps.", "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "variables": { "type": "object" }, "operationName": { "type": "string" } }, "required": ["query"] } },
+        { "name": "db_introspect", "description": "Return the SDL of the app's GraphQL schema in one shot (postgres-dataverse backend). Single-call alternative to crafting `__schema` queries.", "inputSchema": { "type": "object", "properties": {} } },
         // ── Documentation (DOC-FIRST OBLIGATOIRE — voir .claude/rules/docs.md) ──
         { "name": "docs_overview", "description": "DOC-FIRST OBLIGATOIRE. Premier appel à faire avant toute exploration de code. Renvoie l'overview, l'index compact (écrans/features/composants avec titre+résumé 1 ligne) et les stats de l'app courante.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "docs_list_entries", "description": "Liste compacte des entrées de doc, filtrable par type. Préférer docs_search si on a un mot-clé.", "inputSchema": { "type": "object", "properties": { "type": { "type": "string", "enum": ["screen", "feature", "component"] } } } },
@@ -708,6 +711,8 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "db.add_column" => tool_db_add_column(id, &arguments, state).await,
         "db.remove_column" => tool_db_remove_column(id, &arguments, state).await,
         "db.create_relation" => tool_db_create_relation(id, &arguments, state).await,
+        "db.graphql" => tool_db_graphql(id, &arguments, state).await,
+        "db.introspect" => tool_db_introspect(id, &arguments, state).await,
         // ── Project-scoped simplified names (used when ?project=slug) ──
         "status" => tool_app_status(id, &arguments, state).await,
         "start" => {
@@ -739,6 +744,8 @@ async fn handle_tools_call(id: Value, params: Value, state: &McpState, project_s
         "db_add_column" => tool_db_add_column(id, &arguments, state).await,
         "db_remove_column" => tool_db_remove_column(id, &arguments, state).await,
         "db_create_relation" => tool_db_create_relation(id, &arguments, state).await,
+        "db_graphql" => tool_db_graphql(id, &arguments, state).await,
+        "db_introspect" => tool_db_introspect(id, &arguments, state).await,
         "docs_overview" => tool_docs_overview(id, &arguments).await,
         "docs_list_entries" => tool_docs_list_entries(id, &arguments).await,
         "docs_get" => tool_docs_get(id, &arguments).await,
@@ -2297,6 +2304,29 @@ fn tool_definitions_apps() -> Value {
             }
         },
         {
+            "name": "db.graphql",
+            "description": "Execute a GraphQL query or mutation against the app's managed schema (postgres-dataverse backend only). Returns the canonical {data, errors} envelope.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "query": { "type": "string", "description": "GraphQL query or mutation text" },
+                    "variables": { "type": "object", "description": "Variables map for the query (optional)" },
+                    "operationName": { "type": "string", "description": "Operation name when the query has multiple operations (optional)" }
+                },
+                "required": ["slug", "query"]
+            }
+        },
+        {
+            "name": "db.introspect",
+            "description": "Return the SDL (Schema Definition Language) of the app's GraphQL schema in one shot — preferred over crafting `__schema` queries when an agent needs to discover the data model. Postgres-dataverse backend only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "slug": { "type": "string" } },
+                "required": ["slug"]
+            }
+        },
+        {
             "name": "studio.refresh_context",
             "description": "Regenerate Claude Code context files (CLAUDE.md, .claude/) for a specific app.",
             "inputSchema": {
@@ -2794,6 +2824,45 @@ async fn tool_db_create_relation(id: Value, args: &Value, state: &McpState) -> V
         id,
         ctx.db_create_relation(slug.to_string(), relation).await,
     )
+}
+
+// ── db.graphql (postgres-dataverse only) ─────────────────────────────
+
+async fn tool_db_graphql(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    let Some(query) = args.get("query").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing query".into());
+    };
+    let variables = args.get("variables").cloned();
+    let operation_name = args
+        .get("operationName")
+        .or_else(|| args.get("operation_name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    ipc_resp_to_mcp(
+        id,
+        ctx.db_graphql(slug.to_string(), query.to_string(), variables, operation_name)
+            .await,
+    )
+}
+
+// ── db.introspect (postgres-dataverse only) ──────────────────────────
+
+async fn tool_db_introspect(id: Value, args: &Value, state: &McpState) -> Value {
+    let ctx = match require_apps_ctx(&id, state) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let Some(slug) = args.get("slug").and_then(|v| v.as_str()) else {
+        return error_response(id, INVALID_PARAMS, "Missing slug".into());
+    };
+    ipc_resp_to_mcp(id, ctx.db_introspect(slug.to_string()).await)
 }
 
 // ── studio.refresh_context ───────────────────────────────────────────

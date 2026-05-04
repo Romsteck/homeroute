@@ -11,6 +11,7 @@ path = "src/main.rs"
 hr-common = { path = "../../shared/hr-common" }
 hr-ipc = { path = "../../shared/hr-ipc" }
 hr-apps = { path = "../hr-apps" }
+hr-dataverse = { workspace = true }
 hr-registry = { path = "../hr-registry" }
 hr-container = { path = "../hr-container" }
 hr-git = { path = "../hr-git" }

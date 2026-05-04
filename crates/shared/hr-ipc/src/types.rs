@@ -199,12 +199,21 @@ pub struct ApplicationDto {
     /// when missing from older payloads for back-compat.
     #[serde(default = "default_sources_on")]
     pub sources_on: String,
+    /// "legacy-sqlite" (default) or "postgres-dataverse". The frontend uses
+    /// this to branch DbExplorer / SchemaPage between the SQL-brut UI and
+    /// the GraphQL UI.
+    #[serde(default = "default_db_backend")]
+    pub db_backend: String,
     pub created_at: String,
     pub updated_at: String,
 }
 
 fn default_sources_on() -> String {
     "medion".to_string()
+}
+
+fn default_db_backend() -> String {
+    "legacy-sqlite".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -145,6 +145,13 @@ impl ContextGenerator {
                   &render_docs_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("app-info.md"),
                   &render_app_info_md(app, all_apps, &db_tables))?;
+        // db.md varies by `app.db_backend`:
+        //  - LegacySqlite      → "MIGRATION POSTGRES EN ATTENTE" (warns to
+        //    minimise schema changes until the migration runs)
+        //  - PostgresDataverse → new stack rules + post-migration cleanup
+        //    instructions (delete leftover SQLite refs)
+        log_write(&app.slug, &src_rules_dir.join("db.md"),
+                  &render_db_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("mcp-tools.md"),
                   &render_mcp_tools_md(app))?;
         log_write(&app.slug, &src_rules_dir.join("workflow.md"),
@@ -1407,6 +1414,109 @@ fn cleanup_legacy_parent_context(app_dir: &Path, slug: &str) {
             Err(e) => warn!(slug, path = %parent_claude.display(), error = %e, "failed to remove legacy parent .claude/"),
         }
     }
+}
+
+/// Always-on rule that documents the DB stack the app is on. The content
+/// is selected at generation time from `app.db_backend`:
+/// - `LegacySqlite` → "MIGRATION POSTGRES PENDING" (RULE PRINCIPALE that
+///   asks the agent to minimise schema churn until migration runs)
+/// - `PostgresDataverse` → new-stack documentation + post-migration
+///   cleanup instruction (delete leftover SQLite references)
+///
+/// The rule is regenerated at every boot / `AppUpdate` /
+/// `AppRegenerateContext`. Switching `db_backend` flips the rule
+/// automatically — agents inside the app pick up the new instructions on
+/// the next context refresh.
+fn render_db_md(app: &crate::types::Application) -> String {
+    use crate::types::DbBackend;
+    match app.db_backend {
+        DbBackend::LegacySqlite => render_db_md_legacy(app),
+        DbBackend::PostgresDataverse => render_db_md_dataverse(app),
+    }
+}
+
+fn render_db_md_legacy(app: &crate::types::Application) -> String {
+    format!(
+        "# ⚠️ Base de données — MIGRATION POSTGRES + GRAPHQL EN ATTENTE\n\
+         \n\
+         Cette app (`{slug}`) utilise actuellement la stack **legacy SQLite** : fichier\n\
+         `/opt/homeroute/apps/{slug}/db.sqlite`, tools MCP `db_tables`, `db_query`,\n\
+         `db_exec`, `db_find`, etc.\n\
+         \n\
+         **Une migration vers PostgreSQL + Dataverse-like managé + GraphQL est planifiée\n\
+         mais pas encore exécutée pour cette app.** Tant que cette règle est présente :\n\
+         \n\
+         - ✅ Continue à utiliser la stack legacy SQLite comme aujourd'hui (tools `db_*`\n\
+           classiques, SQL brut autorisé)\n\
+         - ❌ **Ne propose pas** de refactor du schéma DB qui ne serait justifié que par\n\
+           la nouvelle stack\n\
+         - ❌ **Ne crée pas** massivement de nouvelles tables ou colonnes — minimise les\n\
+           changements de schéma jusqu'à la migration (la migration sera plus simple si\n\
+           le schéma a peu bougé)\n\
+         - ✅ Bug fixes et changements de données ponctuels restent OK\n\
+         - ✅ Si l'utilisateur demande explicitement un changement de schéma, fais-le,\n\
+           mais signale-lui dans la conversation que la migration Postgres approche\n\
+         \n\
+         Quand la migration aura été effectuée, cette règle sera **automatiquement\n\
+         remplacée** par la version « post-migration » par hr-apps lors du regen de\n\
+         contexte. Tu n'as rien à faire de spécial.\n",
+        slug = app.slug,
+    )
+}
+
+fn render_db_md_dataverse(app: &crate::types::Application) -> String {
+    format!(
+        "# Base de données — PostgreSQL + Dataverse-like + GraphQL\n\
+         \n\
+         Cette app (`{slug}`) utilise la stack **HomeRoute Dataverse** :\n\
+         \n\
+         - **PostgreSQL 18** sur Medion :5432, base dédiée `app_{slug}` (rôle\n\
+           `app_{slug}` aux droits limités à cette base)\n\
+         - **Connexion runtime** : `DATABASE_URL` est injectée dans l'env du\n\
+           process par `hr-apps`. Tu peux utiliser sqlx, tokio-postgres, prisma,\n\
+           etc. selon la stack de l'app.\n\
+         - **API GraphQL managée** : endpoint `/api/apps/{slug}/db/graphql` (POST)\n\
+           pour les opérations Dataverse — schéma généré dynamiquement depuis\n\
+           les métadonnées `_dv_*`. Endpoint introspection : `GET /api/apps/{slug}/db/introspect`.\n\
+         - **Schema-ops** : tools MCP `db_create_table`, `db_add_column`,\n\
+           `db_create_relation`, `db_drop_table`, `db_remove_column` (inchangés depuis le legacy) — \n\
+           ils créent les tables avec trigger `updated_at`, FK natives, types Dataverse riches.\n\
+         \n\
+         ## Comment requêter (côté app et côté agent)\n\
+         \n\
+         - **Lecture** : query GraphQL avec filtres style Hasura\n\
+           ({{ email: {{ _ilike: \"%@%\" }} }})\n\
+         - **Mutations** : `insert<Table>`, `update<Table>`, `delete<Table>`\n\
+         - **Découverte du schéma** : appelle `db_introspect` (renvoie le SDL en\n\
+           un seul shot) — préférable à un `__schema` query manuel.\n\
+         \n\
+         ## Tools MCP `db_*` à privilégier\n\
+         \n\
+         - `db_introspect` — voir le schéma GraphQL en SDL\n\
+         - `db_graphql` — exécuter une query/mutation GraphQL arbitraire\n\
+         - `db_find` — sucre syntaxique (where/orderBy/limit/offset/expand → query GraphQL)\n\
+         - `db_tables`, `db_schema`, `db_get_schema` — métadonnées Dataverse\n\
+         - `db_create_table`, `db_add_column`, `db_create_relation` — schema-ops\n\
+         \n\
+         ## ❌ Ne PAS faire\n\
+         \n\
+         - Pas de `db_query` / `db_exec` (SQL brut) — ils renvoient une erreur sur\n\
+           ce backend. Utilise `db_graphql`.\n\
+         - Pas d'ouverture directe d'un fichier `.db` — il n'y en a plus.\n\
+         \n\
+         ## 🧹 Nettoyage post-migration\n\
+         \n\
+         Si tu trouves dans le code de l'app **des restes de l'ancienne stack SQLite**\n\
+         (chemins `db.sqlite`, dépendances `rusqlite`, calls vers `db_query`/`db_exec`\n\
+         SQL brut, mentions de `hr-db` legacy, fixtures de migration `_dv_*`\n\
+         SQLite-flavored), **supprime-les** : la migration est faite, ces restes ne\n\
+         servent à rien.\n\
+         \n\
+         Si tu trouves dans la doc / `CLAUDE.md` de l'app des phrases du type\n\
+         « migration Postgres en attente », **supprime-les aussi** — la migration a eu\n\
+         lieu et la règle « post-migration » que tu lis maintenant le confirme.\n",
+        slug = app.slug,
+    )
 }
 
 #[cfg(test)]

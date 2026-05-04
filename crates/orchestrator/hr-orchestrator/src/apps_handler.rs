@@ -9,11 +9,12 @@ use std::time::{Duration, Instant};
 
 use crate::scaffold;
 
-use hr_apps::types::{AppStack, AppState, Application, SourcesLocation, Visibility, valid_slug};
+use hr_apps::types::{AppStack, AppState, Application, DbBackend, SourcesLocation, Visibility, valid_slug};
 use hr_apps::todos::{TodoStatus, TodosManager};
 use hr_apps::{AppSupervisor, ContextGenerator, DbManager, ProcessStatus};
 use hr_common::events::AppBuildEvent;
 use hr_common::logging::LogStore;
+use hr_dataverse::DataverseManager;
 use tokio::sync::broadcast;
 
 fn detect_level(msg: &str) -> &'static str {
@@ -41,6 +42,11 @@ use tracing::{error, info, warn};
 pub const BUILD_HOST: &str = "romain@10.0.0.10";
 /// Default SSH key path on Medion (override via `HR_BUILD_SSH_KEY`).
 pub const SSH_KEY: &str = "/opt/homeroute/data/build/ssh/id_ed25519";
+/// Base URL of the homeroute API as seen *from CloudMaster*. Used to bind
+/// the `origin` remote of each app's working tree on CloudMaster — code-server
+/// vit là-bas depuis le split DEV/PROD, donc `127.0.0.1:4000` n'atteint plus
+/// le hr-git Smart-HTTP. Override via `HR_GIT_API_BASE`.
+pub const GIT_API_BASE: &str = "http://10.0.0.254:4000";
 /// Cap stdout/stderr capture per pipeline stage to ~1 MB.
 const OUTPUT_CAP_BYTES: usize = 1024 * 1024;
 
@@ -49,6 +55,10 @@ const OUTPUT_CAP_BYTES: usize = 1024 * 1024;
 pub struct AppsContext {
     pub supervisor: AppSupervisor,
     pub db_manager: DbManager,
+    /// New Postgres+GraphQL backend, populated when
+    /// `HR_DATAVERSE_ADMIN_URL` is set at boot. None means apps flagged
+    /// `db_backend: postgres-dataverse` will get an explicit error.
+    pub dataverse_manager: Option<Arc<DataverseManager>>,
     pub todos: TodosManager,
     pub context_generator: Arc<ContextGenerator>,
     pub edge: Arc<EdgeClient>,
@@ -60,6 +70,37 @@ pub struct AppsContext {
         Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// Broadcast channel for build progress events.
     pub app_build_tx: broadcast::Sender<AppBuildEvent>,
+}
+
+impl AppsContext {
+    /// Look up the configured backend for a slug. Apps not in the
+    /// registry default to `LegacySqlite` (the same fallback the field
+    /// default uses), making this safe to call before app creation
+    /// completes.
+    pub async fn db_backend_for(&self, slug: &str) -> DbBackend {
+        match self.supervisor.registry.get(slug).await {
+            Some(app) => app.db_backend,
+            None => DbBackend::default(),
+        }
+    }
+
+    /// Resolve the postgres-dataverse engine for `slug`. Maps any
+    /// configuration / connectivity error into a ready-to-return
+    /// [`IpcResponse`] so call sites stay compact.
+    pub(crate) async fn dv_engine_for(
+        &self,
+        slug: &str,
+    ) -> std::result::Result<Arc<hr_dataverse::DataverseEngine>, IpcResponse> {
+        let mgr = self.dataverse_manager.as_ref().ok_or_else(|| {
+            IpcResponse::err(
+                "postgres-dataverse backend is not configured on this orchestrator \
+                 (set HR_DATAVERSE_ADMIN_URL and restart)",
+            )
+        })?;
+        mgr.engine_for(slug)
+            .await
+            .map_err(|e| IpcResponse::err(format!("dataverse engine: {e}")))
+    }
 }
 
 impl AppsContext {
@@ -626,6 +667,19 @@ impl AppsContext {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
+        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
+            let engine = match self.dv_engine_for(&slug).await {
+                Ok(e) => e,
+                Err(resp) => return resp,
+            };
+            return match engine.list_tables().await {
+                Ok(tables) => {
+                    info!(slug = %slug, count = tables.len(), backend = "postgres-dataverse", "AppDbListTables ok");
+                    IpcResponse::ok_data(AppDbTablesData { tables })
+                }
+                Err(e) => IpcResponse::err(format!("list_tables: {e}")),
+            };
+        }
         match self.db_manager.list_tables(&slug).await {
             Ok(tables) => {
                 info!(slug = %slug, count = tables.len(), "AppDbListTables ok");
@@ -641,6 +695,52 @@ impl AppsContext {
     pub async fn db_describe_table(&self, slug: String, table: String) -> IpcResponse {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
+        }
+        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
+            let engine = match self.dv_engine_for(&slug).await {
+                Ok(e) => e,
+                Err(resp) => return resp,
+            };
+            // hr_dataverse::DatabaseSchema → AppDbTableSchema (same JSON shape).
+            let dv_schema = match engine.get_schema().await {
+                Ok(s) => s,
+                Err(e) => return IpcResponse::err(format!("get_schema: {e}")),
+            };
+            let Some(t) = dv_schema.tables.iter().find(|t| t.name == table) else {
+                return IpcResponse::err(format!("table '{}' not found", table));
+            };
+            let row_count = engine.count_rows(&table).await.unwrap_or(0) as u64;
+            let columns = t
+                .columns
+                .iter()
+                .map(|c| AppDbTableColumn {
+                    name: c.name.clone(),
+                    // Both backends derive `Debug` and use the same variant
+                    // names, so `Debug` formatting is interchangeable.
+                    field_type: format!("{:?}", c.field_type),
+                    required: c.required,
+                    unique: c.unique,
+                    choices: c.choices.clone(),
+                    formula_expression: c.formula_expression.clone(),
+                })
+                .collect();
+            let relations = dv_schema
+                .relations
+                .iter()
+                .filter(|r| r.from_table == table)
+                .map(|r| AppDbRelation {
+                    from_column: r.from_column.clone(),
+                    to_table: r.to_table.clone(),
+                    to_column: r.to_column.clone(),
+                    display_column: "id".to_string(),
+                })
+                .collect();
+            return IpcResponse::ok_data(AppDbTableSchema {
+                name: t.name.clone(),
+                columns,
+                relations,
+                row_count,
+            });
         }
         match self.db_manager.describe_table(&slug, &table).await {
             Ok(schema) => {
@@ -685,6 +785,12 @@ impl AppsContext {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
+        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
+            return IpcResponse::err(
+                "raw SQL is not supported on the postgres-dataverse backend — \
+                 use db.graphql for queries and db.insert/update/delete for mutations",
+            );
+        }
         match self.db_manager.query(&slug, &sql, params).await {
             Ok(q) => {
                 info!(slug = %slug, rows = q.total, "AppDbQuery ok");
@@ -709,6 +815,12 @@ impl AppsContext {
     ) -> IpcResponse {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
+        }
+        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
+            return IpcResponse::err(
+                "raw SQL is not supported on the postgres-dataverse backend — \
+                 use db.insert / db.update / db.delete or a GraphQL mutation",
+            );
         }
         info!(slug = %slug, sql_preview = %sql.chars().take(80).collect::<String>(), "AppDbExecute");
         match self.db_manager.execute(&slug, &sql, params).await {
@@ -736,6 +848,12 @@ impl AppsContext {
     ) -> IpcResponse {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
+        }
+        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
+            return IpcResponse::err(
+                "the legacy filter shape is not supported on postgres-dataverse — \
+                 use db.graphql with a Hasura-style `where` argument, or db.find",
+            );
         }
 
         // Parse filters from JSON
@@ -775,6 +893,16 @@ impl AppsContext {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
+        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
+            // On the postgres-dataverse backend, `_dv_*` IS the source of
+            // truth — there is nothing to sync from. We return an empty
+            // SyncResult so the caller sees a successful no-op.
+            return IpcResponse::ok_data(serde_json::json!({
+                "tables_added": [],
+                "columns_added": [],
+                "relations_added": 0,
+            }));
+        }
         match self.db_manager.sync_schema(&slug).await {
             Ok(r) => {
                 info!(slug = %slug, tables = r.tables_added.len(), columns = r.columns_added.len(), relations = r.relations_added, "Schema sync done");
@@ -788,6 +916,16 @@ impl AppsContext {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
+        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
+            let engine = match self.dv_engine_for(&slug).await {
+                Ok(e) => e,
+                Err(resp) => return resp,
+            };
+            return match engine.get_schema().await {
+                Ok(schema) => IpcResponse::ok_data(schema),
+                Err(e) => IpcResponse::err(format!("get_schema: {e}")),
+            };
+        }
         match self.db_manager.get_schema(&slug).await {
             Ok(schema) => IpcResponse::ok_data(schema),
             Err(e) => IpcResponse::err(format!("get_schema: {e}")),
@@ -799,7 +937,7 @@ impl AppsContext {
             return IpcResponse::err("invalid slug");
         }
         // Fill in defaults so callers only need to supply `name` and `columns`.
-        // `slug` defaults to `name`, and timestamps to `now` — all easily overridable.
+        // Both backends accept the same JSON shape for TableDefinition.
         let mut def_value = definition;
         if let serde_json::Value::Object(ref mut map) = def_value {
             let now = chrono::Utc::now().to_rfc3339();
@@ -812,6 +950,21 @@ impl AppsContext {
                 .or_insert_with(|| serde_json::Value::String(now.clone()));
             map.entry("updated_at".to_string())
                 .or_insert_with(|| serde_json::Value::String(now));
+        }
+        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
+            let engine = match self.dv_engine_for(&slug).await {
+                Ok(e) => e,
+                Err(resp) => return resp,
+            };
+            let def: hr_dataverse::TableDefinition = match serde_json::from_value(def_value) {
+                Ok(d) => d,
+                Err(e) => return IpcResponse::err(format!("invalid table definition: {e}")),
+            };
+            info!(slug = %slug, table = %def.name, backend = "postgres-dataverse", "Creating table");
+            return match engine.create_table(&def).await {
+                Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
+                Err(e) => IpcResponse::err(format!("create_table: {e}")),
+            };
         }
         let def: hr_apps::TableDefinition = match serde_json::from_value(def_value) {
             Ok(d) => d,
@@ -828,6 +981,17 @@ impl AppsContext {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
+        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
+            let engine = match self.dv_engine_for(&slug).await {
+                Ok(e) => e,
+                Err(resp) => return resp,
+            };
+            info!(slug = %slug, table = %table, backend = "postgres-dataverse", "Dropping table");
+            return match engine.drop_table(&table).await {
+                Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
+                Err(e) => IpcResponse::err(format!("drop_table: {e}")),
+            };
+        }
         info!(slug = %slug, table = %table, "Dropping table");
         match self.db_manager.drop_table(&slug, &table).await {
             Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
@@ -838,6 +1002,21 @@ impl AppsContext {
     pub async fn db_add_column(&self, slug: String, table: String, column: serde_json::Value) -> IpcResponse {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
+        }
+        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
+            let engine = match self.dv_engine_for(&slug).await {
+                Ok(e) => e,
+                Err(resp) => return resp,
+            };
+            let col: hr_dataverse::ColumnDefinition = match serde_json::from_value(column) {
+                Ok(c) => c,
+                Err(e) => return IpcResponse::err(format!("invalid column definition: {e}")),
+            };
+            info!(slug = %slug, table = %table, column = %col.name, backend = "postgres-dataverse", "Adding column");
+            return match engine.add_column(&table, &col).await {
+                Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
+                Err(e) => IpcResponse::err(format!("add_column: {e}")),
+            };
         }
         let col: hr_apps::ColumnDefinition = match serde_json::from_value(column) {
             Ok(c) => c,
@@ -854,6 +1033,17 @@ impl AppsContext {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
+        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
+            let engine = match self.dv_engine_for(&slug).await {
+                Ok(e) => e,
+                Err(resp) => return resp,
+            };
+            info!(slug = %slug, table = %table, column = %column, backend = "postgres-dataverse", "Removing column");
+            return match engine.remove_column(&table, &column).await {
+                Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
+                Err(e) => IpcResponse::err(format!("remove_column: {e}")),
+            };
+        }
         info!(slug = %slug, table = %table, column = %column, "Removing column");
         match self.db_manager.remove_column(&slug, &table, &column).await {
             Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
@@ -865,6 +1055,21 @@ impl AppsContext {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
+        if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
+            let engine = match self.dv_engine_for(&slug).await {
+                Ok(e) => e,
+                Err(resp) => return resp,
+            };
+            let rel: hr_dataverse::RelationDefinition = match serde_json::from_value(relation) {
+                Ok(r) => r,
+                Err(e) => return IpcResponse::err(format!("invalid relation definition: {e}")),
+            };
+            info!(slug = %slug, from = %rel.from_table, to = %rel.to_table, backend = "postgres-dataverse", "Creating relation");
+            return match engine.create_relation(&rel).await {
+                Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
+                Err(e) => IpcResponse::err(format!("create_relation: {e}")),
+            };
+        }
         let rel: hr_apps::RelationDefinition = match serde_json::from_value(relation) {
             Ok(r) => r,
             Err(e) => return IpcResponse::err(format!("invalid relation definition: {e}")),
@@ -873,6 +1078,57 @@ impl AppsContext {
         match self.db_manager.create_relation(&slug, rel).await {
             Ok(version) => IpcResponse::ok_data(serde_json::json!({ "version": version })),
             Err(e) => IpcResponse::err(format!("create_relation: {e}")),
+        }
+    }
+
+    // ── Postgres-Dataverse-only methods ─────────────────────────────
+
+    /// Execute an arbitrary GraphQL query/mutation. Returns the canonical
+    /// `{ data, errors }` JSON envelope. Errors out for non-PG backends.
+    pub async fn db_graphql(
+        &self,
+        slug: String,
+        query: String,
+        variables: Option<serde_json::Value>,
+        operation_name: Option<String>,
+    ) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        if !matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
+            return IpcResponse::err(
+                "db.graphql is only available on the postgres-dataverse backend",
+            );
+        }
+        let Some(mgr) = self.dataverse_manager.as_ref() else {
+            return IpcResponse::err("postgres-dataverse backend is not configured");
+        };
+        match mgr
+            .graphql_execute(&slug, &query, variables, operation_name.as_deref())
+            .await
+        {
+            Ok(v) => IpcResponse::ok_data(v),
+            Err(e) => IpcResponse::err(format!("graphql: {e}")),
+        }
+    }
+
+    /// Return the SDL of the app's GraphQL schema. Useful for agents that
+    /// need the data model in a single shot.
+    pub async fn db_introspect(&self, slug: String) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        if !matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
+            return IpcResponse::err(
+                "db.introspect is only available on the postgres-dataverse backend",
+            );
+        }
+        let Some(mgr) = self.dataverse_manager.as_ref() else {
+            return IpcResponse::err("postgres-dataverse backend is not configured");
+        };
+        match mgr.introspect_sdl(&slug).await {
+            Ok(sdl) => IpcResponse::ok_data(serde_json::json!({ "sdl": sdl })),
+            Err(e) => IpcResponse::err(format!("introspect: {e}")),
         }
     }
 
@@ -2004,8 +2260,16 @@ pub fn app_to_dto(app: &Application) -> ApplicationDto {
             .collect(),
         state: state_to_str(&app.state).to_string(),
         sources_on: sources_location_to_str(&app.sources_on).to_string(),
+        db_backend: db_backend_to_str(&app.db_backend).to_string(),
         created_at: app.created_at.to_rfc3339(),
         updated_at: app.updated_at.to_rfc3339(),
+    }
+}
+
+fn db_backend_to_str(b: &DbBackend) -> &'static str {
+    match b {
+        DbBackend::LegacySqlite => "legacy-sqlite",
+        DbBackend::PostgresDataverse => "postgres-dataverse",
     }
 }
 
@@ -2129,6 +2393,10 @@ async fn scaffold_on_cloudmaster(
         );
     }
 
+    if let Err(e) = bind_git_remote_on_cloudmaster(slug, &host, &key, &remote_src).await {
+        warn!(slug = %slug, error = %e, "scaffold_on_cloudmaster: git remote bind failed (non-fatal)");
+    }
+
     let _ = tokio::fs::remove_dir_all(&tmp).await;
 
     info!(
@@ -2137,6 +2405,58 @@ async fn scaffold_on_cloudmaster(
         remote_src = %remote_src,
         "scaffold_on_cloudmaster: done"
     );
+    Ok(())
+}
+
+/// Variante "à la racine" : résout `host`, `key` et `remote_src` à partir des
+/// valeurs par défaut + slug. Utilisée par le pass boot-heal.
+pub(crate) async fn bind_git_remote_on_cloudmaster_for_slug(slug: &str) -> anyhow::Result<()> {
+    let host = std::env::var("HR_BUILD_HOST").unwrap_or_else(|_| BUILD_HOST.to_string());
+    let key = std::env::var("HR_BUILD_SSH_KEY").unwrap_or_else(|_| SSH_KEY.to_string());
+    let remote_src = format!("/opt/homeroute/apps/{slug}/src");
+    bind_git_remote_on_cloudmaster(slug, &host, &key, &remote_src).await
+}
+
+/// Initialise (idempotent) le working tree git de l'app sur CloudMaster et
+/// pointe `origin` vers le bare repo hr-git côté Medion. Sans ça, code-server
+/// (qui tourne sur CloudMaster) tape sur `127.0.0.1:4000` et n'atteint pas
+/// l'API homeroute (toujours sur Medion). Idempotent : safe à re-rouler.
+pub(crate) async fn bind_git_remote_on_cloudmaster(
+    slug: &str,
+    host: &str,
+    key: &str,
+    remote_src: &str,
+) -> anyhow::Result<()> {
+    let api_base = std::env::var("HR_GIT_API_BASE").unwrap_or_else(|_| GIT_API_BASE.to_string());
+    let origin_url = format!("{api_base}/api/git/repos/{slug}.git");
+    // `git init` est idempotent ; `remote set-url` (fallback `add`) garantit la
+    // bonne URL même si un remote `origin` existait déjà.
+    let cmd = format!(
+        "set -e; cd {src}; git init -q; \
+         git remote set-url origin {url} 2>/dev/null || git remote add origin {url}",
+        src = shell_quote(remote_src),
+        url = shell_quote(&origin_url),
+    );
+    let out = run_capture(
+        "ssh",
+        &[
+            "-i", key,
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            host,
+            &cmd,
+        ],
+        None,
+    )
+    .await;
+    if out.exit_code != 0 {
+        anyhow::bail!(
+            "ssh git remote bind failed (exit={}): {}",
+            out.exit_code,
+            truncate(&out.stderr, 256)
+        );
+    }
+    info!(slug, host, origin = %origin_url, "git origin bound on cloudmaster");
     Ok(())
 }
 

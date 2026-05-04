@@ -60,21 +60,26 @@ export default function SchemaPage() {
           ) : apps.length === 0 ? (
             <div className="px-3 py-4 text-xs text-gray-500">Aucune app avec DB</div>
           ) : (
-            apps.map(app => (
-              <button
-                key={app.slug}
-                onClick={() => setSearchParams({ app: app.slug })}
-                className={`w-full text-left px-3 py-2 text-sm border-none cursor-pointer flex items-center gap-2 ${
-                  selectedApp === app.slug
-                    ? 'bg-blue-500/10 text-blue-400'
-                    : 'bg-transparent text-gray-400 hover:bg-gray-700/30 hover:text-white'
-                }`}
-              >
-                <Database className="w-3.5 h-3.5 shrink-0" />
-                <span className="flex-1 truncate">{app.slug}</span>
-                <span className="text-[10px] text-gray-600">{app.tableCount}</span>
-              </button>
-            ))
+            apps.map(app => {
+              const isPg = app.db_backend === 'postgres-dataverse';
+              return (
+                <button
+                  key={app.slug}
+                  onClick={() => setSearchParams({ app: app.slug })}
+                  className={`w-full text-left px-3 py-2 text-sm border-none cursor-pointer flex items-center gap-2 ${
+                    selectedApp === app.slug
+                      ? 'bg-blue-500/10 text-blue-400'
+                      : 'bg-transparent text-gray-400 hover:bg-gray-700/30 hover:text-white'
+                  }`}
+                  title={isPg ? 'Backend: postgres + GraphQL' : 'Backend: SQLite legacy'}
+                >
+                  <Database className={`w-3.5 h-3.5 shrink-0 ${isPg ? 'text-emerald-400' : ''}`} />
+                  <span className="flex-1 truncate">{app.slug}</span>
+                  {isPg && <span className="text-[9px] text-emerald-400 uppercase">pg</span>}
+                  <span className="text-[10px] text-gray-600">{app.tableCount}</span>
+                </button>
+              );
+            })
           )}
         </div>
       </div>

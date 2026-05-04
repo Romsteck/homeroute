@@ -45,6 +45,10 @@ pub fn router() -> Router<ApiState> {
         .route("/apps/{slug}/db/relations", post(create_relation))
         .route("/apps/{slug}/db/query", post(query_db))
         .route("/apps/{slug}/db/execute", post(execute_db))
+        // Postgres-dataverse only — these routes return an explicit error
+        // when the app is on the legacy SQLite backend.
+        .route("/apps/{slug}/db/graphql", post(graphql))
+        .route("/apps/{slug}/db/introspect", get(introspect))
 }
 
 fn validate_slug(slug: &str) -> Result<(), axum::response::Response> {
@@ -456,6 +460,59 @@ async fn create_relation(
             slug: slug.clone(),
             relation: body,
         })
+        .await
+    {
+        Ok(resp) => ipc_response(resp),
+        Err(e) => ipc_err_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct GraphqlBody {
+    query: String,
+    #[serde(default)]
+    variables: Option<Value>,
+    #[serde(default, alias = "operation_name")]
+    operation_name: Option<String>,
+}
+
+#[tracing::instrument(skip(state, body))]
+async fn graphql(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+    Json(body): Json<GraphqlBody>,
+) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    info!(slug, query_len = body.query.len(), "GraphQL execute");
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::AppDbGraphql {
+            slug: slug.clone(),
+            query: body.query,
+            variables: body.variables,
+            operation_name: body.operation_name,
+        })
+        .await
+    {
+        Ok(resp) => ipc_response(resp),
+        Err(e) => ipc_err_response(e),
+    }
+}
+
+#[tracing::instrument(skip(state))]
+async fn introspect(
+    State(state): State<ApiState>,
+    Path(slug): Path<String>,
+) -> impl IntoResponse {
+    if let Err(r) = validate_slug(&slug) {
+        return r;
+    }
+    info!(slug, "GraphQL introspect (SDL)");
+    match state
+        .orchestrator
+        .request(&OrchestratorRequest::AppDbIntrospect { slug: slug.clone() })
         .await
     {
         Ok(resp) => ipc_response(resp),

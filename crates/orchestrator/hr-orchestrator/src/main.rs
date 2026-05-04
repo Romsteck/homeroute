@@ -250,6 +250,48 @@ async fn main() -> anyhow::Result<()> {
         events.app_state.clone(),
     );
     let db_manager = DbManager::new("/opt/homeroute/apps");
+
+    // Optional: connect to the Postgres+GraphQL admin DSN. Apps flagged
+    // `db_backend: postgres-dataverse` use this; when the env var is not
+    // set, those apps simply receive an explicit error from the IPC layer
+    // and the legacy SQLite path remains unaffected.
+    let dataverse_manager: Option<std::sync::Arc<hr_dataverse::DataverseManager>> =
+        match std::env::var("HR_DATAVERSE_ADMIN_URL") {
+            Ok(admin_dsn) => {
+                let host = std::env::var("HR_DATAVERSE_HOST")
+                    .unwrap_or_else(|_| "127.0.0.1".to_string());
+                let port: u16 = std::env::var("HR_DATAVERSE_PORT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(5432);
+                let secrets_path = std::path::PathBuf::from(
+                    std::env::var("HR_DATAVERSE_SECRETS_PATH")
+                        .unwrap_or_else(|_| "/opt/homeroute/data/dataverse-secrets.json".into()),
+                );
+                let cfg = hr_dataverse::ProvisioningConfig { host, port };
+                match hr_dataverse::DataverseManager::connect_admin(
+                    admin_dsn,
+                    cfg,
+                    Some(secrets_path),
+                )
+                .await
+                {
+                    Ok(mgr) => {
+                        info!("hr-dataverse admin pool connected");
+                        Some(std::sync::Arc::new(mgr))
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "hr-dataverse admin connect failed — backend disabled");
+                        None
+                    }
+                }
+            }
+            Err(_) => {
+                info!("HR_DATAVERSE_ADMIN_URL absent — postgres-dataverse backend disabled");
+                None
+            }
+        };
+
     let todos_manager = hr_apps::todos::TodosManager::new("/opt/homeroute/apps", events.clone());
     let mcp_endpoint_url = std::env::var("HR_APPS_MCP_ENDPOINT")
         .unwrap_or_else(|_| "http://127.0.0.1:4001/mcp".to_string());
@@ -321,6 +363,7 @@ async fn main() -> anyhow::Result<()> {
         base_domain: env.base_domain.clone(),
         app_supervisor: supervisor.clone(),
         db_manager: db_manager.clone(),
+        dataverse_manager: dataverse_manager.clone(),
         todos: todos_manager.clone(),
         context_generator: context_generator.clone(),
         log_store: log_store.clone(),
@@ -346,6 +389,34 @@ async fn main() -> anyhow::Result<()> {
                 warn!(error = %e, "boot: root context regen failed");
             }
             info!("boot: context regen done");
+        });
+    }
+
+    // ── Heal git origin on CloudMaster for every cloudmaster-sourced app ──
+    // Code-server vit sur CloudMaster ; le `.git/config` du working tree doit
+    // pointer sur l'API homeroute côté Medion (10.0.0.254:4000), pas sur
+    // 127.0.0.1:4000 (legacy quand code-server tournait sur le routeur).
+    // Idempotent : `git init -q` + `remote set-url origin`.
+    {
+        let registry_for_git = app_registry.clone();
+        tokio::spawn(async move {
+            let apps = registry_for_git.list().await;
+            let cm_apps: Vec<_> = apps
+                .iter()
+                .filter(|a| matches!(a.sources_on, hr_apps::SourcesLocation::CloudMaster))
+                .collect();
+            if cm_apps.is_empty() {
+                return;
+            }
+            info!(count = cm_apps.len(), "boot: binding git origin on cloudmaster");
+            for app in cm_apps {
+                if let Err(e) =
+                    apps_handler::bind_git_remote_on_cloudmaster_for_slug(&app.slug).await
+                {
+                    warn!(slug = %app.slug, error = %e, "boot: git origin bind failed");
+                }
+            }
+            info!("boot: git origin bind done");
         });
     }
 
@@ -397,6 +468,7 @@ async fn main() -> anyhow::Result<()> {
             s.apps_ctx = Some(apps_handler::AppsContext {
                 supervisor: supervisor.clone(),
                 db_manager: db_manager.clone(),
+                dataverse_manager: dataverse_manager.clone(),
                 todos: todos_manager.clone(),
                 context_generator: context_generator.clone(),
                 edge: edge.clone(),
