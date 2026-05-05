@@ -1256,15 +1256,15 @@ impl AppsContext {
         }))
     }
 
-    /// Roll back a `DataMigrated` app to `LegacySqlite`. Drops the
-    /// per-app PG database, removes `DATABASE_URL` from `.env`, flips
-    /// the flag, regenerates context, restarts. The legacy `db.sqlite`
-    /// is **not** touched — it has been the source of truth all along.
+    /// Roll back the migration to `LegacySqlite`. Drops the per-app
+    /// PG database, removes `DATABASE_URL` from `.env`, flips the
+    /// flag, regenerates context, restarts. The legacy `db.sqlite`
+    /// is **not** touched — it has been on disk the whole time.
     ///
-    /// Refuses to roll back from `PostgresDataverse` because by then
-    /// the runtime depends on PG and SQLite is stale: a rollback at
-    /// that point would lose data. Operator must restore from a PG
-    /// backup or sync deltas back to SQLite by hand first.
+    /// Accepts both `DataMigrated` (safe — SQLite is still
+    /// authoritative) and `PostgresDataverse` (caveat: any data
+    /// written exclusively to PG since `commit_migration` is lost).
+    /// Refuses from `LegacySqlite` (nothing to roll back).
     pub async fn db_rollback_migration(&self, slug: String) -> IpcResponse {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
@@ -1273,13 +1273,23 @@ impl AppsContext {
             Some(a) => a,
             None => return IpcResponse::err(format!("app not found: {slug}")),
         };
-        if !matches!(app.db_backend, DbBackend::DataMigrated) {
-            return IpcResponse::err(format!(
-                "db_rollback_migration only safe from backend=data-migrated, current is {:?}. \
-                 If you're on postgres-dataverse and really want to revert, you need to sync \
-                 PG → SQLite manually first.",
-                app.db_backend
-            ));
+        match app.db_backend {
+            DbBackend::DataMigrated => {
+                info!(slug = %slug, "rollback from data-migrated (safe — SQLite was authoritative)");
+            }
+            DbBackend::PostgresDataverse => {
+                warn!(
+                    slug = %slug,
+                    "rollback from postgres-dataverse — any PG-only writes since \
+                     commit_migration will be lost. SQLite has not been written to since \
+                     the commit, so it may be stale relative to PG."
+                );
+            }
+            DbBackend::LegacySqlite => {
+                return IpcResponse::err(
+                    "already on legacy-sqlite — nothing to roll back",
+                );
+            }
         }
 
         if let Some(mgr) = &self.dataverse_manager {
