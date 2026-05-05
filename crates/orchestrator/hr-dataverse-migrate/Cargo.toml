@@ -3,6 +3,10 @@ name = "hr-dataverse-migrate"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "hr_dataverse_migrate"
+path = "src/lib.rs"
+
 [[bin]]
 name = "hr-dataverse-migrate"
 path = "src/main.rs"

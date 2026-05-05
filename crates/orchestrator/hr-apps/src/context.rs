@@ -1431,36 +1431,214 @@ fn render_db_md(app: &crate::types::Application) -> String {
     use crate::types::DbBackend;
     match app.db_backend {
         DbBackend::LegacySqlite => render_db_md_legacy(app),
+        DbBackend::DataMigrated => render_db_md_data_migrated(app),
         DbBackend::PostgresDataverse => render_db_md_dataverse(app),
     }
 }
 
 fn render_db_md_legacy(app: &crate::types::Application) -> String {
     format!(
-        "# ⚠️ Base de données — MIGRATION POSTGRES + GRAPHQL EN ATTENTE\n\
+        "# Base de données — état: legacy SQLite (migration disponible)\n\
          \n\
-         Cette app (`{slug}`) utilise actuellement la stack **legacy SQLite** : fichier\n\
-         `/opt/homeroute/apps/{slug}/db.sqlite`, tools MCP `db_tables`, `db_query`,\n\
-         `db_exec`, `db_find`, etc.\n\
+         Cette app (`{slug}`) utilise la stack **legacy SQLite** : fichier\n\
+         `/opt/homeroute/apps/{slug}/db.sqlite`, accédé via les tools MCP\n\
+         classiques `db_tables`, `db_query`, `db_exec`, `db_find`.\n\
          \n\
-         **Une migration vers PostgreSQL + Dataverse-like managé + GraphQL est planifiée\n\
-         mais pas encore exécutée pour cette app.** Tant que cette règle est présente :\n\
+         ## Migration vers Postgres+GraphQL : disponible en un appel MCP\n\
          \n\
-         - ✅ Continue à utiliser la stack legacy SQLite comme aujourd'hui (tools `db_*`\n\
-           classiques, SQL brut autorisé)\n\
-         - ❌ **Ne propose pas** de refactor du schéma DB qui ne serait justifié que par\n\
-           la nouvelle stack\n\
-         - ❌ **Ne crée pas** massivement de nouvelles tables ou colonnes — minimise les\n\
-           changements de schéma jusqu'à la migration (la migration sera plus simple si\n\
-           le schéma a peu bougé)\n\
-         - ✅ Bug fixes et changements de données ponctuels restent OK\n\
-         - ✅ Si l'utilisateur demande explicitement un changement de schéma, fais-le,\n\
-           mais signale-lui dans la conversation que la migration Postgres approche\n\
+         Pour migrer cette app vers la nouvelle stack Dataverse :\n\
          \n\
-         Quand la migration aura été effectuée, cette règle sera **automatiquement\n\
-         remplacée** par la version « post-migration » par hr-apps lors du regen de\n\
-         contexte. Tu n'as rien à faire de spécial.\n",
+         1. Appelle le tool MCP **`db_migrate`** (sans argument — il connaît\n\
+            ton slug). Le système :\n\
+            - provisionne une base Postgres dédiée `app_{slug}` (rôle dédié,\n\
+              droits limités)\n\
+            - copie toutes les tables `_dv_*`-managées + leurs lignes\n\
+            - persiste le secret de connexion dans le secret-store du host\n\
+            - flippe l'état de l'app à `data-migrated` (étape 2 ci-dessous)\n\
+            - injecte `DATABASE_URL` dans ton env runtime au prochain restart\n\
+            - régénère cette règle (qui basculera sur la version « refactor\n\
+              en cours »)\n\
+            - pousse les nouvelles règles vers ton workspace CloudMaster\n\
+         \n\
+         2. Dans la session suivante, tu liras un nouveau `db.md` avec un\n\
+            **playbook concret** pour réécrire le code source de l'app et\n\
+            l'aiguiller vers `DATABASE_URL` au lieu de `db.sqlite`.\n\
+         \n\
+         3. Quand le refactor est validé end-to-end, tu appelles\n\
+            **`db_commit_migration`** qui finalise le passage : `db.sqlite`\n\
+            est laissé en place comme fallback de rollback, mais le runtime\n\
+            ne le lit plus.\n\
+         \n\
+         ## En attendant : règles d'usage SQLite\n\
+         \n\
+         - ✅ Tools MCP `db_*` classiques, SQL brut autorisé\n\
+         - ❌ **Évite** les changements lourds de schéma — chaque colonne\n\
+           ajoutée maintenant devra être recréée dans Postgres pendant\n\
+           `db_migrate`. Bug fixes et changements de données : OK.\n\
+         - ❌ Ne crée pas de table dont le nom commence par `_dv_` (réservé\n\
+           au méta-modèle Dataverse).\n\
+         \n\
+         **Quand t'attaques la migration** : c'est le moment idéal entre deux\n\
+         features (le système refuse `db_migrate` si l'app crash en boucle).\n\
+         Préviens l'utilisateur avant de lancer — il sait que son app va\n\
+         passer en mode 'refactor en cours' pendant un moment.\n",
         slug = app.slug,
+    )
+}
+
+fn render_db_md_data_migrated(app: &crate::types::Application) -> String {
+    let stack_hint = match app.stack {
+        crate::types::AppStack::Axum | crate::types::AppStack::AxumVite =>
+            "## Refactor Rust (axum) : remplace `rusqlite` par `sqlx-postgres`\n\
+             \n\
+             ```toml\n\
+             # Cargo.toml\n\
+             # Retire: rusqlite\n\
+             [dependencies]\n\
+             sqlx = { version = \"0.8\", default-features = false, features = [\n\
+               \"runtime-tokio-rustls\", \"postgres\", \"chrono\", \"uuid\", \"json\"\n\
+             ] }\n\
+             ```\n\
+             \n\
+             ```rust\n\
+             // Connexion (au démarrage de l'app)\n\
+             let database_url = std::env::var(\"DATABASE_URL\")\n\
+                 .expect(\"DATABASE_URL must be set\");\n\
+             let pool = sqlx::postgres::PgPoolOptions::new()\n\
+                 .max_connections(8)\n\
+                 .connect(&database_url)\n\
+                 .await?;\n\
+             \n\
+             // Query (équivalent de rusqlite Statement)\n\
+             let rows = sqlx::query!(\n\
+                 \"SELECT id, amount FROM transactions WHERE created_at > $1\",\n\
+                 cutoff,\n\
+             ).fetch_all(&pool).await?;\n\
+             ```\n\
+             \n\
+             Notes :\n\
+             - Les `?` SQLite deviennent `$1`, `$2`, etc. (placeholders PG)\n\
+             - Les booleans SQLite (0/1) deviennent vrais BOOLEAN en PG\n\
+             - Les timestamps stockés en TEXT ISO en SQLite sont des `TIMESTAMPTZ`\n\
+               en PG → utilise `chrono::DateTime<Utc>` directement\n\
+             - Les NUMERIC PG demandent un cast explicite si tu binds une string\n",
+        crate::types::AppStack::NextJs =>
+            "## Refactor Next.js : remplace better-sqlite3 par `pg` (ou Prisma)\n\
+             \n\
+             ```bash\n\
+             npm uninstall better-sqlite3\n\
+             npm install pg\n\
+             # ou: npm install prisma @prisma/client (si tu veux un ORM typé)\n\
+             ```\n\
+             \n\
+             ```js\n\
+             // lib/db.js\n\
+             import { Pool } from 'pg';\n\
+             export const pool = new Pool({\n\
+               connectionString: process.env.DATABASE_URL,\n\
+             });\n\
+             \n\
+             // Usage\n\
+             const { rows } = await pool.query(\n\
+               'SELECT id, amount FROM transactions WHERE created_at > $1',\n\
+               [cutoff],\n\
+             );\n\
+             ```\n\
+             \n\
+             Notes :\n\
+             - Placeholders : `$1`, `$2` (au lieu de `?` SQLite)\n\
+             - JSONB columns retournent des objets JS directement\n\
+             - Pour Prisma, `prisma init` puis adapte le schema.prisma au\n\
+               schéma actuel + `prisma db pull`\n",
+        crate::types::AppStack::Flutter =>
+            "## Refactor Flutter : Postgres distant via `postgres` package\n\
+             \n\
+             Note : pour une app mobile, l'accès direct à Postgres en LAN n'est\n\
+             pas idéal. Préfère exposer un endpoint REST/GraphQL côté serveur.\n\
+             Tu peux utiliser le tool MCP `db_graphql` pour valider la couche\n\
+             data sans toucher au mobile.\n",
+    };
+
+    format!(
+        "# Base de données — état: data-migrated (refactor en cours)\n\
+         \n\
+         🟡 Cette app (`{slug}`) est dans un **état intermédiaire de migration** :\n\
+         \n\
+         | Aspect | État |\n\
+         |---|---|\n\
+         | Données SQLite (`db.sqlite`) | toujours présentes, runtime les lit |\n\
+         | Données Postgres (`app_{slug}`) | copie complète, à jour à T0 |\n\
+         | `DATABASE_URL` dans ton env runtime | ✅ injectée |\n\
+         | Code source de l'app | encore en SQLite — **à refactorer** |\n\
+         | Bascule du runtime sur Postgres | en attente de `db_commit_migration` |\n\
+         \n\
+         **Ta mission** : refactorer le code source pour qu'il utilise\n\
+         `DATABASE_URL` (Postgres) au lieu d'ouvrir `db.sqlite` directement.\n\
+         Quand c'est fait et testé, tu appelles `db_commit_migration` pour\n\
+         flipper le runtime sur Postgres.\n\
+         \n\
+         ## Outils MCP disponibles\n\
+         \n\
+         | Tool | Usage |\n\
+         |------|-------|\n\
+         | `db_introspect` | renvoie le SDL GraphQL généré depuis ton schéma. **Premier appel à faire** pour voir la forme du modèle. |\n\
+         | `db_graphql` | exécute query/mutation GraphQL sur Postgres. Utile pour valider que ta nouvelle couche data renvoie les bons résultats. |\n\
+         | `db_tables`, `db_query`, `db_exec` | ⚠ ces tools agissent **sur SQLite** (pas sur Postgres). Pendant la migration, traite SQLite comme la source de vérité. |\n\
+         | `db_commit_migration` | finalise la migration (flippe le flag, restart l'app). **À appeler quand le refactor est validé.** |\n\
+         | `db_rollback_migration` | annule la migration : drop la base Postgres, revient en `legacy-sqlite`. À appeler si le refactor coince et qu'on veut tout reset. |\n\
+         \n\
+         {stack_hint}\n\
+         \n\
+         ## Workflow de refactor recommandé\n\
+         \n\
+         1. **Inspecte** : `db_introspect` pour récupérer le SDL — c'est la\n\
+            forme exacte des données côté PG (camelCase pour les champs,\n\
+            types GraphQL pour les scalaires).\n\
+         2. **Identifie les call-sites SQLite** dans `src/` (grep `rusqlite`,\n\
+            `better-sqlite`, `db.sqlite`, etc.). Liste-les avant de toucher\n\
+            quoi que ce soit.\n\
+         3. **Branche par feature** dans le code : ajoute une nouvelle couche\n\
+            data Postgres en parallèle, garde la couche SQLite intacte. Une\n\
+            feature flag (env var ou simple `if`) bascule entre les deux.\n\
+         4. **Teste les nouvelles requêtes** :\n\
+            - via `db_graphql` (le plus simple, schéma déjà généré)\n\
+            - ou via `psql $DATABASE_URL` (raw SQL, debug)\n\
+            - ou en construisant un endpoint test dans l'app qui appelle ta\n\
+              nouvelle couche puis logge le résultat\n\
+         5. **Compare** : exécute la même opération côté SQLite et côté\n\
+            Postgres, valide que les résultats correspondent (counts,\n\
+            valeurs significatives).\n\
+         6. **Bascule** une fois confiant : retire la couche SQLite, push la\n\
+            version 'PG-only', vérifie que l'app tourne, puis appelle\n\
+            `db_commit_migration`.\n\
+         \n\
+         ## Pièges connus\n\
+         \n\
+         - **Booleans** : SQLite stocke 0/1 dans des colonnes INTEGER, PG\n\
+           stocke vraiment des BOOLEAN. La migration a fait la conversion ;\n\
+           ton code doit attendre `bool`/`Boolean` côté résultats.\n\
+         - **Timestamps avec timezone** : `TIMESTAMPTZ` PG retourne du UTC\n\
+           (avec offset). Si ton code SQLite parsait du `\"YYYY-MM-DD HH:MM:SS\"`\n\
+           naïf, adapte.\n\
+         - **NUMERIC** : pour les colonnes Decimal/Currency/Percent, PG\n\
+           refuse l'implicit cast TEXT→NUMERIC. Bind avec un type décimal\n\
+           ou ajoute `::NUMERIC` dans ta requête.\n\
+         - **AUTO_INCREMENT** : les ids ont été régénérés par PG (BIGSERIAL).\n\
+           Si tu avais des FKs en dur dans le code, elles sont restées\n\
+           cohérentes côté PG mais peuvent ne pas matcher 1:1 avec les ids\n\
+           SQLite. La migration n'a pas préservé les ids sources.\n\
+         - **Tables `_dv_*`** : le méta-schéma (5 tables) est dans la base PG\n\
+           comme dans la SQLite. Ne touche pas — c'est managé par hr-dataverse.\n\
+         \n\
+         ## En cas de doute\n\
+         \n\
+         - `db_rollback_migration` te ramène à `legacy-sqlite` proprement\n\
+           (drop le PG, retire `DATABASE_URL`). La SQLite reste intacte.\n\
+         - Préviens l'utilisateur avant de toucher à du code prod ou de\n\
+           commit_migration — c'est lui qui sait quand l'app peut être\n\
+           interrompue brièvement le temps du restart.\n",
+        slug = app.slug,
+        stack_hint = stack_hint,
     )
 }
 

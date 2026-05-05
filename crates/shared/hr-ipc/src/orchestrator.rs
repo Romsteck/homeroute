@@ -322,6 +322,14 @@ pub enum OrchestratorRequest {
     AppDbIntrospect {
         slug: String,
     },
+    /// Migrate the app's data from SQLite legacy to Postgres dataverse
+    /// (one-shot, agent-driven). Provisions PG, copies rows, persists
+    /// the secret, flips backend to `data-migrated`, regenerates
+    /// per-app context, and restarts the app so `DATABASE_URL` is
+    /// injected into its env.
+    AppDbMigrate {
+        slug: String,
+    },
 
     // ── Per-app todos (JSON-backed, live via app_todos event) ─────
     AppTodosList {

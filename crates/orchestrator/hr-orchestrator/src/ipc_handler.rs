@@ -652,6 +652,9 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
             OrchestratorRequest::AppDbIntrospect { slug } => {
                 self.apps_ctx().db_introspect(slug).await
             }
+            OrchestratorRequest::AppDbMigrate { slug } => {
+                self.apps_ctx().db_migrate(slug).await
+            }
             OrchestratorRequest::AppTodosList { slug, status } => {
                 self.apps_ctx().todos_list(slug, status).await
             }

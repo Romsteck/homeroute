@@ -69,23 +69,48 @@ pub enum SourcesLocation {
     CloudMaster,
 }
 
-/// Which managed database engine an app uses.
+/// Where an app stands in the SQLite-legacy → Postgres-dataverse
+/// migration. Three states cover the agent-driven migration playbook:
 ///
-/// During the migration window both engines coexist in the binary. Each app
-/// declares its backend in `apps.json` and the AppsContext routes its
-/// `db_*` calls accordingly. Apps with no `db_backend` field default to
-/// `LegacySqlite` so existing `apps.json` files keep working unchanged.
+/// 1. `LegacySqlite` — only SQLite is in use. Default for any app
+///    provisioned before the dataverse rollout. The agent can call
+///    `db.migrate` to enter state 2.
+///
+/// 2. `DataMigrated` — the data has been copied into a Postgres
+///    database `app_{slug}` and the app's runtime env carries a
+///    `DATABASE_URL`, BUT the app binary still reads from
+///    `db.sqlite`. This is the "refactor in progress" state: the
+///    agent rewrites the source code to use `DATABASE_URL`, validates
+///    end-to-end, then calls `db.commit_migration` to enter state 3.
+///
+/// 3. `PostgresDataverse` — the app's runtime is fully on Postgres.
+///    The legacy `db.sqlite` is left on disk as a rollback fallback
+///    (the agent is instructed to clean it up once confident).
+///
+/// Apps without a `db_backend` field in `apps.json` default to
+/// `LegacySqlite`, so existing `apps.json` files keep working unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum DbBackend {
     /// `hr-db` SQLite engine, file `/opt/homeroute/apps/{slug}/db.sqlite`.
-    /// Default for backward compatibility with apps provisioned before the
-    /// dataverse rollout.
     #[default]
     LegacySqlite,
-    /// `hr-dataverse` Postgres engine, dedicated database `app_{slug}` on
-    /// the shared cluster. Schema-ops + GraphQL surface, no SQLite file.
+    /// Data has been copied into Postgres `app_{slug}` and the runtime
+    /// has `DATABASE_URL` injected. The app binary, however, still
+    /// reads from `db.sqlite` — refactor pending.
+    DataMigrated,
+    /// `hr-dataverse` Postgres engine, dedicated database `app_{slug}`.
+    /// The app's binary uses `DATABASE_URL`. SQLite file remains as a
+    /// safety net.
     PostgresDataverse,
+}
+
+impl DbBackend {
+    /// Whether the app should receive `DATABASE_URL` in its runtime env.
+    /// True for the two Postgres-aware states.
+    pub fn injects_database_url(&self) -> bool {
+        matches!(self, Self::DataMigrated | Self::PostgresDataverse)
+    }
 }
 
 pub fn valid_slug(slug: &str) -> bool {

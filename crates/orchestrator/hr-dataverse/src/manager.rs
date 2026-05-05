@@ -182,6 +182,37 @@ impl DataverseManager {
         app_exists(&self.admin_pool, slug).await
     }
 
+    /// Adopt an existing Postgres database for `slug`: assume the DB
+    /// and role were provisioned earlier (possibly by a now-lost
+    /// secret), reset the role's password to a fresh value, and
+    /// persist the new secret as if it were a brand new provisioning.
+    ///
+    /// Used by the migration tool to recover from "the secrets file
+    /// was lost / never written" scenarios — common during the
+    /// transitional rollout. Caller is expected to validate that the
+    /// schema in the existing DB matches what they expect.
+    pub async fn adopt_existing(&self, slug: &str) -> Result<ProvisioningResult> {
+        if !self.exists(slug).await? {
+            return Err(DataverseError::provisioning(
+                slug,
+                "no postgres database to adopt",
+            ));
+        }
+        let result = crate::provisioning::adopt_app(
+            &self.admin_pool,
+            &self.config,
+            slug,
+        )
+        .await?;
+
+        if let Some(path) = &self.secrets_path {
+            let mut secrets = read_secrets_file(path).unwrap_or_default();
+            secrets.apps.insert(slug.to_string(), AppSecret::from(&result));
+            write_secrets_file(path, &secrets)?;
+        }
+        Ok(result)
+    }
+
     /// Execute an arbitrary GraphQL request (query or mutation) against
     /// the app's dynamic schema. The schema is built lazily and cached
     /// per `_dv_meta.schema_version`.

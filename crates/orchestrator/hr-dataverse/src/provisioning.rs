@@ -187,6 +187,51 @@ pub async fn provision_app(
     })
 }
 
+/// Adopt an existing per-app PG database whose password we no longer
+/// have: ALTER ROLE to a fresh random password, return the new
+/// `ProvisioningResult`. Does NOT touch the database contents.
+pub async fn adopt_app(
+    admin: &PgPool,
+    config: &ProvisioningConfig,
+    slug: &str,
+) -> Result<ProvisioningResult> {
+    crate::validation::validate_user_identifier(slug).map_err(|e| {
+        DataverseError::provisioning(slug, format!("invalid slug: {}", e))
+    })?;
+
+    let db_name = db_name_for(slug);
+    let role_name = role_name_for(slug);
+    let password = random_password();
+
+    // ALTER ROLE to set a known password. The role must exist already
+    // (paired with the existing DB).
+    let alter_sql = format!(
+        "ALTER ROLE {role} WITH LOGIN PASSWORD '{pwd}'",
+        role = quote_ident(&role_name),
+        pwd = escape_pg_string(&password),
+    );
+    sqlx::query(&alter_sql).execute(admin).await.map_err(|e| {
+        DataverseError::provisioning(slug, format!("ALTER ROLE: {}", e))
+    })?;
+
+    let dsn = format!(
+        "postgres://{role}:{pwd}@{host}:{port}/{db}",
+        role = url_encode_component(&role_name),
+        pwd = url_encode_component(&password),
+        host = config.host,
+        port = config.port,
+        db = url_encode_component(&db_name),
+    );
+
+    Ok(ProvisioningResult {
+        slug: slug.to_string(),
+        db_name,
+        role_name,
+        password,
+        dsn,
+    })
+}
+
 /// Tear down the database and role for an app. Used by tests and by
 /// `AppDelete` flows. Does not destroy backups.
 pub async fn drop_app(admin: &PgPool, slug: &str) -> Result<()> {
