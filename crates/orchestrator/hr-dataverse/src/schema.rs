@@ -1,6 +1,65 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Strategy for the implicit `id` primary-key column of a user table.
+///
+/// `Bigserial` (default) gives an `id BIGINT` auto-incrementing PK and the
+/// GraphQL `id` field is typed `Int!`. `Uuid` gives `id UUID DEFAULT
+/// gen_random_uuid()` and the GraphQL `id` field is typed `String!`. The
+/// strategy is per-table — a database can mix Bigserial and UUID tables,
+/// although a Lookup column's storage type is always derived from the
+/// target table's strategy at create time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdStrategy {
+    #[default]
+    Bigserial,
+    Uuid,
+}
+
+impl IdStrategy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Bigserial => "bigserial",
+            Self::Uuid => "uuid",
+        }
+    }
+
+    pub fn from_code(s: &str) -> Option<Self> {
+        Some(match s {
+            "bigserial" => Self::Bigserial,
+            "uuid" => Self::Uuid,
+            _ => return None,
+        })
+    }
+
+    /// Postgres column type the implicit `id` column gets in DDL.
+    pub fn pg_id_type(&self) -> &'static str {
+        match self {
+            Self::Bigserial => "BIGSERIAL",
+            Self::Uuid => "UUID",
+        }
+    }
+
+    /// Postgres column type for a Lookup column whose target uses this
+    /// strategy. (BIGINT or UUID — never BIGSERIAL on the FK side.)
+    pub fn pg_fk_type(&self) -> &'static str {
+        match self {
+            Self::Bigserial => "BIGINT",
+            Self::Uuid => "UUID",
+        }
+    }
+
+    /// Whether `id` should be emitted with a `DEFAULT gen_random_uuid()`
+    /// clause (Bigserial declares the default via the SERIAL pseudo-type).
+    pub fn id_default_clause(&self) -> &'static str {
+        match self {
+            Self::Bigserial => "",
+            Self::Uuid => " DEFAULT gen_random_uuid()",
+        }
+    }
+}
+
 /// Supported field types for Dataverse columns.
 ///
 /// Each variant maps to:
@@ -211,6 +270,11 @@ pub struct TableDefinition {
     pub columns: Vec<ColumnDefinition>,
     #[serde(default)]
     pub description: Option<String>,
+    /// Primary-key strategy for this table's implicit `id` column.
+    /// Defaults to [`IdStrategy::Bigserial`] for backward compatibility
+    /// with all tables created before UUID-PK support landed.
+    #[serde(default)]
+    pub id_strategy: IdStrategy,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

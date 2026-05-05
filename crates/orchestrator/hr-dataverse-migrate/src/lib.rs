@@ -71,26 +71,21 @@ pub async fn migrate_with_manager(
         info!("  - {} ({} cols)", t.name, t.columns.len());
     }
 
-    // Pre-flight: detect UUID/TEXT primary keys. The dataverse engine
-    // currently hardcodes `id BIGSERIAL PRIMARY KEY` on every table.
-    // Apps that externalise UUID PKs in URLs / mobile sync / on-disk
-    // paths get hopelessly broken when the BIGSERIAL renumbering hits.
-    // Refuse early with a clear message rather than copying TBs of data
-    // that the operator will then have to roll back.
-    if let Some(report) = detect_uuid_pk_incompatibility(sqlite_path, &tables)? {
-        bail!(
-            "this app appears to use UUID/TEXT primary keys, which the current \
-             dataverse migrator cannot preserve.\n\n\
-             {}\n\
-             Options:\n\
-             - keep the app on `legacy-sqlite` (recommended for UUID-keyed apps);\n\
-             - manually rename the legacy `id` column away from being a PK and \
-               run a fresh migration (the BIGSERIAL `id` will be added alongside \
-               your existing UUID column);\n\
-             - wait for hr-dataverse's planned UUID-PK mode (uses TEXT PRIMARY KEY \
-               with `gen_random_uuid()` defaults).",
-            report
+    // Detect which tables use UUID-shaped primary keys. Those tables
+    // get created with [`IdStrategy::Uuid`] in the dataverse engine —
+    // the original `id` strings are preserved during the copy so any
+    // external links (URLs, mobile sync state, FK references) stay
+    // valid. Tables without UUID PKs use the default Bigserial
+    // strategy and let PG renumber.
+    let uuid_pk_tables = detect_uuid_pk_tables(sqlite_path, &tables)?;
+    if !uuid_pk_tables.is_empty() {
+        info!(
+            count = uuid_pk_tables.len(),
+            "detected UUID primary keys — these tables will use IdStrategy::Uuid"
         );
+        for t in &uuid_pk_tables {
+            info!("  - {} (UUID PK)", t);
+        }
     }
 
     // ── Fresh provisioning OR adopt existing PG ──────────────────────
@@ -113,7 +108,8 @@ pub async fn migrate_with_manager(
     // need to re-read the file.
     manager.set_dsn_override(slug, secret.dsn.clone()).await;
 
-    let outcome = do_migrate(manager, slug, &tables, &relations, sqlite_path).await;
+    let outcome =
+        do_migrate(manager, slug, &tables, &relations, sqlite_path, &uuid_pk_tables).await;
 
     let report = match outcome {
         Ok(report) => report,
@@ -144,6 +140,7 @@ async fn do_migrate(
     tables: &[SqliteTable],
     relations: &[SqliteRelation],
     sqlite_path: &Path,
+    uuid_pk_tables: &std::collections::HashSet<String>,
 ) -> Result<InternalReport> {
     let engine = manager
         .engine_for(slug)
@@ -166,8 +163,18 @@ async fn do_migrate(
             );
             continue;
         }
-        let def = build_table_definition(table)?;
-        info!(table = %table.name, cols = def.columns.len(), "create_table");
+        let id_strategy = if uuid_pk_tables.contains(&table.name) {
+            hr_dataverse::IdStrategy::Uuid
+        } else {
+            hr_dataverse::IdStrategy::Bigserial
+        };
+        let def = build_table_definition(table, id_strategy)?;
+        info!(
+            table = %table.name,
+            cols = def.columns.len(),
+            id_strategy = ?id_strategy,
+            "create_table"
+        );
         engine
             .create_table(&def)
             .await
@@ -221,7 +228,8 @@ async fn do_migrate(
             );
         }
 
-        let n = copy_rows(&engine, sqlite_path, table)
+        let preserve_id = uuid_pk_tables.contains(&table.name);
+        let n = copy_rows(&engine, sqlite_path, table, preserve_id)
             .await
             .with_context(|| format!("copy rows of {}", table.name))?;
         copied.push((table.name.clone(), n));
@@ -369,7 +377,10 @@ fn sqlite_table_count(path: &Path, table: &str) -> Result<i64> {
 // Schema translation
 // ---------------------------------------------------------------------
 
-fn build_table_definition(t: &SqliteTable) -> Result<hr_dataverse::TableDefinition> {
+fn build_table_definition(
+    t: &SqliteTable,
+    id_strategy: hr_dataverse::IdStrategy,
+) -> Result<hr_dataverse::TableDefinition> {
     let now = Utc::now();
     let mut cols: Vec<hr_dataverse::ColumnDefinition> = Vec::with_capacity(t.columns.len());
     for c in &t.columns {
@@ -412,6 +423,7 @@ fn build_table_definition(t: &SqliteTable) -> Result<hr_dataverse::TableDefiniti
         slug: t.name.clone(),
         columns: cols,
         description: t.description.clone(),
+        id_strategy,
         created_at: now,
         updated_at: now,
     })
@@ -421,20 +433,19 @@ fn parse_field_type(s: &str) -> Result<PgFieldType> {
     PgFieldType::from_code(s).ok_or_else(|| anyhow!("unknown field_type code in legacy DB: {}", s))
 }
 
-/// Inspect a sample of `id` values in each user table. If most of them
-/// look like UUIDs (TEXT, hyphens, hex), the app is externalising
-/// non-integer PKs and is incompatible with the current dataverse
-/// migrator (which forces BIGSERIAL). Returns a diagnostic string
-/// describing the offending tables, or `None` when everything looks
-/// integer-shaped.
-fn detect_uuid_pk_incompatibility(
+/// Inspect a sample of `id` values in each user table and return the
+/// set of tables whose `id` column looks UUID-shaped. Those tables are
+/// migrated with [`hr_dataverse::IdStrategy::Uuid`] so the original
+/// UUID values survive — keeping any external links (URLs, mobile
+/// sync state, FK references in other columns) valid.
+fn detect_uuid_pk_tables(
     sqlite_path: &Path,
     tables: &[SqliteTable],
-) -> Result<Option<String>> {
+) -> Result<std::collections::HashSet<String>> {
     let conn = Connection::open_with_flags(sqlite_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let uuid_re = regex_uuid();
 
-    let mut offenders: Vec<(String, String)> = Vec::new();
+    let mut found: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for t in tables {
         // SQLite stores `id` as whatever type was declared. We sample
@@ -450,36 +461,22 @@ fn detect_uuid_pk_incompatibility(
         };
         let mut seen_uuid = 0usize;
         let mut seen_total = 0usize;
-        let mut sample: Option<String> = None;
         while let Ok(Some(row)) = rows.next() {
             seen_total += 1;
-            // Try TEXT first (UUID strings)
             if let Ok(s) = row.get::<_, String>(0) {
                 if uuid_re.is_match(s.trim()) {
                     seen_uuid += 1;
-                    if sample.is_none() {
-                        sample = Some(s);
-                    }
                 }
             }
         }
+        // Majority-vote heuristic: more than half of sampled values
+        // look like UUIDs → flag the table.
         if seen_total >= 1 && seen_uuid * 2 >= seen_total {
-            offenders.push((
-                t.name.clone(),
-                sample.unwrap_or_else(|| "<sample unavailable>".into()),
-            ));
+            found.insert(t.name.clone());
         }
     }
 
-    if offenders.is_empty() {
-        Ok(None)
-    } else {
-        let lines: Vec<String> = offenders
-            .iter()
-            .map(|(t, s)| format!("  - `{}.id` looks UUID-shaped (sample: `{}`)", t, s))
-            .collect();
-        Ok(Some(format!("Tables with UUID-shaped `id`:\n{}\n", lines.join("\n"))))
-    }
+    Ok(found)
 }
 
 fn regex_uuid() -> SimpleUuidPattern {
@@ -605,6 +602,7 @@ async fn copy_rows(
     engine: &DataverseEngine,
     sqlite_path: &Path,
     table: &SqliteTable,
+    preserve_id: bool,
 ) -> Result<i64> {
     // ── 1. Read all rows from SQLite into memory FIRST and close the
     //       connection. rusqlite's `Connection` is `!Send` so we can't
@@ -624,8 +622,8 @@ async fn copy_rows(
         .cloned()
         .collect();
 
-    let (rows, has_created_at, has_updated_at) =
-        read_sqlite_rows(sqlite_path, &table.name, &cols_to_copy_owned)?;
+    let (rows, has_created_at, has_updated_at, has_id) =
+        read_sqlite_rows(sqlite_path, &table.name, &cols_to_copy_owned, preserve_id)?;
 
     // ── 2. Insert into PG, batched (async, no SQLite borrow held) ───
     // Single-row INSERTs cost a network round-trip per row. For tables
@@ -644,6 +642,7 @@ async fn copy_rows(
             chunk,
             has_created_at,
             has_updated_at,
+            has_id,
         )
         .await?;
         total += chunk.len() as i64;
@@ -654,16 +653,23 @@ async fn copy_rows(
 /// Synchronous helper: opens the SQLite DB, reads all rows of `table`
 /// projected on the given columns + optional implicit timestamps,
 /// returns them as JSON values along with which timestamps exist.
+///
+/// When `preserve_id` is true, the `id` column is also selected (so the
+/// caller can preserve its value during INSERT — used for UUID-PK
+/// tables where the original UUIDs must survive migration).
 fn read_sqlite_rows(
     sqlite_path: &Path,
     table: &str,
     cols_to_copy: &[SqliteColumn],
-) -> Result<(Vec<HashMap<String, JsonValue>>, bool, bool)> {
+    preserve_id: bool,
+) -> Result<(Vec<HashMap<String, JsonValue>>, bool, bool, bool)> {
     let conn = Connection::open_with_flags(sqlite_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let has_created_at = sqlite_has_column(&conn, table, "created_at")?;
     let has_updated_at = sqlite_has_column(&conn, table, "updated_at")?;
+    let has_id = preserve_id && sqlite_has_column(&conn, table, "id")?;
 
     let mut select_cols: Vec<String> = Vec::new();
+    if has_id { select_cols.push("id".to_string()); }
     if has_created_at { select_cols.push("created_at".to_string()); }
     if has_updated_at { select_cols.push("updated_at".to_string()); }
     for c in cols_to_copy {
@@ -691,7 +697,7 @@ fn read_sqlite_rows(
         }
         rows.push(values);
     }
-    Ok((rows, has_created_at, has_updated_at))
+    Ok((rows, has_created_at, has_updated_at, has_id))
 }
 
 fn sqlite_has_column(conn: &Connection, table: &str, col: &str) -> Result<bool> {
@@ -717,14 +723,17 @@ async fn insert_rows_batch(
     batch: &[HashMap<String, JsonValue>],
     has_created_at: bool,
     has_updated_at: bool,
+    has_id: bool,
 ) -> Result<()> {
     if batch.is_empty() {
         return Ok(());
     }
 
     // Build the column list once.
-    let mut col_names: Vec<String> = Vec::with_capacity(cols.len() + 2);
-    let mut col_casts: Vec<&'static str> = Vec::with_capacity(cols.len() + 2);
+    let mut col_names: Vec<String> = Vec::with_capacity(cols.len() + 3);
+    let mut col_casts: Vec<&'static str> = Vec::with_capacity(cols.len() + 3);
+    // `id` first so its placeholder casts cleanly to `::UUID`.
+    if has_id { col_names.push("id".into()); col_casts.push("::UUID"); }
     if has_created_at { col_names.push("created_at".into()); col_casts.push(""); }
     if has_updated_at { col_names.push("updated_at".into()); col_casts.push(""); }
     for c in cols {
@@ -762,6 +771,25 @@ async fn insert_rows_batch(
 
     let mut args = PgArguments::default();
     for values in batch {
+        if has_id {
+            // `id` arrives as a TEXT-shaped UUID. Bind as String — the
+            // `::UUID` cast in the placeholder converts it server-side.
+            // A NULL id forces Postgres to fall back to the default
+            // (gen_random_uuid()) which is fine.
+            let v = values.get("id").cloned().unwrap_or(JsonValue::Null);
+            match v {
+                JsonValue::Null => args
+                    .add(Option::<String>::None)
+                    .map_err(map_bind)?,
+                JsonValue::String(s) => args.add(s).map_err(map_bind)?,
+                other => {
+                    return Err(anyhow!(
+                        "non-string id value while preserving UUID PK: {:?}",
+                        other
+                    ));
+                }
+            }
+        }
         if has_created_at {
             bind_optional_dt(&mut args, "created_at", values)?;
         }

@@ -27,10 +27,11 @@ use crate::error::{DataverseError, Result};
 use crate::graphql::filters::where_fragment;
 use crate::graphql::naming;
 use crate::graphql::sql::{
-    BindValue, SqlBuilder, graphql_value_to_bind, row_to_json, select_fragment_for,
+    BindValue, IdValue, RowReadCtx, SqlBuilder, graphql_value_to_bind, row_to_json,
+    select_fragment_for,
 };
 use crate::migration::quote_ident;
-use crate::schema::{ColumnDefinition, DatabaseSchema, FieldType, TableDefinition};
+use crate::schema::{ColumnDefinition, DatabaseSchema, FieldType, IdStrategy, TableDefinition};
 
 /// Types of the scalar filter inputs (one set, shared across tables).
 const INT_FILTER: &str = "IntFilter";
@@ -43,12 +44,18 @@ const JSON_SCALAR: &str = "JSON";
 const UUID_SCALAR: &str = "UUID";
 
 /// Translate a column's [`FieldType`] into the GraphQL output type ref.
-fn output_type_ref(ft: FieldType) -> TypeRef {
+///
+/// `lookup_target_strategy` is consulted only for [`FieldType::Lookup`]:
+/// the FK column surfaces as `Int` when the target table uses Bigserial,
+/// or `String` when the target uses UUID PKs.
+fn output_type_ref(ft: FieldType, lookup_target_strategy: IdStrategy) -> TypeRef {
     match ft {
         FieldType::Boolean => TypeRef::named(TypeRef::BOOLEAN),
-        FieldType::Number | FieldType::AutoIncrement | FieldType::Lookup => {
-            TypeRef::named(TypeRef::INT)
-        }
+        FieldType::Number | FieldType::AutoIncrement => TypeRef::named(TypeRef::INT),
+        FieldType::Lookup => match lookup_target_strategy {
+            IdStrategy::Bigserial => TypeRef::named(TypeRef::INT),
+            IdStrategy::Uuid => TypeRef::named(TypeRef::STRING),
+        },
         FieldType::DateTime => TypeRef::named(DATETIME_SCALAR),
         FieldType::Json => TypeRef::named(JSON_SCALAR),
         FieldType::Uuid => TypeRef::named(UUID_SCALAR),
@@ -60,16 +67,66 @@ fn output_type_ref(ft: FieldType) -> TypeRef {
 }
 
 /// Type ref of the scalar filter input matching this column's type.
-fn filter_type_ref(ft: FieldType) -> TypeRef {
+///
+/// Lookup columns with a UUID target use the string filter (UUIDs are
+/// exchanged as strings at the GraphQL boundary).
+fn filter_type_ref(ft: FieldType, lookup_target_strategy: IdStrategy) -> TypeRef {
     match ft {
         FieldType::Boolean => TypeRef::named(BOOL_FILTER),
-        FieldType::Number | FieldType::AutoIncrement | FieldType::Lookup => {
-            TypeRef::named(INT_FILTER)
-        }
+        FieldType::Number | FieldType::AutoIncrement => TypeRef::named(INT_FILTER),
+        FieldType::Lookup => match lookup_target_strategy {
+            IdStrategy::Bigserial => TypeRef::named(INT_FILTER),
+            IdStrategy::Uuid => TypeRef::named(STRING_FILTER),
+        },
         // V1: every other column uses the string filter (DateTime/Uuid/Date
         // values are exchanged as strings at the GraphQL boundary).
         _ => TypeRef::named(STRING_FILTER),
     }
+}
+
+/// GraphQL type ref of the implicit `id` field, given a table's strategy.
+fn id_output_ref(strategy: IdStrategy) -> TypeRef {
+    match strategy {
+        IdStrategy::Bigserial => TypeRef::named_nn(TypeRef::INT),
+        IdStrategy::Uuid => TypeRef::named_nn(TypeRef::STRING),
+    }
+}
+
+/// GraphQL type ref of the `id` argument on `*ById/update*/delete*`
+/// mutations. Same as [`id_output_ref`] but built from the input shape
+/// (still `Int!`/`String!`).
+fn id_arg_ref(strategy: IdStrategy) -> TypeRef {
+    match strategy {
+        IdStrategy::Bigserial => TypeRef::named_nn(TypeRef::INT),
+        IdStrategy::Uuid => TypeRef::named_nn(TypeRef::STRING),
+    }
+}
+
+/// Filter input ref for `id` filtering, given a table's strategy.
+fn id_filter_ref(strategy: IdStrategy) -> TypeRef {
+    match strategy {
+        IdStrategy::Bigserial => TypeRef::named(INT_FILTER),
+        IdStrategy::Uuid => TypeRef::named(STRING_FILTER),
+    }
+}
+
+/// Lookup the [`IdStrategy`] of a Lookup column's target table.
+fn lookup_target_strategy(
+    col: &ColumnDefinition,
+    dataverse: &DatabaseSchema,
+) -> IdStrategy {
+    if col.field_type != FieldType::Lookup {
+        return IdStrategy::default();
+    }
+    let Some(target) = col.lookup_target.as_deref() else {
+        return IdStrategy::default();
+    };
+    dataverse
+        .tables
+        .iter()
+        .find(|t| t.name == target)
+        .map(|t| t.id_strategy)
+        .unwrap_or_default()
 }
 
 /// Build the schema. Caller passes the engine (for resolver access to its
@@ -102,11 +159,11 @@ pub fn build_schema(
     for (idx, table) in dataverse.tables.iter().enumerate() {
         // Type registrations
         sb = sb
-            .register(build_object_type(table))
-            .register(build_where_input(table))
+            .register(build_object_type(table, &dataverse))
+            .register(build_where_input(table, &dataverse))
             .register(build_order_by_input(table))
-            .register(build_insert_input(table))
-            .register(build_update_input(table));
+            .register(build_insert_input(table, &dataverse))
+            .register(build_update_input(table, &dataverse));
 
         // Query fields
         query = query
@@ -184,11 +241,11 @@ fn bool_filter_input() -> InputObject {
         .field(InputValue::new("_isNull", TypeRef::named(TypeRef::BOOLEAN)))
 }
 
-fn build_object_type(table: &TableDefinition) -> Object {
+fn build_object_type(table: &TableDefinition, dataverse: &DatabaseSchema) -> Object {
     let type_name = naming::type_name(&table.name);
 
     let mut obj = Object::new(type_name)
-        .field(scalar_field("id", TypeRef::named_nn(TypeRef::INT), "id"))
+        .field(scalar_field("id", id_output_ref(table.id_strategy), "id"))
         .field(scalar_field(
             "createdAt",
             TypeRef::named_nn(DATETIME_SCALAR),
@@ -202,7 +259,8 @@ fn build_object_type(table: &TableDefinition) -> Object {
 
     for col in &table.columns {
         let nullable = !col.required;
-        let base = output_type_ref(col.field_type);
+        let target_strategy = lookup_target_strategy(col, dataverse);
+        let base = output_type_ref(col.field_type, target_strategy);
         let ty = if nullable {
             base
         } else {
@@ -249,7 +307,7 @@ fn scalar_field(gql_name: &str, ty: TypeRef, pg_key: &str) -> Field {
     })
 }
 
-fn build_where_input(table: &TableDefinition) -> InputObject {
+fn build_where_input(table: &TableDefinition, dataverse: &DatabaseSchema) -> InputObject {
     let name = naming::input_where(&table.name);
     let mut io = InputObject::new(&name);
 
@@ -262,7 +320,7 @@ fn build_where_input(table: &TableDefinition) -> InputObject {
     // Implicit columns are first-class filterable. Every row has them
     // and every UI eventually wants to filter on `id` or sort by date.
     io = io
-        .field(InputValue::new("id", TypeRef::named(INT_FILTER)))
+        .field(InputValue::new("id", id_filter_ref(table.id_strategy)))
         .field(InputValue::new("createdAt", TypeRef::named(STRING_FILTER)))
         .field(InputValue::new("updatedAt", TypeRef::named(STRING_FILTER)));
 
@@ -272,7 +330,11 @@ fn build_where_input(table: &TableDefinition) -> InputObject {
             continue;
         }
         let f = naming::camel_case(&col.name);
-        io = io.field(InputValue::new(&f, filter_type_ref(col.field_type)));
+        let target_strategy = lookup_target_strategy(col, dataverse);
+        io = io.field(InputValue::new(
+            &f,
+            filter_type_ref(col.field_type, target_strategy),
+        ));
     }
 
     io
@@ -296,7 +358,24 @@ fn build_order_by_input(table: &TableDefinition) -> InputObject {
     io
 }
 
-fn build_insert_input(table: &TableDefinition) -> InputObject {
+/// Pick the input scalar type for a column at insert/update time.
+fn input_scalar_for(col: &ColumnDefinition, dataverse: &DatabaseSchema) -> TypeRef {
+    match col.field_type {
+        FieldType::Boolean => TypeRef::named(TypeRef::BOOLEAN),
+        FieldType::Number | FieldType::AutoIncrement => TypeRef::named(TypeRef::INT),
+        FieldType::Lookup => match lookup_target_strategy(col, dataverse) {
+            IdStrategy::Bigserial => TypeRef::named(TypeRef::INT),
+            IdStrategy::Uuid => TypeRef::named(TypeRef::STRING),
+        },
+        FieldType::Json => TypeRef::named(JSON_SCALAR),
+        FieldType::DateTime => TypeRef::named(DATETIME_SCALAR),
+        FieldType::Uuid => TypeRef::named(UUID_SCALAR),
+        FieldType::MultiChoice => TypeRef::named_nn_list(TypeRef::STRING),
+        _ => TypeRef::named(TypeRef::STRING),
+    }
+}
+
+fn build_insert_input(table: &TableDefinition, dataverse: &DatabaseSchema) -> InputObject {
     let name = naming::input_insert(&table.name);
     let mut io = InputObject::new(&name);
 
@@ -304,17 +383,7 @@ fn build_insert_input(table: &TableDefinition) -> InputObject {
         if col.field_type == FieldType::Formula {
             continue; // generated columns can't be inserted into
         }
-        let base = match col.field_type {
-            FieldType::Boolean => TypeRef::named(TypeRef::BOOLEAN),
-            FieldType::Number | FieldType::AutoIncrement | FieldType::Lookup => {
-                TypeRef::named(TypeRef::INT)
-            }
-            FieldType::Json => TypeRef::named(JSON_SCALAR),
-            FieldType::DateTime => TypeRef::named(DATETIME_SCALAR),
-            FieldType::Uuid => TypeRef::named(UUID_SCALAR),
-            FieldType::MultiChoice => TypeRef::named_nn_list(TypeRef::STRING),
-            _ => TypeRef::named(TypeRef::STRING),
-        };
+        let base = input_scalar_for(col, dataverse);
         let ty = if col.required && col.default_value.is_none() {
             match col.field_type {
                 FieldType::MultiChoice => TypeRef::named_nn_list_nn(TypeRef::STRING),
@@ -329,7 +398,7 @@ fn build_insert_input(table: &TableDefinition) -> InputObject {
     io
 }
 
-fn build_update_input(table: &TableDefinition) -> InputObject {
+fn build_update_input(table: &TableDefinition, dataverse: &DatabaseSchema) -> InputObject {
     // Update inputs always make every column optional.
     let name = naming::input_update(&table.name);
     let mut io = InputObject::new(&name);
@@ -338,17 +407,7 @@ fn build_update_input(table: &TableDefinition) -> InputObject {
             continue;
         }
         let f = naming::camel_case(&col.name);
-        let ty = match col.field_type {
-            FieldType::Boolean => TypeRef::named(TypeRef::BOOLEAN),
-            FieldType::Number | FieldType::AutoIncrement | FieldType::Lookup => {
-                TypeRef::named(TypeRef::INT)
-            }
-            FieldType::Json => TypeRef::named(JSON_SCALAR),
-            FieldType::DateTime => TypeRef::named(DATETIME_SCALAR),
-            FieldType::Uuid => TypeRef::named(UUID_SCALAR),
-            FieldType::MultiChoice => TypeRef::named_nn_list(TypeRef::STRING),
-            _ => TypeRef::named(TypeRef::STRING),
-        };
+        let ty = input_scalar_for(col, dataverse);
         io = io.field(InputValue::new(&f, ty));
     }
     io
@@ -377,7 +436,7 @@ fn field_list(table_idx: usize, dataverse: Arc<DatabaseSchema>) -> Field {
                     .data::<Arc<DataverseEngine>>()
                     .map_err(|e| async_graphql::Error::new(format!("missing engine: {}", e.message)))?;
 
-                let rows = run_list(engine.clone(), table, &ctx).await?;
+                let rows = run_list(engine.clone(), table, &dv, &ctx).await?;
                 let values = rows
                     .into_iter()
                     .map(|r| FieldValue::owned_any(r))
@@ -399,6 +458,7 @@ fn field_by_id(table_idx: usize, dataverse: Arc<DatabaseSchema>) -> Field {
     let table = &dataverse.tables[table_idx];
     let gql_name = naming::field_by_id(&table.name);
     let row_type = naming::type_name(&table.name);
+    let id_arg = id_arg_ref(table.id_strategy);
     let dv = dataverse.clone();
 
     Field::new(gql_name, TypeRef::named(row_type), move |ctx: ResolverContext| {
@@ -408,15 +468,13 @@ fn field_by_id(table_idx: usize, dataverse: Arc<DatabaseSchema>) -> Field {
             let engine = ctx
                 .data::<Arc<DataverseEngine>>()
                 .map_err(|e| async_graphql::Error::new(format!("missing engine: {}", e.message)))?;
-            let id = ctx
-                .args
-                .try_get("id")?
-                .i64()?;
-            let row = run_by_id(engine.clone(), table, id).await?;
+            let id_arg = ctx.args.try_get("id")?.deserialize::<GqlValue>()?;
+            let id = IdValue::from_gql(&id_arg, table.id_strategy).map_err(to_gql_err)?;
+            let row = run_by_id(engine.clone(), table, &dv, id).await?;
             Ok(row.map(FieldValue::owned_any))
         })
     })
-    .argument(InputValue::new("id", TypeRef::named_nn(TypeRef::INT)))
+    .argument(InputValue::new("id", id_arg))
 }
 
 fn field_count(table_idx: usize, dataverse: Arc<DatabaseSchema>) -> Field {
@@ -435,7 +493,7 @@ fn field_count(table_idx: usize, dataverse: Arc<DatabaseSchema>) -> Field {
                 let engine = ctx
                     .data::<Arc<DataverseEngine>>()
                     .map_err(|e| async_graphql::Error::new(format!("missing engine: {}", e.message)))?;
-                let n = run_count(engine.clone(), table, &ctx).await?;
+                let n = run_count(engine.clone(), table, &dv, &ctx).await?;
                 Ok(Some(FieldValue::value(n)))
             })
         },
@@ -465,8 +523,13 @@ fn field_insert(table_idx: usize, dataverse: Arc<DatabaseSchema>) -> Field {
                     .data::<Arc<DataverseEngine>>()
                     .map_err(|e| async_graphql::Error::new(format!("missing engine: {}", e.message)))?;
                 let values = ctx.args.try_get("values")?;
-                let row = run_insert(engine.clone(), table, values.deserialize::<GqlValue>()?)
-                    .await?;
+                let row = run_insert(
+                    engine.clone(),
+                    table,
+                    &dv,
+                    values.deserialize::<GqlValue>()?,
+                )
+                .await?;
                 Ok(Some(FieldValue::owned_any(row)))
             })
         },
@@ -482,6 +545,7 @@ fn field_update(table_idx: usize, dataverse: Arc<DatabaseSchema>) -> Field {
     let gql_name = naming::mutation_update(&table.name);
     let row_type = naming::type_name(&table.name);
     let update_ty = naming::input_update(&table.name);
+    let id_arg = id_arg_ref(table.id_strategy);
     let dv = dataverse.clone();
 
     Field::new(
@@ -494,20 +558,22 @@ fn field_update(table_idx: usize, dataverse: Arc<DatabaseSchema>) -> Field {
                 let engine = ctx
                     .data::<Arc<DataverseEngine>>()
                     .map_err(|e| async_graphql::Error::new(format!("missing engine: {}", e.message)))?;
-                let id = ctx.args.try_get("id")?.i64()?;
+                let id_arg = ctx.args.try_get("id")?.deserialize::<GqlValue>()?;
+                let id = IdValue::from_gql(&id_arg, table.id_strategy).map_err(to_gql_err)?;
                 let values = ctx.args.try_get("values")?.deserialize::<GqlValue>()?;
-                let row = run_update(engine.clone(), table, id, values).await?;
+                let row = run_update(engine.clone(), table, &dv, id, values).await?;
                 Ok(row.map(FieldValue::owned_any))
             })
         },
     )
-    .argument(InputValue::new("id", TypeRef::named_nn(TypeRef::INT)))
+    .argument(InputValue::new("id", id_arg))
     .argument(InputValue::new("values", TypeRef::named_nn(update_ty)))
 }
 
 fn field_delete(table_idx: usize, dataverse: Arc<DatabaseSchema>) -> Field {
     let table = &dataverse.tables[table_idx];
     let gql_name = naming::mutation_delete(&table.name);
+    let id_arg = id_arg_ref(table.id_strategy);
     let dv = dataverse.clone();
 
     Field::new(
@@ -520,13 +586,14 @@ fn field_delete(table_idx: usize, dataverse: Arc<DatabaseSchema>) -> Field {
                 let engine = ctx
                     .data::<Arc<DataverseEngine>>()
                     .map_err(|e| async_graphql::Error::new(format!("missing engine: {}", e.message)))?;
-                let id = ctx.args.try_get("id")?.i64()?;
+                let id_arg = ctx.args.try_get("id")?.deserialize::<GqlValue>()?;
+                let id = IdValue::from_gql(&id_arg, table.id_strategy).map_err(to_gql_err)?;
                 let removed = run_delete(engine.clone(), table, id).await?;
                 Ok(Some(FieldValue::value(removed)))
             })
         },
     )
-    .argument(InputValue::new("id", TypeRef::named_nn(TypeRef::INT)))
+    .argument(InputValue::new("id", id_arg))
 }
 
 // ------------------------------------------------------------------
@@ -536,11 +603,12 @@ fn field_delete(table_idx: usize, dataverse: Arc<DatabaseSchema>) -> Field {
 async fn run_list(
     engine: Arc<DataverseEngine>,
     table: &TableDefinition,
+    dataverse: &DatabaseSchema,
     ctx: &ResolverContext<'_>,
 ) -> std::result::Result<Vec<serde_json::Map<String, JsonValue>>, async_graphql::Error> {
     let mut builder = SqlBuilder::new();
     let where_arg: Option<GqlValue> = arg_to_value(ctx, "where")?;
-    let where_clause = where_fragment(table, where_arg.as_ref(), &mut builder)
+    let where_clause = where_fragment(table, dataverse, where_arg.as_ref(), &mut builder)
         .map_err(to_gql_err)?;
 
     // SELECT list
@@ -593,41 +661,54 @@ async fn run_list(
         .await
         .map_err(|e| to_gql_err(DataverseError::from(e)))?;
 
+    let read_ctx = RowReadCtx::from_table_and_schema(table, dataverse);
     rows.iter()
-        .map(|r| row_to_json(r, &table.columns).map_err(to_gql_err))
+        .map(|r| row_to_json(r, &table.columns, &read_ctx).map_err(to_gql_err))
         .collect()
 }
 
 async fn run_by_id(
     engine: Arc<DataverseEngine>,
     table: &TableDefinition,
-    id: i64,
+    dataverse: &DatabaseSchema,
+    id: IdValue,
 ) -> std::result::Result<Option<serde_json::Map<String, JsonValue>>, async_graphql::Error> {
     let select_cols = build_select_list(table);
+    // Cast the placeholder type so PG accepts the bind regardless of
+    // strategy. ::BIGINT for Bigserial id, ::UUID for Uuid id.
+    let id_cast = match table.id_strategy {
+        crate::schema::IdStrategy::Bigserial => "BIGINT",
+        crate::schema::IdStrategy::Uuid => "UUID",
+    };
     let sql = format!(
-        "SELECT {} FROM {} WHERE id = $1",
+        "SELECT {} FROM {} WHERE id = $1::{}",
         select_cols,
         quote_ident(&table.name),
+        id_cast,
     );
     let pool = engine.pool().clone();
-    let row = sqlx_core::query::query::<sqlx_postgres::Postgres>(&sql)
-        .bind(id)
+    let mut builder = SqlBuilder::new();
+    let _ = builder.push(id.into_bind());
+    let args = builder.into_arguments().map_err(to_gql_err)?;
+    let row = sqlx_core::query::query_with::<sqlx_postgres::Postgres, _>(&sql, args)
         .fetch_optional(&pool)
         .await
         .map_err(|e| to_gql_err(DataverseError::from(e)))?;
 
-    row.map(|r| row_to_json(&r, &table.columns).map_err(to_gql_err))
+    let read_ctx = RowReadCtx::from_table_and_schema(table, dataverse);
+    row.map(|r| row_to_json(&r, &table.columns, &read_ctx).map_err(to_gql_err))
         .transpose()
 }
 
 async fn run_count(
     engine: Arc<DataverseEngine>,
     table: &TableDefinition,
+    dataverse: &DatabaseSchema,
     ctx: &ResolverContext<'_>,
 ) -> std::result::Result<i64, async_graphql::Error> {
     let mut builder = SqlBuilder::new();
     let where_arg: Option<GqlValue> = arg_to_value(ctx, "where")?;
-    let where_clause = where_fragment(table, where_arg.as_ref(), &mut builder)
+    let where_clause = where_fragment(table, dataverse, where_arg.as_ref(), &mut builder)
         .map_err(to_gql_err)?;
 
     let mut sql = format!("SELECT COUNT(*) FROM {}", quote_ident(&table.name));
@@ -647,6 +728,7 @@ async fn run_count(
 async fn run_insert(
     engine: Arc<DataverseEngine>,
     table: &TableDefinition,
+    dataverse: &DatabaseSchema,
     values: GqlValue,
 ) -> std::result::Result<serde_json::Map<String, JsonValue>, async_graphql::Error> {
     let GqlValue::Object(map) = values else {
@@ -661,7 +743,8 @@ async fn run_insert(
         if col.field_type == FieldType::Formula { continue; }
         let camel = naming::camel_case(&col.name);
         let Some(v) = map.get(camel.as_str()) else { continue };
-        let bind = graphql_value_to_bind(v, col.field_type)
+        let target_strategy = lookup_target_strategy(col, dataverse);
+        let bind = graphql_value_to_bind(v, col.field_type, target_strategy)
             .map_err(to_gql_err)?;
         match bind {
             Some(b) => {
@@ -669,9 +752,15 @@ async fn run_insert(
                 placeholders.push(builder.push(b));
             }
             None => {
-                // Explicit null
+                // Explicit null — pick the right pg type cast: Lookup
+                // columns inherit the FK type from the target table.
+                let null_pg_type = if col.field_type == FieldType::Lookup {
+                    target_strategy.pg_fk_type()
+                } else {
+                    col.field_type.pg_type()
+                };
                 col_idents.push(quote_ident(&col.name));
-                placeholders.push(builder.push(BindValue::NullAs(col.field_type.pg_type())));
+                placeholders.push(builder.push(BindValue::NullAs(null_pg_type)));
             }
         }
     }
@@ -700,13 +789,15 @@ async fn run_insert(
         .await
         .map_err(|e| to_gql_err(DataverseError::from(e)))?;
 
-    row_to_json(&row, &table.columns).map_err(to_gql_err)
+    let read_ctx = RowReadCtx::from_table_and_schema(table, dataverse);
+    row_to_json(&row, &table.columns, &read_ctx).map_err(to_gql_err)
 }
 
 async fn run_update(
     engine: Arc<DataverseEngine>,
     table: &TableDefinition,
-    id: i64,
+    dataverse: &DatabaseSchema,
+    id: IdValue,
     values: GqlValue,
 ) -> std::result::Result<Option<serde_json::Map<String, JsonValue>>, async_graphql::Error> {
     let GqlValue::Object(map) = values else {
@@ -719,7 +810,8 @@ async fn run_update(
         if col.field_type == FieldType::Formula { continue; }
         let camel = naming::camel_case(&col.name);
         let Some(v) = map.get(camel.as_str()) else { continue };
-        let bind = graphql_value_to_bind(v, col.field_type).map_err(to_gql_err)?;
+        let target_strategy = lookup_target_strategy(col, dataverse);
+        let bind = graphql_value_to_bind(v, col.field_type, target_strategy).map_err(to_gql_err)?;
         match bind {
             Some(b) => {
                 let p = builder.push(b);
@@ -733,10 +825,10 @@ async fn run_update(
 
     if sets.is_empty() {
         // Nothing to update — just return the current row.
-        return run_by_id(engine, table, id).await;
+        return run_by_id(engine, table, dataverse, id).await;
     }
 
-    let id_p = builder.push(BindValue::Int(id));
+    let id_p = builder.push(id.into_bind());
     let select_cols = build_select_list(table);
     let sql = format!(
         "UPDATE {} SET {} WHERE id = {} RETURNING {}",
@@ -753,22 +845,30 @@ async fn run_update(
         .await
         .map_err(|e| to_gql_err(DataverseError::from(e)))?;
 
-    row.map(|r| row_to_json(&r, &table.columns).map_err(to_gql_err))
+    let read_ctx = RowReadCtx::from_table_and_schema(table, dataverse);
+    row.map(|r| row_to_json(&r, &table.columns, &read_ctx).map_err(to_gql_err))
         .transpose()
 }
 
 async fn run_delete(
     engine: Arc<DataverseEngine>,
     table: &TableDefinition,
-    id: i64,
+    id: IdValue,
 ) -> std::result::Result<bool, async_graphql::Error> {
+    let id_cast = match table.id_strategy {
+        crate::schema::IdStrategy::Bigserial => "BIGINT",
+        crate::schema::IdStrategy::Uuid => "UUID",
+    };
     let sql = format!(
-        "DELETE FROM {} WHERE id = $1",
+        "DELETE FROM {} WHERE id = $1::{}",
         quote_ident(&table.name),
+        id_cast,
     );
     let pool = engine.pool().clone();
-    let result = sqlx_core::query::query::<sqlx_postgres::Postgres>(&sql)
-        .bind(id)
+    let mut builder = SqlBuilder::new();
+    let _ = builder.push(id.into_bind());
+    let args = builder.into_arguments().map_err(to_gql_err)?;
+    let result = sqlx_core::query::query_with::<sqlx_postgres::Postgres, _>(&sql, args)
         .execute(&pool)
         .await
         .map_err(|e| to_gql_err(DataverseError::from(e)))?;

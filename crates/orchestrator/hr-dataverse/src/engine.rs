@@ -23,8 +23,8 @@ use crate::migration::{
     drop_column_sql, drop_table_sql, quote_ident,
 };
 use crate::schema::{
-    CascadeAction, ColumnDefinition, DatabaseSchema, FieldType, RelationDefinition, RelationType,
-    TableDefinition,
+    CascadeAction, ColumnDefinition, DatabaseSchema, FieldType, IdStrategy, RelationDefinition,
+    RelationType, TableDefinition,
 };
 use crate::validation;
 
@@ -38,9 +38,16 @@ CREATE TABLE IF NOT EXISTS _dv_tables (
     name        TEXT NOT NULL UNIQUE,
     slug        TEXT NOT NULL UNIQUE,
     description TEXT,
+    -- 'bigserial' (legacy default) or 'uuid' — picks the implicit
+    -- `id` column type for this user table. See [`IdStrategy`].
+    id_strategy TEXT NOT NULL DEFAULT 'bigserial',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Forward-compat: existing databases that pre-date the column get it
+-- backfilled with the safe default. ALTER … IF NOT EXISTS is idempotent.
+ALTER TABLE _dv_tables
+    ADD COLUMN IF NOT EXISTS id_strategy TEXT NOT NULL DEFAULT 'bigserial';
 
 CREATE TABLE IF NOT EXISTS _dv_columns (
     id                  BIGSERIAL PRIMARY KEY,
@@ -183,20 +190,43 @@ impl DataverseEngine {
         Ok(row.map(|(b,)| b).unwrap_or(false))
     }
 
+    /// Read just the [`IdStrategy`] of a single user table. Returns `None`
+    /// when the table is unknown — caller decides between defaulting and
+    /// erroring (here, default is the safe choice for FK type resolution).
+    async fn lookup_strategy_of(&self, table: &str) -> Result<IdStrategy> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT id_strategy FROM _dv_tables WHERE name = $1",
+        )
+        .bind(table)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row
+            .and_then(|(s,)| IdStrategy::from_code(&s))
+            .unwrap_or_default())
+    }
+
     /// Read the full schema (tables + columns + relations + version).
     pub async fn get_schema(&self) -> Result<DatabaseSchema> {
-        let table_rows: Vec<(String, String, Option<String>, DateTime<Utc>, DateTime<Utc>)> =
-            sqlx::query_as(
-                "SELECT name, slug, description, created_at, updated_at FROM _dv_tables ORDER BY id",
-            )
-            .fetch_all(&self.pool)
-            .await?;
+        let table_rows: Vec<(
+            String,         // name
+            String,         // slug
+            Option<String>, // description
+            String,         // id_strategy
+            DateTime<Utc>,
+            DateTime<Utc>,
+        )> = sqlx::query_as(
+            "SELECT name, slug, description, id_strategy, created_at, updated_at \
+             FROM _dv_tables ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
 
         let mut tables: Vec<TableDefinition> = Vec::with_capacity(table_rows.len());
-        for (name, slug, description, created_at, updated_at) in table_rows {
+        for (name, slug, description, id_strategy_code, created_at, updated_at) in table_rows {
             let cols = self.list_columns(&name).await?;
+            let id_strategy = IdStrategy::from_code(&id_strategy_code).unwrap_or_default();
             tables.push(TableDefinition {
-                name, slug, description, columns: cols, created_at, updated_at,
+                name, slug, description, columns: cols, id_strategy, created_at, updated_at,
             });
         }
 
@@ -273,19 +303,25 @@ impl DataverseEngine {
         let snapshot = self.get_schema().await?;
         validation::validate_table_definition(def, &snapshot)?;
 
-        // 1. CREATE TABLE
-        sqlx::raw_sql(&create_table_sql(def)).execute(&self.pool).await?;
+        // 1. CREATE TABLE — DDL needs the schema snapshot so Lookup
+        //    columns inherit their target table's id_strategy for the
+        //    FK column type (BIGINT vs UUID).
+        sqlx::raw_sql(&create_table_sql(def, &snapshot)).execute(&self.pool).await?;
 
         // 2. Updated_at trigger
         sqlx::raw_sql(&create_updated_at_trigger_sql(&def.name)).execute(&self.pool).await?;
 
-        // 3. _dv_tables row
+        // 3. _dv_tables row — persists id_strategy so subsequent
+        //    schema reads (and add_column for Lookups targeting this
+        //    table) pick up the right FK type.
         sqlx::query(
-            "INSERT INTO _dv_tables (name, slug, description) VALUES ($1, $2, $3)",
+            "INSERT INTO _dv_tables (name, slug, description, id_strategy) \
+             VALUES ($1, $2, $3, $4)",
         )
         .bind(&def.name)
         .bind(&def.slug)
         .bind(&def.description)
+        .bind(def.id_strategy.as_str())
         .execute(&self.pool)
         .await?;
 
@@ -359,7 +395,19 @@ impl DataverseEngine {
             return Err(DataverseError::TableNotFound(table.into()));
         }
 
-        sqlx::raw_sql(&add_column_sql(table, col)).execute(&self.pool).await?;
+        // For Lookup columns, look up the target table's id_strategy
+        // so the FK column type matches the target's `id` type.
+        let lookup_target_strategy = if col.field_type == FieldType::Lookup {
+            match col.lookup_target.as_deref() {
+                Some(target) => self.lookup_strategy_of(target).await.unwrap_or_default(),
+                None => IdStrategy::default(),
+            }
+        } else {
+            IdStrategy::default()
+        };
+        sqlx::raw_sql(&add_column_sql(table, col, lookup_target_strategy))
+            .execute(&self.pool)
+            .await?;
 
         let position: i32 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(position), -1) + 1 FROM _dv_columns WHERE table_name = $1",

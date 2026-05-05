@@ -18,7 +18,57 @@ use sqlx_postgres::{PgArguments, PgRow};
 use uuid::Uuid;
 
 use crate::error::{DataverseError, Result};
-use crate::schema::{ColumnDefinition, FieldType};
+use crate::schema::{ColumnDefinition, FieldType, IdStrategy};
+
+/// Type-erased value of an implicit `id` (or any FK) — picks the right
+/// Postgres bind based on the target table's [`IdStrategy`].
+#[derive(Debug, Clone)]
+pub enum IdValue {
+    Int(i64),
+    Uuid(Uuid),
+}
+
+impl IdValue {
+    /// Convert to a [`BindValue`] for sqlx parameter binding.
+    pub fn into_bind(self) -> BindValue {
+        match self {
+            IdValue::Int(i) => BindValue::Int(i),
+            IdValue::Uuid(u) => BindValue::Uuid(u),
+        }
+    }
+
+    /// Parse an `id` argument from a GraphQL Value, picking the variant
+    /// from the target table's strategy.
+    pub fn from_gql(v: &async_graphql::Value, strategy: IdStrategy) -> Result<Self> {
+        use async_graphql::Value as V;
+        match (strategy, v) {
+            (IdStrategy::Bigserial, V::Number(n)) => {
+                let i = n.as_i64().ok_or_else(|| {
+                    DataverseError::internal(format!("expected Int id, got {:?}", n))
+                })?;
+                Ok(IdValue::Int(i))
+            }
+            (IdStrategy::Bigserial, V::String(s)) => {
+                // Tolerant: integer-shaped strings are accepted (the
+                // SPA may stringify large ids before sending).
+                let i = s.parse::<i64>().map_err(|e| {
+                    DataverseError::internal(format!("invalid Int id '{}': {}", s, e))
+                })?;
+                Ok(IdValue::Int(i))
+            }
+            (IdStrategy::Uuid, V::String(s)) => {
+                let u = Uuid::parse_str(s).map_err(|e| {
+                    DataverseError::internal(format!("invalid UUID id '{}': {}", s, e))
+                })?;
+                Ok(IdValue::Uuid(u))
+            }
+            (strategy, other) => Err(DataverseError::internal(format!(
+                "id value {:?} doesn't match table id_strategy {:?}",
+                other, strategy
+            ))),
+        }
+    }
+}
 
 /// A typed value that can be bound to a `$N` placeholder. We keep the
 /// type information here because Postgres rejects untyped NULLs and we
@@ -97,9 +147,15 @@ impl SqlBuilder {
 ///
 /// Returns `Ok(None)` if the value is `null` and the column is not a
 /// nullable type (caller decides whether that's an error).
+///
+/// `lookup_target_strategy` matters only when `field_type` is
+/// [`FieldType::Lookup`] — it picks between Int (target=Bigserial) and
+/// Uuid (target=Uuid) binding. For non-Lookup columns the value is
+/// ignored.
 pub fn graphql_value_to_bind(
     val: &async_graphql::Value,
     field_type: FieldType,
+    lookup_target_strategy: IdStrategy,
 ) -> Result<Option<BindValue>> {
     use async_graphql::Value as V;
 
@@ -109,11 +165,37 @@ pub fn graphql_value_to_bind(
 
     let bind = match (field_type, val) {
         (FieldType::Boolean, V::Boolean(b)) => BindValue::Bool(*b),
-        (FieldType::Number | FieldType::AutoIncrement | FieldType::Lookup, V::Number(n)) => {
+        (FieldType::Number | FieldType::AutoIncrement, V::Number(n)) => {
             let i = n.as_i64().ok_or_else(|| {
                 DataverseError::internal(format!("expected integer, got {:?}", n))
             })?;
             BindValue::Int(i)
+        }
+        (FieldType::Lookup, V::Number(n)) => {
+            // Bigserial-target Lookup arrives as Int.
+            let i = n.as_i64().ok_or_else(|| {
+                DataverseError::internal(format!("expected integer FK, got {:?}", n))
+            })?;
+            BindValue::Int(i)
+        }
+        (FieldType::Lookup, V::String(s)) => {
+            // UUID-target Lookup arrives as String. Accept bigserial-style
+            // numeric strings too, defensively, when target is Bigserial
+            // (some clients stringify large ints).
+            match lookup_target_strategy {
+                IdStrategy::Uuid => {
+                    let u = Uuid::parse_str(s).map_err(|e| {
+                        DataverseError::internal(format!("invalid UUID FK '{}': {}", s, e))
+                    })?;
+                    BindValue::Uuid(u)
+                }
+                IdStrategy::Bigserial => {
+                    let i = s.parse::<i64>().map_err(|e| {
+                        DataverseError::internal(format!("invalid Int FK '{}': {}", s, e))
+                    })?;
+                    BindValue::Int(i)
+                }
+            }
         }
         (FieldType::Decimal | FieldType::Currency | FieldType::Percent, V::Number(n)) => {
             // Numeric arrives as either an int or a float. We bind as text
@@ -192,18 +274,66 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
+/// Read context for [`row_to_json`] / [`read_column_value`]: holds the
+/// table's id_strategy (governs the `id` column read) and a per-column
+/// lookup-target strategy lookup (governs each Lookup FK read).
+pub struct RowReadCtx<'a> {
+    pub id_strategy: IdStrategy,
+    /// Strategy of each Lookup column's target table, indexed by column
+    /// name. Non-Lookup columns may be absent.
+    pub lookup_targets: std::collections::HashMap<&'a str, IdStrategy>,
+}
+
+impl<'a> RowReadCtx<'a> {
+    pub fn from_table_and_schema(
+        table: &'a crate::schema::TableDefinition,
+        dataverse: &'a crate::schema::DatabaseSchema,
+    ) -> Self {
+        let mut lookup_targets = std::collections::HashMap::new();
+        for col in &table.columns {
+            if col.field_type == FieldType::Lookup {
+                if let Some(target) = col.lookup_target.as_deref() {
+                    let s = dataverse
+                        .tables
+                        .iter()
+                        .find(|t| t.name == target)
+                        .map(|t| t.id_strategy)
+                        .unwrap_or_default();
+                    lookup_targets.insert(col.name.as_str(), s);
+                }
+            }
+        }
+        Self {
+            id_strategy: table.id_strategy,
+            lookup_targets,
+        }
+    }
+}
+
 /// Decode a `PgRow` into a `serde_json::Map` whose values respect the
 /// GraphQL scalar mapping (cf. [`FieldType::graphql_type_name`]).
 ///
 /// Implicit columns (`id`, `created_at`, `updated_at`) are always read.
 /// User columns are read by `column_def` order; the column must exist in
 /// the row by name (driven by the SELECT list the resolver issues).
-pub fn row_to_json(row: &PgRow, columns: &[ColumnDefinition]) -> Result<Map<String, Value>> {
+pub fn row_to_json(
+    row: &PgRow,
+    columns: &[ColumnDefinition],
+    ctx: &RowReadCtx<'_>,
+) -> Result<Map<String, Value>> {
     let mut out = Map::new();
 
-    // id
-    let id: i64 = row.try_get("id").map_err(map_err)?;
-    out.insert("id".into(), Value::Number(Number::from(id)));
+    // id — type depends on the table's id_strategy.
+    match ctx.id_strategy {
+        IdStrategy::Bigserial => {
+            let id: i64 = row.try_get("id").map_err(map_err)?;
+            out.insert("id".into(), Value::Number(Number::from(id)));
+        }
+        IdStrategy::Uuid => {
+            let id: Uuid = row.try_get("id").map_err(map_err)?;
+            out.insert("id".into(), Value::String(id.to_string()));
+        }
+    }
 
     // created_at / updated_at
     let created: DateTime<Utc> = row.try_get("created_at").map_err(map_err)?;
@@ -213,23 +343,43 @@ pub fn row_to_json(row: &PgRow, columns: &[ColumnDefinition]) -> Result<Map<Stri
 
     for col in columns {
         let key = col.name.as_str();
-        let v = read_column_value(row, key, col.field_type)?;
+        let lookup_target = ctx.lookup_targets.get(key).copied().unwrap_or_default();
+        let v = read_column_value(row, key, col.field_type, lookup_target)?;
         out.insert(key.to_string(), v);
     }
 
     Ok(out)
 }
 
-fn read_column_value(row: &PgRow, name: &str, ft: FieldType) -> Result<Value> {
+fn read_column_value(
+    row: &PgRow,
+    name: &str,
+    ft: FieldType,
+    lookup_target_strategy: IdStrategy,
+) -> Result<Value> {
     Ok(match ft {
         FieldType::Boolean => match row.try_get::<Option<bool>, _>(name).map_err(map_err)? {
             Some(b) => Value::Bool(b),
             None => Value::Null,
         },
-        FieldType::Number | FieldType::AutoIncrement | FieldType::Lookup => {
+        FieldType::Number | FieldType::AutoIncrement => {
             match row.try_get::<Option<i64>, _>(name).map_err(map_err)? {
                 Some(i) => Value::Number(Number::from(i)),
                 None => Value::Null,
+            }
+        }
+        FieldType::Lookup => match lookup_target_strategy {
+            IdStrategy::Bigserial => {
+                match row.try_get::<Option<i64>, _>(name).map_err(map_err)? {
+                    Some(i) => Value::Number(Number::from(i)),
+                    None => Value::Null,
+                }
+            }
+            IdStrategy::Uuid => {
+                match row.try_get::<Option<Uuid>, _>(name).map_err(map_err)? {
+                    Some(u) => Value::String(u.to_string()),
+                    None => Value::Null,
+                }
             }
         }
         FieldType::Decimal | FieldType::Currency | FieldType::Percent => {
@@ -338,7 +488,7 @@ mod tests {
     fn graphql_to_bind_int() {
         use async_graphql::Value;
         let v = Value::Number(serde_json::Number::from(42));
-        let b = graphql_value_to_bind(&v, FieldType::Number).unwrap();
+        let b = graphql_value_to_bind(&v, FieldType::Number, IdStrategy::default()).unwrap();
         match b.unwrap() {
             BindValue::Int(i) => assert_eq!(i, 42),
             _ => panic!("expected Int"),
@@ -349,7 +499,7 @@ mod tests {
     fn graphql_to_bind_string() {
         use async_graphql::Value;
         let v = Value::String("hi".into());
-        let b = graphql_value_to_bind(&v, FieldType::Text).unwrap();
+        let b = graphql_value_to_bind(&v, FieldType::Text, IdStrategy::default()).unwrap();
         match b.unwrap() {
             BindValue::Text(s) => assert_eq!(s, "hi"),
             _ => panic!("expected Text"),
@@ -359,7 +509,52 @@ mod tests {
     #[test]
     fn null_returns_none() {
         use async_graphql::Value;
-        let b = graphql_value_to_bind(&Value::Null, FieldType::Text).unwrap();
+        let b = graphql_value_to_bind(&Value::Null, FieldType::Text, IdStrategy::default()).unwrap();
         assert!(b.is_none());
+    }
+
+    #[test]
+    fn graphql_to_bind_lookup_uuid_target() {
+        use async_graphql::Value;
+        let v = Value::String("550e8400-e29b-41d4-a716-446655440000".into());
+        let b = graphql_value_to_bind(&v, FieldType::Lookup, IdStrategy::Uuid).unwrap();
+        match b.unwrap() {
+            BindValue::Uuid(_) => {}
+            other => panic!("expected Uuid bind, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn graphql_to_bind_lookup_bigserial_target() {
+        use async_graphql::Value;
+        let v = Value::Number(serde_json::Number::from(7));
+        let b = graphql_value_to_bind(&v, FieldType::Lookup, IdStrategy::Bigserial).unwrap();
+        match b.unwrap() {
+            BindValue::Int(i) => assert_eq!(i, 7),
+            _ => panic!("expected Int"),
+        }
+    }
+
+    #[test]
+    fn id_value_uuid_round_trip() {
+        use async_graphql::Value;
+        let s = "550e8400-e29b-41d4-a716-446655440000";
+        let v = Value::String(s.into());
+        let id = IdValue::from_gql(&v, IdStrategy::Uuid).unwrap();
+        match id {
+            IdValue::Uuid(u) => assert_eq!(u.to_string(), s),
+            _ => panic!("expected Uuid id"),
+        }
+    }
+
+    #[test]
+    fn id_value_int_round_trip() {
+        use async_graphql::Value;
+        let v = Value::Number(serde_json::Number::from(42));
+        let id = IdValue::from_gql(&v, IdStrategy::Bigserial).unwrap();
+        match id {
+            IdValue::Int(i) => assert_eq!(i, 42),
+            _ => panic!("expected Int id"),
+        }
     }
 }

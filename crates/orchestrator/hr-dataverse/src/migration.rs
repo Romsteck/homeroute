@@ -9,7 +9,9 @@
 //! provisioning time (see [`crate::engine::INIT_METADATA_SQL`]), and a
 //! per-table `BEFORE UPDATE` trigger fires it.
 
-use crate::schema::{ColumnDefinition, FieldType, RelationDefinition, TableDefinition};
+use crate::schema::{
+    ColumnDefinition, DatabaseSchema, FieldType, IdStrategy, RelationDefinition, TableDefinition,
+};
 
 /// Quote a Postgres identifier with double quotes, escaping internal quotes.
 ///
@@ -20,8 +22,18 @@ pub fn quote_ident(name: &str) -> String {
 }
 
 /// Build the column-fragment of a CREATE TABLE / ALTER TABLE ADD COLUMN.
-fn column_fragment(col: &ColumnDefinition) -> String {
-    let mut frag = format!("{} {}", quote_ident(&col.name), col.field_type.pg_type());
+///
+/// `lookup_target_strategy` is the [`IdStrategy`] of the table this column
+/// references, when [`ColumnDefinition::field_type`] is [`FieldType::Lookup`].
+/// It dictates whether the FK column is BIGINT (target=Bigserial) or UUID
+/// (target=Uuid). For non-Lookup columns this argument is ignored.
+fn column_fragment(col: &ColumnDefinition, lookup_target_strategy: IdStrategy) -> String {
+    let pg_type = if col.field_type == FieldType::Lookup {
+        lookup_target_strategy.pg_fk_type()
+    } else {
+        col.field_type.pg_type()
+    };
+    let mut frag = format!("{} {}", quote_ident(&col.name), pg_type);
 
     if col.field_type == FieldType::Formula {
         // GENERATED ALWAYS AS (...) STORED. The user-provided expression is
@@ -65,20 +77,56 @@ fn column_fragment(col: &ColumnDefinition) -> String {
 
 /// Generate `CREATE TABLE` for a user table (without FK constraints — those
 /// are applied via [`add_foreign_key_sql`] after every Lookup column exists).
-pub fn create_table_sql(def: &TableDefinition) -> String {
+///
+/// `schema` is the existing schema (used to resolve Lookup columns' target
+/// `id_strategy` so the FK column type matches the target's `id`).
+pub fn create_table_sql(def: &TableDefinition, schema: &DatabaseSchema) -> String {
+    let id_line = format!(
+        "\"id\" {}{} PRIMARY KEY",
+        def.id_strategy.pg_id_type(),
+        def.id_strategy.id_default_clause(),
+    );
     let mut cols: Vec<String> = vec![
-        "\"id\" BIGSERIAL PRIMARY KEY".into(),
+        id_line,
         "\"created_at\" TIMESTAMPTZ NOT NULL DEFAULT now()".into(),
         "\"updated_at\" TIMESTAMPTZ NOT NULL DEFAULT now()".into(),
     ];
     for col in &def.columns {
-        cols.push(column_fragment(col));
+        cols.push(column_fragment(col, lookup_strategy_for(col, def, schema)));
     }
     format!(
         "CREATE TABLE {} (\n  {}\n);",
         quote_ident(&def.name),
         cols.join(",\n  ")
     )
+}
+
+/// Resolve the [`IdStrategy`] of a Lookup column's target table. Returns
+/// the default ([`IdStrategy::Bigserial`]) when the column isn't a Lookup
+/// or when the target can't be resolved (caller validates target existence).
+///
+/// Allows self-FKs (target == def.name) — for a brand-new table being
+/// created, its strategy isn't in `schema` yet, so we read it from `def`.
+pub(crate) fn lookup_strategy_for(
+    col: &ColumnDefinition,
+    def: &TableDefinition,
+    schema: &DatabaseSchema,
+) -> IdStrategy {
+    if col.field_type != FieldType::Lookup {
+        return IdStrategy::default();
+    }
+    let Some(target) = col.lookup_target.as_deref() else {
+        return IdStrategy::default();
+    };
+    if target == def.name {
+        return def.id_strategy;
+    }
+    schema
+        .tables
+        .iter()
+        .find(|t| t.name == target)
+        .map(|t| t.id_strategy)
+        .unwrap_or_default()
 }
 
 /// Generate the `BEFORE UPDATE` trigger that keeps `updated_at` fresh.
@@ -96,11 +144,18 @@ pub fn drop_table_sql(table: &str) -> String {
     format!("DROP TABLE IF EXISTS {} CASCADE;", quote_ident(table))
 }
 
-pub fn add_column_sql(table: &str, col: &ColumnDefinition) -> String {
+/// Generate `ALTER TABLE … ADD COLUMN`. `lookup_target_strategy` is consulted
+/// only when the column is a Lookup (to pick the FK column type matching the
+/// target's `id`). For non-Lookup columns its value is irrelevant.
+pub fn add_column_sql(
+    table: &str,
+    col: &ColumnDefinition,
+    lookup_target_strategy: IdStrategy,
+) -> String {
     format!(
         "ALTER TABLE {} ADD COLUMN {};",
         quote_ident(table),
-        column_fragment(col)
+        column_fragment(col, lookup_target_strategy)
     )
 }
 
@@ -141,9 +196,14 @@ mod tests {
             slug: name.to_string(),
             columns: cols,
             description: None,
+            id_strategy: IdStrategy::Bigserial,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    fn empty_schema() -> DatabaseSchema {
+        DatabaseSchema::default()
     }
 
     fn col(name: &str, ty: FieldType) -> ColumnDefinition {
@@ -162,11 +222,74 @@ mod tests {
 
     #[test]
     fn create_table_includes_implicit_columns() {
-        let sql = create_table_sql(&def_table("contacts", vec![col("email", FieldType::Email)]));
+        let sql = create_table_sql(
+            &def_table("contacts", vec![col("email", FieldType::Email)]),
+            &empty_schema(),
+        );
         assert!(sql.contains("\"id\" BIGSERIAL PRIMARY KEY"));
         assert!(sql.contains("\"created_at\" TIMESTAMPTZ"));
         assert!(sql.contains("\"updated_at\" TIMESTAMPTZ"));
         assert!(sql.contains("\"email\" TEXT"));
+    }
+
+    #[test]
+    fn create_table_uuid_strategy_emits_uuid_pk() {
+        let mut def = def_table("files", vec![col("name", FieldType::Text)]);
+        def.id_strategy = IdStrategy::Uuid;
+        let sql = create_table_sql(&def, &empty_schema());
+        assert!(sql.contains("\"id\" UUID DEFAULT gen_random_uuid() PRIMARY KEY"));
+    }
+
+    #[test]
+    fn lookup_column_inherits_target_strategy_uuid() {
+        // Target table 'folders' uses UUID PKs; a Lookup pointing to it
+        // must declare its FK column as UUID, not BIGINT.
+        let folders = TableDefinition {
+            name: "folders".into(),
+            slug: "folders".into(),
+            columns: vec![],
+            description: None,
+            id_strategy: IdStrategy::Uuid,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let schema = DatabaseSchema {
+            tables: vec![folders],
+            relations: vec![],
+            version: 1,
+            updated_at: None,
+        };
+        let mut fk_col = col("folder_id", FieldType::Lookup);
+        fk_col.lookup_target = Some("folders".into());
+        let mut def = def_table("files", vec![fk_col]);
+        def.id_strategy = IdStrategy::Uuid;
+        let sql = create_table_sql(&def, &schema);
+        assert!(sql.contains("\"folder_id\" UUID"), "FK should be UUID, got: {}", sql);
+        assert!(!sql.contains("\"folder_id\" BIGINT"));
+    }
+
+    #[test]
+    fn lookup_column_default_target_is_bigint() {
+        let companies = TableDefinition {
+            name: "companies".into(),
+            slug: "companies".into(),
+            columns: vec![],
+            description: None,
+            id_strategy: IdStrategy::Bigserial,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let schema = DatabaseSchema {
+            tables: vec![companies],
+            relations: vec![],
+            version: 1,
+            updated_at: None,
+        };
+        let mut fk_col = col("company_id", FieldType::Lookup);
+        fk_col.lookup_target = Some("companies".into());
+        let def = def_table("contacts", vec![fk_col]);
+        let sql = create_table_sql(&def, &schema);
+        assert!(sql.contains("\"company_id\" BIGINT"));
     }
 
     #[test]
@@ -176,7 +299,7 @@ mod tests {
         // column; enforcement happens at the application layer.
         let mut c = col("status", FieldType::Choice);
         c.choices = vec!["open".into(), "closed".into()];
-        let sql = create_table_sql(&def_table("tickets", vec![c]));
+        let sql = create_table_sql(&def_table("tickets", vec![c]), &empty_schema());
         assert!(!sql.contains("CHECK"));
         assert!(sql.contains("\"status\" TEXT"));
     }
@@ -185,7 +308,7 @@ mod tests {
     fn formula_emits_generated_clause() {
         let mut c = col("full_name", FieldType::Formula);
         c.formula_expression = Some("first_name || ' ' || last_name".into());
-        let sql = create_table_sql(&def_table("people", vec![c]));
+        let sql = create_table_sql(&def_table("people", vec![c]), &empty_schema());
         assert!(sql.contains("GENERATED ALWAYS AS (first_name || ' ' || last_name) STORED"));
     }
 
@@ -213,7 +336,10 @@ mod tests {
 
     #[test]
     fn multichoice_uses_array() {
-        let sql = create_table_sql(&def_table("posts", vec![col("tags", FieldType::MultiChoice)]));
+        let sql = create_table_sql(
+            &def_table("posts", vec![col("tags", FieldType::MultiChoice)]),
+            &empty_schema(),
+        );
         assert!(sql.contains("\"tags\" TEXT[]"));
     }
 }

@@ -58,7 +58,7 @@ pub use crate::provisioning::{
     ProvisioningConfig, ProvisioningResult, db_name_for, role_name_for,
 };
 pub use crate::schema::{
-    CascadeAction, CascadeRules, ColumnDefinition, DatabaseSchema, FieldType,
+    CascadeAction, CascadeRules, ColumnDefinition, DatabaseSchema, FieldType, IdStrategy,
     RelationDefinition, RelationType, TableDefinition,
 };
 pub use crate::validation::ValidationError;
