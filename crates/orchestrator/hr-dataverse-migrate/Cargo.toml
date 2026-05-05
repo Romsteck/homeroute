@@ -1,0 +1,26 @@
+[package]
+name = "hr-dataverse-migrate"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hr-dataverse-migrate"
+path = "src/main.rs"
+
+[dependencies]
+hr-db = { workspace = true }
+hr-dataverse = { workspace = true }
+
+# Postgres driver — same shim convention as hr-dataverse
+sqlx-core = { workspace = true }
+sqlx-postgres = { workspace = true }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+rusqlite = { workspace = true }

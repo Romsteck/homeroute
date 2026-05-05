@@ -24,6 +24,7 @@ members = [
     "orchestrator/hr-git",
     "orchestrator/hr-db",
     "orchestrator/hr-dataverse",
+    "orchestrator/hr-dataverse-migrate",
     "orchestrator/hr-apps",
     # api (4000)
     "api/homeroute",
