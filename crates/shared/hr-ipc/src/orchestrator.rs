@@ -330,6 +330,18 @@ pub enum OrchestratorRequest {
     AppDbMigrate {
         slug: String,
     },
+    /// Finalise the migration: from `data-migrated`, flip to
+    /// `postgres-dataverse` and restart. Caller's responsibility to
+    /// have refactored the source code first.
+    AppDbCommitMigration {
+        slug: String,
+    },
+    /// Roll back from `data-migrated` to `legacy-sqlite`. Drops the
+    /// PG database, removes `DATABASE_URL` from .env, restarts. The
+    /// legacy `db.sqlite` is preserved.
+    AppDbRollbackMigration {
+        slug: String,
+    },
 
     // ── Per-app todos (JSON-backed, live via app_todos event) ─────
     AppTodosList {

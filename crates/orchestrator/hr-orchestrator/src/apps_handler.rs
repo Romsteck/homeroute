@@ -1218,6 +1218,98 @@ impl AppsContext {
         }))
     }
 
+    /// Finalise the migration: from `DataMigrated`, flip to
+    /// `PostgresDataverse` and restart the app. The rule `db.md`
+    /// regenerates to the terminal state (post-migration cleanup
+    /// notes). Caller is expected to have refactored the source code
+    /// to use `DATABASE_URL` first — otherwise the app's binary will
+    /// still hit `db.sqlite`, which is harmless but defeats the
+    /// purpose.
+    pub async fn db_commit_migration(&self, slug: String) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        let mut app = match self.supervisor.registry.get(&slug).await {
+            Some(a) => a,
+            None => return IpcResponse::err(format!("app not found: {slug}")),
+        };
+        if !matches!(app.db_backend, DbBackend::DataMigrated) {
+            return IpcResponse::err(format!(
+                "db_commit_migration requires backend=data-migrated, current is {:?}",
+                app.db_backend
+            ));
+        }
+        app.db_backend = DbBackend::PostgresDataverse;
+        if let Err(e) = self.supervisor.registry.upsert(app.clone()).await {
+            return IpcResponse::err(format!("update apps.json: {e}"));
+        }
+        let _ = self.regenerate_context(slug.clone()).await;
+        if let Err(e) = self.supervisor.restart(&slug).await {
+            warn!(slug = %slug, error = %e, "post-commit restart failed");
+        }
+        info!(slug = %slug, "db.commit_migration done — app now on postgres-dataverse");
+        IpcResponse::ok_data(serde_json::json!({
+            "slug": slug,
+            "db_backend": "postgres-dataverse",
+            "next_step": "Read the new src/.claude/rules/db.md — it now describes the terminal state \
+                         and points out leftover SQLite references to clean up.",
+        }))
+    }
+
+    /// Roll back a `DataMigrated` app to `LegacySqlite`. Drops the
+    /// per-app PG database, removes `DATABASE_URL` from `.env`, flips
+    /// the flag, regenerates context, restarts. The legacy `db.sqlite`
+    /// is **not** touched — it has been the source of truth all along.
+    ///
+    /// Refuses to roll back from `PostgresDataverse` because by then
+    /// the runtime depends on PG and SQLite is stale: a rollback at
+    /// that point would lose data. Operator must restore from a PG
+    /// backup or sync deltas back to SQLite by hand first.
+    pub async fn db_rollback_migration(&self, slug: String) -> IpcResponse {
+        if !valid_slug(&slug) {
+            return IpcResponse::err("invalid slug");
+        }
+        let mut app = match self.supervisor.registry.get(&slug).await {
+            Some(a) => a,
+            None => return IpcResponse::err(format!("app not found: {slug}")),
+        };
+        if !matches!(app.db_backend, DbBackend::DataMigrated) {
+            return IpcResponse::err(format!(
+                "db_rollback_migration only safe from backend=data-migrated, current is {:?}. \
+                 If you're on postgres-dataverse and really want to revert, you need to sync \
+                 PG → SQLite manually first.",
+                app.db_backend
+            ));
+        }
+
+        if let Some(mgr) = &self.dataverse_manager {
+            if let Err(e) = mgr.drop_app(&slug).await {
+                warn!(slug = %slug, error = %e, "drop_app failed (continuing rollback)");
+            }
+        }
+
+        // Strip DATABASE_URL from .env
+        if let Err(e) = remove_env_var(&app.env_file(), "DATABASE_URL").await {
+            warn!(slug = %slug, error = %e, "removing DATABASE_URL from .env failed");
+        }
+
+        app.db_backend = DbBackend::LegacySqlite;
+        if let Err(e) = self.supervisor.registry.upsert(app.clone()).await {
+            return IpcResponse::err(format!("update apps.json: {e}"));
+        }
+        let _ = self.regenerate_context(slug.clone()).await;
+        if let Err(e) = self.supervisor.restart(&slug).await {
+            warn!(slug = %slug, error = %e, "post-rollback restart failed");
+        }
+        info!(slug = %slug, "db.rollback_migration done — app back on legacy-sqlite");
+        IpcResponse::ok_data(serde_json::json!({
+            "slug": slug,
+            "db_backend": "legacy-sqlite",
+            "next_step": "PG database dropped, DATABASE_URL removed, app restarted on SQLite. \
+                         The legacy db.sqlite was never touched.",
+        }))
+    }
+
     pub async fn db_introspect(&self, slug: String) -> IpcResponse {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
@@ -2369,6 +2461,30 @@ pub fn app_to_dto(app: &Application) -> ApplicationDto {
         created_at: app.created_at.to_rfc3339(),
         updated_at: app.updated_at.to_rfc3339(),
     }
+}
+
+/// Remove any line matching `KEY=…` (commented-out or not) from a
+/// `.env` file. No-op if the file or the key doesn't exist.
+async fn remove_env_var(path: &std::path::Path, key: &str) -> std::io::Result<()> {
+    let existing = match tokio::fs::read_to_string(path).await {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let prefix = format!("{}=", key);
+    let commented = format!("#{}=", key);
+    let kept: Vec<&str> = existing
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !t.starts_with(&prefix) && !t.starts_with(&commented)
+        })
+        .collect();
+    let mut out = kept.join("\n");
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    tokio::fs::write(path, out).await
 }
 
 /// Set / replace a single `KEY=value` line in a `.env` file. Idempotent:
