@@ -259,6 +259,13 @@ fn build_where_input(table: &TableDefinition) -> InputObject {
         .field(InputValue::new("_or", TypeRef::named_nn_list(&name)))
         .field(InputValue::new("_not", TypeRef::named(&name)));
 
+    // Implicit columns are first-class filterable. Every row has them
+    // and every UI eventually wants to filter on `id` or sort by date.
+    io = io
+        .field(InputValue::new("id", TypeRef::named(INT_FILTER)))
+        .field(InputValue::new("createdAt", TypeRef::named(STRING_FILTER)))
+        .field(InputValue::new("updatedAt", TypeRef::named(STRING_FILTER)));
+
     for col in &table.columns {
         // V1: skip MultiChoice/Json from filtering surface.
         if matches!(col.field_type, FieldType::MultiChoice | FieldType::Json) {
@@ -794,13 +801,24 @@ fn build_order_by(
             return Err(async_graphql::Error::new("orderBy items must be objects"));
         };
         for (key, v) in m.iter() {
-            let GqlValue::Enum(dir) = v else {
-                return Err(async_graphql::Error::new("orderBy direction must be ASC/DESC"));
+            // Accept both the GraphQL enum form (`ASC`/`DESC`) and a
+            // String fallback — JSON variables encode enums as strings,
+            // and the dynamic schema otherwise refuses them.
+            let dir_raw: &str = match v {
+                GqlValue::Enum(s) => s.as_str(),
+                GqlValue::String(s) => s.as_str(),
+                _ => return Err(async_graphql::Error::new(
+                    "orderBy direction must be ASC or DESC",
+                )),
             };
-            let dir = if dir.as_str().eq_ignore_ascii_case("ASC") {
+            let dir = if dir_raw.eq_ignore_ascii_case("ASC") {
                 "ASC"
-            } else {
+            } else if dir_raw.eq_ignore_ascii_case("DESC") {
                 "DESC"
+            } else {
+                return Err(async_graphql::Error::new(format!(
+                    "orderBy direction must be ASC or DESC, got '{}'", dir_raw
+                )));
             };
             // Resolve the key (camelCase) back to a Postgres column name.
             let key_str = key.as_str();

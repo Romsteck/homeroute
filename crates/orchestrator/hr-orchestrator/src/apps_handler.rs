@@ -850,10 +850,21 @@ impl AppsContext {
             return IpcResponse::err("invalid slug");
         }
         if matches!(self.db_backend_for(&slug).await, DbBackend::PostgresDataverse) {
-            return IpcResponse::err(
-                "the legacy filter shape is not supported on postgres-dataverse — \
-                 use db.graphql with a Hasura-style `where` argument, or db.find",
-            );
+            // Translate the legacy {column, op, value} filter shape to a
+            // GraphQL query against the dataverse-managed Postgres. Same
+            // wire response shape (columns / rows / total) so DbExplorer
+            // doesn't need to know which backend it's hitting.
+            return query_rows_via_graphql(
+                self.dataverse_manager.as_ref(),
+                &slug,
+                &table,
+                &filters_json,
+                limit,
+                offset,
+                order_by.as_deref(),
+                order_desc.unwrap_or(false),
+            )
+            .await;
         }
 
         // Parse filters from JSON
@@ -2523,6 +2534,209 @@ async fn upsert_env_var(path: &std::path::Path, key: &str, value: &str) -> std::
     }
     out.push_str(&format!("{}={}\n", key, value));
     tokio::fs::write(path, out).await
+}
+
+/// Translate a legacy `db.tables/{t}/rows` request into a GraphQL
+/// query against the per-app dataverse Postgres, then re-shape the
+/// response into the same `AppDbQueryResult { columns, rows, total }`
+/// envelope so DbExplorer doesn't need a frontend branch.
+async fn query_rows_via_graphql(
+    manager: Option<&Arc<hr_dataverse::DataverseManager>>,
+    slug: &str,
+    table: &str,
+    legacy_filters: &[serde_json::Value],
+    limit: Option<u64>,
+    offset: Option<u64>,
+    order_by: Option<&str>,
+    order_desc: bool,
+) -> IpcResponse {
+    use hr_dataverse::graphql::naming;
+
+    let Some(mgr) = manager else {
+        return IpcResponse::err("postgres-dataverse backend not configured");
+    };
+    let engine = match mgr.engine_for(slug).await {
+        Ok(e) => e,
+        Err(e) => return IpcResponse::err(format!("dataverse engine: {e}")),
+    };
+    let snapshot = match engine.get_schema().await {
+        Ok(s) => s,
+        Err(e) => return IpcResponse::err(format!("get_schema: {e}")),
+    };
+    let Some(table_def) = snapshot.tables.iter().find(|t| t.name == table) else {
+        return IpcResponse::err(format!("table '{}' not found", table));
+    };
+
+    // Build the SELECT field list (camelCase) — every user column +
+    // implicit id/createdAt/updatedAt. Lookup columns currently
+    // surface as Int (the FK); object expansion is deferred (no
+    // DataLoader yet in the schema builder).
+    let mut gql_fields: Vec<String> =
+        vec!["id".into(), "createdAt".into(), "updatedAt".into()];
+    for c in &table_def.columns {
+        // Skip MultiChoice/Json from the projection only when they would
+        // conflict with our row-mapping; for V1 we include them since
+        // the GraphQL builder declares them.
+        gql_fields.push(naming::camel_case(&c.name));
+    }
+    let field_list = gql_fields.join(" ");
+
+    // Translate filters[] to a Hasura-style `where` JSON.
+    let where_value = translate_legacy_filters(legacy_filters);
+    let lim = limit.unwrap_or(100).min(1000);
+    let off = offset.unwrap_or(0);
+
+    // Build the GraphQL query string. Variables travel separately
+    // for the `where` (its shape depends on the table).
+    let table_field = naming::camel_case(&table_def.name);
+    let where_input = naming::input_where(&table_def.name);
+    let order_input = naming::input_order_by(&table_def.name);
+
+    let count_field = naming::field_count(&table_def.name);
+    let query = format!(
+        "query Rows($where: {where_input}, $orderBy: [{order_input}!], $limit: Int, $offset: Int) {{\n  \
+         {table_field}(where: $where, orderBy: $orderBy, limit: $limit, offset: $offset) {{ {field_list} }}\n  \
+         {count_field}(where: $where)\n}}",
+        where_input = where_input,
+        order_input = order_input,
+        table_field = table_field,
+        field_list = field_list,
+        count_field = count_field,
+    );
+
+    // Build orderBy variable.
+    let order_by_var = if let Some(col) = order_by {
+        let c_camel = naming::camel_case(col);
+        let dir = if order_desc { "DESC" } else { "ASC" };
+        serde_json::json!([{ c_camel: dir }])
+    } else {
+        serde_json::Value::Null
+    };
+
+    let variables = serde_json::json!({
+        "where": where_value,
+        "orderBy": if order_by.is_some() { order_by_var } else { serde_json::Value::Null },
+        "limit": lim,
+        "offset": off,
+    });
+
+    let response = match mgr
+        .graphql_execute(slug, &query, Some(variables), Some("Rows"))
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return IpcResponse::err(format!("graphql: {e}")),
+    };
+
+    // Parse `{ data: { <table>: [...rows], <table>Count: N }, errors: [...] }`
+    if let Some(errors) = response.get("errors") {
+        if let Some(arr) = errors.as_array() {
+            if !arr.is_empty() {
+                let msg = arr
+                    .iter()
+                    .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return IpcResponse::err(format!("graphql errors: {msg}"));
+            }
+        }
+    }
+    let data = match response.get("data") {
+        Some(d) => d,
+        None => return IpcResponse::err("graphql response missing data"),
+    };
+    let rows_camel = data.get(&table_field).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let total = data
+        .get(&count_field)
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| rows_camel.len() as i64);
+
+    // Convert each row's keys from camelCase → snake_case (the legacy
+    // wire shape DbExplorer expects).
+    let rows_snake: Vec<serde_json::Value> = rows_camel
+        .iter()
+        .map(|row| {
+            let Some(obj) = row.as_object() else { return row.clone(); };
+            let mut out = serde_json::Map::new();
+            for (k, v) in obj {
+                out.insert(naming::snake_case(k), v.clone());
+            }
+            serde_json::Value::Object(out)
+        })
+        .collect();
+
+    let columns: Vec<String> = if let Some(first) = rows_snake.first().and_then(|v| v.as_object()) {
+        first.keys().cloned().collect()
+    } else {
+        // Empty result — synthesise the column list from the schema
+        // so DbExplorer can render headers.
+        let mut c: Vec<String> = vec!["id".into(), "created_at".into(), "updated_at".into()];
+        for col in &table_def.columns {
+            c.push(col.name.clone());
+        }
+        c
+    };
+
+    IpcResponse::ok_data(AppDbQueryResult {
+        columns,
+        rows: rows_snake,
+        total: total.max(0) as u64,
+    })
+}
+
+/// Translate the legacy `[{column, op, value?}]` filter shape into the
+/// Hasura `{column: {_op: value}}` shape that the dataverse GraphQL
+/// builder expects. Multiple filters on the same column are AND-ed
+/// (same column → keys merge).
+fn translate_legacy_filters(legacy: &[serde_json::Value]) -> serde_json::Value {
+    use hr_dataverse::graphql::naming;
+    let mut out: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    for f in legacy {
+        let Some(col) = f.get("column").and_then(|v| v.as_str()) else { continue };
+        let Some(op) = f.get("op").and_then(|v| v.as_str()) else { continue };
+        let value = f.get("value").cloned();
+        let camel = naming::camel_case(col);
+
+        let entry = out
+            .entry(camel.clone())
+            .or_insert(serde_json::Value::Object(serde_json::Map::new()));
+        let map = entry.as_object_mut().expect("just inserted");
+
+        match op {
+            "eq" => {
+                map.insert("_eq".into(), value.unwrap_or(serde_json::Value::Null));
+            }
+            "ne" => {
+                map.insert("_ne".into(), value.unwrap_or(serde_json::Value::Null));
+            }
+            "gt" => {
+                map.insert("_gt".into(), value.unwrap_or(serde_json::Value::Null));
+            }
+            "gte" => {
+                map.insert("_gte".into(), value.unwrap_or(serde_json::Value::Null));
+            }
+            "lt" => {
+                map.insert("_lt".into(), value.unwrap_or(serde_json::Value::Null));
+            }
+            "lte" => {
+                map.insert("_lte".into(), value.unwrap_or(serde_json::Value::Null));
+            }
+            "like" => {
+                map.insert("_like".into(), value.unwrap_or(serde_json::Value::Null));
+            }
+            "in" => {
+                map.insert("_in".into(), value.unwrap_or(serde_json::Value::Null));
+            }
+            "is_null" => {
+                map.insert("_isNull".into(), serde_json::Value::Bool(true));
+            }
+            "is_not_null" => {
+                map.insert("_isNull".into(), serde_json::Value::Bool(false));
+            }
+            _ => {} // unknown op silently dropped (safe default)
+        }
+    }
+    serde_json::Value::Object(out)
 }
 
 fn db_backend_to_str(b: &DbBackend) -> &'static str {

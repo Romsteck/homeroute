@@ -13,6 +13,7 @@ import { Pagination } from '../components/db/Pagination';
 import { AddRowModal } from '../components/db/AddRowModal';
 import { DeleteConfirmModal } from '../components/db/DeleteConfirmModal';
 import { Download, Plus, Trash2, RefreshCw, Database, Loader2 } from 'lucide-react';
+import PageHeader from '../components/PageHeader';
 
 function unwrap(res) {
   const d = res.data;
@@ -340,7 +341,9 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
     : null;
 
   return (
-    <div className={`flex h-full overflow-hidden ${embedded ? '' : 'rounded border border-gray-700'}`}>
+    <>
+      {!embedded && <PageHeader title="Bases de données" icon={Database} />}
+      <div className={`flex h-full overflow-hidden ${embedded ? '' : 'rounded border border-gray-700'}`}>
       {/* Sidebar */}
       <TableSidebar
         appsWithTables={propAppSlug ? appsWithTables.filter(a => a.app.slug === propAppSlug) : appsWithTables}
@@ -507,6 +510,7 @@ export default function DbExplorer({ appSlug: propAppSlug, embedded }) {
         <DeleteConfirmModal count={selectedRows.size} onConfirm={handleDeleteSelected} onClose={() => setShowDeleteConfirm(false)} />
       )}
     </div>
+    </>
   );
 }
 

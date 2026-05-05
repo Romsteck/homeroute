@@ -100,7 +100,7 @@ fn compile_where(
                 let mut field_parts: Vec<String> = Vec::with_capacity(ops.len());
                 for (op_name, op_val) in ops.iter() {
                     field_parts.push(compile_operator(
-                        column,
+                        &column,
                         op_name.as_str(),
                         op_val,
                         builder,
@@ -253,22 +253,46 @@ fn array_op(
     Ok(sql)
 }
 
-fn resolve_column<'a>(table: &'a TableDefinition, name: &str) -> Result<&'a ColumnDefinition> {
-    if name == "id" || name == "created_at" || name == "updated_at" {
-        // Implicit columns: synthesise a stand-in ColumnDefinition for the
-        // operator compiler. We never persist this — it's borrow-only.
-        return Err(DataverseError::internal(format!(
-            "filtering on implicit column '{}' is not yet supported", name
-        )));
+/// Holder for the metadata `compile_operator` needs. We synthesise
+/// transient `ColumnDefinition`s for the implicit columns (`id`,
+/// `created_at`, `updated_at`) so they can be filtered like user
+/// columns without having to live in `_dv_columns`.
+fn resolve_column(table: &TableDefinition, name: &str) -> Result<ColumnDefinition> {
+    use crate::graphql::naming::snake_case;
+    use crate::schema::FieldType;
+
+    // Where-input field names are camelCase; the table's columns are
+    // snake_case in `_dv_columns`. Normalise.
+    let snake = snake_case(name);
+
+    match snake.as_str() {
+        "id" => Ok(synth_column("id", FieldType::Number)),
+        "created_at" => Ok(synth_column("created_at", FieldType::DateTime)),
+        "updated_at" => Ok(synth_column("updated_at", FieldType::DateTime)),
+        _ => table
+            .columns
+            .iter()
+            .find(|c| c.name == snake)
+            .cloned()
+            .ok_or_else(|| DataverseError::ColumnNotFound {
+                table: table.name.clone(),
+                column: name.to_string(),
+            }),
     }
-    table
-        .columns
-        .iter()
-        .find(|c| c.name == name)
-        .ok_or_else(|| DataverseError::ColumnNotFound {
-            table: table.name.clone(),
-            column: name.to_string(),
-        })
+}
+
+fn synth_column(name: &str, ft: crate::schema::FieldType) -> ColumnDefinition {
+    ColumnDefinition {
+        name: name.to_string(),
+        field_type: ft,
+        required: false,
+        unique: false,
+        default_value: None,
+        description: None,
+        choices: vec![],
+        formula_expression: None,
+        lookup_target: None,
+    }
 }
 
 #[cfg(test)]

@@ -241,10 +241,31 @@ fn read_column_value(row: &PgRow, name: &str, ft: FieldType) -> Result<Value> {
             }
         }
         FieldType::Text | FieldType::Email | FieldType::Url | FieldType::Phone
-        | FieldType::Choice | FieldType::Time | FieldType::Duration | FieldType::Formula
-        | FieldType::Date => {
+        | FieldType::Choice | FieldType::Formula => {
             match row.try_get::<Option<String>, _>(name).map_err(map_err)? {
                 Some(s) => Value::String(s),
+                None => Value::Null,
+            }
+        }
+        FieldType::Date => {
+            // PG `DATE` decodes to `chrono::NaiveDate` natively. We
+            // serialise as `YYYY-MM-DD` for JSON.
+            match row.try_get::<Option<NaiveDate>, _>(name).map_err(map_err)? {
+                Some(d) => Value::String(d.format("%Y-%m-%d").to_string()),
+                None => Value::Null,
+            }
+        }
+        FieldType::Time => {
+            match row.try_get::<Option<NaiveTime>, _>(name).map_err(map_err)? {
+                Some(t) => Value::String(t.format("%H:%M:%S%.f").to_string()),
+                None => Value::Null,
+            }
+        }
+        FieldType::Duration => {
+            // `INTERVAL` decoding is messy in sqlx; fallback to text
+            // representation when present.
+            match row.try_get::<Option<sqlx_postgres::types::PgInterval>, _>(name).map_err(map_err)? {
+                Some(i) => Value::String(format!("{}mo {}d {}us", i.months, i.days, i.microseconds)),
                 None => Value::Null,
             }
         }
@@ -292,11 +313,6 @@ pub fn select_fragment_for(col: &ColumnDefinition) -> String {
     }
 }
 
-/// Workaround for `chrono::NaiveDate`/`NaiveTime` ergonomics: forces the
-/// compiler to emit type-imports we use elsewhere in the crate. Otherwise
-/// the unused-import lint kicks in for files that don't touch them yet.
-#[allow(dead_code)]
-fn _force_chrono_types(_d: NaiveDate, _t: NaiveTime) {}
 
 #[cfg(test)]
 mod tests {
