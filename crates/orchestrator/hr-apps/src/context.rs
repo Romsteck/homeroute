@@ -905,28 +905,7 @@ fn render_app_info_md(
         Visibility::Private => "Private (HomeRoute auth required)",
     };
 
-    let db_section = match (app.has_db, db_tables) {
-        (true, Some(tables)) if !tables.is_empty() => {
-            let mut s = String::from("Managed SQLite database (Dataverse).\n\n**Tables :**\n");
-            for t in tables {
-                s.push_str(&format!("- `{}`\n", t));
-            }
-            s.push_str("\n- Path: `");
-            s.push_str(&app.db_path().display().to_string());
-            s.push_str("`\n");
-            s.push_str(
-                "- Utilise les tools MCP `db.*` — n'ouvre jamais le fichier `.db` directement.\n",
-            );
-            s
-        }
-        (true, _) => format!(
-            "Managed SQLite database (Dataverse, tables not yet inspected).\n\n\
-             - Path: `{}`\n\
-             - Utilise les tools MCP `db.*` — n'ouvre jamais le fichier `.db` directement.\n",
-            app.db_path().display(),
-        ),
-        (false, _) => "Pas de base de données configurée pour cette app.".to_string(),
-    };
+    let db_section = render_db_section(app, db_tables);
 
     let env_var_section = if app.env_vars.is_empty() {
         "Aucune variable d'environnement custom déclarée. `PORT` est injecté automatiquement.".to_string()
@@ -1427,6 +1406,60 @@ fn cleanup_legacy_parent_context(app_dir: &Path, slug: &str) {
 /// `AppRegenerateContext`. Switching `db_backend` flips the rule
 /// automatically — agents inside the app pick up the new instructions on
 /// the next context refresh.
+/// Backend-aware DB section in `app-info.md`. Tracks the same 3-state
+/// model as [`render_db_md`] so the headline description in the
+/// agent's "what is this app" rule stays consistent with the
+/// dedicated `db.md` rule.
+fn render_db_section(app: &crate::types::Application, db_tables: &Option<Vec<String>>) -> String {
+    use crate::types::DbBackend;
+    if !app.has_db {
+        return "Pas de base de données configurée pour cette app.".to_string();
+    }
+
+    let tables_block = match db_tables {
+        Some(tables) if !tables.is_empty() => {
+            let mut s = String::from("\n**Tables :**\n");
+            for t in tables {
+                s.push_str(&format!("- `{}`\n", t));
+            }
+            s
+        }
+        _ => String::new(),
+    };
+
+    match app.db_backend {
+        DbBackend::LegacySqlite => format!(
+            "Managed SQLite database (Dataverse legacy).\n\
+             {tables}\n\
+             - Path: `{path}`\n\
+             - Utilise les tools MCP `db.*` — n'ouvre jamais le fichier `.db` directement.\n\
+             - **Migration vers Postgres+GraphQL disponible** : appelle `db_migrate` quand tu es prêt (voir `.claude/rules/db.md`).\n",
+            tables = tables_block,
+            path = app.db_path().display(),
+        ),
+        DbBackend::DataMigrated => format!(
+            "🟡 **Migration en cours** : data dans Postgres `app_{slug}`, runtime encore sur SQLite.\n\
+             {tables}\n\
+             - `DATABASE_URL` injecté dans ton env runtime (Postgres dédié)\n\
+             - SQLite (`{path}`) est encore la source de vérité pour le runtime\n\
+             - Refactor du code source en cours — voir `.claude/rules/db.md` pour le playbook\n",
+            slug = app.slug,
+            tables = tables_block,
+            path = app.db_path().display(),
+        ),
+        DbBackend::PostgresDataverse => format!(
+            "PostgreSQL Dataverse (`app_{slug}`).\n\
+             {tables}\n\
+             - Connexion : `DATABASE_URL` injecté dans ton env runtime\n\
+             - Tools MCP : `db_graphql` (queries/mutations), `db_introspect` (SDL)\n\
+             - Voir `.claude/rules/db.md` pour les règles d'usage et le nettoyage des restes SQLite.\n\
+             - Le fichier `db.sqlite` reste sur disque comme fallback froid (le runtime ne le lit plus).\n",
+            slug = app.slug,
+            tables = tables_block,
+        ),
+    }
+}
+
 fn render_db_md(app: &crate::types::Application) -> String {
     use crate::types::DbBackend;
     match app.db_backend {
