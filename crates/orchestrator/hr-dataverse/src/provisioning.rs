@@ -74,7 +74,7 @@ pub async fn app_exists(admin: &PgPool, slug: &str) -> Result<bool> {
 pub async fn provision_app(
     admin: &PgPool,
     config: &ProvisioningConfig,
-    admin_dsn: &str,
+    _admin_dsn: &str,
     slug: &str,
 ) -> Result<ProvisioningResult> {
     crate::validation::validate_user_identifier(slug).map_err(|e| {
@@ -104,6 +104,23 @@ pub async fn provision_app(
     sqlx::query(&role_sql).execute(admin).await.map_err(|e| {
         DataverseError::provisioning(slug, format!("CREATE ROLE: {}", e))
     })?;
+
+    // 1.b. Grant the new role to the admin so we can `CREATE DATABASE …
+    //      OWNER …` with it. Postgres rejects ownership transfers to a
+    //      role the creator isn't a member of (unless superuser).
+    let grant_membership_sql = format!(
+        "GRANT {role} TO CURRENT_USER",
+        role = quote_ident(&role_name),
+    );
+    if let Err(e) = sqlx::query(&grant_membership_sql).execute(admin).await {
+        let _ = sqlx::query(&format!("DROP ROLE IF EXISTS {}", quote_ident(&role_name)))
+            .execute(admin)
+            .await;
+        return Err(DataverseError::provisioning(
+            slug,
+            format!("GRANT membership: {}", e),
+        ));
+    }
 
     // 2. CREATE DATABASE owned by the new role.
     let db_sql = format!(
@@ -135,35 +152,6 @@ pub async fn provision_app(
     .await
     .map_err(|e| DataverseError::provisioning(slug, format!("GRANT: {}", e)))?;
 
-    // 4. Connect to the freshly created DB as admin and run INIT_METADATA_SQL.
-    let new_db_dsn = swap_database_in_dsn(admin_dsn, &db_name);
-    let init_pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&new_db_dsn)
-        .await
-        .map_err(|e| DataverseError::provisioning(slug, format!("connect new DB: {}", e)))?;
-
-    sqlx::raw_sql(INIT_METADATA_SQL)
-        .execute(&init_pool)
-        .await
-        .map_err(|e| DataverseError::provisioning(slug, format!("init _dv_*: {}", e)))?;
-
-    // Grant table-level privileges on the new metadata tables to the app role.
-    let grants = [
-        "GRANT USAGE ON SCHEMA public TO ",
-        "GRANT ALL ON ALL TABLES IN SCHEMA public TO ",
-        "GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO ",
-        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO ",
-        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO ",
-    ];
-    for prefix in grants {
-        let stmt = format!("{}{}", prefix, quote_ident(&role_name));
-        if let Err(e) = sqlx::query(&stmt).execute(&init_pool).await {
-            tracing::warn!(slug, error = %e, "grant statement failed: {}", stmt);
-        }
-    }
-    init_pool.close().await;
-
     let dsn = format!(
         "postgres://{role}:{pwd}@{host}:{port}/{db}",
         role = url_encode_component(&role_name),
@@ -172,6 +160,23 @@ pub async fn provision_app(
         port = config.port,
         db = url_encode_component(&db_name),
     );
+
+    // 4. Connect to the freshly created DB **as the app role** (not admin)
+    //    to run INIT_METADATA_SQL — that way `_dv_*` tables, indexes and
+    //    the `_dv_set_updated_at` function are owned by the app role,
+    //    which avoids "must be owner of …" errors when the engine later
+    //    re-runs init_metadata defensively.
+    let init_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&dsn)
+        .await
+        .map_err(|e| DataverseError::provisioning(slug, format!("connect new DB as app role: {}", e)))?;
+
+    sqlx::raw_sql(INIT_METADATA_SQL)
+        .execute(&init_pool)
+        .await
+        .map_err(|e| DataverseError::provisioning(slug, format!("init _dv_*: {}", e)))?;
+    init_pool.close().await;
 
     Ok(ProvisioningResult {
         slug: slug.to_string(),
@@ -237,8 +242,10 @@ fn escape_pg_string(s: &str) -> String {
 
 /// Replace the database segment of a `postgres://…/db` DSN.
 ///
-/// This is intentionally simple: it splits on the last `/` after the
-/// authority and replaces what follows. Query strings (`?…`) are preserved.
+/// Currently unused — provisioning builds the per-app DSN from
+/// (host, port, role, password, db) directly — but kept for future
+/// callers that need to derive a sibling DSN from the admin one.
+#[allow(dead_code)]
 fn swap_database_in_dsn(dsn: &str, new_db: &str) -> String {
     // Find the path part: scheme://authority/path[?query]
     let scheme_end = dsn.find("://").map(|i| i + 3).unwrap_or(0);
