@@ -373,7 +373,11 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Refresh per-app context for every existing app at boot ──────
     // Non-blocking: propagates new context files (e.g. app-build.md) to
-    // apps that existed before the orchestrator was upgraded.
+    // apps that existed before the orchestrator was upgraded. Apps with
+    // `sources_on: cloudmaster` get their rules pushed via SSH so the
+    // agent in code-server (which reads from CloudMaster's filesystem)
+    // sees the latest version on its next session — without a manual
+    // `app.regenerate_context` call per app.
     {
         let registry_for_ctx = app_registry.clone();
         let ctx = context_generator.clone();
@@ -381,7 +385,16 @@ async fn main() -> anyhow::Result<()> {
             let apps = registry_for_ctx.list().await;
             info!(count = apps.len(), "boot: regenerating per-app context");
             for app in &apps {
-                if let Err(e) = ctx.generate_for_app(app, &apps, None) {
+                let res = match app.sources_on {
+                    hr_apps::types::SourcesLocation::Medion => {
+                        ctx.generate_for_app(app, &apps, None)
+                    }
+                    hr_apps::types::SourcesLocation::CloudMaster => {
+                        apps_handler::regen_context_on_cloudmaster(app, &ctx, &apps, None)
+                            .await
+                    }
+                };
+                if let Err(e) = res {
                     warn!(slug = %app.slug, error = %e, "boot: context regen failed");
                 }
             }

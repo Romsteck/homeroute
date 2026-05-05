@@ -2939,7 +2939,7 @@ pub(crate) async fn bind_git_remote_on_cloudmaster(
 /// rsync UP vers CloudMaster sans toucher au reste du src/. On utilise
 /// `--include` pour ne pousser que les fichiers de contexte.
 #[tracing::instrument(skip(ctx_generator, all_apps, db_tables), fields(slug = %app.slug))]
-async fn regen_context_on_cloudmaster(
+pub async fn regen_context_on_cloudmaster(
     app: &Application,
     ctx_generator: &ContextGenerator,
     all_apps: &[Application],
