@@ -1106,16 +1106,10 @@ impl AppsContext {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
         }
-        // Available as soon as data has been migrated (PG copy exists),
-        // so the agent can test its refactored code against PG while the
-        // runtime still uses SQLite.
-        let backend = self.db_backend_for(&slug).await;
-        if !matches!(backend, DbBackend::DataMigrated | DbBackend::PostgresDataverse) {
-            return IpcResponse::err(
-                "db.graphql requires the data-migrated or postgres-dataverse backend — \
-                 call db.migrate first to populate Postgres",
-            );
-        }
+        // All apps with a DB are on postgres-dataverse since the
+        // legacy SQLite stack was retired. The backend check is now a
+        // no-op (kept as a defensive matches!() in case the enum is
+        // ever extended again).
         let Some(mgr) = self.dataverse_manager.as_ref() else {
             return IpcResponse::err("postgres-dataverse backend is not configured");
         };
@@ -1130,235 +1124,9 @@ impl AppsContext {
 
     /// Return the SDL of the app's GraphQL schema. Useful for agents that
     /// need the data model in a single shot.
-    /// Run the full SQLite → Postgres migration for an app and flip
-    /// its backend to `DataMigrated`. Idempotent: if the app is
-    /// already `DataMigrated` (or its PG database already exists) the
-    /// tool adopts the existing PG state and refreshes secrets.
-    ///
-    /// Side-effects on success:
-    /// - PG database `app_{slug}` populated (or adopted)
-    /// - secret persisted to `dataverse-secrets.json`
-    /// - `DATABASE_URL` written to `<apps_root>/{slug}/.env`
-    /// - `apps.json::{slug}.db_backend` flipped to `data-migrated`
-    /// - per-app context regenerated (and pushed to CloudMaster for
-    ///   `sources_on=cloudmaster` apps) — the agent reads the new
-    ///   `db.md` rule on next session
-    /// - app restarted so `DATABASE_URL` is picked up by the runtime
-    pub async fn db_migrate(&self, slug: String) -> IpcResponse {
-        if !valid_slug(&slug) {
-            return IpcResponse::err("invalid slug");
-        }
-        let mut app = match self.supervisor.registry.get(&slug).await {
-            Some(a) => a,
-            None => return IpcResponse::err(format!("app not found: {slug}")),
-        };
-        if !app.has_db {
-            return IpcResponse::err(format!("app '{slug}' is flagged has_db=false — nothing to migrate"));
-        }
-        if matches!(app.db_backend, DbBackend::PostgresDataverse) {
-            return IpcResponse::err(
-                "app is already on postgres-dataverse — migration is complete; nothing to do",
-            );
-        }
-        let mgr = match self.dataverse_manager.as_ref() {
-            Some(m) => m.clone(),
-            None => {
-                return IpcResponse::err(
-                    "postgres-dataverse backend is not configured on this orchestrator \
-                     (set HR_DATAVERSE_ADMIN_URL and restart)",
-                );
-            }
-        };
-
-        let sqlite_path = app.db_path();
-        info!(slug = %slug, source = %sqlite_path.display(), "db.migrate: starting");
-
-        let report = match hr_dataverse_migrate::migrate_with_manager(&mgr, &slug, &sqlite_path)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                error!(slug = %slug, error = %format!("{:#}", e), "db.migrate failed");
-                return IpcResponse::err(format!("migrate: {:#}", e));
-            }
-        };
-
-        // Write DATABASE_URL to the app's .env. Idempotent: any
-        // existing DATABASE_URL line is removed before appending.
-        if let Err(e) = upsert_env_var(&app.env_file(), "DATABASE_URL", &report.secret.dsn).await {
-            error!(slug = %slug, error = %e, "writing DATABASE_URL to .env failed");
-            return IpcResponse::err(format!("write .env: {e}"));
-        }
-
-        // Flip the backend flag (data-migrated state) + persist apps.json.
-        app.db_backend = DbBackend::DataMigrated;
-        if let Err(e) = self.supervisor.registry.upsert(app.clone()).await {
-            error!(slug = %slug, error = %e, "registry.upsert failed");
-            return IpcResponse::err(format!("update apps.json: {e}"));
-        }
-
-        // Regenerate per-app context so the agent reads the updated
-        // db.md (now describing the data-migrated state + refactor
-        // playbook). For sources_on=cloudmaster apps, this pushes the
-        // files to CloudMaster automatically.
-        let _ = self.regenerate_context(slug.clone()).await;
-
-        // Restart the app so the new .env (with DATABASE_URL) is
-        // picked up. The binary still reads SQLite — DATABASE_URL is
-        // just available in the env for the agent to consume during
-        // the refactor.
-        if let Err(e) = self.supervisor.restart(&slug).await {
-            warn!(slug = %slug, error = %e, "post-migrate restart failed (continuing)");
-        }
-
-        info!(
-            slug = %slug,
-            tables = report.copied.len(),
-            adopted = report.adopted_existing,
-            "db.migrate: complete"
-        );
-        IpcResponse::ok_data(serde_json::json!({
-            "slug": slug,
-            "adopted_existing": report.adopted_existing,
-            "tables": report.copied.iter().map(|(t, n)| serde_json::json!({"table": t, "rows": n})).collect::<Vec<_>>(),
-            "skipped": report.skipped,
-            "db_name": report.secret.db_name,
-            "role_name": report.secret.role_name,
-            "next_step": "Read the new src/.claude/rules/db.md for the refactor playbook. \
-                         When the source code is fully on Postgres, call db.commit_migration.",
-        }))
-    }
-
-    /// Finalise the migration: from `DataMigrated`, flip to
-    /// `PostgresDataverse` and restart the app. The rule `db.md`
-    /// regenerates to the terminal state (post-migration cleanup
-    /// notes). Caller is expected to have refactored the source code
-    /// to use `DATABASE_URL` first — otherwise the app's binary will
-    /// still hit `db.sqlite`, which is harmless but defeats the
-    /// purpose.
-    pub async fn db_commit_migration(&self, slug: String) -> IpcResponse {
-        if !valid_slug(&slug) {
-            return IpcResponse::err("invalid slug");
-        }
-        let mut app = match self.supervisor.registry.get(&slug).await {
-            Some(a) => a,
-            None => return IpcResponse::err(format!("app not found: {slug}")),
-        };
-        if !matches!(app.db_backend, DbBackend::DataMigrated) {
-            return IpcResponse::err(format!(
-                "db_commit_migration requires backend=data-migrated, current is {:?}",
-                app.db_backend
-            ));
-        }
-        app.db_backend = DbBackend::PostgresDataverse;
-        if let Err(e) = self.supervisor.registry.upsert(app.clone()).await {
-            return IpcResponse::err(format!("update apps.json: {e}"));
-        }
-        let _ = self.regenerate_context(slug.clone()).await;
-        if let Err(e) = self.supervisor.restart(&slug).await {
-            warn!(slug = %slug, error = %e, "post-commit restart failed");
-        }
-        info!(slug = %slug, "db.commit_migration done — app now on postgres-dataverse");
-        IpcResponse::ok_data(serde_json::json!({
-            "slug": slug,
-            "db_backend": "postgres-dataverse",
-            "next_step": "Read the new src/.claude/rules/db.md — it now describes the terminal state \
-                         and points out leftover SQLite references to clean up.",
-        }))
-    }
-
-    /// Roll back the migration to `LegacySqlite`. Drops the per-app
-    /// PG database, removes `DATABASE_URL` from `.env`, flips the
-    /// flag, regenerates context, restarts. The legacy `db.sqlite`
-    /// is **not** touched — it has been on disk the whole time.
-    ///
-    /// Accepts both `DataMigrated` (safe — SQLite is still
-    /// authoritative) and `PostgresDataverse` (caveat: any data
-    /// written exclusively to PG since `commit_migration` is lost).
-    /// Refuses from `LegacySqlite` (nothing to roll back).
-    pub async fn db_rollback_migration(&self, slug: String) -> IpcResponse {
-        if !valid_slug(&slug) {
-            return IpcResponse::err("invalid slug");
-        }
-        let mut app = match self.supervisor.registry.get(&slug).await {
-            Some(a) => a,
-            None => return IpcResponse::err(format!("app not found: {slug}")),
-        };
-        match app.db_backend {
-            DbBackend::DataMigrated => {
-                info!(slug = %slug, "rollback from data-migrated (safe — SQLite was authoritative)");
-            }
-            DbBackend::PostgresDataverse => {
-                warn!(
-                    slug = %slug,
-                    "rollback from postgres-dataverse — any PG-only writes since \
-                     commit_migration will be lost. SQLite has not been written to since \
-                     the commit, so it may be stale relative to PG."
-                );
-            }
-            DbBackend::LegacySqlite => {
-                // When the flag is already legacy-sqlite there's nothing
-                // to roll back from a state-machine perspective, BUT a
-                // partially-migrated PG database can be left behind by a
-                // `db_migrate` that errored mid-flight (e.g. CHECK
-                // constraint violation). Tolerate that case: if a PG db
-                // exists for this slug, drop it so a subsequent
-                // `db_migrate` starts fresh. Useful as a stale-state
-                // cleaner.
-                let has_pg = if let Some(mgr) = &self.dataverse_manager {
-                    mgr.exists(&slug).await.unwrap_or(false)
-                } else {
-                    false
-                };
-                if !has_pg {
-                    return IpcResponse::err(
-                        "already on legacy-sqlite and no postgres residue — nothing to do",
-                    );
-                }
-                info!(
-                    slug = %slug,
-                    "rollback cleaning up stale postgres state (flag=legacy-sqlite, PG exists)"
-                );
-            }
-        }
-
-        if let Some(mgr) = &self.dataverse_manager {
-            if let Err(e) = mgr.drop_app(&slug).await {
-                warn!(slug = %slug, error = %e, "drop_app failed (continuing rollback)");
-            }
-        }
-
-        // Strip DATABASE_URL from .env
-        if let Err(e) = remove_env_var(&app.env_file(), "DATABASE_URL").await {
-            warn!(slug = %slug, error = %e, "removing DATABASE_URL from .env failed");
-        }
-
-        app.db_backend = DbBackend::LegacySqlite;
-        if let Err(e) = self.supervisor.registry.upsert(app.clone()).await {
-            return IpcResponse::err(format!("update apps.json: {e}"));
-        }
-        let _ = self.regenerate_context(slug.clone()).await;
-        if let Err(e) = self.supervisor.restart(&slug).await {
-            warn!(slug = %slug, error = %e, "post-rollback restart failed");
-        }
-        info!(slug = %slug, "db.rollback_migration done — app back on legacy-sqlite");
-        IpcResponse::ok_data(serde_json::json!({
-            "slug": slug,
-            "db_backend": "legacy-sqlite",
-            "next_step": "PG database dropped, DATABASE_URL removed, app restarted on SQLite. \
-                         The legacy db.sqlite was never touched.",
-        }))
-    }
-
     pub async fn db_introspect(&self, slug: String) -> IpcResponse {
         if !valid_slug(&slug) {
             return IpcResponse::err("invalid slug");
-        }
-        let backend = self.db_backend_for(&slug).await;
-        if !matches!(backend, DbBackend::DataMigrated | DbBackend::PostgresDataverse) {
-            return IpcResponse::err(
-                "db.introspect requires the data-migrated or postgres-dataverse backend",
-            );
         }
         let Some(mgr) = self.dataverse_manager.as_ref() else {
             return IpcResponse::err("postgres-dataverse backend is not configured");
@@ -2760,8 +2528,6 @@ fn translate_legacy_filters(legacy: &[serde_json::Value]) -> serde_json::Value {
 
 fn db_backend_to_str(b: &DbBackend) -> &'static str {
     match b {
-        DbBackend::LegacySqlite => "legacy-sqlite",
-        DbBackend::DataMigrated => "data-migrated",
         DbBackend::PostgresDataverse => "postgres-dataverse",
     }
 }

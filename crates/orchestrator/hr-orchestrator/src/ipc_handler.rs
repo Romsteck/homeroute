@@ -652,15 +652,18 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
             OrchestratorRequest::AppDbIntrospect { slug } => {
                 self.apps_ctx().db_introspect(slug).await
             }
-            OrchestratorRequest::AppDbMigrate { slug } => {
-                self.apps_ctx().db_migrate(slug).await
-            }
-            OrchestratorRequest::AppDbCommitMigration { slug } => {
-                self.apps_ctx().db_commit_migration(slug).await
-            }
-            OrchestratorRequest::AppDbRollbackMigration { slug } => {
-                self.apps_ctx().db_rollback_migration(slug).await
-            }
+            // The legacy SQLite → Postgres migration tools (db_migrate,
+            // db_commit_migration, db_rollback_migration) were removed
+            // in Phase E once every app was running on postgres-dataverse.
+            // Their IPC variants stay around for forward-compat (old
+            // clients keep being able to send them) but unconditionally
+            // refuse: there is no legacy backend to migrate from.
+            OrchestratorRequest::AppDbMigrate { slug: _ }
+            | OrchestratorRequest::AppDbCommitMigration { slug: _ }
+            | OrchestratorRequest::AppDbRollbackMigration { slug: _ } => IpcResponse::err(
+                "SQLite migration tools were removed — every app already runs on \
+                 postgres-dataverse",
+            ),
             OrchestratorRequest::AppTodosList { slug, status } => {
                 self.apps_ctx().todos_list(slug, status).await
             }
