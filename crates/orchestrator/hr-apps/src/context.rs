@@ -1502,6 +1502,29 @@ fn render_db_md_legacy(app: &crate::types::Application) -> String {
             est laissé en place comme fallback de rollback, mais le runtime\n\
             ne le lit plus.\n\
          \n\
+         ## ⚠️ Compatibilité — vérifie avant de lancer la migration\n\
+         \n\
+         Le migrateur dataverse actuel **ne supporte pas** les apps qui\n\
+         externalisent leurs clés primaires comme UUID dans des URLs,\n\
+         des protocoles de sync mobile, ou des chemins de fichiers sur\n\
+         disque. Il transforme tous les `id` en `BIGSERIAL` Postgres,\n\
+         ce qui invalide les UUIDs déjà publiés.\n\
+         \n\
+         Le migrateur détecte automatiquement les `id` UUID-shaped et\n\
+         refuse `db_migrate` avec un message explicite — pas de copie\n\
+         destructive avant rollback.\n\
+         \n\
+         Cas où la migration est sûre :\n\
+         - PKs internes (jamais exposées dans les URLs publiques)\n\
+         - Colonnes `id` de type INTEGER ou inexistantes\n\
+         - Apps qui ne dépendent pas de la stabilité de l'`id`\n\
+         \n\
+         Cas où il faut **attendre** (mode UUID-PK à venir côté\n\
+         hr-dataverse) :\n\
+         - PKs externalisées dans les URLs\n\
+         - Apps avec un protocole de sync mobile typé UUID\n\
+         - Apps avec des refs sur disque par UUID (thumbnails, etc.)\n\
+         \n\
          ## En attendant : règles d'usage SQLite\n\
          \n\
          - ✅ Tools MCP `db_*` classiques, SQL brut autorisé\n\

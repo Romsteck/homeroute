@@ -71,6 +71,28 @@ pub async fn migrate_with_manager(
         info!("  - {} ({} cols)", t.name, t.columns.len());
     }
 
+    // Pre-flight: detect UUID/TEXT primary keys. The dataverse engine
+    // currently hardcodes `id BIGSERIAL PRIMARY KEY` on every table.
+    // Apps that externalise UUID PKs in URLs / mobile sync / on-disk
+    // paths get hopelessly broken when the BIGSERIAL renumbering hits.
+    // Refuse early with a clear message rather than copying TBs of data
+    // that the operator will then have to roll back.
+    if let Some(report) = detect_uuid_pk_incompatibility(sqlite_path, &tables)? {
+        bail!(
+            "this app appears to use UUID/TEXT primary keys, which the current \
+             dataverse migrator cannot preserve.\n\n\
+             {}\n\
+             Options:\n\
+             - keep the app on `legacy-sqlite` (recommended for UUID-keyed apps);\n\
+             - manually rename the legacy `id` column away from being a PK and \
+               run a fresh migration (the BIGSERIAL `id` will be added alongside \
+               your existing UUID column);\n\
+             - wait for hr-dataverse's planned UUID-PK mode (uses TEXT PRIMARY KEY \
+               with `gen_random_uuid()` defaults).",
+            report
+        );
+    }
+
     // ── Fresh provisioning OR adopt existing PG ──────────────────────
     let (secret, adopted_existing) = if manager.exists(slug).await? {
         info!(slug, "PG database already exists — adopting (resetting role password)");
@@ -397,6 +419,96 @@ fn build_table_definition(t: &SqliteTable) -> Result<hr_dataverse::TableDefiniti
 
 fn parse_field_type(s: &str) -> Result<PgFieldType> {
     PgFieldType::from_code(s).ok_or_else(|| anyhow!("unknown field_type code in legacy DB: {}", s))
+}
+
+/// Inspect a sample of `id` values in each user table. If most of them
+/// look like UUIDs (TEXT, hyphens, hex), the app is externalising
+/// non-integer PKs and is incompatible with the current dataverse
+/// migrator (which forces BIGSERIAL). Returns a diagnostic string
+/// describing the offending tables, or `None` when everything looks
+/// integer-shaped.
+fn detect_uuid_pk_incompatibility(
+    sqlite_path: &Path,
+    tables: &[SqliteTable],
+) -> Result<Option<String>> {
+    let conn = Connection::open_with_flags(sqlite_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let uuid_re = regex_uuid();
+
+    let mut offenders: Vec<(String, String)> = Vec::new();
+
+    for t in tables {
+        // SQLite stores `id` as whatever type was declared. We sample
+        // up to 5 non-null values and see if they look like UUIDs.
+        let sql = format!("SELECT id FROM \"{}\" WHERE id IS NOT NULL LIMIT 5", t.name);
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => continue, // table may not have an `id` column
+        };
+        let mut rows = match stmt.query([]) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let mut seen_uuid = 0usize;
+        let mut seen_total = 0usize;
+        let mut sample: Option<String> = None;
+        while let Ok(Some(row)) = rows.next() {
+            seen_total += 1;
+            // Try TEXT first (UUID strings)
+            if let Ok(s) = row.get::<_, String>(0) {
+                if uuid_re.is_match(s.trim()) {
+                    seen_uuid += 1;
+                    if sample.is_none() {
+                        sample = Some(s);
+                    }
+                }
+            }
+        }
+        if seen_total >= 1 && seen_uuid * 2 >= seen_total {
+            offenders.push((
+                t.name.clone(),
+                sample.unwrap_or_else(|| "<sample unavailable>".into()),
+            ));
+        }
+    }
+
+    if offenders.is_empty() {
+        Ok(None)
+    } else {
+        let lines: Vec<String> = offenders
+            .iter()
+            .map(|(t, s)| format!("  - `{}.id` looks UUID-shaped (sample: `{}`)", t, s))
+            .collect();
+        Ok(Some(format!("Tables with UUID-shaped `id`:\n{}\n", lines.join("\n"))))
+    }
+}
+
+fn regex_uuid() -> SimpleUuidPattern {
+    // We don't depend on the `regex` crate; a hand-rolled matcher
+    // covers the canonical UUID shape (36 chars, 8-4-4-4-12 hex).
+    SimpleUuidPattern
+}
+
+/// Lightweight UUID matcher — avoids pulling the `regex` crate just
+/// for one heuristic.
+struct SimpleUuidPattern;
+impl SimpleUuidPattern {
+    fn is_match(&self, s: &str) -> bool {
+        let bytes = s.as_bytes();
+        if bytes.len() != 36 {
+            return false;
+        }
+        for (i, b) in bytes.iter().enumerate() {
+            let is_hyphen_position = matches!(i, 8 | 13 | 18 | 23);
+            if is_hyphen_position {
+                if *b != b'-' {
+                    return false;
+                }
+            } else if !b.is_ascii_hexdigit() {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// Translate a `default_value` literal from SQLite-flavored syntax (as
