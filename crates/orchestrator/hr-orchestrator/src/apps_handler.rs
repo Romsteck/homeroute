@@ -1297,8 +1297,27 @@ impl AppsContext {
                 );
             }
             DbBackend::LegacySqlite => {
-                return IpcResponse::err(
-                    "already on legacy-sqlite — nothing to roll back",
+                // When the flag is already legacy-sqlite there's nothing
+                // to roll back from a state-machine perspective, BUT a
+                // partially-migrated PG database can be left behind by a
+                // `db_migrate` that errored mid-flight (e.g. CHECK
+                // constraint violation). Tolerate that case: if a PG db
+                // exists for this slug, drop it so a subsequent
+                // `db_migrate` starts fresh. Useful as a stale-state
+                // cleaner.
+                let has_pg = if let Some(mgr) = &self.dataverse_manager {
+                    mgr.exists(&slug).await.unwrap_or(false)
+                } else {
+                    false
+                };
+                if !has_pg {
+                    return IpcResponse::err(
+                        "already on legacy-sqlite and no postgres residue — nothing to do",
+                    );
+                }
+                info!(
+                    slug = %slug,
+                    "rollback cleaning up stale postgres state (flag=legacy-sqlite, PG exists)"
                 );
             }
         }

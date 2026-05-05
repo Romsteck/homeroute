@@ -41,15 +41,24 @@ fn column_fragment(col: &ColumnDefinition) -> String {
         }
     }
 
-    // CHECK constraint for Choice fields with a finite set of allowed values.
-    if col.field_type == FieldType::Choice && !col.choices.is_empty() {
-        let escaped: Vec<String> = col
-            .choices
-            .iter()
-            .map(|c| format!("'{}'", c.replace('\'', "''")))
-            .collect();
-        frag.push_str(&format!(" CHECK ({} IN ({}))", quote_ident(&col.name), escaped.join(", ")));
-    }
+    // NOTE on Choice columns: we deliberately do NOT emit a `CHECK
+    // (col IN (…))` constraint anymore. Two reasons:
+    //
+    // 1. Migration safety — historical rows often carry values that
+    //    fall outside the current choice set (`_dv_columns.choices` is
+    //    a snapshot of the schema's *intended* values; SQLite never
+    //    enforced anything). A CHECK would refuse legitimate data
+    //    being copied from the legacy DB.
+    //
+    // 2. Choice values evolve — adding a value to a Choice column would
+    //    require an `ALTER TABLE … DROP CONSTRAINT … ADD CONSTRAINT …`
+    //    dance that complicates `add_column` / `add_choice` flows.
+    //
+    // The `choices` metadata stays in `_dv_columns` for documentation,
+    // UI dropdowns, and GraphQL enum hinting. Enforcement of values
+    // happens at the application/GraphQL layer, not in the storage
+    // engine. If a strict CHECK is wanted post-migration, the operator
+    // adds it manually.
 
     frag
 }
@@ -161,11 +170,15 @@ mod tests {
     }
 
     #[test]
-    fn choice_emits_check_constraint() {
+    fn choice_does_not_emit_check_constraint() {
+        // Choice columns no longer emit CHECK constraints — see the
+        // long-form note in `column_fragment`. The DDL is just a TEXT
+        // column; enforcement happens at the application layer.
         let mut c = col("status", FieldType::Choice);
         c.choices = vec!["open".into(), "closed".into()];
         let sql = create_table_sql(&def_table("tickets", vec![c]));
-        assert!(sql.contains("CHECK (\"status\" IN ('open', 'closed'))"));
+        assert!(!sql.contains("CHECK"));
+        assert!(sql.contains("\"status\" TEXT"));
     }
 
     #[test]

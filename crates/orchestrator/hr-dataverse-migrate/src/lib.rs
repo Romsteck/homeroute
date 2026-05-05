@@ -152,18 +152,25 @@ async fn do_migrate(
             .with_context(|| format!("create_table {}", table.name))?;
     }
 
-    // ── 2. Apply explicit relations from `_dv_relations` ─────────────
-    for rel in relations {
-        let r = build_relation(rel)?;
-        if let Err(e) = engine.create_relation(&r).await {
-            warn!(
-                from = %r.from_table,
-                to = %r.to_table,
-                error = %e,
-                "create_relation failed (continuing — may already exist)"
-            );
-        }
-    }
+    // ── 2. Skip FK constraints during migration ──────────────────────
+    // Source IDs are NOT preserved (PG assigns BIGSERIAL fresh), so any
+    // child.parent_id value would point to a row whose primary key has
+    // changed in the target. Adding FK constraints before the copy
+    // would block valid (if stale-pointer-bearing) INSERTs.
+    //
+    // Trade-off: the per-app PG database carries no relational
+    // integrity at the storage layer. Lookup metadata still lives in
+    // `_dv_columns` (lookup_target) — but with `lookup_target=None`
+    // forced by `build_table_definition` for migration, that field is
+    // empty here. Operators who want to restore FKs post-migration
+    // can call `db.create_relation` once the agent has refactored the
+    // code to recompute consistent IDs (or migrate IDs in place).
+    let _unused_relations = relations;
+    info!(
+        "skipping {} foreign-key constraints during migration — \
+         restore manually post-cleanup if integrity is required",
+        relations.len()
+    );
 
     // ── 3. Copy rows table by table ──────────────────────────────────
     //     If a table already has rows in PG (adoption with existing
@@ -359,9 +366,19 @@ fn build_table_definition(t: &SqliteTable) -> Result<hr_dataverse::TableDefiniti
         cols.push(hr_dataverse::ColumnDefinition {
             name: c.name.clone(),
             field_type: ft,
-            required: c.required,
-            unique: c.is_unique,
-            default_value: c.default_value.clone(),
+            // **Constraints are deliberately relaxed during migration.**
+            // Source SQLite data routinely violates the schema declared
+            // in `_dv_columns` (e.g. trader's `virtual_positions.entry_date`
+            // is NOT NULL but unparseable values get dropped to NULL by
+            // our tolerant Date parser; or `is_unique` columns have
+            // duplicate historical rows). Forcing NOT NULL / UNIQUE at
+            // table-creation time would block legitimate data copies.
+            // The metadata still describes the *intended* shape; the
+            // operator re-applies constraints manually post-cleanup
+            // (`ALTER TABLE … ALTER COLUMN … SET NOT NULL` etc.).
+            required: false,
+            unique: false,
+            default_value: c.default_value.as_deref().map(|d| translate_sqlite_default(d, ft)),
             description: c.description.clone(),
             choices: c.choices.clone(),
             formula_expression: c.formula_expression.clone(),
@@ -380,6 +397,67 @@ fn build_table_definition(t: &SqliteTable) -> Result<hr_dataverse::TableDefiniti
 
 fn parse_field_type(s: &str) -> Result<PgFieldType> {
     PgFieldType::from_code(s).ok_or_else(|| anyhow!("unknown field_type code in legacy DB: {}", s))
+}
+
+/// Translate a `default_value` literal from SQLite-flavored syntax (as
+/// stored in the legacy `_dv_columns.default_value`) to a Postgres
+/// equivalent that can be spliced verbatim into a `DEFAULT …` clause.
+///
+/// Idempotent: values already in PG form (e.g. `now()`, `true`,
+/// `'hello'`) pass through unchanged.
+///
+/// Common SQLite → PG translations covered:
+/// - `datetime('now')` (and variants) → `now()` for DateTime columns,
+///   `now()::text` for Text columns
+/// - `1` / `0` for Boolean columns → `true` / `false`
+/// - bare strings for Text/Choice/Email/etc. → SQL-quoted `'string'`
+///   (with internal quotes escaped)
+/// - numeric and Json values pass through
+fn translate_sqlite_default(raw: &str, ft: PgFieldType) -> String {
+    use PgFieldType::*;
+    let v = raw.trim();
+    let lower = v.to_lowercase();
+
+    // Recognise SQLite's "datetime('now')" family — also accept
+    // already-translated `now()` for idempotence.
+    let is_now_call = lower.contains("datetime('now')")
+        || lower.contains("datetime(\"now\")")
+        || lower.contains("date('now')")
+        || lower.contains("time('now')")
+        || lower == "now()"
+        || lower == "current_timestamp";
+
+    match ft {
+        Boolean => match lower.as_str() {
+            "1" | "true" | "'true'" => "true".into(),
+            "0" | "false" | "'false'" => "false".into(),
+            _ => v.to_string(),
+        },
+        DateTime | Date | Time => {
+            if is_now_call {
+                "now()".into()
+            } else {
+                v.to_string()
+            }
+        }
+        Text | Email | Url | Phone | Choice | Duration => {
+            if is_now_call {
+                // SQLite stored datetime as TEXT — keep it as TEXT in PG.
+                "now()::text".into()
+            } else if v.starts_with('\'') && v.ends_with('\'') && v.len() >= 2 {
+                // already SQL-quoted
+                v.to_string()
+            } else if v.starts_with('"') && v.ends_with('"') && v.len() >= 2 {
+                // double-quoted (SQL identifier syntax) — re-quote as string
+                format!("'{}'", v[1..v.len() - 1].replace('\'', "''"))
+            } else {
+                // bare token — wrap as SQL string literal
+                format!("'{}'", v.replace('\'', "''"))
+            }
+        }
+        Number | AutoIncrement | Lookup | Decimal | Currency | Percent | Json | Uuid
+        | MultiChoice | Formula => v.to_string(),
+    }
 }
 
 fn build_relation(r: &SqliteRelation) -> Result<hr_dataverse::RelationDefinition> {
@@ -437,20 +515,26 @@ async fn copy_rows(
     let (rows, has_created_at, has_updated_at) =
         read_sqlite_rows(sqlite_path, &table.name, &cols_to_copy_owned)?;
 
-    // ── 2. Insert into PG (async, no SQLite borrow held) ─────────────
+    // ── 2. Insert into PG, batched (async, no SQLite borrow held) ───
+    // Single-row INSERTs cost a network round-trip per row. For tables
+    // with > 100k rows (e.g. trader's market_data_cache) that would
+    // take minutes and risk client timeouts during MCP calls. Batch up
+    // to BATCH_SIZE rows per INSERT — Postgres handles this well and
+    // it cuts wall-time roughly 50-100×.
+    const BATCH_SIZE: usize = 500;
     let cols_to_copy: Vec<&SqliteColumn> = cols_to_copy_owned.iter().collect();
     let mut total: i64 = 0;
-    for values in &rows {
-        insert_row(
+    for chunk in rows.chunks(BATCH_SIZE) {
+        insert_rows_batch(
             engine,
             &table.name,
             &cols_to_copy,
-            values,
+            chunk,
             has_created_at,
             has_updated_at,
         )
         .await?;
-        total += 1;
+        total += chunk.len() as i64;
     }
     Ok(total)
 }
@@ -510,6 +594,83 @@ fn sqlite_has_column(conn: &Connection, table: &str, col: &str) -> Result<bool> 
     Ok(false)
 }
 
+/// Multi-row INSERT (`INSERT … VALUES (row1), (row2), …`) for the
+/// supplied batch. Cuts down round-trips dramatically vs single-row
+/// inserts. Each placeholder gets the same column-type cast as the
+/// single-row path, so the Decimal/Numeric handling stays identical.
+async fn insert_rows_batch(
+    engine: &DataverseEngine,
+    table: &str,
+    cols: &[&SqliteColumn],
+    batch: &[HashMap<String, JsonValue>],
+    has_created_at: bool,
+    has_updated_at: bool,
+) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+
+    // Build the column list once.
+    let mut col_names: Vec<String> = Vec::with_capacity(cols.len() + 2);
+    let mut col_casts: Vec<&'static str> = Vec::with_capacity(cols.len() + 2);
+    if has_created_at { col_names.push("created_at".into()); col_casts.push(""); }
+    if has_updated_at { col_names.push("updated_at".into()); col_casts.push(""); }
+    for c in cols {
+        col_names.push(c.name.clone());
+        let ft = parse_field_type(&c.field_type)?;
+        col_casts.push(match ft {
+            PgFieldType::Decimal | PgFieldType::Currency | PgFieldType::Percent => "::NUMERIC",
+            _ => "",
+        });
+    }
+    let cols_per_row = col_names.len();
+
+    // Each row contributes `cols_per_row` placeholders. They are
+    // numbered globally so all binds line up: `($1, $2), ($3, $4), …`.
+    let mut row_groups: Vec<String> = Vec::with_capacity(batch.len());
+    for row_ix in 0..batch.len() {
+        let mut placeholders: Vec<String> = Vec::with_capacity(cols_per_row);
+        for col_ix in 0..cols_per_row {
+            let n = row_ix * cols_per_row + col_ix + 1;
+            placeholders.push(format!("${}{}", n, col_casts[col_ix]));
+        }
+        row_groups.push(format!("({})", placeholders.join(", ")));
+    }
+
+    let sql = format!(
+        "INSERT INTO \"{}\" ({}) VALUES {}",
+        table,
+        col_names
+            .iter()
+            .map(|c| format!("\"{}\"", c))
+            .collect::<Vec<_>>()
+            .join(", "),
+        row_groups.join(", "),
+    );
+
+    let mut args = PgArguments::default();
+    for values in batch {
+        if has_created_at {
+            bind_optional_dt(&mut args, "created_at", values)?;
+        }
+        if has_updated_at {
+            bind_optional_dt(&mut args, "updated_at", values)?;
+        }
+        for c in cols {
+            let ft = parse_field_type(&c.field_type)?;
+            let v = values.get(&c.name).cloned().unwrap_or(JsonValue::Null);
+            bind_for_field(&mut args, &v, ft)?;
+        }
+    }
+
+    sqlx_core::query::query_with::<sqlx_postgres::Postgres, _>(&sql, args)
+        .execute(engine.pool())
+        .await
+        .with_context(|| format!("INSERT batch into {} ({} rows)", table, batch.len()))?;
+    Ok(())
+}
+
+#[allow(dead_code)]
 async fn insert_row(
     engine: &DataverseEngine,
     table: &str,
@@ -595,6 +756,12 @@ fn bind_for_field(args: &mut PgArguments, v: &JsonValue, ft: PgFieldType) -> Res
             DateTime => args
                 .add(Option::<chrono::DateTime<Utc>>::None)
                 .map_err(map_bind)?,
+            Date => args
+                .add(Option::<chrono::NaiveDate>::None)
+                .map_err(map_bind)?,
+            Time => args
+                .add(Option::<chrono::NaiveTime>::None)
+                .map_err(map_bind)?,
             Json => args
                 .add(Option::<SqlxJson<JsonValue>>::None)
                 .map_err(map_bind)?,
@@ -618,24 +785,47 @@ fn bind_for_field(args: &mut PgArguments, v: &JsonValue, ft: PgFieldType) -> Res
             args.add(s.clone()).map_err(map_bind)?
         }
         (DateTime, JsonValue::String(s)) => {
-            let dt = parse_dt(s)?;
-            args.add(dt).map_err(map_bind)?
+            // SQLite metadata sometimes mis-classifies columns
+            // (a Date column actually carrying "market_closed" etc.).
+            // Tolerate by binding NULL on parse failure rather than
+            // failing the whole migration. The agent can fix this
+            // post-cleanup.
+            match parse_dt(s) {
+                Ok(dt) => args.add(dt).map_err(map_bind)?,
+                Err(_) => {
+                    warn!("dropping unparseable DateTime value: {:?}", s);
+                    args.add(Option::<chrono::DateTime<Utc>>::None).map_err(map_bind)?
+                }
+            }
         }
         (Date, JsonValue::String(s)) => {
-            let d = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-                .with_context(|| format!("bad date: {}", s))?;
-            args.add(d).map_err(map_bind)?
+            match chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                Ok(d) => args.add(d).map_err(map_bind)?,
+                Err(_) => {
+                    warn!("dropping unparseable Date value: {:?}", s);
+                    args.add(Option::<chrono::NaiveDate>::None).map_err(map_bind)?
+                }
+            }
         }
         (Time, JsonValue::String(s)) => {
-            let t = chrono::NaiveTime::parse_from_str(s, "%H:%M:%S")
-                .or_else(|_| chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f"))
-                .with_context(|| format!("bad time: {}", s))?;
-            args.add(t).map_err(map_bind)?
+            let parsed = chrono::NaiveTime::parse_from_str(s, "%H:%M:%S")
+                .or_else(|_| chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f"));
+            match parsed {
+                Ok(t) => args.add(t).map_err(map_bind)?,
+                Err(_) => {
+                    warn!("dropping unparseable Time value: {:?}", s);
+                    args.add(Option::<chrono::NaiveTime>::None).map_err(map_bind)?
+                }
+            }
         }
         (Uuid, JsonValue::String(s)) => {
-            let u = uuid::Uuid::parse_str(s)
-                .with_context(|| format!("bad UUID: {}", s))?;
-            args.add(u).map_err(map_bind)?
+            match uuid::Uuid::parse_str(s) {
+                Ok(u) => args.add(u).map_err(map_bind)?,
+                Err(_) => {
+                    warn!("dropping unparseable UUID value: {:?}", s);
+                    args.add(Option::<uuid::Uuid>::None).map_err(map_bind)?
+                }
+            }
         }
         (Json, v) => args.add(SqlxJson(v.clone())).map_err(map_bind)?,
         (MultiChoice, JsonValue::String(s)) => {

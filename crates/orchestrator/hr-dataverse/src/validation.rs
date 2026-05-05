@@ -2,11 +2,22 @@ use crate::schema::{
     ColumnDefinition, DatabaseSchema, FieldType, RelationDefinition, TableDefinition,
 };
 
-/// Postgres reserved words (subset, kept conservative). Any of these as an
-/// unquoted identifier is rejected to keep the generated SQL portable and
-/// avoid surprising parser errors. Names are matched case-insensitively.
+/// Postgres reserved words (the subset that are actual *parser* keywords).
+/// Any of these as an unquoted identifier would fail to parse — but since
+/// our DDL emission always quotes user identifiers via [`crate::migration::quote_ident`],
+/// the practical risk is low. We still reject them upfront to keep the
+/// generated SQL portable and to surface confusing names early.
+///
+/// Notable exclusions:
+/// - **type names** (`integer`, `text`, `timestamp`, `date`, `time`,
+///   `interval`, `jsonb`, `uuid`, etc.) are NOT in this list. They are
+///   only meaningful in type positions, never as bare identifiers in
+///   parser contexts; quoting them makes them safe column names. Apps
+///   like trader have legitimate columns named `date` and `timestamp`.
+/// - the implicit Dataverse columns (`id`, `created_at`, `updated_at`)
+///   and the `_dv_*` system tables are handled by [`validate_user_identifier`]
+///   below — they're forbidden as user-defined names there.
 const RESERVED_WORDS: &[&str] = &[
-    // SQL standard + Postgres reserved
     "all", "analyse", "analyze", "and", "any", "array", "as", "asc", "asymmetric",
     "both", "case", "cast", "check", "collate", "column", "constraint", "create",
     "current_catalog", "current_date", "current_role", "current_time", "current_timestamp",
@@ -17,13 +28,6 @@ const RESERVED_WORDS: &[&str] = &[
     "primary", "references", "returning", "select", "session_user", "some", "symmetric",
     "table", "then", "to", "trailing", "true", "union", "unique", "user", "using",
     "variadic", "when", "where", "window", "with",
-    // Common type names that we generate ourselves
-    "integer", "bigint", "text", "boolean", "numeric", "timestamp", "date", "time",
-    "interval", "jsonb", "uuid", "serial", "bigserial",
-    // Implicit Dataverse-managed columns
-    "id", "created_at", "updated_at",
-    // Internal table prefix
-    "_dv_tables", "_dv_columns", "_dv_relations", "_dv_migrations", "_dv_meta",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -77,12 +81,19 @@ pub fn validate_identifier(name: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// Validate a name that *must not* collide with the `_dv_` system prefix.
-/// Used for user-defined tables and columns; system metadata tables bypass this.
+/// Validate a name that *must not* collide with the `_dv_` system
+/// prefix or the implicit Dataverse-managed columns. Used for
+/// user-defined tables and columns; system metadata tables bypass this.
 pub fn validate_user_identifier(name: &str) -> Result<(), ValidationError> {
     validate_identifier(name)?;
-    if name.to_lowercase().starts_with("_dv_") {
+    let lower = name.to_lowercase();
+    if lower.starts_with("_dv_") {
         return Err(ValidationError::ReservedPrefix(name.to_string()));
+    }
+    // The implicit columns are added automatically to every user
+    // table; redeclaring them would conflict at CREATE TABLE time.
+    if matches!(lower.as_str(), "id" | "created_at" | "updated_at") {
+        return Err(ValidationError::ReservedWord(name.to_string()));
     }
     Ok(())
 }
@@ -196,7 +207,22 @@ mod tests {
     fn rejects_reserved_words() {
         assert!(validate_identifier("user").is_err());
         assert!(validate_identifier("table").is_err());
-        assert!(validate_identifier("created_at").is_err());
+        assert!(validate_identifier("select").is_err());
+        // Type names are allowed at the bare-identifier level — they're
+        // safe column names because we always quote in DDL emission.
+        assert!(validate_identifier("date").is_ok());
+        assert!(validate_identifier("timestamp").is_ok());
+        assert!(validate_identifier("integer").is_ok());
+        // Implicit dataverse columns are blocked at the user-identifier
+        // level, not at the bare-identifier level.
+        assert!(validate_identifier("created_at").is_ok());
+        assert!(validate_user_identifier("created_at").is_err());
+        assert!(validate_user_identifier("id").is_err());
+        assert!(validate_user_identifier("updated_at").is_err());
+        // But `date` / `timestamp` ARE allowed as user columns
+        // (they were the real-world blocker for trader's migration).
+        assert!(validate_user_identifier("date").is_ok());
+        assert!(validate_user_identifier("timestamp").is_ok());
     }
 
     #[test]
