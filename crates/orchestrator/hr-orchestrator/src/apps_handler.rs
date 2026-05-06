@@ -101,6 +101,61 @@ impl AppsContext {
             .await
             .map_err(|e| IpcResponse::err(format!("dataverse engine: {e}")))
     }
+
+    /// Sync the dataverse-gateway env vars (`HR_DV_BASE_URL`, `HR_DV_TOKEN`,
+    /// `HR_APP_UUID`) into the app's `.env` file. Backfills missing
+    /// gateway credentials in `dataverse-secrets.json` if needed. Removes
+    /// any legacy `DATABASE_URL` line so apps don't accidentally keep
+    /// a stale direct DSN. Idempotent — safe to call on every boot.
+    ///
+    /// `base_url_override` lets the caller pass a custom base URL (used
+    /// by tests). In production, defaults to `http://127.0.0.1:4000/api/dv/{slug}`
+    /// — apps reach the gateway via loopback, hr-edge handles external
+    /// access on `dv.<base_domain>/{slug}/...`.
+    pub async fn sync_dv_env(&self, slug: &str) -> anyhow::Result<()> {
+        let Some(mgr) = self.dataverse_manager.as_ref() else {
+            return Ok(());
+        };
+        let app = match self.supervisor.registry.get(slug).await {
+            Some(a) => a,
+            None => return Ok(()),
+        };
+        // Backfill credentials lazily (no-op if already present).
+        let secret = match mgr.ensure_gateway_credentials(slug) {
+            Ok(s) => s,
+            Err(_) => return Ok(()), // app not provisioned — nothing to sync
+        };
+        let base_url = format!("http://127.0.0.1:4000/api/dv/{}", slug);
+        let env_path = app.env_file();
+        if let Some(parent) = env_path.parent() {
+            tokio::fs::create_dir_all(parent).await.ok();
+        }
+        upsert_env_var(&env_path, "HR_DV_BASE_URL", &base_url).await?;
+        upsert_env_var(&env_path, "HR_DV_TOKEN", &secret.gateway_token).await?;
+        upsert_env_var(&env_path, "HR_APP_UUID", &secret.app_uuid.to_string()).await?;
+        // Transitional: the long-term plan bans direct PG access (apps go
+        // through the gateway only), but during the migration window
+        // mid-migrated apps still need `DATABASE_URL`. We persist it so
+        // sqlx-postgres callers keep working until they're refactored to
+        // the typed `dv-{slug}` client. The hard ban (revoke LOGIN on the
+        // PG role + drop this line) lands in the decommission phase.
+        upsert_env_var(&env_path, "DATABASE_URL", &secret.dsn).await?;
+        info!(slug, "sync_dv_env: HR_DV_* + transitional DATABASE_URL injected");
+        Ok(())
+    }
+
+    /// Run [`Self::sync_dv_env`] for every app whose `db_backend` is
+    /// `PostgresDataverse`. Called at orchestrator boot.
+    pub async fn sync_dv_env_all(&self) {
+        let apps = self.supervisor.registry.list().await;
+        for app in apps {
+            if matches!(app.db_backend, hr_apps::DbBackend::PostgresDataverse) {
+                if let Err(e) = self.sync_dv_env(&app.slug).await {
+                    warn!(slug = %app.slug, error = %e, "sync_dv_env failed");
+                }
+            }
+        }
+    }
 }
 
 impl AppsContext {
@@ -1529,8 +1584,9 @@ impl AppsContext {
 
             // 5) rsync each artefact back
             let rsync_back_started = Instant::now();
-            for art in &artefacts {
-                info!(slug = %slug, artefact = %art, "build: rsync down");
+            for art_spec in &artefacts {
+                let (art, optional) = parse_artefact_spec(art_spec);
+                info!(slug = %slug, artefact = %art, optional, "build: rsync down");
                 let remote_path = format!("{}/{}", remote_src, art);
                 let local_path = local_src.join(art);
                 if let Some(parent) = local_path.parent() {
@@ -1553,6 +1609,10 @@ impl AppsContext {
                 )
                 .await;
                 if exists.exit_code != 0 {
+                    if optional {
+                        info!(slug = %slug, artefact = %art, "build: optional artefact absent, skipping");
+                        continue;
+                    }
                     acc.push(&format!("check-{art}"), &exists);
                     return acc.into_result(
                         format!("artefact missing on remote: {art}"),
@@ -1856,8 +1916,9 @@ impl AppsContext {
 
             // 2) Rsync each artefact back from CloudMaster to Medion.
             let rsync_back_started = Instant::now();
-            for art in &artefacts {
-                info!(slug = %slug_for_pipeline, artefact = %art, "ship: rsync down");
+            for art_spec in &artefacts {
+                let (art, optional) = parse_artefact_spec(art_spec);
+                info!(slug = %slug_for_pipeline, artefact = %art, optional, "ship: rsync down");
                 let remote_path = format!("{}/{}", remote_src, art);
                 let local_path = local_src.join(art);
                 if let Some(parent) = local_path.parent() {
@@ -1879,6 +1940,10 @@ impl AppsContext {
                 )
                 .await;
                 if exists.exit_code != 0 {
+                    if optional {
+                        info!(slug = %slug_for_pipeline, artefact = %art, "ship: optional artefact absent, skipping");
+                        continue;
+                    }
                     acc.push(&format!("check-{art}"), &exists);
                     return acc.into_result(
                         format!("artefact missing on remote: {art} (build it first locally on CloudMaster)"),
@@ -2002,6 +2067,20 @@ impl AppsContext {
 
 /// Returns `(default_build_command, default_artefact_paths)` for stacks that
 /// support remote build, or `None` for unsupported stacks.
+/// Parse a single line of the `build_artefact` spec. Lines starting with
+/// `?` are treated as **optional** artefacts: the rsync skips silently if
+/// the source path is absent on CloudMaster, instead of erroring out.
+/// Used for inputs like custom-server bundles (`server.js` for Next.js
+/// custom-HTTP-handler apps) that some apps emit and others don't.
+///
+/// Returns `(path, optional)`.
+fn parse_artefact_spec(spec: &str) -> (&str, bool) {
+    match spec.strip_prefix('?') {
+        Some(rest) => (rest, true),
+        None => (spec, false),
+    }
+}
+
 fn build_defaults_for_stack(app: &Application) -> Option<(&'static str, Vec<String>)> {
     match app.stack {
         AppStack::Axum => Some((
@@ -2020,6 +2099,13 @@ fn build_defaults_for_stack(app: &Application) -> Option<(&'static str, Vec<Stri
                 "package.json".to_string(),
                 "package-lock.json".to_string(),
                 "node_modules".to_string(),
+                // Custom-server apps (e.g. server.ts → server.js bundle for
+                // WebSocket integration) emit a server.js or server.mjs at
+                // the package root. Marked optional (`?` prefix) — apps
+                // using the standalone deployment pattern don't have a
+                // root-level server file and the rsync skips silently.
+                "?server.js".to_string(),
+                "?server.mjs".to_string(),
             ],
         )),
         AppStack::Flutter => None,

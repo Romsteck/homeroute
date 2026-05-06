@@ -1222,6 +1222,13 @@ fn render_settings_json_with_auth(mcp_endpoint: &str, token: Option<&str>) -> St
                 "mcp__homeroute__db_sync_schema",
                 "mcp__homeroute__db_overview",
                 "mcp__homeroute__db_count_rows",
+                "mcp__homeroute__db_find",
+                "mcp__homeroute__db_introspect",
+                "mcp__homeroute__db_graphql",
+                // Schema mutations (db_create_table / db_add_column / etc.)
+                // are intentionally NOT in the auto-approve list — agents
+                // get a confirmation prompt before each call. They are
+                // discoverable via tools/list (see mcp.rs).
                 "mcp__homeroute__docs_overview",
                 "mcp__homeroute__docs_list_entries",
                 "mcp__homeroute__docs_get",

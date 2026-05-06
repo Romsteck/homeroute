@@ -564,6 +564,10 @@ fn is_project_simplified_tool(name: &str) -> bool {
         "status" | "start" | "stop" | "restart" | "exec" | "logs"
             | "db_tables" | "db_schema" | "db_query" | "db_find" | "db_exec"
             | "db_graphql" | "db_introspect"
+            | "db_overview" | "db_count_rows"
+            | "db_get_schema" | "db_sync_schema"
+            | "db_create_table" | "db_drop_table"
+            | "db_add_column" | "db_remove_column" | "db_create_relation"
             | "docs_overview" | "docs_list_entries" | "docs_get" | "docs_search"
             | "docs_completeness" | "docs_diagram_get"
             | "docs_update" | "docs_delete" | "docs_diagram_set"
@@ -589,6 +593,16 @@ fn tool_definitions_project() -> Value {
         { "name": "db_exec", "description": "Execute a mutation (INSERT, UPDATE, DELETE) against the database. Legacy SQLite backend only — apps on postgres-dataverse must use db_graphql.", "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" }, "params": { "type": "array", "items": {}, "default": [] } }, "required": ["sql"] } },
         { "name": "db_graphql", "description": "Execute a GraphQL query/mutation against the app's managed schema (postgres-dataverse backend). Returns {data, errors}. Prefer this over db_query/db_exec on dataverse-backed apps.", "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "variables": { "type": "object" }, "operationName": { "type": "string" } }, "required": ["query"] } },
         { "name": "db_introspect", "description": "Return the SDL of the app's GraphQL schema in one shot (postgres-dataverse backend). Single-call alternative to crafting `__schema` queries.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "db_overview", "description": "Compact overview of the database: table list with column count + row count for each.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "db_count_rows", "description": "Count rows in a single table.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" } }, "required": ["table"] } },
+        { "name": "db_get_schema", "description": "Return the dataverse schema (tables + columns + relations) as JSON. Read-only.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "db_sync_schema", "description": "Rebuild the dataverse `_dv_tables`/`_dv_columns`/`_dv_relations` metadata by introspecting the live PG schema. Use after manual ALTER TABLE.", "inputSchema": { "type": "object", "properties": {} } },
+        // Schema-ops (mutations — confirmation required, NOT in auto-approve).
+        { "name": "db_create_table", "description": "Create a dataverse-managed table. Emits the right PG type per `field_type` (NUMERIC for decimal, TIMESTAMPTZ for date_time, JSONB for json, UUID for uuid, etc.) and registers it in `_dv_tables`/`_dv_columns`. Audit columns (id, created_at, updated_at, version, is_deleted, created_by, updated_by, *_kind) are added implicitly — do NOT declare them.", "inputSchema": { "type": "object", "properties": { "definition": { "type": "object", "description": "TableDefinition — { name, slug, columns: [{name, field_type, required?, unique?, default_value?, ...}], id_strategy?: \"bigserial\"|\"uuid\" }" } }, "required": ["definition"] } },
+        { "name": "db_drop_table", "description": "Drop a dataverse-managed table (DROP TABLE + remove from `_dv_*` metadata).", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" } }, "required": ["table"] } },
+        { "name": "db_add_column", "description": "Add a column to an existing dataverse-managed table. Reserved/audit names (created_by, updated_by, version, etc.) are rejected.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "column": { "type": "object", "description": "ColumnDefinition — { name, field_type, required?, unique?, default_value? }" } }, "required": ["table", "column"] } },
+        { "name": "db_remove_column", "description": "Drop a user-defined column from a dataverse-managed table. Refuses to drop audit/reserved columns.", "inputSchema": { "type": "object", "properties": { "table": { "type": "string" }, "column": { "type": "string" } }, "required": ["table", "column"] } },
+        { "name": "db_create_relation", "description": "Declare a Lookup foreign-key relation between two dataverse-managed tables.", "inputSchema": { "type": "object", "properties": { "from_table": { "type": "string" }, "from_column": { "type": "string" }, "to_table": { "type": "string" } }, "required": ["from_table", "from_column", "to_table"] } },
         // ── Documentation (DOC-FIRST OBLIGATOIRE — voir .claude/rules/docs.md) ──
         { "name": "docs_overview", "description": "DOC-FIRST OBLIGATOIRE. Premier appel à faire avant toute exploration de code. Renvoie l'overview, l'index compact (écrans/features/composants avec titre+résumé 1 ligne) et les stats de l'app courante.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "docs_list_entries", "description": "Liste compacte des entrées de doc, filtrable par type. Préférer docs_search si on a un mot-clé.", "inputSchema": { "type": "object", "properties": { "type": { "type": "string", "enum": ["screen", "feature", "component"] } } } },

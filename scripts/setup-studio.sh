@@ -178,14 +178,31 @@ ensure_user_and_group() {
 }
 
 # =============================================================================
-# Permissions on /opt/homeroute/apps/ — group-owned by hr-studio with setgid
+# Permissions on /opt/homeroute/apps/ — group-owned by hr-studio with setgid +
+# default POSIX ACLs so files created by the `romain` user (umask 0022) still
+# end up group-writable for the Studio agent.
 # =============================================================================
 apply_apps_permissions() {
     log_info "ensuring $APPS_DIR is group=$STUDIO_GROUP, g+rwX, setgid on dirs"
     run "chgrp -R '$STUDIO_GROUP' '$APPS_DIR'"
     run "chmod -R g+rwX '$APPS_DIR'"
     run "find '$APPS_DIR' -type d -exec chmod g+s {} +"
-    log_ok "$APPS_DIR permissions applied (group=$STUDIO_GROUP, setgid on dirs)"
+
+    # Default ACLs: kernel-applied, immune to the creating process's umask.
+    # The hr-studio.service has UMask=0002 (so its files are g+w by default),
+    # but plain `romain` shells default to 0022 — without this default ACL,
+    # files romain creates land as 644 + romain:romain group, and the
+    # hr-studio user can't unlink/edit them. The default ACL on each dir
+    # forces every newly-created child to inherit g:hr-studio:rwX.
+    if command -v setfacl >/dev/null 2>&1; then
+        log_info "applying POSIX default ACLs (g:$STUDIO_GROUP:rwX) on $APPS_DIR"
+        run "setfacl -R -m g:$STUDIO_GROUP:rwX '$APPS_DIR'"
+        run "setfacl -R -d -m g:$STUDIO_GROUP:rwX '$APPS_DIR'"
+    else
+        log_info "setfacl not installed — skipping default ACLs (acl package recommended)"
+    fi
+
+    log_ok "$APPS_DIR permissions applied (group=$STUDIO_GROUP, setgid on dirs, default ACL on subtree)"
 }
 
 # =============================================================================
