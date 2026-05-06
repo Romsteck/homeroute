@@ -664,6 +664,126 @@ impl IpcHandler<OrchestratorRequest, IpcResponse> for OrchestratorHandler {
                 "SQLite migration tools were removed — every app already runs on \
                  postgres-dataverse",
             ),
+            // ── Dataverse REST gateway ────────────────────────────
+            OrchestratorRequest::DvSchema { slug } => {
+                crate::dv_handler::dv_schema(&self.apps_ctx(), slug).await
+            }
+            OrchestratorRequest::DvList {
+                slug,
+                table,
+                query,
+                identity,
+            } => {
+                crate::dv_handler::dv_list(&self.apps_ctx(), slug, table, query, identity).await
+            }
+            OrchestratorRequest::DvGet {
+                slug,
+                table,
+                id,
+                include_deleted,
+                identity,
+            } => {
+                crate::dv_handler::dv_get(
+                    &self.apps_ctx(),
+                    slug,
+                    table,
+                    id,
+                    include_deleted,
+                    identity,
+                )
+                .await
+            }
+            OrchestratorRequest::DvInsert {
+                slug,
+                table,
+                payload,
+                identity,
+            } => {
+                crate::dv_handler::dv_insert(&self.apps_ctx(), slug, table, payload, identity)
+                    .await
+            }
+            OrchestratorRequest::DvUpdate {
+                slug,
+                table,
+                id,
+                if_version,
+                payload,
+                identity,
+            } => {
+                crate::dv_handler::dv_update(
+                    &self.apps_ctx(),
+                    slug,
+                    table,
+                    id,
+                    if_version,
+                    payload,
+                    identity,
+                )
+                .await
+            }
+            OrchestratorRequest::DvSoftDelete {
+                slug,
+                table,
+                id,
+                if_version,
+                identity,
+            } => {
+                crate::dv_handler::dv_soft_delete(
+                    &self.apps_ctx(),
+                    slug,
+                    table,
+                    id,
+                    if_version,
+                    identity,
+                )
+                .await
+            }
+            OrchestratorRequest::DvRestore {
+                slug,
+                table,
+                id,
+                if_version,
+                identity,
+            } => {
+                crate::dv_handler::dv_restore(
+                    &self.apps_ctx(),
+                    slug,
+                    table,
+                    id,
+                    if_version,
+                    identity,
+                )
+                .await
+            }
+            OrchestratorRequest::DvAuditList {
+                slug,
+                table,
+                row_id,
+                op,
+                since,
+                top,
+                skip,
+                identity,
+            } => {
+                crate::dv_handler::dv_audit_list(
+                    &self.apps_ctx(),
+                    slug,
+                    table,
+                    row_id,
+                    op,
+                    since,
+                    top,
+                    skip,
+                    identity,
+                )
+                .await
+            }
+            OrchestratorRequest::DvRotateToken { slug } => {
+                crate::dv_handler::dv_rotate_token(&self.apps_ctx(), slug).await
+            }
+            OrchestratorRequest::DvVerifyToken { slug, token } => {
+                crate::dv_handler::dv_verify_token(&self.apps_ctx(), slug, token).await
+            }
             OrchestratorRequest::AppTodosList { slug, status } => {
                 self.apps_ctx().todos_list(slug, status).await
             }

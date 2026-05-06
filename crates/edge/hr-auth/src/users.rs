@@ -5,6 +5,7 @@ use argon2::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 /// Données utilisateur sérialisées en YAML
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,6 +16,11 @@ struct UsersFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UserData {
+    /// Stable per-user identity used by the dataverse gateway to populate
+    /// `created_by` / `updated_by` and (later) row-level rights. Lazily
+    /// generated on first access if missing — see [`UserStore::get`].
+    #[serde(default)]
+    uuid: Option<Uuid>,
     #[serde(default)]
     displayname: Option<String>,
     #[serde(default)]
@@ -36,6 +42,9 @@ struct UserData {
 #[serde(rename_all = "camelCase")]
 pub struct UserInfo {
     pub username: String,
+    /// Stable identity uuid. Always present on `UserInfo` — see the persistence
+    /// note on [`UserData::uuid`].
+    pub uuid: Uuid,
     pub displayname: String,
     pub email: String,
     pub created: Option<String>,
@@ -84,18 +93,48 @@ impl UserStore {
         }
     }
 
-    /// Récupère un utilisateur par nom (sans mot de passe)
+    /// Récupère un utilisateur par nom (sans mot de passe).
+    ///
+    /// Backfills a UUIDv4 into `users.yml` for any user that pre-dates the
+    /// dataverse identity model. The persistence is best-effort: a write
+    /// failure is logged and the in-memory uuid is returned anyway, so the
+    /// next call will simply re-generate. That regeneration window is fine
+    /// because no consumer stores a uuid expecting it to outlive the next
+    /// read of a missing entry.
     pub fn get(&self, username: &str) -> Option<UserInfo> {
-        let data = self.load();
-        data.users.get(username).map(|ud| UserInfo {
-            username: username.to_string(),
-            displayname: ud
+        let mut data = self.load();
+        let (uuid, displayname, email, created, last_login, needs_save);
+        {
+            let user = data.users.get_mut(username)?;
+            (uuid, needs_save) = match user.uuid {
+                Some(u) => (u, false),
+                None => {
+                    let new_uuid = Uuid::new_v4();
+                    user.uuid = Some(new_uuid);
+                    (new_uuid, true)
+                }
+            };
+            displayname = user
                 .displayname
                 .clone()
-                .unwrap_or_else(|| username.to_string()),
-            email: ud.email.clone().unwrap_or_default(),
-            created: ud.created.clone(),
-            last_login: ud.last_login.clone(),
+                .unwrap_or_else(|| username.to_string());
+            email = user.email.clone().unwrap_or_default();
+            created = user.created.clone();
+            last_login = user.last_login.clone();
+        }
+        if needs_save && !self.save(&data) {
+            tracing::warn!(
+                username,
+                "failed to persist backfilled UUID for user — will regenerate next call"
+            );
+        }
+        Some(UserInfo {
+            username: username.to_string(),
+            uuid,
+            displayname,
+            email,
+            created,
+            last_login,
         })
     }
 
@@ -194,5 +233,39 @@ mod tests {
         let password = "test";
         let hash = hash_password(password).unwrap();
         assert!(hash.starts_with("$argon2id$"));
+    }
+
+    #[test]
+    fn get_backfills_uuid_for_legacy_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("users.yml");
+        // Pre-existing users.yml without `uuid` field — simulates legacy state.
+        std::fs::write(
+            &path,
+            "users:\n  alice:\n    displayname: Alice\n    email: alice@example.com\n",
+        )
+        .unwrap();
+        let store = UserStore::new(dir.path());
+
+        let info = store.get("alice").expect("user exists");
+        let first_uuid = info.uuid;
+        assert_ne!(first_uuid, Uuid::nil(), "uuid must be backfilled");
+        assert_eq!(info.username, "alice");
+        assert_eq!(info.displayname, "Alice");
+
+        // The same uuid must come back on the next read — proves persistence.
+        let info2 = store.get("alice").expect("user exists");
+        assert_eq!(info2.uuid, first_uuid, "backfilled uuid must persist across reads");
+
+        // The on-disk yaml must now contain the uuid.
+        let yaml = std::fs::read_to_string(&path).unwrap();
+        assert!(yaml.contains(&first_uuid.to_string()));
+    }
+
+    #[test]
+    fn get_returns_none_for_missing_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserStore::new(dir.path());
+        assert!(store.get("nobody").is_none());
     }
 }

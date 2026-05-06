@@ -10,9 +10,13 @@ pub enum ForwardAuthResult {
     Unauthorized { login_url: String },
 }
 
-/// Headers à injecter dans la réponse en cas de succès
+/// Headers à injecter dans la réponse en cas de succès.
+///
+/// `remote_user_id` is consumed by the dataverse gateway to populate
+/// `created_by` / `updated_by` (and, later, to enforce row-level rights).
 pub struct ForwardAuthHeaders {
     pub remote_user: String,
+    pub remote_user_id: String,
     pub remote_email: String,
     pub remote_name: String,
 }
@@ -21,6 +25,7 @@ impl From<&UserInfo> for ForwardAuthHeaders {
     fn from(user: &UserInfo) -> Self {
         Self {
             remote_user: user.username.clone(),
+            remote_user_id: user.uuid.to_string(),
             remote_email: user.email.clone(),
             remote_name: user.displayname.clone(),
         }

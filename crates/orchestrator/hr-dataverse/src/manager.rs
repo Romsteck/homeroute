@@ -16,7 +16,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use crate::sqlx::{PgPool, PgPoolOptions};
 use tokio::sync::RwLock;
 
@@ -43,6 +46,42 @@ pub struct AppSecret {
     pub role_name: String,
     pub password: String,
     pub dsn: String,
+    /// Stable per-app identity uuid. Used by the dataverse gateway to
+    /// populate `created_by` / `updated_by` when the app itself (not a
+    /// human user) is the actor. Persistent — never rotated.
+    #[serde(default)]
+    pub app_uuid: Uuid,
+    /// Opaque bearer token the app supplies in `Authorization: Bearer …`
+    /// when calling the dataverse gateway. The value is a 32-byte random
+    /// blob, base64url-encoded. Rotated by [`DataverseManager::rotate_token`];
+    /// the previous value is invalidated immediately.
+    #[serde(default)]
+    pub gateway_token: String,
+    /// Wall-clock timestamp of the last token rotation (or first mint).
+    #[serde(default)]
+    pub token_rotated_at: Option<DateTime<Utc>>,
+}
+
+impl AppSecret {
+    /// Generate a fresh `AppSecret::gateway_token` (32 random bytes,
+    /// base64url-encoded without padding). 256 bits of entropy.
+    pub fn fresh_token() -> String {
+        let mut buf = [0u8; 32];
+        rand::rng().fill_bytes(&mut buf);
+        base64url_no_pad(&buf)
+    }
+
+    /// True iff the secret has both an `app_uuid` and a `gateway_token`.
+    /// Pre-base-model entries were written before these fields existed
+    /// (`app_uuid` deserialises to `Uuid::nil()`, `gateway_token` to "").
+    pub fn has_gateway_credentials(&self) -> bool {
+        !self.app_uuid.is_nil() && !self.gateway_token.is_empty()
+    }
+}
+
+fn base64url_no_pad(input: &[u8]) -> String {
+    use base64::engine::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(input)
 }
 
 impl From<&ProvisioningResult> for AppSecret {
@@ -52,6 +91,9 @@ impl From<&ProvisioningResult> for AppSecret {
             role_name: r.role_name.clone(),
             password: r.password.clone(),
             dsn: r.dsn.clone(),
+            app_uuid: Uuid::new_v4(),
+            gateway_token: AppSecret::fresh_token(),
+            token_rotated_at: Some(Utc::now()),
         }
     }
 }
@@ -251,6 +293,82 @@ impl DataverseManager {
         Ok(schema.sdl())
     }
 
+    /// Read the current `AppSecret` for `slug`.
+    pub fn read_secret(&self, slug: &str) -> Result<Option<AppSecret>> {
+        let Some(path) = &self.secrets_path else {
+            return Ok(None);
+        };
+        let secrets = read_secrets_file(path)?;
+        Ok(secrets.apps.get(slug).cloned())
+    }
+
+    /// Backfill an `app_uuid` and `gateway_token` for `slug` if missing
+    /// (i.e. for entries written before the gateway-credential fields
+    /// existed). Returns the secret in its final form. No-op when the
+    /// fields are already populated.
+    pub fn ensure_gateway_credentials(&self, slug: &str) -> Result<AppSecret> {
+        let Some(path) = &self.secrets_path else {
+            return Err(DataverseError::NotProvisioned(slug.to_string()));
+        };
+        let mut secrets = read_secrets_file(path)?;
+        let entry = secrets
+            .apps
+            .get_mut(slug)
+            .ok_or_else(|| DataverseError::NotProvisioned(slug.to_string()))?;
+        if !entry.has_gateway_credentials() {
+            if entry.app_uuid.is_nil() {
+                entry.app_uuid = Uuid::new_v4();
+            }
+            if entry.gateway_token.is_empty() {
+                entry.gateway_token = AppSecret::fresh_token();
+                entry.token_rotated_at = Some(Utc::now());
+            }
+            let snapshot = entry.clone();
+            write_secrets_file(path, &secrets)?;
+            return Ok(snapshot);
+        }
+        Ok(entry.clone())
+    }
+
+    /// Generate and persist a fresh `gateway_token` for `slug`. Invalidates
+    /// the previous token immediately. The `app_uuid` is left untouched.
+    pub fn rotate_token(&self, slug: &str) -> Result<String> {
+        let Some(path) = &self.secrets_path else {
+            return Err(DataverseError::NotProvisioned(slug.to_string()));
+        };
+        let mut secrets = read_secrets_file(path)?;
+        let entry = secrets
+            .apps
+            .get_mut(slug)
+            .ok_or_else(|| DataverseError::NotProvisioned(slug.to_string()))?;
+        let new_token = AppSecret::fresh_token();
+        entry.gateway_token = new_token.clone();
+        entry.token_rotated_at = Some(Utc::now());
+        if entry.app_uuid.is_nil() {
+            entry.app_uuid = Uuid::new_v4();
+        }
+        write_secrets_file(path, &secrets)?;
+        Ok(new_token)
+    }
+
+    /// Verify that `presented` matches the stored `gateway_token` for
+    /// `slug`. Returns the `app_uuid` on success. Constant-time on the
+    /// token comparison.
+    pub fn verify_token(&self, slug: &str, presented: &str) -> Result<Uuid> {
+        let secret = self
+            .read_secret(slug)?
+            .ok_or_else(|| DataverseError::NotProvisioned(slug.to_string()))?;
+        if secret.gateway_token.is_empty() {
+            return Err(DataverseError::internal(
+                "gateway_token not yet provisioned — call ensure_gateway_credentials",
+            ));
+        }
+        if !ct_eq(secret.gateway_token.as_bytes(), presented.as_bytes()) {
+            return Err(DataverseError::internal("invalid gateway token"));
+        }
+        Ok(secret.app_uuid)
+    }
+
     /// Tear down database + role for an app and remove its secret entry.
     pub async fn drop_app(&self, slug: &str) -> Result<()> {
         self.evict(slug).await;
@@ -301,6 +419,18 @@ fn set_owner_only(path: &Path) {
 #[cfg(not(unix))]
 fn set_owner_only(_path: &Path) {}
 
+/// Constant-time byte slice equality.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,11 +460,63 @@ mod tests {
             role_name: "app_foo".into(),
             password: "deadbeef".into(),
             dsn: "postgres://app_foo:deadbeef@localhost:5432/app_foo".into(),
+            app_uuid: Uuid::new_v4(),
+            gateway_token: AppSecret::fresh_token(),
+            token_rotated_at: Some(Utc::now()),
         });
         write_secrets_file(&path, &s).unwrap();
         let read = read_secrets_file(&path).unwrap();
         assert_eq!(read.apps.len(), 1);
-        assert_eq!(read.apps.get("foo").unwrap().db_name, "app_foo");
+        let entry = read.apps.get("foo").unwrap();
+        assert_eq!(entry.db_name, "app_foo");
+        assert!(!entry.app_uuid.is_nil());
+        assert!(!entry.gateway_token.is_empty());
+        assert!(entry.has_gateway_credentials());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_entry_without_gateway_fields_deserialises() {
+        // Pre-base-model entry: only the four legacy fields. The new fields
+        // must default to their zero values so older secrets files keep
+        // loading.
+        let path = unique_tmp("legacy");
+        std::fs::write(
+            &path,
+            r#"{
+              "apps": {
+                "legacy": {
+                  "db_name": "app_legacy",
+                  "role_name": "app_legacy",
+                  "password": "p",
+                  "dsn": "postgres://app_legacy:p@localhost:5432/app_legacy"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let read = read_secrets_file(&path).unwrap();
+        let entry = read.apps.get("legacy").unwrap();
+        assert!(entry.app_uuid.is_nil());
+        assert!(entry.gateway_token.is_empty());
+        assert!(!entry.has_gateway_credentials());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn fresh_token_is_unique_and_url_safe() {
+        let a = AppSecret::fresh_token();
+        let b = AppSecret::fresh_token();
+        assert_ne!(a, b);
+        assert!(!a.is_empty());
+        // base64url-no-pad: only [A-Za-z0-9_-]
+        assert!(a.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
+    }
+
+    #[test]
+    fn ct_eq_equal_strings() {
+        assert!(ct_eq(b"hello", b"hello"));
+        assert!(!ct_eq(b"hello", b"world"));
+        assert!(!ct_eq(b"short", b"short_but_longer"));
     }
 }

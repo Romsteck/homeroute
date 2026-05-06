@@ -1,4 +1,5 @@
 use crate::types::*;
+use hr_common::Identity;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -341,6 +342,98 @@ pub enum OrchestratorRequest {
     /// legacy `db.sqlite` is preserved.
     AppDbRollbackMigration {
         slug: String,
+    },
+
+    // ── Dataverse REST gateway (next-gen, replaces AppDbGraphql/Introspect) ─
+    /// Return the public schema JSON for the app's dataverse (tables,
+    /// columns, computed expressions, relations) — what the gateway
+    /// exposes at `GET /api/dv/{slug}/$schema`.
+    DvSchema {
+        slug: String,
+    },
+    /// `GET /api/dv/{slug}/{table}` — paginated list with `$filter`,
+    /// `$select`, `$orderby`, `$top`, `$skip`, `$includeDeleted`,
+    /// `$count`. `query` is a JSON-serialised `ListQuery`.
+    DvList {
+        slug: String,
+        table: String,
+        #[serde(default)]
+        query: serde_json::Value,
+        identity: Identity,
+    },
+    /// `GET /api/dv/{slug}/{table}/{id}` — single row.
+    DvGet {
+        slug: String,
+        table: String,
+        id: serde_json::Value,
+        #[serde(default)]
+        include_deleted: bool,
+        identity: Identity,
+    },
+    /// `POST /api/dv/{slug}/{table}` — insert. `payload` is the user
+    /// column map; base columns are forbidden (they are filled by the
+    /// gateway from `identity`).
+    DvInsert {
+        slug: String,
+        table: String,
+        payload: BTreeMap<String, serde_json::Value>,
+        identity: Identity,
+    },
+    /// `PATCH /api/dv/{slug}/{table}/{id}` — update with `If-Match`
+    /// version check.
+    DvUpdate {
+        slug: String,
+        table: String,
+        id: serde_json::Value,
+        if_version: i32,
+        payload: BTreeMap<String, serde_json::Value>,
+        identity: Identity,
+    },
+    /// `DELETE /api/dv/{slug}/{table}/{id}` — soft-delete.
+    DvSoftDelete {
+        slug: String,
+        table: String,
+        id: serde_json::Value,
+        if_version: i32,
+        identity: Identity,
+    },
+    /// `POST /api/dv/{slug}/{table}/$restore/{id}` — un-soft-delete.
+    DvRestore {
+        slug: String,
+        table: String,
+        id: serde_json::Value,
+        if_version: i32,
+        identity: Identity,
+    },
+    /// `GET /api/dv/{slug}/$audit` — audit log query.
+    DvAuditList {
+        slug: String,
+        #[serde(default)]
+        table: Option<String>,
+        #[serde(default)]
+        row_id: Option<String>,
+        #[serde(default)]
+        op: Option<String>,
+        #[serde(default)]
+        since: Option<String>,
+        #[serde(default)]
+        top: Option<u32>,
+        #[serde(default)]
+        skip: Option<u32>,
+        identity: Identity,
+    },
+    /// `POST /api/dv/{slug}/$schema/rotate-token` — mint a fresh
+    /// gateway token for `slug` (admin-only). Returns the new token in
+    /// the response.
+    DvRotateToken {
+        slug: String,
+    },
+    /// Verify a per-app bearer token. Returns the resolved `app_uuid`
+    /// on success. Used by hr-api to convert `Authorization: Bearer …`
+    /// into an [`Identity::App`] before issuing further IPC calls.
+    DvVerifyToken {
+        slug: String,
+        token: String,
     },
 
     // ── Per-app todos (JSON-backed, live via app_todos event) ─────

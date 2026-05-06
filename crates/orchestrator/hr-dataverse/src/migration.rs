@@ -1,13 +1,21 @@
 //! DDL generation for Postgres.
 //!
-//! Each user table gets three implicit columns:
-//! - `id BIGSERIAL PRIMARY KEY`
-//! - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
-//! - `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()` (kept fresh by a trigger)
+//! Every user table gets the **base data model** automatically — applications
+//! never declare these columns themselves and the gateway hides them from
+//! schema responses except through the `@meta` block:
 //!
-//! The shared trigger function `_dv_set_updated_at()` is created once at
-//! provisioning time (see [`crate::engine::INIT_METADATA_SQL`]), and a
-//! per-table `BEFORE UPDATE` trigger fires it.
+//! - `id BIGSERIAL | UUID PRIMARY KEY` (controlled by [`IdStrategy`])
+//! - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+//! - `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()` (trigger)
+//! - `created_by UUID` / `updated_by UUID` — actor uuid
+//! - `created_by_kind` / `updated_by_kind` (CHECK in `'user','app','system'`)
+//! - `version INTEGER NOT NULL DEFAULT 0` — optimistic concurrency, trigger
+//!   always bumps on UPDATE so a misbehaving caller can't skip it
+//! - `is_deleted BOOLEAN NOT NULL DEFAULT FALSE` — soft-delete; gateway
+//!   queries auto-filter to active rows unless `$includeDeleted=true`
+//!
+//! The shared trigger function `_dv_set_updated_at()` (despite its legacy
+//! name) bumps both `updated_at` and `version` on every row update.
 
 use crate::schema::{
     ColumnDefinition, DatabaseSchema, FieldType, IdStrategy, RelationDefinition, TableDefinition,
@@ -75,22 +83,58 @@ fn column_fragment(col: &ColumnDefinition, lookup_target_strategy: IdStrategy) -
     frag
 }
 
+/// Column fragments for the base data model — present on every user table.
+///
+/// Order is: PK, audit timestamps, audit actors, optimistic concurrency,
+/// soft-delete. The first element (`id`) takes a per-table strategy.
+fn base_column_fragments(id_strategy: IdStrategy) -> Vec<String> {
+    vec![
+        format!(
+            "\"id\" {}{} PRIMARY KEY",
+            id_strategy.pg_id_type(),
+            id_strategy.id_default_clause(),
+        ),
+        "\"created_at\" TIMESTAMPTZ NOT NULL DEFAULT now()".into(),
+        "\"updated_at\" TIMESTAMPTZ NOT NULL DEFAULT now()".into(),
+        "\"created_by\" UUID".into(),
+        "\"updated_by\" UUID".into(),
+        "\"created_by_kind\" TEXT NOT NULL DEFAULT 'system' \
+         CHECK (\"created_by_kind\" IN ('user','app','system'))"
+            .into(),
+        "\"updated_by_kind\" TEXT NOT NULL DEFAULT 'system' \
+         CHECK (\"updated_by_kind\" IN ('user','app','system'))"
+            .into(),
+        "\"version\" INTEGER NOT NULL DEFAULT 0".into(),
+        "\"is_deleted\" BOOLEAN NOT NULL DEFAULT FALSE".into(),
+    ]
+}
+
+/// Names of the base columns. The gateway hides these from app-facing schema
+/// responses (they appear under the `@meta` block).
+pub const BASE_COLUMNS: &[&str] = &[
+    "id",
+    "created_at",
+    "updated_at",
+    "created_by",
+    "updated_by",
+    "created_by_kind",
+    "updated_by_kind",
+    "version",
+    "is_deleted",
+];
+
+/// Returns true iff `name` is one of the [`BASE_COLUMNS`].
+pub fn is_base_column(name: &str) -> bool {
+    BASE_COLUMNS.contains(&name)
+}
+
 /// Generate `CREATE TABLE` for a user table (without FK constraints — those
 /// are applied via [`add_foreign_key_sql`] after every Lookup column exists).
 ///
 /// `schema` is the existing schema (used to resolve Lookup columns' target
 /// `id_strategy` so the FK column type matches the target's `id`).
 pub fn create_table_sql(def: &TableDefinition, schema: &DatabaseSchema) -> String {
-    let id_line = format!(
-        "\"id\" {}{} PRIMARY KEY",
-        def.id_strategy.pg_id_type(),
-        def.id_strategy.id_default_clause(),
-    );
-    let mut cols: Vec<String> = vec![
-        id_line,
-        "\"created_at\" TIMESTAMPTZ NOT NULL DEFAULT now()".into(),
-        "\"updated_at\" TIMESTAMPTZ NOT NULL DEFAULT now()".into(),
-    ];
+    let mut cols = base_column_fragments(def.id_strategy);
     for col in &def.columns {
         cols.push(column_fragment(col, lookup_strategy_for(col, def, schema)));
     }
@@ -99,6 +143,40 @@ pub fn create_table_sql(def: &TableDefinition, schema: &DatabaseSchema) -> Strin
         quote_ident(&def.name),
         cols.join(",\n  ")
     )
+}
+
+/// Partial index targeting active rows. Cheap to maintain, helpful for the
+/// soft-delete-aware default WHERE auto-injected by the gateway.
+pub fn create_active_index_sql(table: &str) -> String {
+    let idx = format!("_dv_idx_{}_active", table);
+    format!(
+        "CREATE INDEX IF NOT EXISTS {idx} ON {tbl} (\"id\") WHERE \"is_deleted\" = FALSE;",
+        idx = quote_ident(&idx),
+        tbl = quote_ident(table),
+    )
+}
+
+/// DDL to upgrade a pre-base-model table to the current base model. Idempotent
+/// (uses `ADD COLUMN IF NOT EXISTS`). Used by `hr-dataverse-migrate
+/// add-base-columns` when migrating legacy tables created before the base
+/// model landed.
+pub fn add_base_columns_sql(table: &str) -> Vec<String> {
+    let t = quote_ident(table);
+    vec![
+        format!("ALTER TABLE {t} ADD COLUMN IF NOT EXISTS \"created_by\" UUID;"),
+        format!("ALTER TABLE {t} ADD COLUMN IF NOT EXISTS \"updated_by\" UUID;"),
+        format!(
+            "ALTER TABLE {t} ADD COLUMN IF NOT EXISTS \"created_by_kind\" TEXT NOT NULL DEFAULT 'system' \
+             CHECK (\"created_by_kind\" IN ('user','app','system'));"
+        ),
+        format!(
+            "ALTER TABLE {t} ADD COLUMN IF NOT EXISTS \"updated_by_kind\" TEXT NOT NULL DEFAULT 'system' \
+             CHECK (\"updated_by_kind\" IN ('user','app','system'));"
+        ),
+        format!("ALTER TABLE {t} ADD COLUMN IF NOT EXISTS \"version\" INTEGER NOT NULL DEFAULT 0;"),
+        format!("ALTER TABLE {t} ADD COLUMN IF NOT EXISTS \"is_deleted\" BOOLEAN NOT NULL DEFAULT FALSE;"),
+        create_active_index_sql(table),
+    ]
 }
 
 /// Resolve the [`IdStrategy`] of a Lookup column's target table. Returns
@@ -221,15 +299,54 @@ mod tests {
     }
 
     #[test]
-    fn create_table_includes_implicit_columns() {
+    fn create_table_includes_base_model() {
         let sql = create_table_sql(
             &def_table("contacts", vec![col("email", FieldType::Email)]),
             &empty_schema(),
         );
+        // PK + timestamps
         assert!(sql.contains("\"id\" BIGSERIAL PRIMARY KEY"));
         assert!(sql.contains("\"created_at\" TIMESTAMPTZ"));
         assert!(sql.contains("\"updated_at\" TIMESTAMPTZ"));
+        // Audit actor
+        assert!(sql.contains("\"created_by\" UUID"));
+        assert!(sql.contains("\"updated_by\" UUID"));
+        assert!(sql.contains("\"created_by_kind\" TEXT NOT NULL DEFAULT 'system'"));
+        assert!(sql.contains("\"updated_by_kind\" TEXT NOT NULL DEFAULT 'system'"));
+        assert!(sql.contains("CHECK (\"created_by_kind\" IN ('user','app','system'))"));
+        // Optimistic concurrency + soft-delete
+        assert!(sql.contains("\"version\" INTEGER NOT NULL DEFAULT 0"));
+        assert!(sql.contains("\"is_deleted\" BOOLEAN NOT NULL DEFAULT FALSE"));
+        // User column comes after base columns
         assert!(sql.contains("\"email\" TEXT"));
+    }
+
+    #[test]
+    fn add_base_columns_idempotent_via_if_not_exists() {
+        let stmts = add_base_columns_sql("legacy_table");
+        // Six ALTERs (+1 partial index)
+        assert_eq!(stmts.len(), 7);
+        for s in stmts.iter().take(6) {
+            assert!(s.contains("ADD COLUMN IF NOT EXISTS"), "stmt was: {}", s);
+        }
+        assert!(stmts[6].contains("CREATE INDEX IF NOT EXISTS"));
+        assert!(stmts[6].contains("WHERE \"is_deleted\" = FALSE"));
+    }
+
+    #[test]
+    fn is_base_column_recognises_all() {
+        for name in BASE_COLUMNS {
+            assert!(is_base_column(name));
+        }
+        assert!(!is_base_column("email"));
+        assert!(!is_base_column("name"));
+    }
+
+    #[test]
+    fn active_index_is_partial_on_is_deleted_false() {
+        let sql = create_active_index_sql("orders");
+        assert!(sql.contains("ON \"orders\""));
+        assert!(sql.contains("WHERE \"is_deleted\" = FALSE"));
     }
 
     #[test]
@@ -297,11 +414,17 @@ mod tests {
         // Choice columns no longer emit CHECK constraints — see the
         // long-form note in `column_fragment`. The DDL is just a TEXT
         // column; enforcement happens at the application layer.
+        //
+        // (The base-model `*_by_kind` columns DO carry CHECK constraints, but
+        // only on `created_by_kind`/`updated_by_kind`, not on user columns.)
         let mut c = col("status", FieldType::Choice);
         c.choices = vec!["open".into(), "closed".into()];
         let sql = create_table_sql(&def_table("tickets", vec![c]), &empty_schema());
-        assert!(!sql.contains("CHECK"));
         assert!(sql.contains("\"status\" TEXT"));
+        // No CHECK on the user-defined `status` column — the choice values
+        // would never appear in a CHECK clause.
+        assert!(!sql.contains("'open'"), "Choice values must not leak into CHECK: {}", sql);
+        assert!(!sql.contains("'closed'"));
     }
 
     #[test]

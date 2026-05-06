@@ -17,6 +17,7 @@ pub mod ws;
 
 pub mod apps;
 pub mod apps_db;
+pub mod dv;
 pub mod backup;
 pub mod docs;
 pub mod edge;

@@ -106,7 +106,7 @@ impl DnsRouteSync {
 
     /// Calcule l'ensemble des FQDN à publier dans le DNS local.
     /// Inclus :
-    /// - Builtins : `proxy.{base_domain}`, `auth.{base_domain}`
+    /// - Builtins : `proxy.{base_domain}`, `auth.{base_domain}`, `dv.{base_domain}`
     /// - Routes manuelles enabled (`ProxyConfig::routes`)
     /// - Toutes les app routes (locales et distantes)
     /// Exclus :
@@ -115,9 +115,11 @@ impl DnsRouteSync {
     fn build_record_set(&self) -> Vec<StaticRecordDto> {
         let mut names: BTreeSet<String> = BTreeSet::new();
 
-        // 1. Builtins
+        // 1. Builtins (management endpoints — TLS terminé par hr-edge,
+        //    routés vers homeroute API sur le port 4000).
         names.insert(format!("proxy.{}", self.base_domain));
         names.insert(format!("auth.{}", self.base_domain));
+        names.insert(format!("dv.{}", self.base_domain));
 
         // 2. Routes manuelles
         let cfg = self.proxy.config();

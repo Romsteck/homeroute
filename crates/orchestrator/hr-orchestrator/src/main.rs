@@ -1,6 +1,7 @@
 #![recursion_limit = "512"]
 mod apps_handler;
 mod backup_pipeline;
+mod dv_handler;
 mod ipc_handler;
 mod mcp;
 mod scaffold;
@@ -402,6 +403,42 @@ async fn main() -> anyhow::Result<()> {
                 warn!(error = %e, "boot: root context regen failed");
             }
             info!("boot: context regen done");
+        });
+    }
+
+    // ── Sync HR_DV_* env vars for every postgres-dataverse app ────────
+    // Persists `HR_DV_BASE_URL`, `HR_DV_TOKEN`, `HR_APP_UUID` into each
+    // app's `.env` file (and removes any legacy `DATABASE_URL`). Idempotent.
+    // Backfills missing gateway credentials in `dataverse-secrets.json`
+    // for apps provisioned before the gateway-token field existed.
+    {
+        let supervisor_for_dv = supervisor.clone();
+        let dv_mgr = dataverse_manager.clone();
+        let db_mgr = db_manager.clone();
+        let todos_for_dv = todos_manager.clone();
+        let context_gen_for_dv = context_generator.clone();
+        let edge_for_dv = edge.clone();
+        let git_for_dv = git_service.clone();
+        let base_domain_for_dv = env.base_domain.clone();
+        let log_store_for_dv = log_store.clone();
+        let build_locks_for_dv = build_locks.clone();
+        let app_build_tx_for_dv = events.app_build.clone();
+        tokio::spawn(async move {
+            let ctx = apps_handler::AppsContext {
+                supervisor: supervisor_for_dv,
+                db_manager: db_mgr,
+                dataverse_manager: dv_mgr,
+                todos: todos_for_dv,
+                context_generator: context_gen_for_dv,
+                edge: edge_for_dv,
+                git: git_for_dv,
+                base_domain: base_domain_for_dv,
+                log_store: log_store_for_dv,
+                build_locks: build_locks_for_dv,
+                app_build_tx: app_build_tx_for_dv,
+            };
+            ctx.sync_dv_env_all().await;
+            info!("boot: dv env sync done");
         });
     }
 

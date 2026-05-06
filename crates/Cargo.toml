@@ -25,6 +25,8 @@ members = [
     "orchestrator/hr-db",
     "orchestrator/hr-dataverse",
     "orchestrator/hr-dataverse-migrate",
+    "orchestrator/hr-dvexpr",
+    "orchestrator/hr-dv-codegen",
     "orchestrator/hr-apps",
     # api (4000)
     "api/homeroute",
@@ -118,6 +120,7 @@ base64 = "0.22"
 # Dataverse
 hr-db = { path = "orchestrator/hr-db" }
 hr-dataverse = { path = "orchestrator/hr-dataverse" }
+hr-dvexpr = { path = "orchestrator/hr-dvexpr" }
 
 # Postgres + GraphQL (used by hr-dataverse).
 # We depend on sqlx-core + sqlx-postgres directly instead of the `sqlx`
@@ -127,7 +130,7 @@ hr-dataverse = { path = "orchestrator/hr-dataverse" }
 # hr-api. The underscore-prefixed sqlx-core features (_rt-tokio, _tls-…) are
 # the ones the sqlx meta-crate uses internally and are stable in practice.
 sqlx-core = { version = "0.8.6", default-features = false, features = ["_rt-tokio", "_tls-rustls-ring-webpki", "json", "chrono", "uuid", "migrate"] }
-sqlx-postgres = { version = "0.8.6", default-features = false, features = ["chrono", "uuid", "json", "migrate"] }
+sqlx-postgres = { version = "0.8.6", default-features = false, features = ["chrono", "uuid", "json", "migrate", "bigdecimal"] }
 async-graphql = { version = "7.0", default-features = false, features = ["dynamic-schema", "dataloader", "chrono", "uuid"] }
 
 # Docs (per-app documentation, structured: overview/screens/features/components + mermaid)

@@ -12,12 +12,19 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 rand = { workspace = true }
+base64 = { workspace = true }
 
 # Postgres driver — see workspace comment for why we don't use the sqlx meta-crate
 sqlx-core = { workspace = true }
 sqlx-postgres = { workspace = true }
 
 async-graphql = { workspace = true }
+
+# Expression language used for $filter and computed columns.
+hr-dvexpr = { workspace = true }
+
+# Identity (User/App/System) threaded through every gateway operation.
+hr-common = { path = "../../shared/hr-common" }
 
 [dev-dependencies]
 futures-util = { workspace = true }

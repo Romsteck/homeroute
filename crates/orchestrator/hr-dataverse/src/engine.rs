@@ -19,8 +19,8 @@ use crate::sqlx::{self, PgPool};
 use crate::error::{DataverseError, Result};
 use crate::graphql::SchemaCache;
 use crate::migration::{
-    add_column_sql, add_foreign_key_sql, create_table_sql, create_updated_at_trigger_sql,
-    drop_column_sql, drop_table_sql, quote_ident,
+    add_column_sql, add_foreign_key_sql, create_active_index_sql, create_table_sql,
+    create_updated_at_trigger_sql, drop_column_sql, drop_table_sql, quote_ident,
 };
 use crate::schema::{
     CascadeAction, ColumnDefinition, DatabaseSchema, FieldType, IdStrategy, RelationDefinition,
@@ -92,9 +92,49 @@ CREATE TABLE IF NOT EXISTS _dv_meta (
 INSERT INTO _dv_meta (key, value) VALUES ('schema_version', '1')
 ON CONFLICT (key) DO NOTHING;
 
+-- Per-database audit log. Every gateway-level mutation appends here in
+-- the same transaction as the data change, so the table is the
+-- ground-truth history (legacy `_dv_migrations` only journals schema
+-- changes). Rows are never deleted; admin tooling adds retention.
+CREATE TABLE IF NOT EXISTS _dv_audit (
+    id          BIGSERIAL PRIMARY KEY,
+    ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    table_name  TEXT NOT NULL,
+    row_id      TEXT NOT NULL,
+    op          TEXT NOT NULL CHECK (op IN ('INSERT','UPDATE','DELETE','RESTORE')),
+    actor_kind  TEXT NOT NULL CHECK (actor_kind IN ('user','app','system')),
+    actor_uuid  UUID,
+    actor_label TEXT,
+    before      JSONB,
+    after       JSONB,
+    diff        JSONB
+);
+CREATE INDEX IF NOT EXISTS _dv_audit_table_row_idx ON _dv_audit (table_name, row_id);
+CREATE INDEX IF NOT EXISTS _dv_audit_ts_idx        ON _dv_audit (ts DESC);
+
+-- Combined trigger: bumps `updated_at` AND `version` on every UPDATE.
+-- Defense in depth: even if the gateway forgets to increment `version` in
+-- the SET clause, the trigger guarantees monotonic version progression so
+-- optimistic-concurrency callers (`If-Match`) stay correct.
+--
+-- The function name is preserved (`_dv_set_updated_at`) for backwards
+-- compatibility with per-table triggers created before the base model
+-- landed; new behavior fires automatically on the next UPDATE because
+-- `CREATE OR REPLACE FUNCTION` updates the body in place.
 CREATE OR REPLACE FUNCTION _dv_set_updated_at() RETURNS TRIGGER AS $$
 BEGIN
     NEW.updated_at = now();
+    -- Only bump version when the column exists on this table. Pre-base-model
+    -- tables that haven't been migrated yet have no `version`; the trigger
+    -- gracefully skips the bump rather than aborting their UPDATEs.
+    IF TG_RELID IS NOT NULL AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = TG_TABLE_NAME
+          AND table_schema = TG_TABLE_SCHEMA
+          AND column_name = 'version'
+    ) THEN
+        NEW.version = COALESCE(OLD.version, 0) + 1;
+    END IF;
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -139,9 +179,28 @@ impl DataverseEngine {
     }
 
     /// Run `INIT_METADATA_SQL` against this engine's pool. Safe to call
-    /// repeatedly (everything is `IF NOT EXISTS`).
+    /// repeatedly (everything is `IF NOT EXISTS`). After bootstrap,
+    /// upgrades pre-base-model tables (legacy data-migrated apps) by
+    /// adding the audit/version/soft-delete columns + the active-row
+    /// partial index; this is idempotent via `ADD COLUMN IF NOT EXISTS`.
     pub async fn init_metadata(&self) -> Result<()> {
         sqlx::raw_sql(INIT_METADATA_SQL).execute(&self.pool).await?;
+        self.upgrade_base_model().await?;
+        Ok(())
+    }
+
+    /// One-shot upgrade of every user table to the current base model.
+    /// Idempotent. Called from [`Self::init_metadata`].
+    async fn upgrade_base_model(&self) -> Result<()> {
+        let tables: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM _dv_tables")
+                .fetch_all(&self.pool)
+                .await?;
+        for (name,) in tables {
+            for stmt in crate::migration::add_base_columns_sql(&name) {
+                sqlx::raw_sql(&stmt).execute(&self.pool).await?;
+            }
+        }
         Ok(())
     }
 
@@ -308,10 +367,15 @@ impl DataverseEngine {
         //    FK column type (BIGINT vs UUID).
         sqlx::raw_sql(&create_table_sql(def, &snapshot)).execute(&self.pool).await?;
 
-        // 2. Updated_at trigger
+        // 2. Trigger that bumps `updated_at` and `version` on every UPDATE.
         sqlx::raw_sql(&create_updated_at_trigger_sql(&def.name)).execute(&self.pool).await?;
 
-        // 3. _dv_tables row — persists id_strategy so subsequent
+        // 3. Partial index for the soft-delete-aware default filter — `WHERE
+        //    is_deleted = FALSE` is auto-injected by the gateway, the index
+        //    keeps active-row scans cheap.
+        sqlx::raw_sql(&create_active_index_sql(&def.name)).execute(&self.pool).await?;
+
+        // 4. _dv_tables row — persists id_strategy so subsequent
         //    schema reads (and add_column for Lookups targeting this
         //    table) pick up the right FK type.
         sqlx::query(
@@ -325,12 +389,12 @@ impl DataverseEngine {
         .execute(&self.pool)
         .await?;
 
-        // 4. _dv_columns rows
+        // 5. _dv_columns rows
         for (pos, col) in def.columns.iter().enumerate() {
             insert_column_metadata(&self.pool, &def.name, col, pos as i32).await?;
         }
 
-        // 5. FK constraints for any Lookup columns
+        // 6. FK constraints for any Lookup columns
         for col in def.columns.iter().filter(|c| c.field_type == FieldType::Lookup) {
             if let Some(target) = &col.lookup_target {
                 let rel = RelationDefinition {

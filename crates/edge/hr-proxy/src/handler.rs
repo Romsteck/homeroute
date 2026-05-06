@@ -299,11 +299,49 @@ async fn proxy_handler_inner(
         req.uri().path()
     );
 
-    // Built-in routes for management domains (proxy.* and auth.*)
+    // Built-in routes for management domains (proxy.*, auth.*, dv.*)
+    //
+    // `dv.{base_domain}` exposes the dataverse REST gateway. It routes to
+    // the same management port as proxy/auth (homeroute API on 4000).
+    // Authentication is **opportunistic**: forward-auth runs below if a
+    // session cookie is present (so browser users get `X-Remote-User-Id`
+    // injected) but never redirects on its absence — the gateway handles
+    // its own auth (Bearer token + `X-Remote-User-Id` fallback).
     let base_domain = state.base_domain();
     let domain_only = host.split(':').next().unwrap_or(&host);
+    let is_dv_gateway = domain_only == format!("dv.{}", base_domain);
     let is_management = domain_only == format!("proxy.{}", base_domain)
-        || domain_only == format!("auth.{}", base_domain);
+        || domain_only == format!("auth.{}", base_domain)
+        || is_dv_gateway;
+
+    // Opportunistic forward-auth for the dataverse gateway: best-effort
+    // session lookup, inject identity headers on success, never redirect.
+    if is_dv_gateway {
+        if let Some(ref auth) = state.auth {
+            let cookie_value = req
+                .headers()
+                .get("cookie")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|cookies| {
+                    cookies
+                        .split(';')
+                        .find_map(|c| c.trim().strip_prefix("auth_session="))
+                });
+            if let Some(session_id) = cookie_value {
+                if let Ok(Some(session)) = auth.sessions.validate(session_id) {
+                    if let Some(user) = auth.users.get(&session.user_id) {
+                        if let Ok(v) = HeaderValue::from_str(&user.username) {
+                            req.headers_mut().insert("X-Remote-User", v);
+                        }
+                        let uuid_str = user.uuid.to_string();
+                        if let Ok(v) = HeaderValue::from_str(&uuid_str) {
+                            req.headers_mut().insert("X-Remote-User-Id", v);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Check for agent-managed application routes (before static route lookup)
     if !is_management {
@@ -342,7 +380,14 @@ async fn proxy_handler_inner(
                     match check_forward_auth(auth, cookie_value, domain_only, &req_uri, "https") {
                         ForwardAuthResult::Success { user } => {
                             if let Ok(v) = HeaderValue::from_str(&user.username) {
-                                req.headers_mut().insert("X-Forwarded-User", v);
+                                req.headers_mut().insert("X-Forwarded-User", v.clone());
+                                req.headers_mut().insert("X-Remote-User", v);
+                            }
+                            // Identity uuid for the dataverse gateway —
+                            // populates `created_by` / `updated_by`.
+                            let uuid_str = user.uuid.to_string();
+                            if let Ok(v) = HeaderValue::from_str(&uuid_str) {
+                                req.headers_mut().insert("X-Remote-User-Id", v);
                             }
                         }
                         ForwardAuthResult::Unauthorized { login_url } => {
@@ -609,6 +654,13 @@ async fn proxy_handler_inner(
             match check_forward_auth(auth, cookie_value, &host, &req_uri, "https") {
                 ForwardAuthResult::Success { user } => {
                     debug!("Auth OK for user: {}", user.username);
+                    if let Ok(v) = HeaderValue::from_str(&user.username) {
+                        req.headers_mut().insert("X-Remote-User", v);
+                    }
+                    let uuid_str = user.uuid.to_string();
+                    if let Ok(v) = HeaderValue::from_str(&uuid_str) {
+                        req.headers_mut().insert("X-Remote-User-Id", v);
+                    }
                 }
                 ForwardAuthResult::Unauthorized { login_url } => {
                     return Err(ProxyError::AuthRequired(Some(login_url)));
@@ -628,11 +680,21 @@ async fn proxy_handler_inner(
     let is_websocket = is_websocket_upgrade(&req);
 
     // Build target URL
-    let path_and_query = req
+    let raw_path_and_query = req
         .uri()
         .path_and_query()
         .map(|x| x.to_string())
         .unwrap_or_else(|| "/".to_string());
+
+    // Path rewrite for the dataverse gateway: external callers hit
+    // `dv.{base_domain}/{slug}/$schema`, the upstream API expects
+    // `/api/dv/{slug}/$schema`. We mount the gateway under that prefix
+    // here so the public surface stays clean.
+    let path_and_query = if is_dv_gateway {
+        format!("/api/dv{}", raw_path_and_query)
+    } else {
+        raw_path_and_query
+    };
 
     let target_url = format!(
         "http://{}:{}{}",
