@@ -82,17 +82,18 @@ pub fn validate_identifier(name: &str) -> Result<(), ValidationError> {
 }
 
 /// Validate a name that *must not* collide with the `_dv_` system
-/// prefix or the implicit Dataverse-managed columns. Used for
-/// user-defined tables and columns; system metadata tables bypass this.
+/// prefix or the implicit base-model columns. Used for user-defined
+/// tables and columns; system metadata tables bypass this.
 pub fn validate_user_identifier(name: &str) -> Result<(), ValidationError> {
     validate_identifier(name)?;
     let lower = name.to_lowercase();
     if lower.starts_with("_dv_") {
         return Err(ValidationError::ReservedPrefix(name.to_string()));
     }
-    // The implicit columns are added automatically to every user
-    // table; redeclaring them would conflict at CREATE TABLE time.
-    if matches!(lower.as_str(), "id" | "created_at" | "updated_at") {
+    // Base-model columns are auto-added to every user table; redeclaring
+    // them would conflict at CREATE TABLE time and confuses the gateway's
+    // `@meta`/visibility split.
+    if crate::migration::is_base_column(&lower) {
         return Err(ValidationError::ReservedWord(name.to_string()));
     }
     Ok(())
@@ -219,6 +220,11 @@ mod tests {
         assert!(validate_user_identifier("created_at").is_err());
         assert!(validate_user_identifier("id").is_err());
         assert!(validate_user_identifier("updated_at").is_err());
+        // Base-model columns are also reserved.
+        assert!(validate_user_identifier("created_by").is_err());
+        assert!(validate_user_identifier("updated_by").is_err());
+        assert!(validate_user_identifier("version").is_err());
+        assert!(validate_user_identifier("is_deleted").is_err());
         // But `date` / `timestamp` ARE allowed as user columns
         // (they were the real-world blocker for trader's migration).
         assert!(validate_user_identifier("date").is_ok());
